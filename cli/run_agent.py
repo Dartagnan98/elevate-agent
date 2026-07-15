@@ -73,6 +73,19 @@ EMPTY_RESPONSE_FAILURE_MESSAGE = (
 INTERRUPTED_BEFORE_RESPONSE_MESSAGE = (
     "Operation interrupted before a model response was produced."
 )
+GUIDANCE_UNCONSUMED_FINISH_REASONS = frozenset(
+    {
+        "error_guidance_unconsumed",
+        "interrupted_guidance_unconsumed",
+    }
+)
+GUIDANCE_RESERVED_FINISH_REASONS = frozenset(
+    {
+        "guidance_reserved",
+        "guidance_reserved_steer",
+        "guidance_reserved_soft",
+    }
+)
 
 
 def _drop_trailing_empty_response_scaffolding(messages: list) -> bool:
@@ -357,6 +370,59 @@ class SteerCutInterrupt(Exception):
     catches it, discards the partial call, folds the steer into the message
     tail, and re-issues the API call immediately.
     """
+
+
+class _ProviderAttemptRevoked(RuntimeError):
+    """Private signal used when a superseded raw provider worker drains."""
+
+
+class _ToolBatchDurabilityError(RuntimeError):
+    """An effect ran but its ordered evidence could not be confirmed durable."""
+
+
+class _ProviderAttempt:
+    """Exact, lock-linearized publication capability for one provider call."""
+
+    __slots__ = ("_lock", "_revoked", "_reason")
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._revoked = False
+        self._reason = ""
+
+    def revoke(self, reason: str) -> None:
+        # Holding this lock across callbacks means either the callback
+        # linearized before revocation or it is suppressed.  There is no
+        # check-then-call gap for a late raw worker to escape through.
+        with self._lock:
+            self._revoked = True
+            self._reason = str(reason or "provider attempt revoked")
+
+    def call_if_active(self, callback: callable, *args, **kwargs):
+        with self._lock:
+            if self._revoked:
+                return False, None
+            return True, callback(*args, **kwargs)
+
+    def is_revoked(self) -> bool:
+        with self._lock:
+            return self._revoked
+
+    def scrub_result_if_revoked(self, result: dict) -> None:
+        with self._lock:
+            if not self._revoked:
+                return
+            result["response"] = None
+            result["error"] = _ProviderAttemptRevoked(
+                self._reason or "provider attempt revoked"
+            )
+            result["partial_tool_names"] = []
+            result["buffered_output_present"] = False
+
+
+_CURRENT_PROVIDER_ATTEMPT: contextvars.ContextVar[
+    _ProviderAttempt | None
+] = contextvars.ContextVar("elevate_current_provider_attempt", default=None)
 
 
 class IterationBudget:
@@ -3616,8 +3682,19 @@ class AIAgent:
         # existing tool message rather than inserting a new user turn).
         self._pending_steer: Optional[str] = None
         self._pending_steer_lock = threading.Lock()
+        self._pending_steer_items: list[dict[str, Any]] = []
         self._pending_soft_interrupts: list[dict[str, Any]] = []
         self._pending_soft_interrupts_lock = threading.Lock()
+        self._pending_inputs: list[dict[str, Any]] = []
+        self._pending_inputs_lock = threading.Lock()
+        self._pending_input_sequence = 0
+        # Closed atomically with the terminal ownership handoff. Producers
+        # that arrive after that boundary must receive False and start a new
+        # user turn; they may not disappear into an already-returned result.
+        self._pending_inputs_closed = True
+        self._accepted_pending_input_ids: dict[
+            str, tuple[str, str]
+        ] = {}
         # Steer-cut: a steer that arrives while the model is still THINKING
         # (reasoning deltas streaming, no final answer text yet) aborts the
         # in-flight call so it applies immediately, instead of waiting out a
@@ -5106,6 +5183,19 @@ class AIAgent:
         return s.strip(" .…\t").lower()
 
     def _emit_status(self, message: str) -> None:
+        """Linearize one complete lifecycle-status emission against Stop."""
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            with acquire_current_turn_permit("status_emit"):
+                self._emit_status_impl(message)
+        except TurnCancelled:
+            return
+
+    def _emit_status_impl(self, message: str) -> None:
         """Emit a lifecycle status message to both CLI and gateway channels.
 
         CLI users see the message via ``_vprint(force=True)`` so it is always
@@ -5156,10 +5246,12 @@ class AIAgent:
                 except Exception:
                     _do_emit = True  # never let the throttle swallow a status
             if _do_emit:
-                try:
-                    self.status_callback("lifecycle", message)
-                except Exception:
-                    logger.debug("status_callback error in _emit_status", exc_info=True)
+                self._invoke_generation_callback(
+                    "status_callback",
+                    self.status_callback,
+                    "lifecycle",
+                    message,
+                )
 
     def _emit_warning(self, message: str) -> None:
         """Emit a non-terminal warning without risking the active turn."""
@@ -5170,11 +5262,12 @@ class AIAgent:
         try:
             self._emit_status(message)
         except Exception:
-            if self.status_callback:
-                try:
-                    self.status_callback("lifecycle", message)
-                except Exception:
-                    logger.debug("status_callback error in _emit_warning", exc_info=True)
+            self._invoke_generation_callback(
+                "status_callback",
+                self.status_callback,
+                "lifecycle",
+                message,
+            )
 
     def _emit_error(self, message: str) -> None:
         """Emit a terminal error to the gateway as a persistent transcript message.
@@ -5187,11 +5280,82 @@ class AIAgent:
         Only call this from branches that abort the turn — retry-exhausted,
         non-retryable auth/4xx, fallback failed.
         """
-        if self.error_callback:
+        self._invoke_generation_callback(
+            "error_callback", self.error_callback, message
+        )
+
+    def _invoke_generation_callback(
+        self,
+        kind: str,
+        callback: Optional[callable],
+        *args,
+        **kwargs,
+    ) -> bool:
+        """Linearize one user-visible callback against Stop."""
+        if callback is None:
+            return False
+
+        def _publish() -> bool:
             try:
-                self.error_callback(message)
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_current_turn_permit,
+                )
+
+                with acquire_current_turn_permit(kind):
+                    callback(*args, **kwargs)
+                return True
+            except TurnCancelled:
+                return False
             except Exception:
-                logger.debug("error_callback error in _emit_error", exc_info=True)
+                logger.debug("%s failed", kind, exc_info=True)
+                return False
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            return _publish()
+        allowed, delivered = attempt.call_if_active(_publish)
+        return bool(allowed and delivered)
+
+    def _emit_thinking(self, message: str) -> None:
+        """Publish thinking state only for the still-current generation."""
+        self._invoke_generation_callback(
+            "thinking_callback", self.thinking_callback, message
+        )
+
+    def _invoke_turn_session_end_hook(
+        self,
+        *,
+        completed: bool,
+        interrupted: bool,
+    ) -> None:
+        """Invoke plugin turn cleanup only while this generation owns effects.
+
+        Plugin ``on_session_end`` is arbitrary code, not a proven idempotent
+        cleanup primitive. A cancellation winner therefore suppresses it; a
+        hook that already acquired the permit is allowed to finish before the
+        actor quiesces.
+        """
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+            from elevate_cli.plugins import invoke_hook as _invoke_hook
+
+            with acquire_current_turn_permit("session_end_hook"):
+                _invoke_hook(
+                    "on_session_end",
+                    session_id=self.session_id,
+                    completed=completed,
+                    interrupted=interrupted,
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                )
+        except TurnCancelled:
+            return
+        except Exception as exc:
+            logger.warning("on_session_end hook failed: %s", exc)
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
@@ -5340,10 +5504,12 @@ class AIAgent:
         """
         msg = getattr(self, "_compression_warning", None)
         if msg and self.status_callback:
-            try:
-                self.status_callback("lifecycle", msg)
-            except Exception:
-                pass
+            self._invoke_generation_callback(
+                "status_callback",
+                self.status_callback,
+                "lifecycle",
+                msg,
+            )
 
     def _is_direct_openai_url(self, base_url: str = None) -> bool:
         """Return True when a base URL targets OpenAI's native API."""
@@ -6056,6 +6222,69 @@ class AIAgent:
                 actions.append(f"{label} updated")
         return actions
 
+    def _prefetch_memory_with_budget(
+        self,
+        prefetch: callable,
+        query: str,
+        budget_s: float,
+    ) -> str:
+        """Run memory prefetch in the exact turn context without orphaning it.
+
+        The caller may stop waiting after ``budget_s`` because memory context
+        is best-effort, but a timed-out provider thread still owns a generation
+        permit until its real exit. Stop therefore cannot report quiescence or
+        admit the next prompt while that old memory call is alive.
+        """
+        result: dict[str, Any] = {}
+        done = threading.Event()
+        worker_context = contextvars.copy_context()
+
+        def _prefetch() -> None:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_background_permit,
+            )
+
+            try:
+                with acquire_current_turn_background_permit(
+                    "memory_prefetch",
+                    {"session_id": self.session_id or ""},
+                ):
+                    result["value"] = prefetch(query) or ""
+            except TurnCancelled:
+                result["cancelled"] = True
+            except BaseException as exc:
+                # Preserve the historical best-effort behavior while ensuring
+                # every exit path releases the permit and signals the waiter.
+                result["error"] = exc
+            finally:
+                done.set()
+
+        worker = threading.Thread(
+            target=worker_context.run,
+            args=(_prefetch,),
+            daemon=True,
+            name="memory-prefetch",
+        )
+        worker.start()
+        try:
+            wait_budget = max(0.0, float(budget_s))
+        except (TypeError, ValueError):
+            wait_budget = 0.0
+        if done.wait(timeout=wait_budget):
+            if "error" in result:
+                logger.debug(
+                    "Memory prefetch failed: %s", result["error"], exc_info=True
+                )
+            return str(result.get("value") or "")
+
+        logger.warning(
+            "Memory prefetch exceeded %.1fs budget — skipping memory "
+            "injection for this turn.",
+            wait_budget,
+        )
+        return ""
+
     def _spawn_background_review(
         self,
         messages_snapshot: List[Dict],
@@ -6070,6 +6299,21 @@ class AIAgent:
         Never modifies the main conversation history or produces user-visible output.
         """
         import threading
+
+        # A detached review has a deliberately longer lifetime than the user
+        # turn that spawned it.  There is no durable generation identity for
+        # that legacy job yet, so a gateway-bound actor must not launch it: a
+        # copied fence would either block the next prompt for the whole review
+        # or, if omitted, allow stale callbacks and writes after Stop.  Keep the
+        # existing best-effort behavior for CLI/library callers and suppress it
+        # for the bound gateway until reviews have their own durable queue.
+        from agent.turn_fence import current_turn_binding
+
+        if current_turn_binding() is not None:
+            logger.debug(
+                "Background memory/skill review deferred for generation-bound turn"
+            )
+            return
 
         # Pick the right prompt based on which triggers fired
         if review_memory and review_skills:
@@ -6234,13 +6478,138 @@ class AIAgent:
         Skipped when ``persist_session=False`` (ephemeral helper flows).
         """
         if not self.persist_session:
-            return
+            return True
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            with acquire_current_turn_permit("session_persist"):
+                return self._persist_session_projection(
+                    messages, conversation_history
+                )
+        except TurnCancelled:
+            return False
+
+    def _persist_session_projection(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+    ) -> bool:
+        """Perform one session projection and return acknowledged durability."""
+        if not self.persist_session:
+            return True
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
-        self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        save_log = self._save_session_log
+        try:
+            if (
+                getattr(save_log, "__func__", None)
+                is AIAgent._save_session_log
+            ):
+                log_result = self._save_session_log_impl(messages)
+            else:
+                log_result = save_log(messages)
+        except Exception:
+            logger.error(
+                "Session JSON projection raised for session %s",
+                self.session_id or "none",
+                exc_info=True,
+            )
+            log_result = False
+
+        flush_db = self._flush_messages_to_session_db
+        try:
+            if (
+                getattr(flush_db, "__func__", None)
+                is AIAgent._flush_messages_to_session_db
+            ):
+                db_result = self._flush_messages_to_session_db_impl(
+                    messages, conversation_history
+                )
+            else:
+                db_result = flush_db(messages, conversation_history)
+        except Exception:
+            logger.error(
+                "Session SQLite projection raised for session %s",
+                self.session_id or "none",
+                exc_info=True,
+            )
+            db_result = False
+        # Custom persistence adapters historically returned None on success;
+        # an explicit False is their failure acknowledgement.  The built-in
+        # JSON/SQLite implementations below return strict booleans.
+        log_confirmed = log_result is not False
+        db_confirmed = (
+            True if self._session_db is None else db_result is not False
+        )
+        if not (log_confirmed and db_confirmed):
+            logger.error(
+                "Session durability not confirmed: json=%s sqlite=%s session=%s",
+                log_confirmed,
+                db_confirmed,
+                self.session_id or "none",
+            )
+        return log_confirmed and db_confirmed
+
+    def _persist_session_under_retained_turn_permit(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        retained_permit=None,
+    ) -> bool:
+        """Persist while the caller already owns a retained turn permit.
+
+        Tool batches use this after one or more effect permits have won.  A
+        Stop that lands after the effect cannot grant a *new* ordinary
+        persistence permit, but the retained batch transaction must still
+        durably project the assistant tool-call row and every ordered result
+        before it is allowed to quiesce.  This helper deliberately performs
+        no fence acquisition; callers must already own that transaction.
+        """
+        from agent.turn_fence import TurnPermit
+
+        if not isinstance(retained_permit, TurnPermit):
+            logger.warning(
+                "Refusing retained session persistence without an exact "
+                "tool_batch_transaction capability"
+            )
+            return False
+        validator = retained_permit.assert_active_for
+        try:
+            validator("tool_batch_transaction")
+        except Exception:
+            logger.warning(
+                "Refusing retained session persistence with an invalid or "
+                "released capability",
+                exc_info=True,
+            )
+            return False
+        return self._persist_session_projection(
+            messages, conversation_history
+        )
 
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
+        """Fence one complete SQLite flush, including message preparation."""
+        if not self._session_db:
+            return
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            with acquire_current_turn_permit("session_db_flush"):
+                return AIAgent._flush_messages_to_session_db_impl(
+                    self,
+                    messages, conversation_history
+                )
+        except TurnCancelled:
+            return
+
+    def _flush_messages_to_session_db_impl(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Persist any un-flushed messages to the SQLite session store.
 
         Uses _last_flushed_db_idx to track which messages have already been
@@ -6248,35 +6617,19 @@ class AIAgent:
         truly new messages — preventing the duplicate-write bug (#860).
         """
         if not self._session_db:
-            return
+            return True
         self._apply_persist_user_message_override(messages)
         self._ensure_client_message_ids(messages)
-        existing_user_client_ids: set[str] | None = None
 
-        def _has_existing_user_client_id(client_message_id: str) -> bool:
-            nonlocal existing_user_client_ids
-            if existing_user_client_ids is None:
-                existing_user_client_ids = set()
-                try:
-                    for row in self._session_db.get_messages(self.session_id):
-                        if not isinstance(row, dict) or row.get("role") != "user":
-                            continue
-                        row_id = row.get("client_message_id")
-                        if isinstance(row_id, str) and row_id:
-                            existing_user_client_ids.add(row_id)
-                except Exception as exc:
-                    logger.debug(
-                        "Session DB user-message duplicate lookup failed for %s: %s",
-                        self.session_id,
-                        exc,
-                    )
-                    existing_user_client_ids = set()
-            return client_message_id in existing_user_client_ids
+        # Real SessionDB provides an all-or-nothing BEGIN-IMMEDIATE batch.
+        # Test/custom adapters retain their historical per-row append method.
+        batch_append = getattr(
+            type(self._session_db), "append_messages_idempotent", None
+        )
+        has_atomic_batch = callable(batch_append)
 
-        # Cursor of the last fully-handled message (appended or intentionally
-        # skipped). Advanced per-message so a mid-batch append failure can't
-        # replay committed rows on the next flush → duplicate transcript rows (A3).
         idx = self._last_flushed_db_idx
+        flush_from = idx
         try:
             # If create_session() failed at startup (e.g. transient lock), the
             # session row may not exist yet.  ensure_session() uses INSERT OR
@@ -6289,22 +6642,15 @@ class AIAgent:
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
             idx = flush_from
+            prepared_messages: list[dict[str, Any]] = []
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = self._strip_image_parts_for_persistence(msg.get("content"))
                 client_message_id = msg.get("client_message_id")
                 if (
                     role == "user"
-                    and isinstance(client_message_id, str)
-                    and client_message_id
-                    and _has_existing_user_client_id(client_message_id)
-                ):
-                    idx += 1
-                    continue
-                if (
-                    role == "user"
-                    and isinstance(client_message_id, str)
-                    and client_message_id.startswith("steer.")
+                    and msg.get("finish_reason")
+                    in GUIDANCE_RESERVED_FINISH_REASONS
                     and isinstance(msg.get("_display_content"), str)
                     and msg["_display_content"].strip()
                 ):
@@ -6339,33 +6685,93 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
-                self._session_db.append_message(
-                    session_id=self.session_id,
-                    role=role,
-                    content=content,
-                    tool_name=msg.get("tool_name"),
-                    tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    token_count=msg.get("token_count") if role == "assistant" else None,
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    client_message_id=client_message_id,
+                prepared = {
+                    "role": role,
+                    "content": content,
+                    "tool_name": msg.get("tool_name"),
+                    "tool_calls": tool_calls_data,
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "finish_reason": msg.get("finish_reason"),
+                    "token_count": (
+                        msg.get("token_count")
+                        if role == "assistant"
+                        else None
+                    ),
+                    "reasoning": (
+                        msg.get("reasoning")
+                        if role == "assistant"
+                        else None
+                    ),
+                    "reasoning_content": (
+                        msg.get("reasoning_content")
+                        if role == "assistant"
+                        else None
+                    ),
+                    "reasoning_details": (
+                        msg.get("reasoning_details")
+                        if role == "assistant"
+                        else None
+                    ),
+                    "codex_reasoning_items": (
+                        msg.get("codex_reasoning_items")
+                        if role == "assistant"
+                        else None
+                    ),
+                    "codex_message_items": (
+                        msg.get("codex_message_items")
+                        if role == "assistant"
+                        else None
+                    ),
+                    "platform_message_id": msg.get("platform_message_id"),
+                    "client_message_id": client_message_id,
+                }
+                prepared_messages.append(prepared)
+                if not has_atomic_batch:
+                    append_ack = self._session_db.append_message(
+                        session_id=self.session_id,
+                        **prepared,
+                    )
+                    if append_ack is None or append_ack is False:
+                        raise RuntimeError(
+                            "Session DB append_message returned no durability "
+                            "acknowledgement"
+                        )
+                    idx += 1
+            if has_atomic_batch and prepared_messages:
+                append_acks = self._session_db.append_messages_idempotent(
+                    self.session_id,
+                    prepared_messages,
                 )
-                idx += 1
+                if (
+                    not isinstance(append_acks, list)
+                    or len(append_acks) != len(prepared_messages)
+                    or any(
+                        not isinstance(ack, int)
+                        or isinstance(ack, bool)
+                        or ack <= 0
+                        for ack in append_acks
+                    )
+                ):
+                    raise RuntimeError(
+                        "Session DB append_messages_idempotent returned an "
+                        "incomplete durability acknowledgement"
+                    )
+                idx = len(messages)
             self._last_flushed_db_idx = len(messages)
+            return True
         except Exception as e:
-            # Commit the cursor up to the last message actually persisted, so a
-            # retry resumes at the failed message instead of re-appending the
-            # rows already committed this batch (duplicate transcript rows — A3).
-            self._last_flushed_db_idx = idx
+            # The atomic contract commits every ordered row or none. Keep the
+            # cursor at the batch start on failure so a later terminal row can
+            # never be skipped. Legacy adapters retain the last acknowledged
+            # per-row cursor.
+            retry_from = flush_from if has_atomic_batch else idx
+            self._last_flushed_db_idx = retry_from
             logger.error(
-                "Session DB append_message failed at message %d/%d; flush cursor "
-                "advanced to %d to avoid duplicate re-writes: %s",
-                idx, len(messages), idx, e,
+                "Session DB message batch failed at message %d/%d; flush cursor "
+                "set to %d for safe retry: %s",
+                idx, len(messages), retry_from, e,
             )
+            return False
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -6598,9 +7004,19 @@ class AIAgent:
         """
         if not self.save_trajectories:
             return
-        
-        trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
-        _save_trajectory_to_file(trajectory, self.model, completed)
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            with acquire_current_turn_permit("trajectory_write"):
+                trajectory = self._convert_to_trajectory_format(
+                    messages, user_query, completed
+                )
+                _save_trajectory_to_file(trajectory, self.model, completed)
+        except TurnCancelled:
+            return
     
     @staticmethod
     def _summarize_api_error(error: Exception) -> str:
@@ -6909,6 +7325,19 @@ class AIAgent:
         return content.strip()
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
+        """Fence one complete JSON session-log projection and atomic write."""
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            with acquire_current_turn_permit("session_log_write"):
+                return AIAgent._save_session_log_impl(self, messages)
+        except TurnCancelled:
+            return
+
+    def _save_session_log_impl(self, messages: List[Dict[str, Any]] = None):
         """
         Save the full raw session to a JSON file.
 
@@ -6922,7 +7351,7 @@ class AIAgent:
         """
         messages = messages or self._session_messages
         if not messages:
-            return
+            return True
 
         try:
             # Clean assistant content for session logs.  Strip the
@@ -6963,7 +7392,10 @@ class AIAgent:
                             "Skipping session log overwrite: existing has %d messages, current has %d",
                             existing_count, len(cleaned),
                         )
-                        return
+                        normalized_cleaned = json.loads(
+                            json.dumps(cleaned, ensure_ascii=False, default=str)
+                        )
+                        return existing.get("messages", [])[: len(cleaned)] == normalized_cleaned
                 except Exception:
                     pass  # corrupted existing file — allow the overwrite
 
@@ -6986,10 +7418,25 @@ class AIAgent:
                 indent=2,
                 default=str,
             )
+            # Treat write completion as acknowledged only after a readback of
+            # the exact normalized projection.  This catches swallowed or
+            # redirected atomic-write failures before an effect batch releases
+            # its retained durability permit.
+            persisted = json.loads(
+                self.session_log_file.read_text(encoding="utf-8")
+            )
+            normalized_cleaned = json.loads(
+                json.dumps(cleaned, ensure_ascii=False, default=str)
+            )
+            return bool(
+                persisted.get("session_id") == self.session_id
+                and persisted.get("message_count") == len(cleaned)
+                and persisted.get("messages") == normalized_cleaned
+            )
 
         except Exception as e:
-            if self.verbose_logging:
-                logging.warning(f"Failed to save session log: {e}")
+            logging.error("Failed to save session log: %s", e)
+            return False
     
     def interrupt(self, message: str = None) -> None:
         """
@@ -7090,7 +7537,7 @@ class AIAgent:
         if not self.quiet_mode:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
     
-    def clear_interrupt(self) -> None:
+    def clear_interrupt(self, *, preserve_queued_inputs: bool = False) -> None:
         """Clear any pending interrupt request and the per-thread tool interrupt signal."""
         self._interrupt_requested = False
         self._interrupt_message = None
@@ -7118,14 +7565,16 @@ class AIAgent:
         # meant for the agent's next tool-call iteration, which will no
         # longer happen. Drop it instead of surprising the user with a
         # late injection on the post-interrupt turn.
-        _steer_lock = getattr(self, "_pending_steer_lock", None)
-        if _steer_lock is not None:
-            with _steer_lock:
+        if not preserve_queued_inputs:
+            _input_lock = getattr(self, "_pending_inputs_lock", None)
+            if _input_lock is None:
                 self._pending_steer = None
-        _soft_lock = getattr(self, "_pending_soft_interrupts_lock", None)
-        if _soft_lock is not None:
-            with _soft_lock:
+                self._pending_steer_items = []
                 self._pending_soft_interrupts = []
+            else:
+                with _input_lock:
+                    self._pending_inputs = []
+                    self._sync_pending_input_projections_locked()
         self._steer_cut_requested = False
 
     def widen_toolsets(self, extra_toolsets) -> bool:
@@ -7169,7 +7618,106 @@ class AIAgent:
         self.valid_tool_names = {n for n in new_names if n}
         return True
 
-    def steer(self, text: str) -> bool:
+    def _sync_pending_input_projections_locked(self) -> None:
+        """Refresh legacy lane attributes from the canonical FIFO."""
+        pending = list(getattr(self, "_pending_inputs", []) or [])
+        steer_items = [
+            item for item in pending if item.get("_input_lane") == "steer"
+        ]
+        self._pending_steer_items = steer_items
+        self._pending_steer = "\n".join(
+            str(item.get("content") or "").strip()
+            for item in steer_items
+            if str(item.get("content") or "").strip()
+        ) or None
+        self._pending_soft_interrupts = [
+            item for item in pending if item.get("_input_lane") != "steer"
+        ]
+
+    def _enqueue_pending_input(
+        self,
+        *,
+        content: str,
+        lane: str,
+        source: str,
+        client_message_id: str | None,
+        urgent: bool = False,
+    ) -> dict[str, Any] | None:
+        lock = getattr(self, "_pending_inputs_lock", None)
+        if lock is None:
+            # Object.__new__ test stubs are single-threaded; initialize the
+            # canonical queue lazily without pretending cross-thread safety.
+            self._pending_inputs_lock = threading.Lock()
+            self._pending_inputs = []
+            self._pending_input_sequence = 0
+            self._pending_inputs_closed = False
+            self._accepted_pending_input_ids = {}
+            lock = self._pending_inputs_lock
+        with lock:
+            normalized_client_id = (
+                client_message_id.strip()
+                if isinstance(client_message_id, str)
+                and client_message_id.strip()
+                else f"steer.{uuid.uuid4().hex}"
+            )
+            normalized_lane = "steer" if lane == "steer" else "soft"
+            accepted_ids = getattr(
+                self, "_accepted_pending_input_ids", None
+            )
+            if accepted_ids is None:
+                accepted_ids = {}
+                self._accepted_pending_input_ids = accepted_ids
+            requested_state = (content, normalized_lane)
+            existing_state = accepted_ids.get(normalized_client_id)
+            if existing_state is not None:
+                if existing_state != requested_state:
+                    raise ValueError(
+                        "client_message_id already identifies different "
+                        "queued guidance"
+                    )
+                if getattr(self, "_pending_inputs_closed", False):
+                    return None
+                for existing in self._pending_inputs:
+                    if (
+                        existing.get("client_message_id")
+                        == normalized_client_id
+                    ):
+                        return dict(existing)
+                return {
+                    "content": content,
+                    "urgent": bool(urgent),
+                    "source": source,
+                    "queued_at": 0.0,
+                    "_queue_seq": 0,
+                    "_input_lane": normalized_lane,
+                    "client_message_id": normalized_client_id,
+                    "_deduplicated": True,
+                }
+            if getattr(self, "_pending_inputs_closed", False):
+                return None
+            self._pending_input_sequence = int(
+                getattr(self, "_pending_input_sequence", 0)
+            ) + 1
+            item = {
+                "content": content,
+                "urgent": bool(urgent),
+                "source": source,
+                "queued_at": time.time(),
+                "_queue_seq": self._pending_input_sequence,
+                "_input_lane": normalized_lane,
+                "client_message_id": normalized_client_id,
+            }
+            self._pending_inputs.append(item)
+            accepted_ids[normalized_client_id] = requested_state
+            self._sync_pending_input_projections_locked()
+            return dict(item)
+
+    def steer(
+        self,
+        text: str,
+        *,
+        client_message_id: str | None = None,
+    ) -> bool:
         """
         Inject a user message into the next tool result without interrupting.
 
@@ -7190,19 +7738,14 @@ class AIAgent:
         if not text or not text.strip():
             return False
         cleaned = text.strip()
-        _lock = getattr(self, "_pending_steer_lock", None)
-        if _lock is None:
-            # Test stubs that built AIAgent via object.__new__ skip __init__.
-            # Fall back to direct attribute set; no concurrent callers expected
-            # in those stubs.
-            existing = getattr(self, "_pending_steer", None)
-            self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
-            return True
-        with _lock:
-            if self._pending_steer:
-                self._pending_steer = self._pending_steer + "\n" + cleaned
-            else:
-                self._pending_steer = cleaned
+        item = self._enqueue_pending_input(
+            content=cleaned,
+            lane="steer",
+            source="steer",
+            client_message_id=client_message_id,
+        )
+        if item is None:
+            return False
         self._request_steer_cut_if_thinking()
         return True
 
@@ -7237,9 +7780,16 @@ class AIAgent:
             # moment the response completes.
             self._steer_cut_requested = False
             return False
-        if getattr(self, "_pending_steer", None) or getattr(
-            self, "_pending_soft_interrupts", None
-        ):
+        _input_lock = getattr(self, "_pending_inputs_lock", None)
+        if _input_lock is None:
+            has_pending = bool(
+                getattr(self, "_pending_steer", None)
+                or getattr(self, "_pending_soft_interrupts", None)
+            )
+        else:
+            with _input_lock:
+                has_pending = bool(self._pending_inputs)
+        if has_pending:
             return True
         self._steer_cut_requested = False
         return False
@@ -7260,21 +7810,15 @@ class AIAgent:
         """
         if not text or not str(text).strip():
             return False
-        item = {
-            "content": str(text).strip(),
-            "urgent": bool(urgent),
-            "source": str(source or "user")[:40],
-            "queued_at": time.time(),
-        }
-        if isinstance(client_message_id, str) and client_message_id.strip():
-            item["client_message_id"] = client_message_id.strip()
-        _lock = getattr(self, "_pending_soft_interrupts_lock", None)
-        if _lock is None:
-            existing = getattr(self, "_pending_soft_interrupts", [])
-            self._pending_soft_interrupts = [*existing, item]
-            return True
-        with _lock:
-            self._pending_soft_interrupts.append(item)
+        item = self._enqueue_pending_input(
+            content=str(text).strip(),
+            lane="soft",
+            source=str(source or "user")[:40],
+            client_message_id=client_message_id,
+            urgent=urgent,
+        )
+        if item is None:
+            return False
         self._request_steer_cut_if_thinking()
         if not self.quiet_mode:
             preview = item["content"][:60] + ("..." if len(item["content"]) > 60 else "")
@@ -7283,34 +7827,32 @@ class AIAgent:
 
     def _drain_pending_soft_interrupts(self, *, urgent_only: bool = False) -> list[dict[str, Any]]:
         """Return and clear pending soft interrupts."""
-        _lock = getattr(self, "_pending_soft_interrupts_lock", None)
-        if _lock is None:
-            items = list(getattr(self, "_pending_soft_interrupts", []) or [])
-            if urgent_only:
-                selected = [item for item in items if item.get("urgent")]
-                self._pending_soft_interrupts = [item for item in items if not item.get("urgent")]
-                return selected
+        lock = getattr(self, "_pending_inputs_lock", None)
+        if lock is None:
+            items = list(
+                getattr(self, "_pending_soft_interrupts", []) or []
+            )
             self._pending_soft_interrupts = []
             return items
-        with _lock:
-            items = list(self._pending_soft_interrupts)
-            if urgent_only:
-                selected = [item for item in items if item.get("urgent")]
-                self._pending_soft_interrupts = [item for item in items if not item.get("urgent")]
-                return selected
-            self._pending_soft_interrupts = []
-            return items
+        with lock:
+            if not self._pending_inputs and self._pending_soft_interrupts:
+                self._pending_inputs = list(self._pending_soft_interrupts)
+            selected = []
+            remaining = []
+            for item in self._pending_inputs:
+                is_soft = item.get("_input_lane") != "steer"
+                if is_soft and (not urgent_only or item.get("urgent")):
+                    selected.append(item)
+                else:
+                    remaining.append(item)
+            self._pending_inputs = remaining
+            self._sync_pending_input_projections_locked()
+            return selected
 
     def _requeue_soft_interrupts(self, items: list[dict[str, Any]]) -> None:
         if not items:
             return
-        _lock = getattr(self, "_pending_soft_interrupts_lock", None)
-        if _lock is None:
-            existing = list(getattr(self, "_pending_soft_interrupts", []) or [])
-            self._pending_soft_interrupts = items + existing
-            return
-        with _lock:
-            self._pending_soft_interrupts = items + self._pending_soft_interrupts
+        self._requeue_pending_inputs(items)
 
     @staticmethod
     def _soft_interrupt_text(items: list[dict[str, Any]]) -> str:
@@ -7339,12 +7881,50 @@ class AIAgent:
         """Return a durable steer client id carried by queued soft interrupts."""
         for item in items or []:
             client_message_id = item.get("client_message_id")
-            if isinstance(client_message_id, str) and client_message_id.startswith("steer."):
+            if isinstance(client_message_id, str) and client_message_id:
                 return client_message_id
         return ""
 
+    def _queued_input_messages(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build one durable, identified user row per accepted input."""
+        rows = []
+        for item in items:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            model_content = (
+                f"User guidance: {content}"
+                if item.get("_input_lane") == "steer"
+                else self._soft_interrupt_text([item])
+            )
+            rows.append(
+                {
+                    "role": "user",
+                    "content": model_content,
+                    "client_message_id": str(
+                        item.get("client_message_id")
+                        or f"steer.{uuid.uuid4().hex}"
+                    ),
+                    "_display_content": content,
+                    "finish_reason": (
+                        "guidance_reserved_steer"
+                        if item.get("_input_lane") == "steer"
+                        else "guidance_reserved_soft"
+                    ),
+                }
+            )
+        return rows
 
-    def _notify_steer_applied(self, items: list[dict[str, Any]] | None, *, via: str) -> None:
+
+    def _notify_steer_applied(
+        self,
+        items: list[dict[str, Any]] | None,
+        *,
+        via: str,
+    ) -> bool:
         """Tell the host UI a queued mid-run follow-up was actually injected.
 
         Emitted through tool_progress_callback so the gateway can relay a
@@ -7352,29 +7932,36 @@ class AIAgent:
         chip from "steering…" to "applied". Best-effort: a missing or
         raising callback never disturbs the turn.
         """
+        from agent.turn_fence import current_turn_publish_allowed
+
+        if not current_turn_publish_allowed():
+            return False
         cb = getattr(self, "tool_progress_callback", None)
         if not cb:
-            return
-        try:
-            cb(
-                "steer.applied",
-                None,
-                None,
-                None,
-                count=len(items or []) or 1,
-                via=via,
-                sources=[str(i.get("source") or "user") for i in (items or [])],
-                client_message_ids=[
-                    str(i.get("client_message_id"))
-                    for i in (items or [])
-                    if isinstance(i.get("client_message_id"), str)
-                ],
-            )
-        except Exception:
-            pass
+            return True
+        return self._invoke_generation_callback(
+            "tool_progress_callback",
+            cb,
+            "steer.applied",
+            None,
+            None,
+            None,
+            count=len(items or []) or 1,
+            via=via,
+            sources=[str(i.get("source") or "user") for i in (items or [])],
+            client_message_ids=[
+                str(i.get("client_message_id"))
+                for i in (items or [])
+                if isinstance(i.get("client_message_id"), str)
+            ],
+        )
 
     def _apply_pending_soft_interrupts_to_tool_results(self, messages: list, num_tool_msgs: int | None = None) -> bool:
         """Append queued follow-ups to the latest tool result when possible."""
+        from agent.turn_fence import current_turn_publish_allowed
+
+        if not current_turn_publish_allowed():
+            return False
         if not messages:
             return False
         items = self._drain_pending_soft_interrupts()
@@ -7401,8 +7988,13 @@ class AIAgent:
             self._requeue_soft_interrupts(items)
             return False
 
+        target_message = dict(messages[target_idx])
+        target_message["content"] = copy.deepcopy(
+            target_message.get("content", "")
+        )
+        messages[target_idx] = target_message
         marker = "\n\n" + self._soft_interrupt_text(items)
-        existing_content = messages[target_idx].get("content", "")
+        existing_content = target_message.get("content", "")
         if isinstance(existing_content, str):
             messages[target_idx]["content"] = existing_content + marker
         elif _is_multimodal_tool_result(existing_content):
@@ -7423,21 +8015,156 @@ class AIAgent:
         )
         return True
 
+    def _drain_pending_steer_items(self) -> list[dict[str, Any]]:
+        """Return exact queued steer records and clear the steer lane."""
+        lock = getattr(self, "_pending_inputs_lock", None)
+        if lock is None:
+            text = getattr(self, "_pending_steer", None)
+            self._pending_steer = None
+            return (
+                [{"content": text, "_input_lane": "steer"}]
+                if text
+                else []
+            )
+        with lock:
+            if not self._pending_inputs and self._pending_steer:
+                legacy_items = list(self._pending_steer_items or [])
+                if not legacy_items:
+                    self._pending_input_sequence += 1
+                    legacy_items = [
+                        {
+                            "content": self._pending_steer,
+                            "source": "steer",
+                            "queued_at": 0.0,
+                            "_queue_seq": self._pending_input_sequence,
+                            "client_message_id": f"steer.{uuid.uuid4().hex}",
+                            "_input_lane": "steer",
+                        }
+                    ]
+                self._pending_inputs = legacy_items
+            selected = [
+                item
+                for item in self._pending_inputs
+                if item.get("_input_lane") == "steer"
+            ]
+            self._pending_inputs = [
+                item
+                for item in self._pending_inputs
+                if item.get("_input_lane") != "steer"
+            ]
+            self._sync_pending_input_projections_locked()
+            return selected
+
+    def _requeue_steer_items(self, items: list[dict[str, Any]]) -> None:
+        if not items:
+            return
+        self._requeue_pending_inputs(items)
+
+    def _drain_pending_inputs(
+        self, *, close_for_handoff: bool = False
+    ) -> list[dict[str, Any]]:
+        lock = getattr(self, "_pending_inputs_lock", None)
+        if lock is None:
+            if close_for_handoff:
+                self._pending_inputs_closed = True
+            items = [
+                *self._drain_pending_steer_items(),
+                *list(getattr(self, "_pending_soft_interrupts", []) or []),
+            ]
+            self._pending_soft_interrupts = []
+            return items
+        with lock:
+            if close_for_handoff:
+                # This is the exact producer/terminal linearization point.
+                # A producer either appears in the snapshot below or observes
+                # the closed flag and is rejected; there is no accepted input
+                # with an ambiguous owner between those outcomes.
+                self._pending_inputs_closed = True
+            if not self._pending_inputs:
+                legacy = []
+                if self._pending_steer:
+                    legacy.extend(self._pending_steer_items or [])
+                    if not self._pending_steer_items:
+                        self._pending_input_sequence += 1
+                        legacy.append(
+                            {
+                                "content": self._pending_steer,
+                                "source": "steer",
+                                "queued_at": 0.0,
+                                "_queue_seq": self._pending_input_sequence,
+                                "client_message_id": f"steer.{uuid.uuid4().hex}",
+                                "_input_lane": "steer",
+                            }
+                        )
+                legacy.extend(self._pending_soft_interrupts or [])
+                self._pending_inputs = legacy
+            items = list(self._pending_inputs)
+            self._pending_inputs = []
+            self._sync_pending_input_projections_locked()
+            return items
+
+    def _requeue_pending_inputs(self, items: list[dict[str, Any]]) -> None:
+        if not items:
+            return
+        lock = getattr(self, "_pending_inputs_lock", None)
+        if lock is None:
+            self._pending_inputs_lock = threading.Lock()
+            self._pending_inputs = []
+            lock = self._pending_inputs_lock
+        with lock:
+            merged_by_id: dict[str, dict[str, Any]] = {}
+            anonymous: list[dict[str, Any]] = []
+            accepted_ids = getattr(
+                self, "_accepted_pending_input_ids", None
+            )
+            if accepted_ids is None:
+                accepted_ids = {}
+                self._accepted_pending_input_ids = accepted_ids
+            for item in [*items, *self._pending_inputs]:
+                item_id = str(item.get("client_message_id") or "")
+                if item_id:
+                    item_state = (
+                        str(item.get("content") or ""),
+                        (
+                            "steer"
+                            if item.get("_input_lane") == "steer"
+                            else "soft"
+                        ),
+                    )
+                    known_state = accepted_ids.get(item_id)
+                    if (
+                        known_state is not None
+                        and known_state != item_state
+                    ):
+                        raise ValueError(
+                            "client_message_id conflicts during guidance "
+                            "requeue"
+                        )
+                    accepted_ids[item_id] = item_state
+                    merged_by_id.setdefault(item_id, item)
+                else:
+                    anonymous.append(item)
+            self._pending_inputs = sorted(
+                [*merged_by_id.values(), *anonymous],
+                key=lambda item: (
+                    int(item.get("_queue_seq", 0) or 0),
+                    float(item.get("queued_at", 0) or 0),
+                ),
+            )
+            self._sync_pending_input_projections_locked()
+
     def _drain_pending_steer(self) -> Optional[str]:
         """Return the pending steer text (if any) and clear the slot.
 
         Safe to call from the agent execution thread after appending tool
         results. Returns None when no steer is pending.
         """
-        _lock = getattr(self, "_pending_steer_lock", None)
-        if _lock is None:
-            text = getattr(self, "_pending_steer", None)
-            self._pending_steer = None
-            return text
-        with _lock:
-            text = self._pending_steer
-            self._pending_steer = None
-        return text
+        items = self._drain_pending_steer_items()
+        return "\n".join(
+            str(item.get("content") or "").strip()
+            for item in items
+            if str(item.get("content") or "").strip()
+        ) or None
 
     def _apply_pending_steer_to_tool_results(self, messages: list, num_tool_msgs: int) -> None:
         """Append any pending /steer text to the last tool result in this turn.
@@ -7453,10 +8180,14 @@ class AIAgent:
             num_tool_msgs: Number of tool results appended in this batch;
                 used to locate the tail slice safely.
         """
+        from agent.turn_fence import current_turn_publish_allowed
+
+        if not current_turn_publish_allowed():
+            return
         if num_tool_msgs <= 0 or not messages:
             return
-        steer_text = self._drain_pending_steer()
-        if not steer_text:
+        pending_items = self._drain_pending_inputs()
+        if not pending_items:
             return
         # Find the last tool-role message in the recent tail. Skipping
         # non-tool messages defends against future code appending
@@ -7471,43 +8202,42 @@ class AIAgent:
             # No tool result in this batch (e.g. all skipped by interrupt);
             # put the steer back so the caller's fallback path can deliver
             # it as a normal next-turn user message.
-            _lock = getattr(self, "_pending_steer_lock", None)
-            if _lock is not None:
-                with _lock:
-                    if self._pending_steer:
-                        self._pending_steer = self._pending_steer + "\n" + steer_text
-                    else:
-                        self._pending_steer = steer_text
-            else:
-                existing = getattr(self, "_pending_steer", None)
-                self._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
+            self._requeue_pending_inputs(pending_items)
             return
-        marker = f"\n\nUser guidance: {steer_text}"
-        existing_content = messages[target_idx].get("content", "")
-        if _is_multimodal_tool_result(existing_content):
-            _append_subdir_hint_to_multimodal(existing_content, marker)
-        elif not isinstance(existing_content, str):
-            # Anthropic multimodal content blocks — preserve them and append
-            # a text block at the end.
-            try:
-                blocks = list(existing_content) if existing_content else []
-                blocks.append({"type": "text", "text": marker.lstrip()})
-                messages[target_idx]["content"] = blocks
-            except Exception:
-                # Fall back to string replacement if content shape is unexpected.
-                messages[target_idx]["content"] = f"{existing_content}{marker}"
-        else:
-            messages[target_idx]["content"] = existing_content + marker
+        # Persist one identified user row per accepted input after the complete
+        # tool-result batch. Text-only embedding in a tool row loses the
+        # client_message_id mapping on crash/restart before the next model ACK.
+        messages.extend(self._queued_input_messages(pending_items))
+        runtime_ack = getattr(
+            self, "_pending_input_ack_items_runtime", None
+        )
+        if runtime_ack is not None:
+            runtime_ack.extend(pending_items)
         logger.info(
-            "Delivered /steer to agent after tool batch (%d chars): %s",
-            len(steer_text),
-            steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
+            "Reserved %d queued input(s) on tool result for next model call",
+            len(pending_items),
         )
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
-        self._last_activity_ts = time.time()
-        self._last_activity_desc = desc
+        def _update() -> None:
+            try:
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_current_turn_permit,
+                )
+
+                with acquire_current_turn_permit("activity_update"):
+                    self._last_activity_ts = time.time()
+                    self._last_activity_desc = desc
+            except TurnCancelled:
+                return
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            _update()
+        else:
+            attempt.call_if_active(_update)
 
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.
@@ -8184,10 +8914,14 @@ class AIAgent:
         """Non-mutating API-shaped payload used only for rough pressure checks."""
         api_messages: List[Dict[str, Any]] = []
         for msg in messages:
+            if msg.get("finish_reason") in GUIDANCE_UNCONSUMED_FINISH_REASONS:
+                continue
             api_msg = msg.copy()
             for internal_field in (
                 "reasoning",
                 "finish_reason",
+                "client_message_id",
+                "_display_content",
                 "_thinking_prefill",
                 "_empty_recovery_synthetic",
             ):
@@ -9556,7 +10290,201 @@ class AIAgent:
                 timeout=get_provider_request_timeout(self.provider, self.model),
             )
 
-    def _interruptible_api_call(self, api_kwargs: dict):
+    def _new_model_worker_thread(
+        self,
+        target: callable,
+        result: dict,
+        model_permit=None,
+        provider_attempt: _ProviderAttempt | None = None,
+    ) -> threading.Thread:
+        """Build a gated provider worker; use ``_spawn_model_worker``.
+
+        The polling caller may return as soon as an interrupt closes the
+        transport, while a provider SDK thread can remain alive after that
+        close.  The permit therefore belongs to this raw worker, not to the
+        polling frame.  A cancelling actor cannot quiesce until the provider
+        call really exits.
+        """
+        worker_context = contextvars.copy_context()
+        start_gate = threading.Event()
+        worker_started = threading.Event()
+
+        def _run_with_permit() -> None:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            attempt_token = None
+            worker_started.set()
+            # The parent detaches cleanup ownership before Thread.start and
+            # opens this gate only after it has definitive start proof.  This
+            # prevents both an early child release and the start-then-raise
+            # seam from handing cleanup back to the parent incorrectly.
+            start_gate.wait()
+            if provider_attempt is not None:
+                attempt_token = _CURRENT_PROVIDER_ATTEMPT.set(
+                    provider_attempt
+                )
+            worker_permit = model_permit
+            try:
+                # ``Thread.start`` wrappers can raise after the OS thread is
+                # already alive.  The parent revokes the exact attempt before
+                # opening this gate, so the child must honor that ownership
+                # loss before touching any provider target.
+                if (
+                    provider_attempt is not None
+                    and provider_attempt.is_revoked()
+                ):
+                    return
+                if worker_permit is None:
+                    worker_permit = acquire_current_turn_permit(
+                        "model",
+                        {
+                            "api_mode": self.api_mode,
+                            "model": self.model,
+                            "provider": self.provider,
+                        },
+                    )
+                # Do not use a short ``with`` around target: attempt-result
+                # scrubbing and context cleanup are part of the raw worker's
+                # ownership.  The model permit is released as the final action
+                # before thread exit so quiescence cannot race old cleanup.
+                worker_permit.__enter__()
+                target()
+            except TurnCancelled as exc:
+                if provider_attempt is None or not provider_attempt.is_revoked():
+                    result["error"] = InterruptedError(str(exc))
+            except BaseException as exc:
+                if provider_attempt is None or not provider_attempt.is_revoked():
+                    result["error"] = exc
+            finally:
+                try:
+                    if provider_attempt is not None:
+                        provider_attempt.scrub_result_if_revoked(result)
+                    if attempt_token is not None:
+                        _CURRENT_PROVIDER_ATTEMPT.reset(attempt_token)
+                finally:
+                    if worker_permit is not None:
+                        worker_permit.release()
+
+        thread = threading.Thread(
+            target=worker_context.run,
+            args=(_run_with_permit,),
+            daemon=True,
+        )
+        thread._elevate_start_gate = start_gate
+        thread._elevate_worker_started = worker_started
+        return thread
+
+    def _start_model_worker_thread(
+        self,
+        worker: threading.Thread,
+        model_permit=None,
+        provider_attempt: _ProviderAttempt | None = None,
+    ) -> None:
+        """Start a raw provider worker with exception-safe permit handoff."""
+        from agent.turn_fence import (
+            TurnCancelled,
+            TurnPermit,
+            current_turn_binding,
+            detach_owned_current_turn_permit,
+            reattach_owned_current_turn_permit,
+            release_attached_owned_current_turn_permit,
+        )
+
+        start_gate = worker._elevate_start_gate
+        worker_started = worker._elevate_worker_started
+        detached_by_this_call = False
+        if model_permit is not None:
+            # Detach before start: after this point binding cleanup cannot
+            # release a permit that may belong to an OS thread. Reconcile an
+            # exception from detach separately because it may have been raised
+            # after committing the registry mutation.
+            try:
+                detached_by_this_call = detach_owned_current_turn_permit(
+                    model_permit
+                )
+            except BaseException:
+                if provider_attempt is not None:
+                    provider_attempt.revoke(
+                        "provider worker ownership transfer failed"
+                    )
+                # add() is idempotent for the same exact permit. It restores
+                # both a before-commit and an after-commit detach failure to
+                # the binding cleanup path before releasing locally.
+                if reattach_owned_current_turn_permit(model_permit):
+                    release_attached_owned_current_turn_permit(model_permit)
+                raise
+            if (
+                isinstance(model_permit, TurnPermit)
+                and current_turn_binding() is not None
+                and not detached_by_this_call
+            ):
+                # Another worker already owns this capability. This invocation
+                # must not revoke it, open its gate, reattach it, or release it.
+                raise TurnCancelled(
+                    "model permit ownership was already claimed"
+                )
+
+        try:
+            worker.start()
+        except BaseException:
+            if provider_attempt is not None:
+                provider_attempt.revoke("provider worker start failed")
+            # Thread.start normally raises before OS start, but injected or
+            # wrapper failures can raise after the thread exists.  CPython's
+            # `_started` event is the definitive proof; our event confirms
+            # entry into the target once the gate is opened.
+            os_thread_started = bool(
+                getattr(worker, "_started", None)
+                and worker._started.is_set()
+            )
+            start_gate.set()
+            if (
+                detached_by_this_call
+                and not os_thread_started
+                and not worker_started.is_set()
+            ):
+                if model_permit is not None:
+                    reattach_owned_current_turn_permit(model_permit)
+                    if not release_attached_owned_current_turn_permit(
+                        model_permit
+                    ):
+                        model_permit.release()
+            raise
+        else:
+            start_gate.set()
+
+    def _spawn_model_worker(
+        self,
+        target: callable,
+        result: dict,
+        *,
+        model_permit=None,
+        provider_attempt: _ProviderAttempt | None = None,
+    ) -> threading.Thread:
+        """Build, transfer ownership to, and start one provider worker."""
+        worker = self._new_model_worker_thread(
+            target,
+            result,
+            model_permit=model_permit,
+            provider_attempt=provider_attempt,
+        )
+        self._start_model_worker_thread(
+            worker,
+            model_permit=model_permit,
+            provider_attempt=provider_attempt,
+        )
+        return worker
+
+    def _interruptible_api_call(
+        self,
+        api_kwargs: dict,
+        *,
+        model_permit=None,
+        on_first_delta: callable = None,
+    ):
         """
         Run the API call in a background thread so the main conversation loop
         can detect interrupts without waiting for the full HTTP round-trip.
@@ -9580,7 +10508,7 @@ class AIAgent:
                     result["response"] = self._run_codex_stream(
                         api_kwargs,
                         client=request_client_holder["client"],
-                        on_first_delta=getattr(self, "_codex_on_first_delta", None),
+                        on_first_delta=on_first_delta,
                     )
                 elif self.api_mode == "anthropic_messages":
                     result["response"] = self._anthropic_messages_create(api_kwargs)
@@ -9630,8 +10558,13 @@ class AIAgent:
         _call_start = time.time()
         self._touch_activity("waiting for non-streaming API response")
 
-        t = threading.Thread(target=_call, daemon=True)
-        t.start()
+        provider_attempt = _ProviderAttempt()
+        t = self._spawn_model_worker(
+            _call,
+            result,
+            model_permit=model_permit,
+            provider_attempt=provider_attempt,
+        )
         _poll_count = 0
         while t.is_alive():
             t.join(timeout=0.3)
@@ -9649,6 +10582,7 @@ class AIAgent:
             # arrives within the configured timeout.
             _elapsed = time.time() - _call_start
             if _elapsed > _stale_timeout:
+                provider_attempt.revoke("non-streaming stale timeout")
                 _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
                 logger.warning(
                     "Non-streaming API call stale for %.0fs (threshold %.0fs). "
@@ -9676,14 +10610,13 @@ class AIAgent:
                 )
                 # Wait briefly for the thread to notice the closed connection.
                 t.join(timeout=2.0)
-                if result["error"] is None and result["response"] is None:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
-                    )
-                break
+                raise TimeoutError(
+                    f"Non-streaming API call timed out after {int(_elapsed)}s "
+                    f"with no response (threshold: {int(_stale_timeout)}s)"
+                )
 
             if self._interrupt_requested:
+                provider_attempt.revoke("turn interrupted")
                 # Force-close the in-flight worker-local HTTP connection to stop
                 # token generation without poisoning the shared client used to
                 # seed future retries.
@@ -9700,6 +10633,7 @@ class AIAgent:
                 raise InterruptedError("Agent interrupted during API call")
 
             if self._consume_steer_cut_request():
+                provider_attempt.revoke("steer cut")
                 # A steer landed mid-think (codex reasoning streams through
                 # this path). Close the worker-local connection to stop token
                 # generation and hand control back to the conversation loop,
@@ -9723,14 +10657,28 @@ class AIAgent:
 
     def _reset_stream_delivery_tracking(self) -> None:
         """Reset tracking for text delivered during the current model response."""
-        self._current_streamed_assistant_text = ""
+        def _reset() -> None:
+            self._current_streamed_assistant_text = ""
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            _reset()
+        else:
+            attempt.call_if_active(_reset)
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
-        if isinstance(text, str) and text:
-            self._current_streamed_assistant_text = (
-                getattr(self, "_current_streamed_assistant_text", "") + text
-            )
+        def _record() -> None:
+            if isinstance(text, str) and text:
+                self._current_streamed_assistant_text = (
+                    getattr(self, "_current_streamed_assistant_text", "") + text
+                )
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            _record()
+        else:
+            attempt.call_if_active(_record)
 
     @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
@@ -9751,6 +10699,10 @@ class AIAgent:
 
     def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
         """Surface a real mid-turn assistant commentary message to the UI layer."""
+        from agent.turn_fence import current_turn_publish_allowed
+
+        if not current_turn_publish_allowed():
+            return
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None or not isinstance(assistant_msg, dict):
             return
@@ -9759,46 +10711,67 @@ class AIAgent:
         if not visible or visible == "(empty)":
             return
         already_streamed = self._interim_content_was_streamed(visible)
-        try:
-            cb(visible, already_streamed=already_streamed)
-        except Exception:
-            logger.debug("interim_assistant_callback error", exc_info=True)
+        self._invoke_generation_callback(
+            "interim_assistant_callback",
+            cb,
+            visible,
+            already_streamed=already_streamed,
+        )
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
-        # Final answer text is flowing — the model is resolving. A steer that
-        # lands from here on waits for the text to finish (after-text drain)
-        # instead of cutting the call.
-        self._stream_phase = "resolving"
-        # If a tool iteration set the break flag, prepend a single paragraph
-        # break before the first real text delta.  This prevents the original
-        # problem (text concatenation across tool boundaries) without stacking
-        # blank lines when multiple tool iterations run back-to-back.
-        if getattr(self, "_stream_needs_break", False) and text and text.strip():
-            self._stream_needs_break = False
-            text = "\n\n" + text
-        callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
-        delivered = False
-        for cb in callbacks:
-            try:
-                cb(text)
-                delivered = True
-            except Exception:
-                pass
-        if delivered:
-            self._record_streamed_assistant_text(text)
+        def _publish() -> None:
+            nonlocal text
+            from agent.turn_fence import current_turn_publish_allowed
+
+            if not current_turn_publish_allowed():
+                return
+            # Final answer text is flowing — the model is resolving. A steer
+            # that lands from here on waits for the text to finish.
+            self._stream_phase = "resolving"
+            if getattr(self, "_stream_needs_break", False) and text and text.strip():
+                self._stream_needs_break = False
+                text = "\n\n" + text
+            callbacks = [
+                cb
+                for cb in (self.stream_delta_callback, self._stream_callback)
+                if cb is not None
+            ]
+            delivered = False
+            for cb in callbacks:
+                delivered = (
+                    self._invoke_generation_callback(
+                        "stream_delta_callback", cb, text
+                    )
+                    or delivered
+                )
+            if delivered:
+                self._record_streamed_assistant_text(text)
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            _publish()
+        else:
+            attempt.call_if_active(_publish)
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
-        # Reasoning is streaming — mid-think, cheap to cut for a steer.
-        if getattr(self, "_stream_phase", "idle") != "resolving":
-            self._stream_phase = "thinking"
-        cb = self.reasoning_callback
-        if cb is not None:
-            try:
-                cb(text)
-            except Exception:
-                pass
+        def _publish() -> None:
+            from agent.turn_fence import current_turn_publish_allowed
+
+            if not current_turn_publish_allowed():
+                return
+            if getattr(self, "_stream_phase", "idle") != "resolving":
+                self._stream_phase = "thinking"
+            self._invoke_generation_callback(
+                "reasoning_callback", self.reasoning_callback, text
+            )
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            _publish()
+        else:
+            attempt.call_if_active(_publish)
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -9808,12 +10781,20 @@ class AIAgent:
         or status line so the user isn't staring at a frozen screen while a
         large tool payload (e.g. a 45 KB write_file) is being generated.
         """
-        cb = self.tool_gen_callback
-        if cb is not None:
-            try:
-                cb(tool_name)
-            except Exception:
-                pass
+        def _publish() -> None:
+            from agent.turn_fence import current_turn_publish_allowed
+
+            if not current_turn_publish_allowed():
+                return
+            self._invoke_generation_callback(
+                "tool_gen_callback", self.tool_gen_callback, tool_name
+            )
+
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            _publish()
+        else:
+            attempt.call_if_active(_publish)
 
     def _has_stream_consumers(self) -> bool:
         """Return True if any streaming consumer is registered."""
@@ -9823,7 +10804,11 @@ class AIAgent:
         )
 
     def _interruptible_streaming_api_call(
-        self, api_kwargs: dict, *, on_first_delta: callable = None
+        self,
+        api_kwargs: dict,
+        *,
+        on_first_delta: callable = None,
+        model_permit=None,
     ):
         """Streaming variant of _interruptible_api_call for real-time token delivery.
 
@@ -9842,15 +10827,14 @@ class AIAgent:
         streaming is not supported.
         """
         if self.api_mode == "codex_responses":
-            # Codex streams internally via _run_codex_stream. The main dispatch
-            # in _interruptible_api_call already calls it; we just need to
-            # ensure on_first_delta reaches it. Store it on the instance
-            # temporarily so _run_codex_stream can pick it up.
-            self._codex_on_first_delta = on_first_delta
-            try:
-                return self._interruptible_api_call(api_kwargs)
-            finally:
-                self._codex_on_first_delta = None
+            # Keep the callback attempt-local.  A cut/timeout can leave the raw
+            # SDK worker alive, so an instance field would let it observe or
+            # clear the callback belonging to a newer retry.
+            return self._interruptible_api_call(
+                api_kwargs,
+                model_permit=model_permit,
+                on_first_delta=on_first_delta,
+            )
 
         # Bedrock Converse uses boto3's converse_stream() with real-time delta
         # callbacks — same UX as Anthropic and chat_completions streaming.
@@ -9862,11 +10846,18 @@ class AIAgent:
 
             def _fire_first():
                 if not first_delta_fired["done"] and on_first_delta:
-                    first_delta_fired["done"] = True
-                    try:
-                        on_first_delta()
-                    except Exception:
-                        pass
+                    def _publish_first() -> None:
+                        first_delta_fired["done"] = True
+                        try:
+                            on_first_delta()
+                        except Exception:
+                            pass
+
+                    attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                    if attempt is None:
+                        _publish_first()
+                    else:
+                        attempt.call_if_active(_publish_first)
 
             def _bedrock_call():
                 try:
@@ -9945,13 +10936,20 @@ class AIAgent:
                 except Exception as e:
                     result["error"] = e
 
-            t = threading.Thread(target=_bedrock_call, daemon=True)
-            t.start()
+            provider_attempt = _ProviderAttempt()
+            t = self._spawn_model_worker(
+                _bedrock_call,
+                result,
+                model_permit=model_permit,
+                provider_attempt=provider_attempt,
+            )
             while t.is_alive():
                 t.join(timeout=0.3)
                 if self._interrupt_requested:
+                    provider_attempt.revoke("turn interrupted")
                     raise InterruptedError("Agent interrupted during Bedrock API call")
                 if self._consume_steer_cut_request():
+                    provider_attempt.revoke("steer cut")
                     raise SteerCutInterrupt("Steer cut the in-flight Bedrock API call")
             if result["error"] is not None:
                 raise result["error"]
@@ -9973,11 +10971,18 @@ class AIAgent:
 
         def _fire_first_delta():
             if not first_delta_fired["done"] and on_first_delta:
-                first_delta_fired["done"] = True
-                try:
-                    on_first_delta()
-                except Exception:
-                    pass
+                def _publish_first() -> None:
+                    first_delta_fired["done"] = True
+                    try:
+                        on_first_delta()
+                    except Exception:
+                        pass
+
+                attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                if attempt is None:
+                    _publish_first()
+                else:
+                    attempt.call_if_active(_publish_first)
 
         def _call_chat_completions():
             """Stream a chat completions response."""
@@ -10070,17 +11075,23 @@ class AIAgent:
                         result["partial_tool_names"].append(value)
                 elif kind == "suppressed_content":
                     if self.stream_delta_callback:
-                        try:
-                            self.stream_delta_callback(value)
+                        if self._invoke_generation_callback(
+                            "stream_delta_callback",
+                            self.stream_delta_callback,
+                            value,
+                        ):
                             self._record_streamed_assistant_text(value)
-                        except Exception:
-                            pass
 
             def _emit_or_buffer_stream_event(kind: str, value: str) -> None:
                 stream_callback_buffer.append((kind, value))
                 result["buffered_output_present"] = True
 
             for chunk in stream:
+                attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                if attempt is not None and attempt.is_revoked():
+                    raise _ProviderAttemptRevoked(
+                        "provider stream attempt was superseded"
+                    )
                 last_chunk_time["t"] = time.time()
                 self._touch_activity("receiving stream response")
 
@@ -10443,6 +11454,11 @@ class AIAgent:
             # Use the Anthropic SDK's streaming context manager
             with self._anthropic_client.messages.stream(**api_kwargs) as stream:
                 for event in stream:
+                    attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                    if attempt is not None and attempt.is_revoked():
+                        raise _ProviderAttemptRevoked(
+                            "provider stream attempt was superseded"
+                        )
                     # Update stale-stream timer on every event so the
                     # outer poll loop knows data is flowing.  Without
                     # this, the detector kills healthy long-running
@@ -10539,6 +11555,9 @@ class AIAgent:
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
+                    attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                    if attempt is not None and attempt.is_revoked():
+                        return
                     try:
                         if self.api_mode == "anthropic_messages":
                             self._try_refresh_anthropic_client_credentials()
@@ -10547,6 +11566,9 @@ class AIAgent:
                             result["response"] = _call_chat_completions()
                         return  # success
                     except Exception as e:
+                        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                        if attempt is not None and attempt.is_revoked():
+                            return
                         _is_timeout = isinstance(
                             e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout)
                         )
@@ -10802,8 +11824,13 @@ class AIAgent:
             else:
                 _stream_stale_timeout = _stream_stale_timeout_base
 
-        t = threading.Thread(target=_call, daemon=True)
-        t.start()
+        provider_attempt = _ProviderAttempt()
+        t = self._spawn_model_worker(
+            _call,
+            result,
+            model_permit=model_permit,
+            provider_attempt=provider_attempt,
+        )
         _last_heartbeat = time.time()
         _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
         while t.is_alive():
@@ -10830,6 +11857,7 @@ class AIAgent:
             # inner retry loop can start a fresh connection.
             _stale_elapsed = time.time() - last_chunk_time["t"]
             if _stale_elapsed > _stream_stale_timeout:
+                provider_attempt.revoke("stream stale timeout")
                 _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
                 logger.warning(
                     "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "
@@ -10861,8 +11889,13 @@ class AIAgent:
                 self._touch_activity(
                     f"stale stream detected after {int(_stale_elapsed)}s, reconnecting"
                 )
+                raise TimeoutError(
+                    f"Streaming API call timed out after {int(_stale_elapsed)}s "
+                    f"with no provider chunks (threshold: {int(_stream_stale_timeout)}s)"
+                )
 
             if self._interrupt_requested:
+                provider_attempt.revoke("turn interrupted")
                 try:
                     if self.api_mode == "anthropic_messages":
                         self._anthropic_client.close()
@@ -10876,6 +11909,7 @@ class AIAgent:
                 raise InterruptedError("Agent interrupted during streaming API call")
 
             if self._consume_steer_cut_request():
+                provider_attempt.revoke("steer cut")
                 # Steer landed mid-think — stop generation and let the
                 # conversation loop re-issue the call with the steer applied.
                 # Only reachable pre-"resolving": once answer text streams,
@@ -10896,6 +11930,7 @@ class AIAgent:
         # join so that race cannot turn a cancelled request into an ordinary
         # incomplete response.
         if self._interrupt_requested:
+            provider_attempt.revoke("turn interrupted")
             raise InterruptedError("Agent interrupted during streaming API call")
         if result["error"] is not None:
             if deltas_were_sent["yes"]:
@@ -11755,10 +12790,11 @@ class AIAgent:
             # Any reasoning that wasn't shown during streaming is caught by the
             # CLI post-response display fallback (cli.py _reasoning_shown_this_turn).
             if not self.stream_delta_callback and not self._stream_callback:
-                try:
-                    self.reasoning_callback(reasoning_text)
-                except Exception:
-                    pass
+                self._invoke_generation_callback(
+                    "reasoning_callback",
+                    self.reasoning_callback,
+                    reasoning_text,
+                )
 
         # Sanitize surrogates from API response — some models (e.g. Kimi/GLM via Ollama)
         # can return invalid surrogate code points that crash json.dumps() on persist.
@@ -11982,10 +13018,14 @@ class AIAgent:
             _needs_sanitize = self._should_sanitize_tool_calls()
             api_messages = []
             for msg in messages:
+                if msg.get("finish_reason") in GUIDANCE_UNCONSUMED_FINISH_REASONS:
+                    continue
                 api_msg = msg.copy()
                 self._copy_reasoning_content_for_api(msg, api_msg)
                 api_msg.pop("reasoning", None)
                 api_msg.pop("finish_reason", None)
+                api_msg.pop("client_message_id", None)
+                api_msg.pop("_display_content", None)
                 api_msg.pop("_flush_sentinel", None)
                 api_msg.pop("_thinking_prefill", None)
                 api_msg.pop("_empty_recovery_synthetic", None)
@@ -12004,6 +13044,13 @@ class AIAgent:
             if self._cached_system_prompt:
                 api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
             api_messages = self._hydrate_media_refs_for_api(api_messages)
+            # The auxiliary and OpenAI-compatible fallback calls below use
+            # Chat Completions directly, bypassing the normal transport
+            # builder. Apply the same role-aware boundary projection so local
+            # durable metadata can never leak through these side paths.
+            chat_api_messages = self._get_transport(
+                "chat_completions"
+            ).convert_messages(api_messages)
 
             # Make one API call with only the memory tool available
             memory_tool_def = None
@@ -12038,7 +13085,7 @@ class AIAgent:
             try:
                 response = _call_llm(
                     task="flush_memories",
-                    messages=api_messages,
+                    messages=chat_api_messages,
                     tools=[memory_tool_def],
                     temperature=_flush_temperature,
                     max_tokens=5120,
@@ -12072,7 +13119,7 @@ class AIAgent:
             elif not _aux_available:
                 api_kwargs = {
                     "model": self.model,
-                    "messages": api_messages,
+                    "messages": chat_api_messages,
                     "tools": [memory_tool_def],
                     **self._max_tokens_param(5120),
                 }
@@ -12155,7 +13202,34 @@ class AIAgent:
             if messages and messages[-1].get("_flush_sentinel") == _sentinel:
                 messages.pop()
 
-    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False) -> tuple:
+    def _compress_context(
+        self,
+        messages: list,
+        system_message: str,
+        *,
+        approx_tokens: int = None,
+        task_id: str = "default",
+        focus_topic: str = None,
+        force: bool = False,
+    ) -> tuple:
+        """Fence the complete shared/fallback compression transaction."""
+        from agent.turn_fence import acquire_current_turn_permit
+
+        with acquire_current_turn_permit(
+            "compression",
+            {"task_id": task_id, "focus_topic": focus_topic or ""},
+        ):
+            return AIAgent._compress_context_impl(
+                self,
+                messages,
+                system_message,
+                approx_tokens=approx_tokens,
+                task_id=task_id,
+                focus_topic=focus_topic,
+                force=force,
+            )
+
+    def _compress_context_impl(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False) -> tuple:
         """Compress conversation context and split the session in SQLite.
 
         Args:
@@ -12357,7 +13431,13 @@ class AIAgent:
         )
         return compressed, new_system_prompt
 
-    def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str) -> None:
+    def _execute_tool_calls(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        retained_batch_permit=None,
+    ) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
         Dispatches to concurrent execution only for batches that look
@@ -12375,11 +13455,17 @@ class AIAgent:
         try:
             if not _should_parallelize_tool_batch(tool_calls):
                 return self._execute_tool_calls_sequential(
-                    assistant_message, messages, effective_task_id
+                    assistant_message,
+                    messages,
+                    effective_task_id,
+                    retained_batch_permit=retained_batch_permit,
                 )
 
             return self._execute_tool_calls_concurrent(
-                assistant_message, messages, effective_task_id
+                assistant_message,
+                messages,
+                effective_task_id,
+                retained_batch_permit=retained_batch_permit,
             )
         finally:
             self._executing_tools = False
@@ -12545,7 +13631,56 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
-    def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str) -> None:
+    def _execute_tool_calls_concurrent(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        retained_batch_permit=None,
+    ) -> None:
+        """Execute concurrent tools with call-local permit cleanup."""
+        import contextlib
+
+        owns_batch_permit = retained_batch_permit is None
+        if owns_batch_permit:
+            try:
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_owned_current_turn_permit,
+                )
+
+                retained_batch_permit = acquire_owned_current_turn_permit(
+                    "tool_batch_transaction",
+                    {"tool_count": len(assistant_message.tool_calls or [])},
+                )
+            except TurnCancelled:
+                return
+
+        permit_cleanup = contextlib.ExitStack()
+        permit_cleanup_lock = threading.Lock()
+        try:
+            return AIAgent._execute_tool_calls_concurrent_impl(
+                self,
+                assistant_message,
+                messages,
+                effective_task_id,
+                permit_cleanup,
+                permit_cleanup_lock,
+            )
+        finally:
+            permit_cleanup.close()
+            self._current_tool = None
+            if owns_batch_permit and retained_batch_permit is not None:
+                retained_batch_permit.release()
+
+    def _execute_tool_calls_concurrent_impl(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        permit_cleanup,
+        permit_cleanup_lock,
+    ) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
         Results are collected in the original tool-call order and appended to
@@ -12554,16 +13689,11 @@ class AIAgent:
         tool_calls = assistant_message.tool_calls
         num_tools = len(tool_calls)
 
-        # ── Pre-flight: interrupt check ──────────────────────────────────
-        if self._interrupt_requested:
-            print(f"{self.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
-            for tc in tool_calls:
-                messages.append({
-                    "role": "tool",
-                    "content": f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
-                    "tool_call_id": tc.id,
-                })
-            return
+        # A retained batch transaction may already have won immediately
+        # before Stop.  Do not abandon its ordered bookkeeping.  A legacy
+        # unbound interrupt still skips physical handlers, but every call gets
+        # an explicit result below.
+        skip_all_due_interrupt = bool(self._interrupt_requested)
 
         # ── Parse args + pre-execution bookkeeping ───────────────────────
         parsed_calls = []  # list of (tool_call, function_name, function_args)
@@ -12593,35 +13723,112 @@ class AIAgent:
                 return
             parsed_calls.append((tool_call, function_name, function_args))
 
+        # Linearize every concurrent effect admission in deterministic model
+        # order before starting any handler.  Stop can split this list into a
+        # winning prefix and cancelled suffix, but no later-index worker can
+        # mutate before the collector knows that complete admission vector.
+        effect_permits = [None] * num_tools
+        admission_open = not skip_all_due_interrupt
+        if admission_open:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            for index, (tool_call, function_name, _function_args) in enumerate(
+                parsed_calls
+            ):
+                if not admission_open:
+                    break
+                try:
+                    permit = acquire_current_turn_permit(
+                        "tool",
+                        {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": function_name,
+                        },
+                    )
+                except TurnCancelled:
+                    admission_open = False
+                    continue
+                effect_permits[index] = permit
+                with permit_cleanup_lock:
+                    permit_cleanup.callback(permit.release)
+
         artifact_baselines_by_call: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        for tool_call, function_name, function_args in parsed_calls:
-            # Reset nudge counters
+        preexecution_errors: list[Optional[str]] = [None] * num_tools
+        checkpointed_workdirs: set[str] = set()
+        blocked_checkpoint_workdirs: set[str] = set()
+        for index, (tool_call, function_name, function_args) in enumerate(
+            parsed_calls
+        ):
+            permit = effect_permits[index]
+            if permit is None:
+                artifact_baselines_by_call[tool_call.id] = {}
+                continue
+
+            # Checkpoints are a serialized barrier across the complete winning
+            # prefix.  No handler thread is submitted until every required
+            # snapshot has returned, so same-workdir dedupe cannot race a
+            # sibling mutation into the snapshot.
+            checkpoint_workdir = None
+            checkpoint_reason = None
+            if self._checkpoint_mgr.enabled and function_name in (
+                "write_file",
+                "patch",
+            ):
+                file_path = function_args.get("path", "")
+                if file_path:
+                    checkpoint_workdir = (
+                        self._checkpoint_mgr.get_working_dir_for_path(file_path)
+                    )
+                    checkpoint_reason = f"before {function_name}"
+            elif self._checkpoint_mgr.enabled and function_name == "terminal":
+                cmd = function_args.get("command", "")
+                if _is_destructive_command(cmd):
+                    checkpoint_workdir = function_args.get("workdir") or os.getenv(
+                        "TERMINAL_CWD", os.getcwd()
+                    )
+                    checkpoint_reason = f"before terminal: {cmd[:60]}"
+
+            if checkpoint_workdir:
+                checkpoint_workdir = str(checkpoint_workdir)
+                checkpoint_error = None
+                if checkpoint_workdir in blocked_checkpoint_workdirs:
+                    checkpoint_error = (
+                        "required checkpoint for this working directory "
+                        "failed earlier in the batch"
+                    )
+                elif checkpoint_workdir not in checkpointed_workdirs:
+                    try:
+                        checkpoint_ok = self._checkpoint_mgr.ensure_checkpoint(
+                            checkpoint_workdir, checkpoint_reason or "before tool"
+                        )
+                        if not checkpoint_ok:
+                            checkpoint_error = (
+                                "required checkpoint was not created"
+                            )
+                    except Exception as exc:
+                        checkpoint_error = f"required checkpoint failed: {exc}"
+
+                if checkpoint_error:
+                    blocked_checkpoint_workdirs.add(checkpoint_workdir)
+                    preexecution_errors[index] = (
+                        f"Error: {function_name} was not started because "
+                        f"{checkpoint_error}."
+                    )
+                    effect_permits[index] = None
+                    permit.release()
+                    artifact_baselines_by_call[tool_call.id] = {}
+                    continue
+                checkpointed_workdirs.add(checkpoint_workdir)
+
+            # Reset cadence only after every required precondition for the
+            # physically admitted call has succeeded.
             if function_name == "memory":
                 self._turns_since_memory = 0
             elif function_name == "skill_manage":
                 self._iters_since_skill = 0
-
-            # Checkpoint for file-mutating tools
-            if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
-                try:
-                    file_path = function_args.get("path", "")
-                    if file_path:
-                        work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                        self._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
-                except Exception:
-                    pass
-
-            # Checkpoint before destructive terminal commands
-            if function_name == "terminal" and self._checkpoint_mgr.enabled:
-                try:
-                    cmd = function_args.get("command", "")
-                    if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            cwd, f"before terminal: {cmd[:60]}"
-                        )
-                except Exception:
-                    pass
 
             # Capture the exact physical candidate state before any worker in
             # this concurrent batch starts.  Independent tool batches cannot
@@ -12637,6 +13844,11 @@ class AIAgent:
 
         # ── Logging / callbacks ──────────────────────────────────────────
         tool_names_str = ", ".join(name for _, name, _ in parsed_calls)
+        winning_tool_names = [
+            name
+            for index, (_tc, name, _args) in enumerate(parsed_calls)
+            if effect_permits[index] is not None
+        ]
         if not self.quiet_mode:
             print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
             for i, (tc, name, args) in enumerate(parsed_calls, 1):
@@ -12648,31 +13860,27 @@ class AIAgent:
                     args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
                     print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
 
-        for tc, name, args in parsed_calls:
-            if self.tool_progress_callback:
-                try:
-                    preview = _build_tool_preview(name, args)
-                    self.tool_progress_callback("tool.started", name, preview, args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
-
-        for tc, name, args in parsed_calls:
-            if self.tool_start_callback:
-                try:
-                    self.tool_start_callback(tc.id, name, args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool start callback error: {cb_err}")
-
         # ── Concurrent execution ─────────────────────────────────────────
         # Each slot holds (function_name, function_args, function_result, duration, error_flag)
         results = [None] * num_tools
 
         # Touch activity before launching workers so the gateway knows
         # we're executing tools (not stuck).
-        self._current_tool = tool_names_str
-        self._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
+        self._current_tool = ", ".join(winning_tool_names) or None
+        if winning_tool_names:
+            self._touch_activity(
+                f"executing {len(winning_tool_names)} tools concurrently: "
+                + ", ".join(winning_tool_names)
+            )
 
-        def _run_tool(index, tool_call, function_name, function_args):
+        def _run_tool(
+            index,
+            tool_call,
+            function_name,
+            function_args,
+            active_turn_permit,
+            preexecution_error,
+        ):
             """Worker function executed in a thread."""
             # Register this worker tid so the agent can fan out an interrupt
             # to it — see AIAgent.interrupt().  Must happen first thing, and
@@ -12700,26 +13908,63 @@ class AIAgent:
                 pass
             start = time.time()
             try:
-                try:
-                    result = self._invoke_tool(
-                        function_name,
-                        function_args,
-                        effective_task_id,
-                        tool_call.id,
-                        messages=messages,
+                if active_turn_permit is None:
+                    result = preexecution_error or (
+                        f"[Tool execution cancelled — {function_name} was "
+                        "not started because cancellation won admission]"
                     )
-                except TypeError as type_error:
-                    # Backwards compatibility for tests/subclasses/stubs that
-                    # still implement the pre-messages _invoke_tool contract.
-                    # Real tool TypeErrors should still surface as tool errors.
-                    if "unexpected keyword argument 'messages'" not in str(type_error):
-                        raise
-                    result = self._invoke_tool(
-                        function_name,
-                        function_args,
-                        effective_task_id,
-                        tool_call.id,
-                    )
+                else:
+                    from agent.turn_fence import current_turn_publish_allowed
+
+                    if (
+                        current_turn_publish_allowed()
+                        and self.tool_progress_callback
+                    ):
+                        preview = _build_tool_preview(
+                            function_name, function_args
+                        )
+                        self._invoke_generation_callback(
+                            "tool_progress_callback",
+                            self.tool_progress_callback,
+                            "tool.started",
+                            function_name,
+                            preview,
+                            function_args,
+                        )
+                    if (
+                        current_turn_publish_allowed()
+                        and self.tool_start_callback
+                    ):
+                        self._invoke_generation_callback(
+                            "tool_start_callback",
+                            self.tool_start_callback,
+                            tool_call.id,
+                            function_name,
+                            function_args,
+                        )
+                    try:
+                        result = self._invoke_tool(
+                            function_name,
+                            function_args,
+                            effective_task_id,
+                            tool_call.id,
+                            messages=messages,
+                        )
+                    except TypeError as type_error:
+                        # Backwards compatibility for tests/subclasses/stubs
+                        # implementing the pre-messages contract.  The
+                        # fallback stays inside the exact same permit.
+                        if (
+                            "unexpected keyword argument 'messages'"
+                            not in str(type_error)
+                        ):
+                            raise
+                        result = self._invoke_tool(
+                            function_name,
+                            function_args,
+                            effective_task_id,
+                            tool_call.id,
+                        )
             except Exception as tool_error:
                 result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
@@ -12730,7 +13975,14 @@ class AIAgent:
                 logger.info("tool %s failed (%.2fs): %s", function_name, duration, result_text[:200])
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result_text))
-            results[index] = (function_name, function_args, result, duration, is_error)
+            results[index] = (
+                function_name,
+                function_args,
+                result,
+                duration,
+                is_error,
+                active_turn_permit,
+            )
             # Tear down worker-tid tracking.  Clear any interrupt bit we may
             # have set so the next task scheduled onto this recycled tid
             # starts with a clean slate.
@@ -12754,7 +14006,16 @@ class AIAgent:
                 futures = []
                 for i, (tc, name, args) in enumerate(parsed_calls):
                     ctx = contextvars.copy_context()
-                    f = executor.submit(ctx.run, _run_tool, i, tc, name, args)
+                    f = executor.submit(
+                        ctx.run,
+                        _run_tool,
+                        i,
+                        tc,
+                        name,
+                        args,
+                        effect_permits[i],
+                        preexecution_errors[i],
+                    )
                     futures.append(f)
 
                 # Wait for all to complete with periodic heartbeats so the
@@ -12823,8 +14084,17 @@ class AIAgent:
                 function_name = name
                 function_args = args
                 is_error = True
+                active_turn_permit = None
             else:
-                function_name, function_args, function_result, tool_duration, is_error = r
+                (
+                    function_name,
+                    function_args,
+                    function_result,
+                    tool_duration,
+                    is_error,
+                    active_turn_permit,
+                ) = r
+
             function_result_text = _multimodal_text_summary(function_result)
             detected_failure, failure_suffix = _detect_tool_failure(
                 function_name,
@@ -12847,14 +14117,19 @@ class AIAgent:
                 result_preview = function_result_text[:200] if len(function_result_text) > 200 else function_result_text
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
-            if self.tool_progress_callback:
-                try:
-                    self.tool_progress_callback(
-                        "tool.completed", function_name, None, None,
-                        duration=tool_duration, is_error=is_error,
-                    )
-                except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
+            from agent.turn_fence import current_turn_publish_allowed
+
+            if current_turn_publish_allowed() and self.tool_progress_callback:
+                self._invoke_generation_callback(
+                    "tool_progress_callback",
+                    self.tool_progress_callback,
+                    "tool.completed",
+                    function_name,
+                    None,
+                    None,
+                    duration=tool_duration,
+                    is_error=is_error,
+                )
 
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
@@ -12877,11 +14152,15 @@ class AIAgent:
             self._current_tool = None
             self._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
 
-            if self.tool_complete_callback:
-                try:
-                    self.tool_complete_callback(tc.id, name, args, function_result)
-                except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
+            if current_turn_publish_allowed() and self.tool_complete_callback:
+                self._invoke_generation_callback(
+                    "tool_complete_callback",
+                    self.tool_complete_callback,
+                    tc.id,
+                    name,
+                    args,
+                    function_result,
+                )
 
             if not _is_multimodal_tool_result(function_result):
                 if not isinstance(function_result, str):
@@ -12908,12 +14187,10 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
-            # ── Per-tool /steer drain ───────────────────────────────────
-            # Same as the sequential path: drain between each collected
-            # result so the steer lands as early as possible.
-            self._apply_pending_steer_to_tool_results(messages, 1)
-            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
-                self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
+            # Keep the handler's winning permit through model-visible result
+            # append, overflow persistence, evidence capture, and steer drain.
+            if active_turn_permit is not None:
+                active_turn_permit.release()
 
         # ── Per-turn aggregate budget enforcement ─────────────────────────
         num_tools = len(parsed_calls)
@@ -12927,18 +14204,93 @@ class AIAgent:
                 ),
             )
 
-        # ── /steer injection ──────────────────────────────────────────────
-        # Append any pending user steer text to the last tool result so the
-        # agent sees it on its next iteration. Runs AFTER budget enforcement
-        # so the steer marker is never truncated. See steer() for details.
-        if num_tools > 0:
+            # This bookkeeping remains under the already-won batch
+            # transaction; it must not ask Stop for a new ordinary permit.
             self._apply_pending_steer_to_tool_results(messages, num_tools)
-            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
-                self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools)
 
-    def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str) -> None:
+    def _execute_tool_calls_sequential(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        retained_batch_permit=None,
+    ) -> None:
+        """Execute sequential tools and never leak an acquired turn permit."""
+        import contextlib
+
+        owns_batch_permit = retained_batch_permit is None
+        if owns_batch_permit:
+            try:
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_owned_current_turn_permit,
+                )
+
+                retained_batch_permit = acquire_owned_current_turn_permit(
+                    "tool_batch_transaction",
+                    {"tool_count": len(assistant_message.tool_calls or [])},
+                )
+            except TurnCancelled:
+                return
+
+        permit_cleanup = contextlib.ExitStack()
+        try:
+            return AIAgent._execute_tool_calls_sequential_impl(
+                self,
+                assistant_message,
+                messages,
+                effective_task_id,
+                permit_cleanup,
+            )
+        finally:
+            permit_cleanup.close()
+            self._current_tool = None
+            if owns_batch_permit and retained_batch_permit is not None:
+                retained_batch_permit.release()
+
+    def _execute_tool_calls_sequential_impl(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        permit_cleanup,
+    ) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
         parsed_calls = []
+        if self._interrupt_requested:
+            batch_outcomes = getattr(self, "_last_tool_batch_outcomes", None)
+            for tool_call in assistant_message.tool_calls:
+                function_name = tool_call.function.name
+                try:
+                    function_args = _parse_tool_arguments_object(
+                        tool_call.function.arguments
+                    )
+                except Exception:
+                    function_args = {}
+                content = (
+                    f"[Tool execution cancelled — {function_name} was not "
+                    "started due to user interrupt]"
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": content,
+                        "tool_call_id": tool_call.id,
+                        "tool_name": function_name,
+                    }
+                )
+                if isinstance(batch_outcomes, list):
+                    batch_outcomes.append(
+                        (
+                            function_name,
+                            function_args,
+                            True,
+                            " [cancelled]",
+                            content,
+                            {},
+                        )
+                    )
+            return
         for tool_call in assistant_message.tool_calls:
             try:
                 function_args = _parse_tool_arguments_object(
@@ -12975,24 +14327,51 @@ class AIAgent:
             delegate_limit = _get_max_concurrent_children()
         delegate_calls_seen = 0
         seen_action_fingerprints = set()
+        checkpointed_workdirs: set[str] = set()
+        blocked_checkpoint_workdirs: set[str] = set()
+
+        def _append_cancelled_suffix(start_index: int, reason: str) -> None:
+            batch_outcomes = getattr(self, "_last_tool_batch_outcomes", None)
+            for skipped_call, skipped_args in parsed_calls[start_index:]:
+                skipped_name = skipped_call.function.name
+                content = (
+                    f"[Tool execution cancelled — {skipped_name} was not "
+                    f"started because {reason}]"
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": content,
+                        "tool_call_id": skipped_call.id,
+                        "tool_name": skipped_name,
+                    }
+                )
+                if isinstance(batch_outcomes, list):
+                    batch_outcomes.append(
+                        (
+                            skipped_name,
+                            skipped_args,
+                            True,
+                            " [cancelled]",
+                            content,
+                            {},
+                        )
+                    )
 
         for i, (tool_call, function_args) in enumerate(parsed_calls, 1):
             # SAFETY: check interrupt BEFORE starting each tool.
             # If the user sent "stop" during a previous tool's execution,
             # do NOT start any more tools -- skip them all immediately.
             if self._interrupt_requested:
-                remaining_calls = assistant_message.tool_calls[i-1:]
-                if remaining_calls:
-                    self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
-                for skipped_tc in remaining_calls:
-                    skipped_name = skipped_tc.function.name
-                    skip_msg = {
-                        "role": "tool",
-                        "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
-                        "tool_call_id": skipped_tc.id,
-                    }
-                    messages.append(skip_msg)
-                break
+                remaining = len(parsed_calls) - (i - 1)
+                if remaining:
+                    self._vprint(
+                        f"{self.log_prefix}⚡ Interrupt: skipping {remaining} "
+                        "tool call(s)",
+                        force=True,
+                    )
+                _append_cancelled_suffix(i - 1, "the user interrupted the batch")
+                return
 
             function_name = tool_call.function.name
 
@@ -13020,6 +14399,38 @@ class AIAgent:
                         f"batch exceeded max_concurrent_children={delegate_limit}. "
                         "Retry this exact delegation in a later tool batch."
                     )
+            # This is the single sequential tool/effect linearization point.
+            # Everything below it (callbacks, checkpoints, built-ins,
+            # registry/MCP handlers, delegate_task, and exact-terminal receipt
+            # code) executes only when this permit wins.  The fence lock is no
+            # longer held while any of that code runs.
+            active_turn_permit = None
+            try:
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_current_turn_permit,
+                    current_turn_publish_allowed,
+                )
+
+                active_turn_permit = acquire_current_turn_permit(
+                    "tool",
+                    {
+                        "tool_call_id": tool_call.id,
+                        "tool_name": function_name,
+                    },
+                )
+                # The cleanup stack is local to this sequential call and is
+                # closed by its caller's try/finally.  Registration happens
+                # immediately after acquisition, closing the exception window
+                # before plugin policy, callbacks, or handlers run.
+                permit_cleanup.callback(active_turn_permit.release)
+            except TurnCancelled:
+                # The retained batch permit authorizes terminal bookkeeping
+                # for calls whose effect permits lost.  Preserve strict tool
+                # role ordering without starting any physical handler.
+                _append_cancelled_suffix(i - 1, "cancellation won admission")
+                return
+
             if _block_msg is None:
                 try:
                     from elevate_cli.plugins import get_pre_tool_call_block_message
@@ -13031,27 +14442,15 @@ class AIAgent:
                 except Exception:
                     pass
 
-            # Plan mode (read-only): mirror of the concurrent-path gate. When
-            # the session is in plan mode, block state-changing tools at the
-            # runtime (read-only tools/shell/memory-reads return None and pass
-            # through). Reuses the existing block-message-as-result path below.
+            # Plan mode (read-only): policy evaluation is kept behind the same
+            # permit as the eventual handler/result so arbitrary plugin hooks
+            # cannot escape the cancellation fence.
             if _block_msg is None:
                 try:
                     from tools.approval import plan_mode_block as _plan_mode_block
                     _block_msg = _plan_mode_block(function_name, function_args)
                 except Exception:
                     pass
-
-            if _block_msg is not None:
-                # Tool blocked by plugin policy — skip counter resets.
-                # Execution is handled below in the tool dispatch chain.
-                pass
-            else:
-                # Reset nudge counters when the relevant tool is actually used
-                if function_name == "memory":
-                    self._turns_since_memory = 0
-                elif function_name == "skill_manage":
-                    self._iters_since_skill = 0
 
             if not self.quiet_mode:
                 args_str = json.dumps(function_args, ensure_ascii=False)
@@ -13076,18 +14475,33 @@ class AIAgent:
                 except Exception:
                     pass
 
-            if _block_msg is None and self.tool_progress_callback:
-                try:
-                    preview = _build_tool_preview(function_name, function_args)
-                    self.tool_progress_callback("tool.started", function_name, preview, function_args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
+            if (
+                _block_msg is None
+                and current_turn_publish_allowed()
+                and self.tool_progress_callback
+            ):
+                preview = _build_tool_preview(function_name, function_args)
+                self._invoke_generation_callback(
+                    "tool_progress_callback",
+                    self.tool_progress_callback,
+                    "tool.started",
+                    function_name,
+                    preview,
+                    function_args,
+                )
 
-            if _block_msg is None and self.tool_start_callback:
-                try:
-                    self.tool_start_callback(tool_call.id, function_name, function_args)
-                except Exception as cb_err:
-                    logging.debug(f"Tool start callback error: {cb_err}")
+            if (
+                _block_msg is None
+                and current_turn_publish_allowed()
+                and self.tool_start_callback
+            ):
+                self._invoke_generation_callback(
+                    "tool_start_callback",
+                    self.tool_start_callback,
+                    tool_call.id,
+                    function_name,
+                    function_args,
+                )
 
             # Checkpoint: snapshot working dir before file-mutating tools
             if _block_msg is None and function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
@@ -13095,11 +14509,24 @@ class AIAgent:
                     file_path = function_args.get("path", "")
                     if file_path:
                         work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            work_dir, f"before {function_name}"
-                        )
-                except Exception:
-                    pass  # never block tool execution
+                        work_dir = str(work_dir)
+                        if work_dir in blocked_checkpoint_workdirs:
+                            _block_msg = (
+                                "required checkpoint for this working directory "
+                                "failed earlier in the batch"
+                            )
+                        elif work_dir not in checkpointed_workdirs:
+                            if self._checkpoint_mgr.ensure_checkpoint(
+                                work_dir, f"before {function_name}"
+                            ):
+                                checkpointed_workdirs.add(work_dir)
+                            else:
+                                blocked_checkpoint_workdirs.add(work_dir)
+                                _block_msg = "required checkpoint was not created"
+                except Exception as exc:
+                    if "work_dir" in locals():
+                        blocked_checkpoint_workdirs.add(str(work_dir))
+                    _block_msg = f"required checkpoint failed: {exc}"
 
             # Checkpoint before destructive terminal commands
             if _block_msg is None and function_name == "terminal" and self._checkpoint_mgr.enabled:
@@ -13107,11 +14534,32 @@ class AIAgent:
                     cmd = function_args.get("command", "")
                     if _is_destructive_command(cmd):
                         cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            cwd, f"before terminal: {cmd[:60]}"
-                        )
-                except Exception:
-                    pass  # never block tool execution
+                        cwd = str(cwd)
+                        if cwd in blocked_checkpoint_workdirs:
+                            _block_msg = (
+                                "required checkpoint for this working directory "
+                                "failed earlier in the batch"
+                            )
+                        elif cwd not in checkpointed_workdirs:
+                            if self._checkpoint_mgr.ensure_checkpoint(
+                                cwd, f"before terminal: {cmd[:60]}"
+                            ):
+                                checkpointed_workdirs.add(cwd)
+                            else:
+                                blocked_checkpoint_workdirs.add(cwd)
+                                _block_msg = "required checkpoint was not created"
+                except Exception as exc:
+                    if "cwd" in locals():
+                        blocked_checkpoint_workdirs.add(str(cwd))
+                    _block_msg = f"required checkpoint failed: {exc}"
+
+            if _block_msg is None:
+                # Reset cadence only after every required checkpoint has
+                # completed and the handler will actually start.
+                if function_name == "memory":
+                    self._turns_since_memory = 0
+                elif function_name == "skill_manage":
+                    self._iters_since_skill = 0
 
             artifact_baselines = (
                 _capture_document_artifact_baselines(
@@ -13344,14 +14792,19 @@ class AIAgent:
                     len(function_result_text),
                 )
 
-            if self.tool_progress_callback:
-                try:
-                    self.tool_progress_callback(
-                        "tool.completed", function_name, None, None,
-                        duration=tool_duration, is_error=_is_error_result,
-                    )
-                except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
+            from agent.turn_fence import current_turn_publish_allowed
+
+            if current_turn_publish_allowed() and self.tool_progress_callback:
+                self._invoke_generation_callback(
+                    "tool_progress_callback",
+                    self.tool_progress_callback,
+                    "tool.completed",
+                    function_name,
+                    None,
+                    None,
+                    duration=tool_duration,
+                    is_error=_is_error_result,
+                )
 
             self._current_tool = None
             self._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s)")
@@ -13360,11 +14813,15 @@ class AIAgent:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result_text)} chars): {function_result_text}")
 
-            if self.tool_complete_callback:
-                try:
-                    self.tool_complete_callback(tool_call.id, function_name, function_args, function_result)
-                except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
+            if current_turn_publish_allowed() and self.tool_complete_callback:
+                self._invoke_generation_callback(
+                    "tool_complete_callback",
+                    self.tool_complete_callback,
+                    tool_call.id,
+                    function_name,
+                    function_args,
+                    function_result,
+                )
 
             if not _is_multimodal_tool_result(function_result):
                 if not isinstance(function_result, str):
@@ -13392,13 +14849,10 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
-            # ── Per-tool /steer drain ───────────────────────────────────
-            # Drain pending steer BETWEEN individual tool calls so the
-            # injection lands as soon as a tool finishes — not after the
-            # entire batch.  The model sees it on the next API iteration.
-            self._apply_pending_steer_to_tool_results(messages, 1)
-            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
-                self._apply_pending_soft_interrupts_to_tool_results(messages, 1)
+            # The model-visible result, any overflow persistence, batch
+            # evidence, and per-tool steer projection belong to the same
+            # operation as the handler.  Only now may cancellation quiesce.
+            active_turn_permit.release()
 
             if not self.quiet_mode:
                 marker = "❌" if _is_error_result else "✅"
@@ -13413,14 +14867,7 @@ class AIAgent:
             if self._interrupt_requested and i < len(assistant_message.tool_calls):
                 remaining = len(assistant_message.tool_calls) - i
                 self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
-                for skipped_tc in assistant_message.tool_calls[i:]:
-                    skipped_name = skipped_tc.function.name
-                    skip_msg = {
-                        "role": "tool",
-                        "content": f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
-                        "tool_call_id": skipped_tc.id
-                    }
-                    messages.append(skip_msg)
+                _append_cancelled_suffix(i, "the user interrupted the batch")
                 break
 
             if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
@@ -13437,18 +14884,38 @@ class AIAgent:
                 ),
             )
 
-        # ── /steer injection ──────────────────────────────────────────────
-        # See _execute_tool_calls_parallel for the rationale. Same hook,
-        # applied to sequential execution as well.
-        if num_tools_seq > 0:
-            self._apply_pending_steer_to_tool_results(messages, num_tools_seq)
-            if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
-                self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools_seq)
+            # The batch transaction already owns bookkeeping after Stop.
+            self._apply_pending_steer_to_tool_results(
+                messages, num_tools_seq
+            )
 
 
 
     def _handle_max_iterations(self, messages: list, api_call_count: int) -> str:
+        """Fence summary preparation, provider attempts, and projection."""
+        from agent.turn_fence import (
+            TurnCancelled,
+            acquire_current_turn_permit,
+        )
+
+        original_len = len(messages)
+        try:
+            with acquire_current_turn_permit("summary_transaction"):
+                return self._handle_max_iterations_impl(
+                    messages, api_call_count
+                )
+        except TurnCancelled:
+            # A cancelled retry must not leave its synthetic system request or
+            # partial summary scaffolding in the model-visible transcript.
+            del messages[original_len:]
+            return ""
+
+    def _handle_max_iterations_impl(
+        self, messages: list, api_call_count: int
+    ) -> str:
         """Request a summary when max iterations are reached. Returns the final response text."""
+        from agent.turn_fence import TurnCancelled
+
         print(f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary...")
 
         def _terminal_summary_text(normalized_response: Any) -> str:
@@ -13476,10 +14943,14 @@ class AIAgent:
             _needs_sanitize = self._should_sanitize_tool_calls()
             api_messages = []
             for msg in messages:
+                if msg.get("finish_reason") in GUIDANCE_UNCONSUMED_FINISH_REASONS:
+                    continue
                 api_msg = msg.copy()
                 for internal_field in (
                     "reasoning",
                     "finish_reason",
+                    "client_message_id",
+                    "_display_content",
                     "_thinking_prefill",
                     "_empty_recovery_synthetic",
                 ):
@@ -13507,6 +14978,12 @@ class AIAgent:
             )
             api_messages = self.messages_for_api(api_messages, _compaction_sys_offset)
             api_messages = self._hydrate_media_refs_for_api(api_messages)
+            # The non-Codex/non-Anthropic summary branch calls an OpenAI Chat
+            # endpoint directly, so it must receive the same strict message
+            # projection as the main Chat Completions transport path.
+            chat_api_messages = self._get_transport(
+                "chat_completions"
+            ).convert_messages(api_messages)
 
             summary_extra_body = {}
             try:
@@ -13533,59 +15010,93 @@ class AIAgent:
             if _is_nous:
                 summary_extra_body["tags"] = ["product=elevate"]
 
-            if self.api_mode == "codex_responses":
-                codex_kwargs = self._build_api_kwargs(api_messages)
-                codex_kwargs.pop("tools", None)
-                summary_response = self._run_codex_stream(codex_kwargs)
-                _ct_sum = self._get_transport()
-                _cnr_sum = _ct_sum.normalize_response(summary_response)
-                final_response = _terminal_summary_text(_cnr_sum)
-            else:
-                summary_kwargs = {
-                    "model": self.model,
-                    "messages": api_messages,
-                }
-                if _summary_temperature is not None:
-                    summary_kwargs["temperature"] = _summary_temperature
-                if self.max_tokens is not None:
-                    summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+            # Include provider routing preferences on both attempts.
+            provider_preferences = {}
+            if self.providers_allowed:
+                provider_preferences["only"] = self.providers_allowed
+            if self.providers_ignored:
+                provider_preferences["ignore"] = self.providers_ignored
+            if self.providers_order:
+                provider_preferences["order"] = self.providers_order
+            if self.provider_sort:
+                provider_preferences["sort"] = self.provider_sort
+            if provider_preferences:
+                summary_extra_body["provider"] = provider_preferences
 
-                # Include provider routing preferences
-                provider_preferences = {}
-                if self.providers_allowed:
-                    provider_preferences["only"] = self.providers_allowed
-                if self.providers_ignored:
-                    provider_preferences["ignore"] = self.providers_ignored
-                if self.providers_order:
-                    provider_preferences["order"] = self.providers_order
-                if self.provider_sort:
-                    provider_preferences["sort"] = self.provider_sort
-                if provider_preferences:
-                    summary_extra_body["provider"] = provider_preferences
+            def _request_summary(attempt: int) -> str:
+                from agent.turn_fence import acquire_current_turn_permit
 
-                if summary_extra_body:
-                    summary_kwargs["extra_body"] = summary_extra_body
+                # Each provider attempt has its own linearization point. If
+                # Stop lands after a first empty response, a retry is a new
+                # external operation and must not inherit the first permit.
+                with acquire_current_turn_permit(
+                    "summary_model",
+                    {"attempt": attempt, "api_call_count": api_call_count},
+                ):
+                    if self.api_mode == "codex_responses":
+                        codex_kwargs = self._build_api_kwargs(api_messages)
+                        codex_kwargs.pop("tools", None)
+                        summary_response = self._run_codex_stream(codex_kwargs)
+                        transport = self._get_transport()
+                        normalized = transport.normalize_response(
+                            summary_response
+                        )
+                        return _terminal_summary_text(normalized)
 
-                if self.api_mode == "anthropic_messages":
-                    _tsum = self._get_transport()
-                    _ant_kw = _tsum.build_kwargs(model=self.model, messages=api_messages, tools=None,
-                                   max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                   is_oauth=self._is_anthropic_oauth,
-                                   preserve_dots=self._anthropic_preserve_dots())
-                    summary_response = self._anthropic_messages_create(_ant_kw)
-                    _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=self._is_anthropic_oauth)
-                    final_response = _terminal_summary_text(_summary_result)
-                else:
+                    if self.api_mode == "anthropic_messages":
+                        transport = self._get_transport()
+                        anthropic_kwargs = transport.build_kwargs(
+                            model=self.model,
+                            messages=api_messages,
+                            tools=None,
+                            max_tokens=self.max_tokens,
+                            reasoning_config=self.reasoning_config,
+                            is_oauth=self._is_anthropic_oauth,
+                            preserve_dots=self._anthropic_preserve_dots(),
+                        )
+                        summary_response = self._anthropic_messages_create(
+                            anthropic_kwargs
+                        )
+                        normalized = transport.normalize_response(
+                            summary_response,
+                            strip_tool_prefix=self._is_anthropic_oauth,
+                        )
+                        return _terminal_summary_text(normalized)
+
+                    summary_kwargs = {
+                        "model": self.model,
+                        "messages": chat_api_messages,
+                    }
+                    if _summary_temperature is not None:
+                        summary_kwargs["temperature"] = _summary_temperature
+                    if self.max_tokens is not None:
+                        summary_kwargs.update(
+                            self._max_tokens_param(self.max_tokens)
+                        )
+                    if summary_extra_body:
+                        summary_kwargs["extra_body"] = summary_extra_body
+
                     from agent.auxiliary_client import _validate_llm_response
 
+                    reason = (
+                        "iteration_limit_summary"
+                        if attempt == 1
+                        else "iteration_limit_summary_retry"
+                    )
                     summary_response = _validate_llm_response(
                         self._ensure_primary_openai_client(
-                            reason="iteration_limit_summary"
+                            reason=reason
                         ).chat.completions.create(**summary_kwargs),
                         "iteration_limit_summary",
                     )
-                    _summary_result = self._get_transport().normalize_response(summary_response)
-                    final_response = _terminal_summary_text(_summary_result)
+                    normalized = self._get_transport().normalize_response(
+                        summary_response
+                    )
+                    return _terminal_summary_text(normalized)
+
+            final_response = _request_summary(1)
+            if not final_response:
+                final_response = _request_summary(2)
 
             if final_response:
                 if "<think>" in final_response:
@@ -13595,56 +15106,10 @@ class AIAgent:
                 else:
                     final_response = "I reached the iteration limit and couldn't generate a summary."
             else:
-                # Retry summary generation
-                if self.api_mode == "codex_responses":
-                    codex_kwargs = self._build_api_kwargs(api_messages)
-                    codex_kwargs.pop("tools", None)
-                    retry_response = self._run_codex_stream(codex_kwargs)
-                    _ct_retry = self._get_transport()
-                    _cnr_retry = _ct_retry.normalize_response(retry_response)
-                    final_response = _terminal_summary_text(_cnr_retry)
-                elif self.api_mode == "anthropic_messages":
-                    _tretry = self._get_transport()
-                    _ant_kw2 = _tretry.build_kwargs(model=self.model, messages=api_messages, tools=None,
-                                    is_oauth=self._is_anthropic_oauth,
-                                    max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                    preserve_dots=self._anthropic_preserve_dots())
-                    retry_response = self._anthropic_messages_create(_ant_kw2)
-                    _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
-                    final_response = _terminal_summary_text(_retry_result)
-                else:
-                    summary_kwargs = {
-                        "model": self.model,
-                        "messages": api_messages,
-                    }
-                    if _summary_temperature is not None:
-                        summary_kwargs["temperature"] = _summary_temperature
-                    if self.max_tokens is not None:
-                        summary_kwargs.update(self._max_tokens_param(self.max_tokens))
-                    if summary_extra_body:
-                        summary_kwargs["extra_body"] = summary_extra_body
+                final_response = "I reached the iteration limit and couldn't generate a summary."
 
-                    from agent.auxiliary_client import _validate_llm_response
-
-                    summary_response = _validate_llm_response(
-                        self._ensure_primary_openai_client(
-                            reason="iteration_limit_summary_retry"
-                        ).chat.completions.create(**summary_kwargs),
-                        "iteration_limit_summary",
-                    )
-                    _retry_result = self._get_transport().normalize_response(summary_response)
-                    final_response = _terminal_summary_text(_retry_result)
-
-                if final_response:
-                    if "<think>" in final_response:
-                        final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
-                    if final_response:
-                        messages.append({"role": "assistant", "content": final_response})
-                    else:
-                        final_response = "I reached the iteration limit and couldn't generate a summary."
-                else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
-
+        except TurnCancelled:
+            raise
         except Exception as e:
             logging.warning(f"Failed to get summary response: {e}")
             final_response = f"I reached the maximum iterations ({self.max_iterations}) but couldn't summarize. Error: {str(e)}"
@@ -13704,10 +15169,49 @@ class AIAgent:
         # Installed once, transparent when streams are healthy, prevents crash on write.
         _install_safe_stdio()
 
+        # Keep the generation's mid-run lane closed until both the user receipt
+        # and session/system startup are durable. A producer that arrives
+        # during either failure window is rejected cleanly instead of being
+        # stranded on an agent instance the host may discard.
+        _pending_lock = getattr(self, "_pending_inputs_lock", None)
+        if _pending_lock is not None:
+            with _pending_lock:
+                self._pending_inputs_closed = True
+
         # Tag all log records on this thread with the session ID so
         # ``elevate logs --session <id>`` can filter a single conversation.
         from elevate_logging import set_session_context
         set_session_context(self.session_id)
+
+        # A generation that never wins meaningful admission must not advance
+        # session-local cadence or consume one-shot UI state.  Keep the exact
+        # pre-turn values so both early terminal helpers and the normal return
+        # path can roll them back on interruption.
+        _cancel_rollback_state = {
+            "_user_turn_count": getattr(self, "_user_turn_count", 0),
+            "_turns_since_memory": getattr(self, "_turns_since_memory", 0),
+            "_iters_since_skill": getattr(self, "_iters_since_skill", 0),
+            "_correction_this_turn": getattr(
+                self, "_correction_this_turn", False
+            ),
+            "_active_action_user_message": getattr(
+                self, "_active_action_user_message", None
+            ),
+            "_current_task_id": getattr(self, "_current_task_id", None),
+            "_compression_warning": getattr(
+                self, "_compression_warning", None
+            ),
+        }
+        _meaningful_turn_admission_won = False
+
+        def _rollback_cancelled_turn_local_state(
+            *, force: bool = False
+        ) -> None:
+            if _meaningful_turn_admission_won and not force:
+                return
+            for attr, value in _cancel_rollback_state.items():
+                setattr(self, attr, value)
+            self._current_tool = None
 
         # If the previous turn activated fallback, restore the primary
         # runtime so this turn gets a fresh attempt with the preferred model.
@@ -13763,25 +15267,6 @@ class AIAgent:
         self._mute_post_response = False
         self._unicode_sanitization_passes = 0
 
-        # Pre-turn connection health check: detect and clean up dead TCP
-        # connections left over from provider outages or dropped streams.
-        # This prevents the next API call from hanging on a zombie socket.
-        if self.api_mode != "anthropic_messages":
-            try:
-                if self._cleanup_dead_connections():
-                    self._emit_status(
-                        "🔌 Detected stale connections from a previous provider "
-                        "issue — cleaned up automatically. Proceeding with fresh "
-                        "connection."
-                    )
-            except Exception:
-                pass
-        # Replay compression warning through status_callback for gateway
-        # platforms (the callback was not wired during __init__).
-        if self._compression_warning:
-            self._replay_compression_warning()
-            self._compression_warning = None  # send once
-
         # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
@@ -13798,8 +15283,71 @@ class AIAgent:
             _msg_preview,
         )
 
-        # Initialize conversation (copy to avoid mutating the caller's list)
-        messages = list(conversation_history) if conversation_history else []
+        # Own the full message graph.  A shallow list copy still lets client-id
+        # stamping, steer folding, and media cleanup mutate caller-owned dicts
+        # and multimodal blocks across turns.
+        prior_history_len = len(conversation_history or [])
+        messages = copy.deepcopy(conversation_history) if conversation_history else []
+        _resumed_guidance_ack_items: list[dict[str, Any]] = []
+        _resumed_guidance_ids: set[str] = set()
+        _allow_guidance_before_terminal_marker = False
+        _recover_tool_evidence_before_guidance = False
+        for _history_offset, _history_msg in enumerate(reversed(messages)):
+            if not isinstance(_history_msg, dict):
+                break
+            if (
+                _history_offset == 0
+                and _history_msg.get("role") == "assistant"
+                and _history_msg.get("finish_reason")
+                in GUIDANCE_UNCONSUMED_FINISH_REASONS
+            ):
+                _allow_guidance_before_terminal_marker = True
+                _recover_tool_evidence_before_guidance = True
+                continue
+            if _recover_tool_evidence_before_guidance:
+                _history_role = _history_msg.get("role")
+                if _history_role == "tool":
+                    continue
+                if (
+                    _history_role == "assistant"
+                    and _history_msg.get("tool_calls")
+                ):
+                    continue
+                _recover_tool_evidence_before_guidance = False
+            _history_id = _history_msg.get("client_message_id")
+            if not (
+                _history_msg.get("role") == "user"
+                and _history_msg.get("finish_reason")
+                in GUIDANCE_RESERVED_FINISH_REASONS
+                and isinstance(_history_id, str)
+                and _history_id
+            ):
+                break
+            if _history_id in _resumed_guidance_ids:
+                continue
+            _resumed_guidance_ids.add(_history_id)
+            _resumed_guidance_ack_items.insert(
+                0,
+                {
+                    "content": _history_msg.get("_display_content")
+                    or _history_msg.get("content")
+                    or "",
+                    "source": "resume",
+                    "client_message_id": _history_id,
+                    "_input_lane": (
+                        "steer"
+                        if _history_msg.get("finish_reason")
+                        == "guidance_reserved_steer"
+                        else "soft"
+                    ),
+                },
+            )
+        if _allow_guidance_before_terminal_marker:
+            logger.info(
+                "Recovered %d unconsumed guidance reservation(s) across "
+                "a durable terminal marker",
+                len(_resumed_guidance_ack_items),
+            )
         # Index of the first message belonging to THIS turn — everything the
         # run appends (user prompt, assistant iterations, tool results, steer
         # folds) sits after it. Used to persist the WHOLE turn's reasoning.
@@ -13924,6 +15472,128 @@ class AIAgent:
             conversation_history = None
             if not self.quiet_mode:
                 logger.info("%sStripped historical image payloads after new user turn", self.log_prefix)
+
+        # Durably reserve the repaired history tail plus this exact user row
+        # before any system-start hook, compressor, memory callback, provider,
+        # or tool can run. Preserve the original history length even when media
+        # stripping intentionally clears ``conversation_history``.
+        if prior_history_len and self._last_flushed_db_idx == 0:
+            self._last_flushed_db_idx = prior_history_len
+        durability_confirmed = True
+
+        def _persist_with_turn_durability(
+            persisted_messages: List[Dict[str, Any]],
+            persisted_history: Optional[List[Dict[str, Any]]] = None,
+        ) -> bool:
+            nonlocal durability_confirmed
+            try:
+                persistence_result = self._persist_session(
+                    persisted_messages, persisted_history
+                )
+                # The built-in path is strict bool. Preserve compatibility
+                # with legacy/custom persistence overrides that historically
+                # returned None after a successful write; only explicit False
+                # is a negative acknowledgement.
+                acknowledged = persistence_result is not False
+            except Exception:
+                logger.error(
+                    "Session persistence raised for session %s",
+                    self.session_id or "none",
+                    exc_info=True,
+                )
+                acknowledged = False
+            durability_confirmed = (
+                durability_confirmed and acknowledged
+            )
+            return acknowledged
+
+        _initial_prompt_durable = _persist_with_turn_durability(
+            messages, None
+        )
+        if not durability_confirmed:
+            try:
+                from agent.turn_fence import current_turn_cancelled
+
+                receipt_interrupted = bool(
+                    self._interrupt_requested or current_turn_cancelled()
+                )
+            except Exception:
+                receipt_interrupted = bool(self._interrupt_requested)
+            receipt_error = (
+                "Operation interrupted before the user message receipt was "
+                "committed."
+                if receipt_interrupted
+                else (
+                    "The user message could not be durably recorded. No model "
+                    "request was sent; please retry this turn."
+                )
+            )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": receipt_error,
+                    "finish_reason": (
+                        "interrupted" if receipt_interrupted else "error"
+                    ),
+                }
+            )
+            # Receipt is the admission boundary. Nothing before it may consume
+            # one-shot UI state or advance session-local cadence, even if some
+            # earlier bookkeeping happened to acquire an ordinary permit.
+            _rollback_cancelled_turn_local_state(force=True)
+            self.clear_interrupt(preserve_queued_inputs=True)
+            self._stream_callback = None
+            self._response_was_previewed = False
+            return {
+                "final_response": receipt_error,
+                "messages": messages,
+                "api_calls": 0,
+                "completed": False,
+                "failed": not receipt_interrupted,
+                "partial": not receipt_interrupted,
+                "interrupted": receipt_interrupted,
+                "error": (
+                    "turn interrupted before receipt"
+                    if receipt_interrupted
+                    else "initial prompt durability not confirmed"
+                ),
+                "turn_exit_reason": (
+                    "interrupted_before_initial_receipt"
+                    if receipt_interrupted
+                    else "initial_prompt_durability_unconfirmed"
+                ),
+                "response_previewed": False,
+                "durability_confirmed": False,
+                "transcript_durable": False,
+            }
+
+        # Pre-turn connection cleanup and visible warning replay are effects,
+        # so they run only after the exact user row has a durable receipt.
+        if self.api_mode != "anthropic_messages":
+            try:
+                if self._cleanup_dead_connections():
+                    self._emit_status(
+                        "🔌 Detected stale connections from a previous provider "
+                        "issue — cleaned up automatically. Proceeding with fresh "
+                        "connection."
+                    )
+            except Exception:
+                pass
+        if self._compression_warning:
+            try:
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_current_turn_permit,
+                )
+
+                with acquire_current_turn_permit(
+                    "compression_warning_replay"
+                ):
+                    self._replay_compression_warning()
+                    self._compression_warning = None  # send once
+                    _meaningful_turn_admission_won = True
+            except TurnCancelled:
+                pass
         
         if not self.quiet_mode:
             _print_preview = _summarize_user_message_for_log(user_message)
@@ -13951,35 +15621,179 @@ class AIAgent:
                     pass  # Fall through to build fresh
 
             if stored_prompt:
-                # Continuing session — reuse the exact system prompt from
-                # the previous turn so the Anthropic cache prefix matches.
-                self._cached_system_prompt = stored_prompt
-            else:
-                # First turn of a new session — build from scratch.
-                self._cached_system_prompt = self._build_system_prompt(system_message)
-                # Plugin hook: on_session_start
-                # Fired once when a brand-new session is created (not on
-                # continuation).  Plugins can use this to initialise
-                # session-scoped state (e.g. warm a memory cache).
                 try:
-                    from elevate_cli.plugins import invoke_hook as _invoke_hook
-                    _invoke_hook(
-                        "on_session_start",
-                        session_id=self.session_id,
-                        model=self.model,
-                        platform=getattr(self, "platform", None) or "",
+                    from agent.turn_fence import (
+                        TurnCancelled,
+                        acquire_current_turn_permit,
                     )
-                except Exception as exc:
-                    logger.warning("on_session_start hook failed: %s", exc)
 
-                # Store the system prompt snapshot in SQLite
-                if self._session_db:
-                    try:
-                        self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
-                    except Exception as e:
-                        logger.debug("Session DB update_system_prompt failed: %s", e)
+                    # Cache publication is turn-local state and therefore
+                    # belongs behind the same cancellation boundary as fresh
+                    # startup.
+                    with acquire_current_turn_permit(
+                        "system_prompt_restore"
+                    ):
+                        self._cached_system_prompt = stored_prompt
+                except TurnCancelled:
+                    pass
+            else:
+                try:
+                    from agent.turn_fence import (
+                        TurnCancelled,
+                        acquire_current_turn_permit,
+                    )
+                    from elevate_cli.plugins import invoke_hook as _invoke_hook
+
+                    # Build, hook, durable snapshot, and cache publication are
+                    # one retained startup transaction.  A cancellation loser
+                    # leaves `_cached_system_prompt` unset so the next valid
+                    # turn retries the complete initialization exactly once.
+                    with acquire_current_turn_permit(
+                        "session_start_transaction"
+                    ):
+                        _meaningful_turn_admission_won = True
+                        candidate_prompt = self._build_system_prompt(
+                            system_message
+                        )
+                        hook_completed = bool(
+                            getattr(
+                                self, "_session_start_hook_completed", False
+                            )
+                        )
+                        if not hook_completed:
+                            try:
+                                _invoke_hook(
+                                    "on_session_start",
+                                    session_id=self.session_id,
+                                    model=self.model,
+                                    platform=getattr(self, "platform", None)
+                                    or "",
+                                )
+                                hook_completed = True
+                                self._session_start_hook_completed = True
+                            except Exception as exc:
+                                logger.warning(
+                                    "on_session_start hook failed: %s", exc
+                                )
+
+                        durable_prompt = self._session_db is None
+                        if hook_completed and self._session_db:
+                            try:
+                                self._session_db.update_system_prompt(
+                                    self.session_id, candidate_prompt
+                                )
+                            except Exception as exc:
+                                # Ambiguous write response: read back below.
+                                logger.debug(
+                                    "Session DB update_system_prompt response "
+                                    "was ambiguous: %s",
+                                    exc,
+                                )
+                            try:
+                                persisted_row = self._session_db.get_session(
+                                    self.session_id
+                                )
+                                durable_prompt = bool(
+                                    persisted_row
+                                    and persisted_row.get("system_prompt")
+                                    == candidate_prompt
+                                )
+                            except Exception as exc:
+                                durable_prompt = False
+                                logger.debug(
+                                    "Session DB system-prompt readback failed: %s",
+                                    exc,
+                                )
+
+                        if hook_completed and durable_prompt:
+                            self._cached_system_prompt = candidate_prompt
+                        elif hook_completed:
+                            logger.warning(
+                                "Session startup remains retryable: system "
+                                "prompt durability was not confirmed"
+                            )
+                except TurnCancelled:
+                    pass
 
         active_system_prompt = self._cached_system_prompt
+
+        if active_system_prompt is None:
+            # Never call a provider without the application/system contract.
+            # A DB write/readback failure is retryable, but proceeding with a
+            # bare user message would be an unsupervised and falsely successful
+            # turn.  Keep the cache unset so the next turn retries durability.
+            try:
+                from agent.turn_fence import current_turn_cancelled
+
+                startup_interrupted = bool(
+                    self._interrupt_requested or current_turn_cancelled()
+                )
+            except Exception:
+                startup_interrupted = bool(self._interrupt_requested)
+            startup_text = (
+                "Operation interrupted before session initialization completed."
+                if startup_interrupted
+                else (
+                    "Session initialization could not be durably confirmed. "
+                    "No model request was sent; please retry this turn."
+                )
+            )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": startup_text,
+                    "finish_reason": (
+                        "interrupted" if startup_interrupted else "error"
+                    ),
+                }
+            )
+            _persist_with_turn_durability(
+                messages, None
+            )
+            result = {
+                "final_response": startup_text,
+                "messages": messages,
+                "api_calls": 0,
+                "completed": False,
+                "failed": not startup_interrupted,
+                "partial": False,
+                "interrupted": startup_interrupted,
+                "error": (
+                    "session startup interrupted"
+                    if startup_interrupted
+                    else "system prompt durability not confirmed"
+                ),
+                "response_previewed": False,
+                "durability_confirmed": durability_confirmed,
+                "transcript_durable": durability_confirmed,
+            }
+            if not durability_confirmed:
+                result["failed"] = True
+                result["partial"] = True
+                result["error"] = (
+                    f"{result['error']}; terminal transcript durability "
+                    "not confirmed"
+                )
+            # The canonical queue stays owned by this agent for an exact retry.
+            # Do not also return gateway auto-followup fields: that would create
+            # a second copy while the original reservation remains queued.
+            if startup_interrupted:
+                _rollback_cancelled_turn_local_state()
+            self.clear_interrupt(preserve_queued_inputs=True)
+            self._stream_callback = None
+            self._invoke_turn_session_end_hook(
+                completed=False,
+                interrupted=startup_interrupted,
+            )
+            return result
+
+        # Receipt and startup are now durable: begin accepting guidance for
+        # this generation. The terminal ownership handoff closes the lane
+        # atomically under this same producer lock.
+        _pending_lock = getattr(self, "_pending_inputs_lock", None)
+        if _pending_lock is not None:
+            with _pending_lock:
+                self._pending_inputs_closed = False
 
         # ── Preflight context compression ──
         # Before entering the main loop, check if the loaded conversation
@@ -14070,10 +15884,25 @@ class AIAgent:
                 for _pass in range(3):
                     _orig_len = len(messages)
                     _pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
-                    messages, active_system_prompt = self._compress_context(
-                        messages, system_message, approx_tokens=_preflight_tokens,
-                        task_id=effective_task_id,
-                    )
+                    try:
+                        messages, active_system_prompt = self._compress_context(
+                            messages,
+                            system_message,
+                            approx_tokens=_preflight_tokens,
+                            task_id=effective_task_id,
+                        )
+                        _meaningful_turn_admission_won = True
+                    except Exception as exc:
+                        from agent.turn_fence import TurnCancelled
+
+                        if not isinstance(exc, TurnCancelled):
+                            raise
+                        # Preflight lives before the main loop's normal
+                        # InterruptedError envelope.  Translate a losing
+                        # compression attempt into the same terminal path and
+                        # leave the unadmitted compaction transaction untouched.
+                        self._interrupt_requested = True
+                        break
                     _cursor_advanced = (
                         int(getattr(self, "compaction_cursor", 0) or 0) > _pre_cursor
                     )
@@ -14133,47 +15962,30 @@ class AIAgent:
         # All injected context is ephemeral (not persisted to session DB).
         _plugin_user_context = ""
         try:
+            from agent.turn_fence import acquire_current_turn_permit
             from elevate_cli.plugins import invoke_hook as _invoke_hook
-            _pre_results = _invoke_hook(
-                "pre_llm_call",
-                session_id=self.session_id,
-                user_message=original_user_message,
-                conversation_history=list(messages),
-                is_first_turn=(not bool(conversation_history)),
-                model=self.model,
-                platform=getattr(self, "platform", None) or "",
-                sender_id=getattr(self, "_user_id", None) or "",
-            )
-            _ctx_parts: list[str] = []
-            for r in _pre_results:
-                if isinstance(r, dict) and r.get("context"):
-                    _ctx_parts.append(str(r["context"]))
-                elif isinstance(r, str) and r.strip():
-                    _ctx_parts.append(r)
-            if _ctx_parts:
-                _plugin_user_context = "\n\n".join(_ctx_parts)
+
+            with acquire_current_turn_permit("pre_llm_hook"):
+                _pre_results = _invoke_hook(
+                    "pre_llm_call",
+                    session_id=self.session_id,
+                    user_message=original_user_message,
+                    conversation_history=list(messages),
+                    is_first_turn=(not bool(conversation_history)),
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                    sender_id=getattr(self, "_user_id", None) or "",
+                )
+                _ctx_parts: list[str] = []
+                for r in _pre_results:
+                    if isinstance(r, dict) and r.get("context"):
+                        _ctx_parts.append(str(r["context"]))
+                    elif isinstance(r, str) and r.strip():
+                        _ctx_parts.append(r)
+                if _ctx_parts:
+                    _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
-
-        # Persist the user's message to the session DB before the first API
-        # call. Without this, nothing is written until _persist_session fires
-        # inside the loop below (after the first response) — so a turn that is
-        # still running, interrupted, or switched away from leaves the session
-        # at message_count=0: untitled in the sidebar, and empty on reattach
-        # (the web transcript merges to [] and wipes to just the typed line).
-        #
-        # Pre-seed _last_flushed_db_idx to the length of the prior turn's
-        # history so this persist (and every persist after) can pass hist=None
-        # safely.  Passing the original ``conversation_history`` once a mid-turn
-        # ``_compress_context`` has fired would skip the entire compressed
-        # message list (start_idx = len(hist) > len(compressed_messages)) and
-        # leave the new session empty on resume.  Carrying the skip cursor on
-        # _last_flushed_db_idx instead means a single ``conversation_history =
-        # None`` after compression is enough — every persist downstream writes
-        # only genuinely new messages, regardless of whether compression ran.
-        if conversation_history and self._last_flushed_db_idx == 0:
-            self._last_flushed_db_idx = len(conversation_history)
-        self._persist_session(messages, None)
 
         # Main conversation loop
         api_call_count = 0
@@ -14183,6 +15995,7 @@ class AIAgent:
         partial = False
         failure_error = None
         sticky_tool_execution_failure = None
+        outcome_unknown = False
         # Normal tool-result failures are recoverable only by a later model
         # batch retrying the exact same action successfully. Keep this ledger
         # local to run_conversation so a new user turn always starts clean.
@@ -14388,6 +16201,185 @@ class AIAgent:
         force_gemini_nonstream_once = False
         gemini_nonstream_empty_attempted = False
         _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+        _owned_result_permits = []
+        self._pending_input_ack_items_runtime = list(
+            _resumed_guidance_ack_items
+        )
+        # Inputs move here once a normalized provider response and its ordered
+        # evidence are durable but the host's steer.applied callback did not
+        # acknowledge delivery. They need UI reconciliation, never provider
+        # redelivery.
+        self._pending_input_ack_delivery_runtime: list[
+            dict[str, Any]
+        ] = list(
+            getattr(self, "_pending_input_ack_delivery_runtime", []) or []
+        )
+
+        def _own_result_permit(kind: str, metadata: dict | None = None):
+            from agent.turn_fence import acquire_owned_current_turn_permit
+
+            permit = acquire_owned_current_turn_permit(kind, metadata)
+            _owned_result_permits.append(permit)
+            return permit
+
+        def _release_owned_result_permits() -> None:
+            while _owned_result_permits:
+                _owned_result_permits.pop().release()
+
+        def _transfer_pending_input_ownership(
+            result: Dict[str, Any],
+        ) -> None:
+            """Move every unconsumed accepted input into the terminal result.
+
+            Reserved inputs left in the runtime ACK list reached durable history
+            but not an accepted provider result. Canonical queue items arrived
+            later. Transfer both once, in FIFO order, with exact ids so the host
+            owns their next-turn delivery instead of ``clear_interrupt``
+            silently discarding them.
+            """
+            runtime_items = list(
+                getattr(self, "_pending_input_ack_items_runtime", []) or []
+            )
+            ack_delivery_items = list(
+                getattr(
+                    self,
+                    "_pending_input_ack_delivery_runtime",
+                    [],
+                )
+                or []
+            )
+            # Close and snapshot the producer queue before relinquishing the
+            # runtime reservations. A concurrent producer must either be in
+            # this handoff or receive a clean False from steer()/queue_soft.
+            queued_items = self._drain_pending_inputs(
+                close_for_handoff=True
+            )
+            self._pending_input_ack_items_runtime = []
+            self._pending_input_ack_delivery_runtime = []
+            combined = [*runtime_items, *queued_items]
+            # These exact ids now belong to the host. Release their local
+            # dedupe ownership while the lane is closed so the host can
+            # intentionally redeliver them in a later generation without the
+            # old agent silently treating that new ownership as a duplicate.
+            if combined:
+                input_lock = getattr(self, "_pending_inputs_lock", None)
+                if input_lock is not None:
+                    with input_lock:
+                        accepted_ids = getattr(
+                            self, "_accepted_pending_input_ids", {}
+                        )
+                        for item in combined:
+                            item_id = str(
+                                item.get("client_message_id") or ""
+                            )
+                            if item_id:
+                                accepted_ids.pop(item_id, None)
+            if ack_delivery_items:
+                ack_by_id: dict[str, dict[str, Any]] = {}
+                for item in ack_delivery_items:
+                    item_id = str(item.get("client_message_id") or "")
+                    if item_id:
+                        ack_by_id.setdefault(item_id, item)
+                if ack_by_id:
+                    result["ack_pending"] = True
+                    result["pending_input_acks"] = [
+                        {
+                            "client_message_id": item_id,
+                            "status": "consumed_durable",
+                        }
+                        for item_id in ack_by_id
+                    ]
+            if not combined:
+                return
+
+            by_id: dict[str, dict[str, Any]] = {}
+            anonymous: list[dict[str, Any]] = []
+            for item in combined:
+                item_id = str(item.get("client_message_id") or "")
+                if item_id:
+                    by_id.setdefault(item_id, item)
+                else:
+                    anonymous.append(item)
+            ordered = sorted(
+                [*by_id.values(), *anonymous],
+                key=lambda item: (
+                    int(item.get("_queue_seq", 0) or 0),
+                    float(item.get("queued_at", 0) or 0),
+                ),
+            )
+            result["pending_inputs"] = [
+                {
+                    "content": str(item.get("content") or ""),
+                    "source": str(item.get("source") or "user"),
+                    "client_message_id": str(
+                        item.get("client_message_id") or ""
+                    ),
+                    "lane": (
+                        "steer"
+                        if item.get("_input_lane") == "steer"
+                        else "soft"
+                    ),
+                    "seq": int(item.get("_queue_seq", 0) or 0),
+                    "queued_at": float(item.get("queued_at", 0) or 0),
+                    "urgent": bool(item.get("urgent")),
+                }
+                for item in ordered
+            ]
+            steer_text = "\n".join(
+                str(item.get("content") or "").strip()
+                for item in ordered
+                if item.get("_input_lane") == "steer"
+                and str(item.get("content") or "").strip()
+            )
+            soft_items = [
+                item
+                for item in ordered
+                if item.get("_input_lane") != "steer"
+            ]
+            if steer_text:
+                result["pending_steer"] = steer_text
+            if soft_items:
+                result["pending_soft_interrupt"] = (
+                    self._soft_interrupt_text(soft_items)
+                )
+        def _ack_durable_consumed_inputs() -> bool:
+            """ACK only after normalized response evidence is durable."""
+            newly_consumed = list(
+                getattr(self, "_pending_input_ack_items_runtime", []) or []
+            )
+            ack_pending = list(
+                getattr(
+                    self,
+                    "_pending_input_ack_delivery_runtime",
+                    [],
+                )
+                or []
+            )
+            applied_items = [*ack_pending, *newly_consumed]
+            if not applied_items:
+                return True
+            by_id: dict[str, dict[str, Any]] = {}
+            anonymous: list[dict[str, Any]] = []
+            for item in applied_items:
+                item_id = str(item.get("client_message_id") or "")
+                if item_id:
+                    by_id.setdefault(item_id, item)
+                else:
+                    anonymous.append(item)
+            owned_delivery = [*by_id.values(), *anonymous]
+            # Durable provider consumption transfers ownership out of the
+            # provider-redelivery lane regardless of UI callback health. Move
+            # it into the ACK-delivery lane before arbitrary callback code so
+            # even KeyboardInterrupt/SystemExit leaves an exact owner.
+            self._pending_input_ack_items_runtime = []
+            self._pending_input_ack_delivery_runtime = owned_delivery
+            delivered = self._notify_steer_applied(
+                owned_delivery,
+                via="model_consumed",
+            )
+            if delivered:
+                self._pending_input_ack_delivery_runtime = []
+            return delivered
 
         def _terminal_result(
             text: str,
@@ -14398,6 +16390,7 @@ class AIAgent:
             result_messages: Optional[List[Dict[str, Any]]] = None,
             compression_exhausted: bool = False,
         ) -> Dict[str, Any]:
+            nonlocal durability_confirmed
             # Keep the returned terminal text and the durable assistant row on
             # one UTF-8-safe canonical value.  Otherwise a provider-supplied
             # lone surrogate can be sanitized later in message persistence
@@ -14412,7 +16405,19 @@ class AIAgent:
                         f"{active_tool_failure}"
                     )
             _drop_trailing_empty_response_scaffolding(messages)
-            finish_reason = "interrupted" if interrupted_result else "error"
+            has_unconsumed_guidance = bool(
+                getattr(self, "_pending_input_ack_items_runtime", [])
+            )
+            if has_unconsumed_guidance:
+                finish_reason = (
+                    "interrupted_guidance_unconsumed"
+                    if interrupted_result
+                    else "error_guidance_unconsumed"
+                )
+            else:
+                finish_reason = (
+                    "interrupted" if interrupted_result else "error"
+                )
             terminal_message = {
                 "role": "assistant",
                 "content": text,
@@ -14427,17 +16432,12 @@ class AIAgent:
                 messages[-1]["finish_reason"] = finish_reason
             else:
                 messages.append(terminal_message)
-            try:
-                # Persistence owns its own incremental cursor. Passing the
-                # original history here can skip messages added after a
-                # compaction or a newly-created session.
-                self._persist_session(messages, None)
-            except Exception:
-                logger.warning(
-                    "Terminal failure persistence failed for session %s",
-                    self.session_id or "none",
-                    exc_info=True,
-                )
+            # Persistence owns its own incremental cursor. Passing the original
+            # history here can skip messages added after compaction or a newly
+            # created session.
+            _persist_with_turn_durability(
+                messages, None
+            )
 
             returned_messages = messages
             if result_messages is not None:
@@ -14461,42 +16461,50 @@ class AIAgent:
                 "response_previewed": getattr(
                     self, "_response_was_previewed", False
                 ),
+                "transcript_durable": durability_confirmed,
+                "durability_confirmed": durability_confirmed,
             }
+            if not durability_confirmed:
+                result["failed"] = True
+                result["partial"] = True
+                result["error"] = (
+                    f"{result['error']}; terminal transcript durability "
+                    "not confirmed"
+                )
             if compression_exhausted:
                 result["compression_exhausted"] = True
 
             # Preserve queued /steer and soft follow-ups before clear_interrupt()
             # discards their in-memory state.
-            leftover_steer = self._drain_pending_steer()
-            if leftover_steer:
-                result["pending_steer"] = leftover_steer
-            leftover_soft = self._drain_pending_soft_interrupts()
-            if leftover_soft:
-                result["pending_soft_interrupt"] = self._soft_interrupt_text(
-                    leftover_soft
-                )
+            _transfer_pending_input_ownership(result)
             if interrupted_result and self._interrupt_message:
                 result["interrupt_message"] = self._interrupt_message
 
-            self._cleanup_task_resources(effective_task_id)
-            self._response_was_previewed = False
-            self.clear_interrupt()
-            self._stream_callback = None
             try:
-                from elevate_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "on_session_end",
-                    session_id=self.session_id,
-                    completed=False,
-                    interrupted=interrupted_result,
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_current_turn_permit,
                 )
-            except Exception as exc:
-                logger.warning("on_session_end hook failed: %s", exc)
 
+                with acquire_current_turn_permit("task_cleanup"):
+                    self._cleanup_task_resources(effective_task_id)
+            except TurnCancelled:
+                pass
+            self._response_was_previewed = False
+            if interrupted_result:
+                _rollback_cancelled_turn_local_state()
+            # Inputs accepted after the ownership-transfer snapshot belong to
+            # the next turn. Never let clear_interrupt erase that race winner.
+            self.clear_interrupt(preserve_queued_inputs=True)
+            self._stream_callback = None
+            self._invoke_turn_session_end_hook(
+                completed=False,
+                interrupted=interrupted_result,
+            )
+
+            _release_owned_result_permits()
             return result
-        
+
         # Record the execution thread so interrupt()/clear_interrupt() can
         # scope the tool-level interrupt signal to THIS agent's thread only.
         # Must be set before any thread-scoped interrupt syncing.
@@ -14518,8 +16526,11 @@ class AIAgent:
         # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
         if self._memory_manager:
             try:
+                from agent.turn_fence import acquire_current_turn_permit
+
                 _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
-                self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg)
+                with acquire_current_turn_permit("memory_turn_start"):
+                    self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg)
             except Exception:
                 pass
 
@@ -14535,24 +16546,15 @@ class AIAgent:
                 # Budget the prefetch: it runs synchronously before the model
                 # call and can include a network embedding + a fact full-scan.
                 # If it overruns, skip the injection rather than hang the turn.
-                # An overrun thread self-cleans (embedding client has a 10s
-                # timeout); memory context is best-effort, so dropping it is safe.
+                # The caller drops the result at the budget, while the exact
+                # generation permit remains owned by the real worker until it
+                # exits. This prevents an old prefetch from becoming anonymous.
                 _pf_budget_s = float(os.getenv("ELEVATE_MEMORY_PREFETCH_BUDGET_S", "2.0"))
-                # Note: do NOT use `with ...:` — its shutdown(wait=True) would
-                # block on the overrunning thread and defeat the budget. Detach
-                # with wait=False on timeout; the thread self-cleans.
-                _pf_ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                _pf_future = _pf_ex.submit(self._memory_manager.prefetch_all, _query)
-                try:
-                    _ext_prefetch_cache = _pf_future.result(timeout=_pf_budget_s) or ""
-                    _pf_ex.shutdown(wait=False)
-                except concurrent.futures.TimeoutError:
-                    logger.warning(
-                        "Memory prefetch exceeded %.1fs budget — skipping "
-                        "memory injection for this turn.", _pf_budget_s,
-                    )
-                    _ext_prefetch_cache = ""
-                    _pf_ex.shutdown(wait=False)
+                _ext_prefetch_cache = self._prefetch_memory_with_budget(
+                    self._memory_manager.prefetch_all,
+                    _query,
+                    _pf_budget_s,
+                )
             except Exception:
                 pass
 
@@ -14607,7 +16609,15 @@ class AIAgent:
 
         _session_deadline_hit = False
         _turn_loop_started = time.monotonic()
+        _prepared_model_permit = None
+        _after_text_continuation_pending = False
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+            # A prior iteration can restart before reaching raw dispatch
+            # (provider fallback/compression).  Its pre-admitted model permit
+            # must not leak or authorize a later, distinct request.
+            if _prepared_model_permit is not None:
+                _prepared_model_permit.release()
+                _prepared_model_permit = None
             # Re-anchor the per-call wall-clock budget at the start of each
             # agentic iteration: each API-call sequence (one model response +
             # ITS retries) gets a fresh budget, so a long multi-step turn is
@@ -14667,9 +16677,73 @@ class AIAgent:
                     self._safe_print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
                 break
 
+            # Admit the first raw model operation for this iteration before
+            # consuming queued steer/soft input or writing inline-media
+            # assets.  If Stop wins here, both queues remain byte-for-byte
+            # untouched and no media externalisation can escape.
+            try:
+                from agent.turn_fence import (
+                    TurnCancelled,
+                    acquire_owned_current_turn_permit,
+                )
+
+                _prepared_model_permit = acquire_owned_current_turn_permit(
+                    "model",
+                    {
+                        "api_mode": self.api_mode,
+                        "model": self.model,
+                        "provider": self.provider,
+                        "api_call_count": api_call_count,
+                    },
+                )
+                _meaningful_turn_admission_won = True
+            except TurnCancelled:
+                interrupted = True
+                final_response = INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+                _turn_exit_reason = "interrupted_before_model_admission"
+                break
+
+            if _after_text_continuation_pending:
+                # The next model operation is now admitted.  Only at this
+                # point consume the ordered user queues and publish their
+                # continuation row; a losing admission leaves both queues
+                # untouched for the caller/resume path.
+                _continuation_items = self._drain_pending_inputs()
+                _after_text_continuation_pending = False
+                if _continuation_items:
+                    _continuation_rows = self._queued_input_messages(
+                        _continuation_items
+                    )
+                    messages.extend(_continuation_rows)
+                    if not _persist_with_turn_durability(messages, None):
+                        if _continuation_rows:
+                            del messages[-len(_continuation_rows):]
+                        self._requeue_pending_inputs(
+                            _continuation_items
+                        )
+                        from agent.turn_fence import (
+                            release_attached_owned_current_turn_permit,
+                        )
+
+                        release_attached_owned_current_turn_permit(
+                            _prepared_model_permit
+                        )
+                        _prepared_model_permit = None
+                        api_call_count -= 1
+                        return _terminal_result(
+                            "Queued guidance could not be durably reserved. "
+                            "No model request was sent; please retry.",
+                            error="queued guidance durability not confirmed",
+                        )
+                    self._pending_input_ack_items_runtime.extend(
+                        _continuation_items
+                    )
+
             # Fire step_callback for gateway hooks (agent:step event)
             if self.step_callback is not None:
                 try:
+                    from agent.turn_fence import acquire_current_turn_permit
+
                     prev_tools = []
                     for _idx, _m in enumerate(reversed(messages)):
                         if _m.get("role") == "assistant" and _m.get("tool_calls"):
@@ -14691,7 +16765,8 @@ class AIAgent:
                                 if isinstance(tc, dict)
                             ]
                             break
-                    self.step_callback(api_call_count, prev_tools)
+                    with acquire_current_turn_permit("step_callback"):
+                        self.step_callback(api_call_count, prev_tools)
                 except Exception as _step_err:
                     logger.debug("step_callback error (iteration %s): %s", api_call_count, _step_err)
 
@@ -14713,51 +16788,36 @@ class AIAgent:
             # iteration, no tools yet), the steer stays pending for the next
             # tool batch — injecting into a user message would break role
             # alternation, and there's no tool output to piggyback on.
-            _pre_api_steer = self._drain_pending_steer()
-            if _pre_api_steer:
-                _injected = False
-                for _si in range(len(messages) - 1, -1, -1):
-                    _sm = messages[_si]
-                    if isinstance(_sm, dict) and _sm.get("role") == "tool":
-                        marker = f"\n\nUser guidance: {_pre_api_steer}"
-                        existing = _sm.get("content", "")
-                        if isinstance(existing, str):
-                            _sm["content"] = existing + marker
-                        elif _is_multimodal_tool_result(existing):
-                            _append_subdir_hint_to_multimodal(existing, marker)
-                        else:
-                            # Multimodal content blocks — append text block
-                            try:
-                                blocks = list(existing) if existing else []
-                                blocks.append({"type": "text", "text": marker})
-                                _sm["content"] = blocks
-                            except Exception:
-                                pass
-                        _injected = True
-                        logger.debug(
-                            "Pre-API-call steer drain: injected into tool msg at index %d",
-                            _si,
-                        )
-                        break
-                if not _injected:
-                    # No tool message to inject into — put it back so
-                    # the post-tool-execution drain picks it up later.
-                    _lock = getattr(self, "_pending_steer_lock", None)
-                    if _lock is not None:
-                        with _lock:
-                            if self._pending_steer:
-                                self._pending_steer = self._pending_steer + "\n" + _pre_api_steer
-                            else:
-                                self._pending_steer = _pre_api_steer
-                    else:
-                        existing = getattr(self, "_pending_steer", None)
-                        self._pending_steer = (existing + "\n" + _pre_api_steer) if existing else _pre_api_steer
+            _pre_api_items = self._drain_pending_inputs()
+            if _pre_api_items:
+                # Guidance belongs to this turn, never to an arbitrary tool
+                # result from a prior turn. Preserve one durable row and one
+                # stable wire id per accepted item in global FIFO order.
+                _guidance_rows = self._queued_input_messages(
+                    _pre_api_items
+                )
+                messages.extend(_guidance_rows)
+                if not _persist_with_turn_durability(messages, None):
+                    if _guidance_rows:
+                        del messages[-len(_guidance_rows):]
+                    self._requeue_pending_inputs(_pre_api_items)
+                    from agent.turn_fence import (
+                        release_attached_owned_current_turn_permit,
+                    )
 
-            # Soft follow-ups use the same safe boundary as /steer when a
-            # completed tool result exists. If there is no tool result yet,
-            # the final-response branch below injects them as a fresh user
-            # message after the assistant text response.
-            self._apply_pending_soft_interrupts_to_tool_results(messages, None)
+                    release_attached_owned_current_turn_permit(
+                        _prepared_model_permit
+                    )
+                    _prepared_model_permit = None
+                    api_call_count -= 1
+                    return _terminal_result(
+                        "Queued guidance could not be durably reserved. "
+                        "No model request was sent; please retry.",
+                        error="queued guidance durability not confirmed",
+                    )
+                self._pending_input_ack_items_runtime.extend(
+                    _pre_api_items
+                )
             messages = self._externalize_inline_media_messages(messages)
 
             # Prepare messages for API call
@@ -14767,6 +16827,11 @@ class AIAgent:
             # on assistant messages with tool_calls. We handle both cases here.
             api_messages = []
             for idx, msg in enumerate(messages):
+                if (
+                    msg.get("finish_reason")
+                    in GUIDANCE_UNCONSUMED_FINISH_REASONS
+                ):
+                    continue
                 api_msg = msg.copy()
 
                 # Inject ephemeral context (memory prefetch + plugin
@@ -14800,6 +16865,10 @@ class AIAgent:
                 # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
                 if "finish_reason" in api_msg:
                     api_msg.pop("finish_reason")
+                # Stable transcript ids and UI display sidecars are durable
+                # metadata, never provider message fields.
+                api_msg.pop("client_message_id", None)
+                api_msg.pop("_display_content", None)
                 # Strip private retry markers before provider serialization.
                 api_msg.pop("_thinking_prefill", None)
                 api_msg.pop("_empty_recovery_synthetic", None)
@@ -14933,7 +17002,7 @@ class AIAgent:
                 if self.thinking_callback:
                     # CLI TUI mode: use prompt_toolkit widget instead of raw spinner
                     # (works in both streaming and non-streaming modes)
-                    self.thinking_callback(f"{face} {verb}...")
+                    self._emit_thinking(f"{face} {verb}...")
                 elif not self._has_stream_consumers() and self._should_start_quiet_spinner():
                     # Raw KawaiiSpinner only when no streaming consumers and the
                     # spinner output has a safe sink.
@@ -15073,7 +17142,39 @@ class AIAgent:
                     except Exception:
                         pass  # Never let the breaker break the agent loop
 
+                # Reaching a new raw-provider dispatch is the terminal
+                # continuation decision for the prior result. Its complete
+                # validation/accounting/callback/tool projection is now done,
+                # so release that transferred permit before attempting the
+                # next independently fenced provider call. This bounds the
+                # owned list to one result across retries and tool loops.
+                _release_owned_result_permits()
+
                 try:
+                    _attempt_model_permit = _prepared_model_permit
+                    _prepared_model_permit = None
+                    if _attempt_model_permit is None:
+                        try:
+                            from agent.turn_fence import (
+                                TurnCancelled,
+                                acquire_owned_current_turn_permit,
+                            )
+
+                            _attempt_model_permit = (
+                                acquire_owned_current_turn_permit(
+                                    "model",
+                                    {
+                                        "api_mode": self.api_mode,
+                                        "model": self.model,
+                                        "provider": self.provider,
+                                        "api_call_count": api_call_count,
+                                        "retry_count": retry_count,
+                                    },
+                                )
+                            )
+                        except TurnCancelled as exc:
+                            raise InterruptedError(str(exc)) from exc
+
                     self._reset_stream_delivery_tracking()
                     api_kwargs = self._build_api_kwargs(api_messages)
                     if self._force_ascii_payload:
@@ -15082,23 +17183,26 @@ class AIAgent:
                         api_kwargs = self._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
 
                     try:
+                        from agent.turn_fence import acquire_current_turn_permit
                         from elevate_cli.plugins import invoke_hook as _invoke_hook
-                        _invoke_hook(
-                            "pre_api_request",
-                            task_id=effective_task_id,
-                            session_id=self.session_id or "",
-                            platform=self.platform or "",
-                            model=self.model,
-                            provider=self.provider,
-                            base_url=self.base_url,
-                            api_mode=self.api_mode,
-                            api_call_count=api_call_count,
-                            message_count=len(api_messages),
-                            tool_count=len(self.tools or []),
-                            approx_input_tokens=approx_tokens,
-                            request_char_count=total_chars,
-                            max_tokens=self.max_tokens,
-                        )
+
+                        with acquire_current_turn_permit("pre_api_hook"):
+                            _invoke_hook(
+                                "pre_api_request",
+                                task_id=effective_task_id,
+                                session_id=self.session_id or "",
+                                platform=self.platform or "",
+                                model=self.model,
+                                provider=self.provider,
+                                base_url=self.base_url,
+                                api_mode=self.api_mode,
+                                api_call_count=api_call_count,
+                                message_count=len(api_messages),
+                                tool_count=len(self.tools or []),
+                                approx_input_tokens=approx_tokens,
+                                request_char_count=total_chars,
+                                max_tokens=self.max_tokens,
+                            )
                     except Exception:
                         pass
 
@@ -15121,8 +17225,7 @@ class AIAgent:
                         if thinking_spinner:
                             thinking_spinner.stop("")
                             thinking_spinner = None
-                        if self.thinking_callback:
-                            self.thinking_callback("")
+                        self._emit_thinking("")
 
                     _use_streaming = True
                     _force_gemini_nonstream_this_attempt = (
@@ -15169,12 +17272,35 @@ class AIAgent:
                         "waiting_stream" if _use_streaming else "nonstream"
                     )
                     try:
+                        from agent.turn_fence import TurnCancelled
+
                         if _use_streaming:
                             response = self._interruptible_streaming_api_call(
-                                api_kwargs, on_first_delta=_stop_spinner
+                                api_kwargs,
+                                on_first_delta=_stop_spinner,
+                                model_permit=_attempt_model_permit,
                             )
                         else:
-                            response = self._interruptible_api_call(api_kwargs)
+                            response = self._interruptible_api_call(
+                                api_kwargs,
+                                model_permit=_attempt_model_permit,
+                            )
+                        # Linearize cancellation immediately after the raw
+                        # provider worker exits and before any response-derived
+                        # callback, accounting, durable write, or model-visible
+                        # projection.  This owned permit is released only after
+                        # terminal-state selection for the turn.
+                        try:
+                            _own_result_permit(
+                                "model_result",
+                                {
+                                    "api_call_count": api_call_count,
+                                    "model": self.model,
+                                    "provider": self.provider,
+                                },
+                            )
+                        except TurnCancelled as exc:
+                            raise InterruptedError(str(exc)) from exc
                     finally:
                         # Out of the call (returned, interrupted, or errored)
                         # — a steer landing now goes through the normal
@@ -15195,8 +17321,7 @@ class AIAgent:
                     if thinking_spinner:
                         thinking_spinner.stop("")
                         thinking_spinner = None
-                    if self.thinking_callback:
-                        self.thinking_callback("")
+                    self._emit_thinking("")
                     
                     if not self.quiet_mode:
                         self._vprint(f"{self.log_prefix}⏱️  API call completed in {api_duration:.2f}s")
@@ -15291,8 +17416,7 @@ class AIAgent:
                         if thinking_spinner:
                             thinking_spinner.stop("(´;ω;`) oops, retrying...")
                             thinking_spinner = None
-                        if self.thinking_callback:
-                            self.thinking_callback("")
+                        self._emit_thinking("")
                         
                         # Invalid response — could be rate limiting, provider timeout,
                         # upstream server error, or malformed response.
@@ -15865,19 +17989,36 @@ class AIAgent:
                     break  # Success, exit retry loop
 
                 except InterruptedError:
+                    if _attempt_model_permit is not None:
+                        from agent.turn_fence import (
+                            release_attached_owned_current_turn_permit,
+                        )
+
+                        release_attached_owned_current_turn_permit(
+                            _attempt_model_permit
+                        )
                     if thinking_spinner:
                         thinking_spinner.stop("")
                         thinking_spinner = None
-                    if self.thinking_callback:
-                        self.thinking_callback("")
+                    self._emit_thinking("")
                     api_elapsed = time.time() - api_start_time
                     self._vprint(f"{self.log_prefix}⚡ Interrupted during API call.", force=True)
-                    self._persist_session(messages, conversation_history)
+                    _persist_with_turn_durability(
+                        messages, conversation_history
+                    )
                     interrupted = True
                     final_response = f"Operation interrupted: waiting for model response ({api_elapsed:.1f}s elapsed)."
                     break
 
                 except SteerCutInterrupt:
+                    if _attempt_model_permit is not None:
+                        from agent.turn_fence import (
+                            release_attached_owned_current_turn_permit,
+                        )
+
+                        release_attached_owned_current_turn_permit(
+                            _attempt_model_permit
+                        )
                     # A steer cut this call mid-think. NOT an interrupt and
                     # NOT an error: discard the partial call, hand control to
                     # the steer-cut seam below the retry loop, which folds the
@@ -15885,8 +18026,7 @@ class AIAgent:
                     if thinking_spinner:
                         thinking_spinner.stop("")
                         thinking_spinner = None
-                    if self.thinking_callback:
-                        self.thinking_callback("")
+                    self._emit_thinking("")
                     self._vprint(
                         f"{self.log_prefix}✂️ Steer received mid-think — cutting this call to apply it now.",
                         force=True,
@@ -15895,12 +18035,19 @@ class AIAgent:
                     break
 
                 except Exception as api_error:
+                    if _attempt_model_permit is not None:
+                        from agent.turn_fence import (
+                            release_attached_owned_current_turn_permit,
+                        )
+
+                        release_attached_owned_current_turn_permit(
+                            _attempt_model_permit
+                        )
                     # Stop spinner before printing error messages
                     if thinking_spinner:
                         thinking_spinner.stop("(╥_╥) error, retrying...")
                         thinking_spinner = None
-                    if self.thinking_callback:
-                        self.thinking_callback("")
+                    self._emit_thinking("")
 
                     # -----------------------------------------------------------
                     # UnicodeEncodeError recovery.  Two common causes:
@@ -17007,43 +19154,25 @@ class AIAgent:
                 # re-issue the API call so the model redirects immediately.
                 steer_cut = False
                 self._steer_cut_requested = False
-                _cut_steer = self._drain_pending_steer()
-                _cut_items = self._drain_pending_soft_interrupts()
+                _cut_items = self._drain_pending_inputs()
                 api_call_count -= 1
                 self.iteration_budget.refund()
-                _cut_parts: list = []
-                if _cut_steer:
-                    _cut_parts.append(f"User guidance: {_cut_steer}")
                 if _cut_items:
-                    _cut_parts.append(self._soft_interrupt_text(_cut_items))
-                if _cut_parts:
-                    _cut_text = "\n\n".join(_cut_parts)
-                    _tail = messages[-1] if messages else None
-                    if (
-                        isinstance(_tail, dict)
-                        and _tail.get("role") in ("tool", "user")
-                        and isinstance(_tail.get("content"), str)
-                    ):
-                        # Fold into the existing tail message so role
-                        # alternation is untouched (strict-alternation
-                        # providers reject a fresh user turn right after
-                        # tool results).
-                        _tail["content"] = (
-                            (_tail["content"] or "") + "\n\n" + _cut_text
-                        )
-                    else:
-                        _cut_msg = {"role": "user", "content": _cut_text}
-                        if not _cut_steer:
-                            _cut_client_message_id = self._soft_interrupt_client_message_id(_cut_items)
-                            if _cut_client_message_id:
-                                _cut_msg["client_message_id"] = _cut_client_message_id
-                                _cut_display = self._soft_interrupt_display_text(_cut_items)
-                                if _cut_display:
-                                    _cut_msg["_display_content"] = _cut_display
-                        messages.append(_cut_msg)
-                    self._notify_steer_applied(_cut_items, via="stream_cut")
+                    _cut_rows = self._queued_input_messages(_cut_items)
+                    messages.extend(_cut_rows)
                     self._session_messages = messages
-                    self._save_session_log(messages)
+                    if not _persist_with_turn_durability(messages, None):
+                        if _cut_rows:
+                            del messages[-len(_cut_rows):]
+                        self._requeue_pending_inputs(_cut_items)
+                        return _terminal_result(
+                            "Queued guidance could not be durably reserved. "
+                            "No replacement model request was sent.",
+                            error="stream-cut guidance durability not confirmed",
+                        )
+                    self._pending_input_ack_items_runtime.extend(
+                        _cut_items
+                    )
                 continue
 
             if restart_with_compressed_messages:
@@ -17071,7 +19200,9 @@ class AIAgent:
             if response is None:
                 _turn_exit_reason = "all_retries_exhausted_no_response"
                 print(f"{self.log_prefix}❌ All API retries exhausted with no successful response.")
-                self._persist_session(messages, conversation_history)
+                _persist_with_turn_durability(
+                    messages, conversation_history
+                )
                 break
 
             try:
@@ -17298,15 +19429,21 @@ class AIAgent:
                     # For all agents with a structured callback: emit reasoning.available event.
                     first_line = _think_text.split('\n')[0][:80] if _think_text else ""
                     if first_line and getattr(self, '_delegate_depth', 0) > 0:
-                        try:
-                            self.tool_progress_callback("_thinking", first_line)
-                        except Exception:
-                            pass
+                        self._invoke_generation_callback(
+                            "tool_progress_callback",
+                            self.tool_progress_callback,
+                            "_thinking",
+                            first_line,
+                        )
                     elif _think_text:
-                        try:
-                            self.tool_progress_callback("reasoning.available", "_thinking", _think_text[:500], None)
-                        except Exception:
-                            pass
+                        self._invoke_generation_callback(
+                            "tool_progress_callback",
+                            self.tool_progress_callback,
+                            "reasoning.available",
+                            "_thinking",
+                            _think_text[:500],
+                            None,
+                        )
                 
                 # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
                 # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
@@ -17655,25 +19792,94 @@ class AIAgent:
                     # a LATER tool round.
                     self._post_tool_empty_retried = False
 
-                    messages.append(assistant_msg)
-                    self._emit_interim_assistant_message(assistant_msg)
+                    try:
+                        from agent.turn_fence import (
+                            TurnCancelled,
+                            acquire_owned_current_turn_permit,
+                        )
 
-                    # Close any open streaming display (response box, reasoning
-                    # box) before tool execution begins.  Intermediate turns may
-                    # have streamed early content that opened the response box;
-                    # flushing here prevents it from wrapping tool feed lines.
-                    # Only signal the display callback — TTS (_stream_callback)
-                    # should NOT receive None (it uses None as end-of-stream).
-                    if self.stream_delta_callback:
+                        tool_batch_permit = acquire_owned_current_turn_permit(
+                            "tool_batch_transaction",
+                            {
+                                "tool_count": len(
+                                    assistant_message.tool_calls or []
+                                )
+                            },
+                        )
+                    except TurnCancelled:
+                        # No effect was admitted and no assistant tool-call row
+                        # was published, so normal interrupted terminalization
+                        # can proceed without an orphaned provider history row.
+                        interrupted = True
+                        final_response = INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+                        _turn_exit_reason = "interrupted_before_tool_batch"
+                        break
+
+                    try:
+                        messages.append(assistant_msg)
+                        self._emit_interim_assistant_message(assistant_msg)
+
+                        # Close any open streaming display (response box,
+                        # reasoning box) before tool execution begins.
+                        if self.stream_delta_callback:
+                            self._invoke_generation_callback(
+                                "stream_delta_callback",
+                                self.stream_delta_callback,
+                                None,
+                            )
+
+                        self._execute_tool_calls(
+                            assistant_message,
+                            messages,
+                            effective_task_id,
+                            retained_batch_permit=tool_batch_permit,
+                        )
+
+                        # Evidence and durability are bookkeeping for the
+                        # already-admitted batch, not new external effects.
+                        # They therefore execute under the retained batch
+                        # permit even if Stop arrived after a handler won.
                         try:
-                            self.stream_delta_callback(None)
-                        except Exception:
-                            pass
+                            _record_tool_batch_outcomes()
+                            from agent.turn_fence import current_turn_binding
 
-                    self._execute_tool_calls(
-                        assistant_message, messages, effective_task_id
-                    )
-                    _record_tool_batch_outcomes()
+                            if current_turn_binding() is None:
+                                persisted = _persist_with_turn_durability(
+                                    messages, None
+                                )
+                            else:
+                                persisted = (
+                                    self._persist_session_under_retained_turn_permit(
+                                        messages,
+                                        None,
+                                        retained_permit=tool_batch_permit,
+                                    )
+                                )
+                                durability_confirmed = (
+                                    durability_confirmed and bool(persisted)
+                                )
+                            if not persisted:
+                                raise _ToolBatchDurabilityError(
+                                    "tool batch evidence durability was not "
+                                    "confirmed"
+                                )
+                            _ack_durable_consumed_inputs()
+                        except _ToolBatchDurabilityError:
+                            sticky_tool_execution_failure = (
+                                "tool batch executed but its ordered evidence "
+                                "durability could not be confirmed"
+                            )
+                            raise
+                        except Exception as exc:
+                            sticky_tool_execution_failure = (
+                                "tool batch executed but its ordered evidence "
+                                "durability could not be confirmed"
+                            )
+                            raise _ToolBatchDurabilityError(
+                                "tool batch evidence durability failed"
+                            ) from exc
+                    finally:
+                        tool_batch_permit.release()
 
                     # Reset per-turn retry counters after successful tool
                     # execution so a single truncation doesn't poison the
@@ -18361,49 +20567,35 @@ class AIAgent:
                     # A /steer or soft follow-up that landed during the final
                     # API call (after the pre-API drain, while the model was
                     # generating this text) has no tool result to attach to.
-                    # Drain both here and continue the loop with a fresh user
-                    # turn so the agent keeps working instead of ending the
-                    # turn with the steer silently stranded.
-                    _soft_items = self._drain_pending_soft_interrupts()
-                    _steer_after_text = self._drain_pending_steer()
-                    if _soft_items or _steer_after_text:
-                        self._notify_steer_applied(_soft_items, via="after_text")
-                        messages.append(final_msg)
-                        _continuation_parts = []
-                        _display_parts = []
-                        if _steer_after_text:
-                            _continuation_parts.append(_steer_after_text)
-                            _display_parts.append(_steer_after_text)
-                        if _soft_items:
-                            _continuation_parts.append(
-                                self._soft_interrupt_text(_soft_items)
+                    # Reserve by observation only.  Consumption and the
+                    # continuation append happen at the top of the next loop
+                    # *after* its model permit wins.  Stop before that point
+                    # therefore leaves exact FIFO input in the queues.
+                    _input_lock = getattr(
+                        self, "_pending_inputs_lock", None
+                    )
+                    if _input_lock is None:
+                        _pending_after_text = []
+                    else:
+                        with _input_lock:
+                            _pending_after_text = list(
+                                self._pending_inputs
                             )
-                            _soft_display = self._soft_interrupt_display_text(_soft_items)
-                            if _soft_display:
-                                _display_parts.append(_soft_display)
-                        _continuation_msg = {
-                            "role": "user",
-                            "content": "\n\n".join(_continuation_parts),
-                            # Durable marker for transcript hydration: the
-                            # dashboard folds steer.* user rows back into the
-                            # previous assistant turn instead of showing a
-                            # new "Worked..." block for the continuation.
-                            "client_message_id": (
-                                self._soft_interrupt_client_message_id(_soft_items)
-                                if _soft_items and not _steer_after_text
-                                else f"steer.{uuid.uuid4().hex}"
-                            ),
-                        }
-                        _display_content = "\n\n".join(
-                            p for p in _display_parts if str(p).strip()
-                        ).strip()
-                        if _display_content:
-                            _continuation_msg["_display_content"] = _display_content
-                        messages.append(_continuation_msg)
+                    _has_steer_after_text = any(
+                        item.get("_input_lane") == "steer"
+                        for item in _pending_after_text
+                    )
+                    _has_soft_after_text = any(
+                        item.get("_input_lane") != "steer"
+                        for item in _pending_after_text
+                    )
+                    if _has_soft_after_text or _has_steer_after_text:
+                        messages.append(final_msg)
+                        _after_text_continuation_pending = True
                         final_response = None
                         _turn_exit_reason = (
                             "steer_after_text_response"
-                            if _steer_after_text
+                            if _has_steer_after_text
                             else "soft_interrupt_after_text_response"
                         )
                         self._session_messages = messages
@@ -18442,6 +20634,21 @@ class AIAgent:
                         self._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
                     break
                 
+            except _ToolBatchDurabilityError as e:
+                durability_confirmed = False
+                outcome_unknown = True
+                failed = True
+                partial = True
+                failure_error = str(e)
+                final_response = (
+                    "A tool action may have completed, but its ordered "
+                    "transcript evidence could not be confirmed durable. "
+                    "No further model or tool call was attempted. Verify the "
+                    "actual external state before retrying."
+                )
+                _turn_exit_reason = "tool_effect_durability_unknown"
+                break
+
             except Exception as e:
                 error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
                 try:
@@ -18514,6 +20721,10 @@ class AIAgent:
                     })
                     break
         
+        if _prepared_model_permit is not None:
+            _prepared_model_permit.release()
+            _prepared_model_permit = None
+
         if final_response is None and _session_deadline_hit:
             # Session wall clock expired — same graceful exit as iteration
             # exhaustion: one toolless call asking the model to summarize
@@ -18557,6 +20768,14 @@ class AIAgent:
         active_tool_pending = _active_tool_pending_summary()
         if active_tool_pending:
             partial = True
+        # A model-result permit may win just before Stop.  The permit keeps the
+        # actor non-quiescent while response processing finishes, but Stop still
+        # owns terminal truth: never promote that generation to completed.
+        from agent.turn_fence import current_turn_cancelled
+
+        if current_turn_cancelled():
+            interrupted = True
+            _turn_exit_reason = "interrupted_during_model_result_projection"
         # An interrupt can be present before the first provider call.  Preserve
         # that truthful terminal state with a visible, durable assistant row;
         # returning ``None`` here leaves the gateway unable to atomically bind
@@ -18610,10 +20829,77 @@ class AIAgent:
                     "content": final_response,
                     "finish_reason": "interrupted",
                 })
+
+        # A failed ordered tool-evidence projection leaves the external effect
+        # outcome unknown.  Preserve a terminal marker after that tool group so
+        # a cold process can walk back to the exact durable guidance rows that
+        # remain reserved for provider delivery.
+        if outcome_unknown and getattr(
+            self, "_pending_input_ack_items_runtime", []
+        ):
+            _drop_trailing_empty_response_scaffolding(messages)
+            if not (
+                messages
+                and isinstance(messages[-1], dict)
+                and messages[-1].get("role") == "assistant"
+                and messages[-1].get("finish_reason")
+                in GUIDANCE_UNCONSUMED_FINISH_REASONS
+            ):
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": final_response,
+                        "finish_reason": "error_guidance_unconsumed",
+                    }
+                )
         
-        # Determine if conversation completed successfully
+        # Clean up VM and browser for this task after conversation completes
+        try:
+            from agent.turn_fence import (
+                TurnCancelled,
+                acquire_current_turn_permit,
+            )
+
+            with acquire_current_turn_permit("task_cleanup"):
+                self._cleanup_task_resources(effective_task_id)
+        except TurnCancelled:
+            pass
+
+        # Early recovery exits can bypass the normal final-message cleanup.
+        _drop_trailing_empty_response_scaffolding(messages)
+        final_durability_confirmed = _persist_with_turn_durability(
+            messages, conversation_history
+        )
+        if durability_confirmed:
+            _ack_durable_consumed_inputs()
+        if not durability_confirmed:
+            durability_error = (
+                "turn transcript durability was not confirmed"
+                if not final_durability_confirmed
+                else (
+                    "earlier ordered turn evidence durability remained "
+                    "unconfirmed"
+                )
+            )
+            completed = False
+            failed = True
+            partial = True
+            failure_error = (
+                f"{failure_error}; {durability_error}"
+                if failure_error
+                else durability_error
+            )
+            if not outcome_unknown:
+                _turn_exit_reason = (
+                    "final_transcript_durability_unconfirmed"
+                )
+
+        # Determine completion only after the final transcript projection is
+        # acknowledged, so completion-only hooks and trajectory records cannot
+        # report success for an unconfirmed turn.
         completed = (
-            final_response is not None
+            durability_confirmed
+            and final_response is not None
             and not failed
             and not interrupted
             and not active_tool_pending
@@ -18622,14 +20908,11 @@ class AIAgent:
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
-        self._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
-
-        # Clean up VM and browser for this task after conversation completes
-        self._cleanup_task_resources(effective_task_id)
-
-        # Early recovery exits can bypass the normal final-message cleanup.
-        _drop_trailing_empty_response_scaffolding(messages)
-        self._persist_session(messages, conversation_history)
+        self._save_trajectory(
+            messages,
+            _summarize_user_message_for_log(user_message),
+            completed,
+        )
 
         # ── Turn-exit diagnostic log ─────────────────────────────────────
         # Always logged at INFO so agent.log captures WHY every turn ended.
@@ -18681,16 +20964,19 @@ class AIAgent:
         # to an external memory system).
         if final_response and completed:
             try:
+                from agent.turn_fence import acquire_current_turn_permit
                 from elevate_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "post_llm_call",
-                    session_id=self.session_id,
-                    user_message=original_user_message,
-                    assistant_response=final_response,
-                    conversation_history=list(messages),
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
-                )
+
+                with acquire_current_turn_permit("post_llm_hook"):
+                    _invoke_hook(
+                        "post_llm_call",
+                        session_id=self.session_id,
+                        user_message=original_user_message,
+                        assistant_response=final_response,
+                        conversation_history=list(messages),
+                        model=self.model,
+                        platform=getattr(self, "platform", None) or "",
+                    )
             except Exception as exc:
                 logger.warning("post_llm_call hook failed: %s", exc)
 
@@ -18700,6 +20986,10 @@ class AIAgent:
         # Self-gated to real-estate accounts; never raises.
         if completed:
             try:
+                from agent.turn_fence import (
+                    acquire_current_turn_permit,
+                    current_turn_binding,
+                )
                 from agent.turn_attribution import (
                     attribute_turn_safely,
                     should_wait_for_inference,
@@ -18707,13 +20997,15 @@ class AIAgent:
                 # Persistent processes (dashboard/gateway/REPL) finish scorecard
                 # inference async; one-shot runs (chat -q, cron) drain it inline
                 # so the tick is never lost on exit.
-                attribute_turn_safely(
-                    messages,
-                    agent_id=getattr(self, "_agent_id", "") or "",
-                    session_id=self.session_id,
-                    main_runtime=self._current_main_runtime(),
-                    wait=should_wait_for_inference(),
-                )
+                with acquire_current_turn_permit("turn_attribution"):
+                    attribute_turn_safely(
+                        messages,
+                        agent_id=getattr(self, "_agent_id", "") or "",
+                        session_id=self.session_id,
+                        main_runtime=self._current_main_runtime(),
+                        wait=should_wait_for_inference(),
+                        allow_background=current_turn_binding() is None,
+                    )
             except Exception as exc:
                 logger.debug("turn attribution hook failed: %s", exc)
 
@@ -18739,6 +21031,8 @@ class AIAgent:
             "session_id": self.session_id,
             "api_calls": api_call_count,
             "completed": completed,
+            "durability_confirmed": durability_confirmed,
+            "transcript_durable": durability_confirmed,
             "turn_exit_reason": _turn_exit_reason,
             "failed": failed,
             "partial": partial,
@@ -18764,6 +21058,8 @@ class AIAgent:
         }
         if failed:
             result["error"] = failure_error or final_response
+        if outcome_unknown:
+            result["outcome_unknown"] = True
         if pending_tool_obligations:
             result["pending_tool_obligations"] = [
                 {
@@ -18800,12 +21096,7 @@ class AIAgent:
         # If a /steer landed after the final assistant turn (no more tool
         # batches to drain into), hand it back to the caller so it can be
         # delivered as the next user turn instead of being silently lost.
-        _leftover_steer = self._drain_pending_steer()
-        if _leftover_steer:
-            result["pending_steer"] = _leftover_steer
-        _leftover_soft = self._drain_pending_soft_interrupts()
-        if _leftover_soft:
-            result["pending_soft_interrupt"] = self._soft_interrupt_text(_leftover_soft)
+        _transfer_pending_input_ownership(result)
         self._response_was_previewed = False
         
         # Include interrupt message if one triggered the interrupt
@@ -18813,7 +21104,9 @@ class AIAgent:
             result["interrupt_message"] = self._interrupt_message
         
         # Clear interrupt state after handling
-        self.clear_interrupt()
+        # A follow-up can arrive after the transfer snapshot above. Preserve
+        # that new canonical queue owner for the next turn.
+        self.clear_interrupt(preserve_queued_inputs=True)
 
         # Clear stream callback so it doesn't leak into future calls
         self._stream_callback = None
@@ -18842,15 +21135,29 @@ class AIAgent:
             and not interrupted
         ):
             try:
-                self._memory_manager.sync_all(
-                    original_user_message,
-                    final_response,
-                    session_id=self.session_id or "",
+                from agent.turn_fence import (
+                    acquire_current_turn_permit,
+                    current_turn_binding,
                 )
-                self._memory_manager.queue_prefetch_all(
-                    original_user_message,
-                    session_id=self.session_id or "",
-                )
+
+                with acquire_current_turn_permit("memory_sync"):
+                    self._memory_manager.sync_all(
+                        original_user_message,
+                        final_response,
+                        session_id=self.session_id or "",
+                    )
+                # Provider queue_prefetch implementations may detach their own
+                # anonymous workers. A bound gateway turn already performs an
+                # exactly-owned prefetch at the next prompt, so suppress this
+                # speculative queue there; preserve legacy CLI behavior.
+                if current_turn_binding() is None:
+                    with acquire_current_turn_permit(
+                        "memory_queue_prefetch"
+                    ):
+                        self._memory_manager.queue_prefetch_all(
+                            original_user_message,
+                            session_id=self.session_id or "",
+                        )
             except Exception:
                 pass
 
@@ -18881,18 +21188,52 @@ class AIAgent:
         # Plugin hook: on_session_end
         # Fired at the very end of every run_conversation call.
         # Plugins can use this for cleanup, flushing buffers, etc.
-        try:
-            from elevate_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "on_session_end",
-                session_id=self.session_id,
-                completed=completed,
-                interrupted=interrupted,
-                model=self.model,
-                platform=getattr(self, "platform", None) or "",
+        self._invoke_turn_session_end_hook(
+            completed=completed,
+            interrupted=interrupted,
+        )
+
+        # Release the final provider-result ownership, then atomically seal the
+        # terminal truth under the same fence lock used by Stop. A Stop that
+        # wins before the seal is reflected below; once the seal wins, later
+        # cancellation cannot retroactively contradict this return payload.
+        _release_owned_result_permits()
+        from agent.turn_fence import seal_current_turn_terminal
+
+        terminal_status = (
+            "completed"
+            if result.get("completed")
+            else "interrupted"
+            if result.get("interrupted")
+            else "error"
+        )
+        terminal_snapshot = seal_current_turn_terminal(terminal_status)
+
+        if terminal_snapshot.get("cancelled"):
+            interrupted = True
+            completed = False
+            failed = True
+            partial = True
+            durability_confirmed = False
+            _turn_exit_reason = "interrupted_during_post_turn_effects"
+            result["completed"] = False
+            result["interrupted"] = True
+            result["failed"] = True
+            result["partial"] = True
+            result["durability_confirmed"] = False
+            result["transcript_durable"] = False
+            result["error"] = (
+                "late cancellation changed terminal state after the last "
+                "durable transcript projection"
             )
-        except Exception as exc:
-            logger.warning("on_session_end hook failed: %s", exc)
+            result["turn_exit_reason"] = _turn_exit_reason
+            if messages and isinstance(messages[-1], dict):
+                terminal_message = messages[-1]
+                if terminal_message.get("role") == "assistant":
+                    terminal_message["finish_reason"] = "interrupted"
+
+        if interrupted:
+            _rollback_cancelled_turn_local_state()
 
         return result
 

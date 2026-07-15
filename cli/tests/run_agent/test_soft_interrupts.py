@@ -68,6 +68,7 @@ def test_steer_display_content_persists_user_text_only():
 
         def append_message(self, **kwargs):
             self.rows.append(kwargs)
+            return len(self.rows)
 
     agent = _agent_stub()
     agent.persist_session = True
@@ -86,6 +87,7 @@ def test_steer_display_content_persists_user_text_only():
             "Fold this into the current task before continuing.",
             "client_message_id": "steer.abc123",
             "_display_content": "focus on seller objections",
+            "finish_reason": "guidance_reserved_soft",
         }
     ]
 
@@ -95,7 +97,7 @@ def test_steer_display_content_persists_user_text_only():
     assert agent._session_db.rows[0]["content"] == "focus on seller objections"
 
 
-def test_flush_skips_duplicate_persisted_user_client_message_id():
+def test_legacy_flush_does_not_use_pg_first_duplicate_preread():
     class FakeDB:
         def __init__(self):
             self.rows = [
@@ -116,6 +118,7 @@ def test_flush_skips_duplicate_persisted_user_client_message_id():
 
         def append_message(self, **kwargs):
             self.appended.append(kwargs)
+            return len(self.rows) + len(self.appended)
 
     agent = _agent_stub()
     agent.persist_session = True
@@ -136,14 +139,80 @@ def test_flush_skips_duplicate_persisted_user_client_message_id():
 
     agent._flush_messages_to_session_db(messages)
 
-    assert agent._session_db.appended == []
+    # Legacy adapters have no atomic identity primitive, so the writer does
+    # not trust a potentially PG-first get_messages() pre-read. Real
+    # SessionDB uses append_message_idempotent under BEGIN IMMEDIATE.
+    assert len(agent._session_db.appended) == 1
     assert agent._last_flushed_db_idx == 1
 
 
-def test_soft_interrupt_client_message_id_prefers_steer_id():
+def test_soft_interrupt_client_message_id_preserves_first_arbitrary_id():
     items = [
         {"content": "one", "client_message_id": "not-a-steer"},
         {"content": "two", "client_message_id": "steer.two"},
     ]
 
-    assert AIAgent._soft_interrupt_client_message_id(items) == "steer.two"
+    assert AIAgent._soft_interrupt_client_message_id(items) == "not-a-steer"
+
+
+def test_atomic_batch_failure_keeps_guidance_and_terminal_cursor_together():
+    class AtomicDB:
+        def __init__(self):
+            self.fail = True
+            self.attempts = []
+            self.stored = []
+
+        def ensure_session(self, *args, **kwargs):
+            return None
+
+        def append_messages_idempotent(self, session_id, messages):
+            snapshot = [dict(message) for message in messages]
+            self.attempts.append((session_id, snapshot))
+            if self.fail:
+                raise RuntimeError("atomic commit failed")
+            self.stored.extend(snapshot)
+            return list(range(1, len(snapshot) + 1))
+
+    agent = _agent_stub()
+    agent.persist_session = True
+    agent._session_db = AtomicDB()
+    agent.session_id = "child-1"
+    agent.platform = "test"
+    agent.model = "gpt-test"
+    agent._last_flushed_db_idx = 0
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+    messages = [
+        {
+            "role": "user",
+            "content": "User guidance: inspect the listing",
+            "client_message_id": "arbitrary-guidance-A",
+            "_display_content": "inspect the listing",
+            "finish_reason": "guidance_reserved_steer",
+        },
+        {
+            "role": "assistant",
+            "content": "provider response was invalid",
+            "client_message_id": "terminal-A",
+            "finish_reason": "error_guidance_unconsumed",
+        },
+    ]
+
+    assert agent._flush_messages_to_session_db_impl(messages) is False
+    assert agent._session_db.stored == []
+    assert agent._last_flushed_db_idx == 0
+    assert len(agent._session_db.attempts) == 1
+    first_payload = agent._session_db.attempts[0][1]
+    assert [row["client_message_id"] for row in first_payload] == [
+        "arbitrary-guidance-A",
+        "terminal-A",
+    ]
+    assert first_payload[0]["content"] == "inspect the listing"
+
+    agent._session_db.fail = False
+    assert agent._flush_messages_to_session_db_impl(messages) is True
+    assert [row["client_message_id"] for row in agent._session_db.stored] == [
+        "arbitrary-guidance-A",
+        "terminal-A",
+    ]
+    assert agent._last_flushed_db_idx == 2

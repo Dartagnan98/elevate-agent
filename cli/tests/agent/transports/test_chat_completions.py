@@ -66,6 +66,105 @@ class TestChatCompletionsBasic:
         # Original list untouched (deepcopy-on-demand)
         assert msgs[2]["tool_name"] == "execute_code"
 
+    def test_convert_messages_role_allowlist_blocks_all_local_metadata(self, transport):
+        messages = [
+            {
+                "role": "user",
+                "content": "hello",
+                "name": "buyer",
+                "cache_control": {"type": "ephemeral"},
+                "client_message_id": "arbitrary-guidance-A",
+                "_display_content": "hello",
+                "_ephemeral_context": "private",
+                "message_id": "platform-1",
+                "platform_message_id": "platform-1",
+                "timestamp": "now",
+                "session_id": "session-1",
+                "id": 42,
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "cache_control": {"type": "ephemeral"},
+                "reasoning_content": "kept reasoning",
+                "reasoning_details": [{"type": "summary", "text": "kept"}],
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{}",
+                            "local": "drop",
+                        },
+                        "extra_content": {
+                            "google": {"thought_signature": "sig"}
+                        },
+                        "call_id": "codex-call",
+                        "response_item_id": "codex-item",
+                    }
+                ],
+                "token_count": 99,
+                "finish_reason": "tool_calls",
+                "reasoning": "normalized already",
+            },
+            {
+                "role": "tool",
+                "content": "result",
+                "name": "lookup",
+                "tool_call_id": "call-1",
+                "tool_name": "lookup",
+                "client_message_id": "local-tool-id",
+            },
+        ]
+
+        converted = transport.convert_messages(messages)
+
+        assert converted == [
+            {
+                "role": "user",
+                "content": "hello",
+                "name": "buyer",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "cache_control": {"type": "ephemeral"},
+                "reasoning_content": "kept reasoning",
+                "reasoning_details": [
+                    {"type": "summary", "text": "kept"}
+                ],
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{}",
+                        },
+                        "extra_content": {
+                            "google": {"thought_signature": "sig"}
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "result",
+                "name": "lookup",
+                "tool_call_id": "call-1",
+            },
+        ]
+        assert all(
+            not key.startswith("_")
+            for message in converted
+            for key in message
+        )
+        assert messages[0]["client_message_id"] == "arbitrary-guidance-A"
+        assert messages[1]["tool_calls"][0]["call_id"] == "codex-call"
+        assert messages[2]["tool_name"] == "lookup"
+
 
 class TestChatCompletionsBuildKwargs:
 

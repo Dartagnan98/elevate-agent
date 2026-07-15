@@ -28,6 +28,7 @@ these paths see no behavioural change.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import json
 import os
@@ -636,8 +637,25 @@ def compress_context(
             except Exception:
                 pass
 
+    _ka_context = contextvars.copy_context()
+
+    def _fenced_compaction_keepalive() -> None:
+        from agent.turn_fence import (
+            TurnCancelled,
+            acquire_current_turn_permit,
+        )
+
+        try:
+            with acquire_current_turn_permit("compression_keepalive"):
+                _compaction_keepalive()
+        except TurnCancelled:
+            return
+
     _ka_thread = threading.Thread(
-        target=_compaction_keepalive, daemon=True, name="compaction-keepalive"
+        target=_ka_context.run,
+        args=(_fenced_compaction_keepalive,),
+        daemon=True,
+        name="compaction-keepalive",
     )
     _ka_thread.start()
     # Compaction redesign (docs/compaction-redesign.md): the transcript is NEVER

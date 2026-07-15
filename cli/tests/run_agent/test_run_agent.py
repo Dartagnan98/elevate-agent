@@ -2014,7 +2014,7 @@ class TestExecuteToolCalls:
 
         responses = [_RateLimitError(), _mock_response(content="Recovered")]
 
-        def _fake_api_call(api_kwargs):
+        def _fake_api_call(api_kwargs, *, model_permit=None):
             result = responses.pop(0)
             if isinstance(result, Exception):
                 raise result
@@ -5694,7 +5694,7 @@ class TestRunConversation:
         agent._memory_manager = memory_manager
         persisted = {}
 
-        def interrupt_side_effect(api_kwargs):
+        def interrupt_side_effect(api_kwargs, *, model_permit=None):
             agent._interrupt_requested = True
             raise InterruptedError("Agent interrupted during API call")
 
@@ -6530,7 +6530,7 @@ class TestRunConversation:
         )
         provider_payloads = []
 
-        def _api_call(api_kwargs):
+        def _api_call(api_kwargs, *, model_permit=None):
             provider_payloads.append(api_kwargs["messages"])
             response = next(responses)
             if len(provider_payloads) == 3:
@@ -6775,7 +6775,7 @@ class TestRunConversation:
         # Stub response with no content (old behavior before fix)
         empty_stub = _mock_response(content=None, finish_reason="stop")
 
-        def _fake_api_call(api_kwargs):
+        def _fake_api_call(api_kwargs, *, model_permit=None):
             # Simulate what streaming does: accumulate text before returning
             # a stub with no content (connection died mid-stream)
             agent._current_streamed_assistant_text = "The answer to your question is that"
@@ -6817,7 +6817,7 @@ class TestRunConversation:
         # Stub response with no content
         empty_stub = _mock_response(content=None, finish_reason="stop")
 
-        def _fake_api_call(api_kwargs):
+        def _fake_api_call(api_kwargs, *, model_permit=None):
             # Simulate partial streaming before connection death
             agent._current_streamed_assistant_text = "Fresh partial content from this turn"
             return empty_stub
@@ -6848,7 +6848,7 @@ class TestRunConversation:
                 super().__init__("Error code: 401 - unauthorized")
                 self.status_code = 401
 
-        def _fake_api_call(api_kwargs):
+        def _fake_api_call(api_kwargs, *, model_permit=None):
             calls["api"] += 1
             if calls["api"] == 1:
                 raise _UnauthorizedError()
@@ -7232,8 +7232,17 @@ class TestRunConversation:
         agent.client.chat.completions.create.return_value = resp
         agent._disable_streaming = True
         agent._response_was_previewed = True
-        agent.steer("keep this steer")
-        agent.queue_soft_interrupt("keep this follow-up")
+        queued_guidance = False
+
+        def _queue_after_receipt(*_args):
+            nonlocal queued_guidance
+            if queued_guidance:
+                return
+            queued_guidance = True
+            assert agent.steer("keep this steer")
+            assert agent.queue_soft_interrupt("keep this follow-up")
+
+        agent.step_callback = _queue_after_receipt
         persisted = {}
         hook_names = []
 
@@ -7274,7 +7283,9 @@ class TestRunConversation:
         assert result["pending_steer"] == "keep this steer"
         assert "keep this follow-up" in result["pending_soft_interrupt"]
         assert result["response_previewed"] is True
-        assert persisted["messages"][-1]["finish_reason"] == "error"
+        assert persisted["messages"][-1]["finish_reason"] == (
+            "error_guidance_unconsumed"
+        )
         assert persisted["messages"][-1]["content"] == result["final_response"]
         cleanup.assert_called_once()
         clear_interrupt.assert_called_once()
@@ -7563,6 +7574,11 @@ class TestRetryExhaustion:
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
+            patch.object(
+                agent,
+                "_compute_non_stream_stale_timeout",
+                return_value=float("inf"),
+            ),
             patch("run_agent.time", self._make_fast_time_mock()),
         ):
             result = agent.run_conversation("hello")
@@ -7581,6 +7597,11 @@ class TestRetryExhaustion:
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
+            patch.object(
+                agent,
+                "_compute_non_stream_stale_timeout",
+                return_value=float("inf"),
+            ),
             patch("run_agent.time", self._make_fast_time_mock()),
         ):
             result = agent.run_conversation("hello")

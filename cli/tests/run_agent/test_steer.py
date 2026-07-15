@@ -1,9 +1,8 @@
 """Tests for AIAgent.steer() — mid-run user message injection.
 
-/steer lets the user add a note to the agent's next tool result without
-interrupting the current tool call. The agent sees the note inline with
-tool output on its next iteration, preserving message-role alternation
-and prompt-cache integrity.
+/steer lets the user add a note without interrupting the current tool call.
+The complete tool-result batch is followed by an identified user guidance row
+so crash recovery retains the exact client message id.
 """
 from __future__ import annotations
 
@@ -72,9 +71,12 @@ class TestSteerDrain:
 
 
 class TestSteerInjection:
-    def test_appends_to_last_tool_result(self):
+    def test_appends_identified_row_after_complete_tool_batch(self):
         agent = _bare_agent()
-        agent.steer("please also check auth.log")
+        agent.steer(
+            "please also check auth.log",
+            client_message_id="guidance-auth-log",
+        )
         messages = [
             {"role": "user", "content": "what's in /var/log?"},
             {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]},
@@ -82,11 +84,17 @@ class TestSteerInjection:
             {"role": "tool", "content": "ls output B", "tool_call_id": "b"},
         ]
         agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs=2)
-        # The LAST tool result is modified; earlier ones are untouched.
+        # Both tool results remain contiguous and unchanged; guidance follows
+        # the complete batch with the exact caller-supplied id.
         assert messages[2]["content"] == "ls output A"
-        assert "ls output B" in messages[3]["content"]
-        assert "User guidance:" in messages[3]["content"]
-        assert "please also check auth.log" in messages[3]["content"]
+        assert messages[3]["content"] == "ls output B"
+        assert messages[4] == {
+            "role": "user",
+            "content": "User guidance: please also check auth.log",
+            "client_message_id": "guidance-auth-log",
+            "_display_content": "please also check auth.log",
+            "finish_reason": "guidance_reserved_steer",
+        }
         # And pending_steer is consumed.
         assert agent._pending_steer is None
 
@@ -122,21 +130,19 @@ class TestSteerInjection:
         assert "stop after next step" in content
 
     def test_multimodal_content_list_preserved(self):
-        """Anthropic-style list content should be preserved, with the steer
-        appended as a text block."""
+        """Anthropic-style tool content stays byte-for-byte unchanged."""
         agent = _bare_agent()
-        agent.steer("extra note")
+        agent.steer("extra note", client_message_id="guidance-multimodal")
         original_blocks = [{"type": "text", "text": "existing output"}]
         messages = [
             {"role": "tool", "content": list(original_blocks), "tool_call_id": "1"}
         ]
         agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs=1)
-        new_content = messages[-1]["content"]
-        assert isinstance(new_content, list)
-        assert len(new_content) == 2
-        assert new_content[0] == {"type": "text", "text": "existing output"}
-        assert new_content[1]["type"] == "text"
-        assert "extra note" in new_content[1]["text"]
+        assert messages[0]["content"] == original_blocks
+        assert messages[1]["role"] == "user"
+        assert messages[1]["client_message_id"] == "guidance-multimodal"
+        assert messages[1]["_display_content"] == "extra note"
+        assert messages[1]["finish_reason"] == "guidance_reserved_steer"
 
     def test_restashed_when_no_tool_result_in_batch(self):
         """If the 'batch' contains no tool-role messages (e.g. all skipped
@@ -177,6 +183,54 @@ class TestSteerThreadSafety:
         lines = text.split("\n")
         assert len(lines) == N
         assert set(lines) == {f"note-{i}" for i in range(N)}
+
+    def test_two_producers_same_arbitrary_id_append_once(self):
+        agent = _bare_agent()
+        barrier = threading.Barrier(3)
+        accepted: list[bool] = []
+
+        def worker() -> None:
+            barrier.wait()
+            accepted.append(
+                agent.steer(
+                    "same guidance",
+                    client_message_id="dashboard-message-42",
+                )
+            )
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        items = agent._drain_pending_inputs()
+        assert accepted == [True, True]
+        assert [item["client_message_id"] for item in items] == [
+            "dashboard-message-42"
+        ]
+
+    def test_same_arbitrary_id_with_different_payload_conflicts(self):
+        agent = _bare_agent()
+        assert agent.steer("first", client_message_id="message-A")
+
+        with pytest.raises(ValueError, match="different queued guidance"):
+            agent.steer("different", client_message_id="message-A")
+
+    def test_terminal_close_snapshots_or_rejects_every_producer(self):
+        agent = _bare_agent()
+        assert agent.steer("included", client_message_id="message-A")
+
+        handed_off = agent._drain_pending_inputs(close_for_handoff=True)
+
+        assert [item["client_message_id"] for item in handed_off] == [
+            "message-A"
+        ]
+        assert agent.steer("too late", client_message_id="message-B") is False
+        # Once the handoff closes, every producer retry is rejected cleanly.
+        assert agent.steer("included", client_message_id="message-A") is False
+        assert agent._drain_pending_inputs() == []
 
 
 class TestSteerClearedOnInterrupt:
@@ -281,7 +335,7 @@ class TestSteerCommandRegistry:
         """The /steer slash command must be registered so it reaches all
         platforms (CLI, gateway, TUI autocomplete, Telegram/Slack menus).
         """
-        from elevate_cli.commands import resolve_command, ACTIVE_SESSION_BYPASS_COMMANDS
+        from elevate_cli.commands import resolve_command
 
         cmd = resolve_command("steer")
         assert cmd is not None

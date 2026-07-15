@@ -39,6 +39,19 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_elevate_home() / "state.db"
 
+
+class SessionMessageConflictError(ValueError):
+    """A stable message identity was reused for different durable state."""
+
+    def __init__(self, session_id: str, client_message_id: str):
+        self.session_id = session_id
+        self.client_message_id = client_message_id
+        super().__init__(
+            "client_message_id conflict for session "
+            f"{session_id!r}: {client_message_id!r} already belongs to "
+            "different message state"
+        )
+
 # Survives every SessionDB instance in this interpreter, but changes after an
 # exec/restart even when the operating system reuses the same PID.
 _PROCESS_IMPORT_PID = os.getpid()
@@ -2354,6 +2367,305 @@ class SessionDB:
         except Exception as exc:
             logger.debug("PG shadow append_message failed for %s: %s", session_id, exc)
         return result
+
+    def append_message_idempotent(
+        self,
+        session_id: str,
+        role: str,
+        content: str = None,
+        tool_name: str = None,
+        tool_calls: Any = None,
+        tool_call_id: str = None,
+        token_count: int = None,
+        finish_reason: str = None,
+        reasoning: str = None,
+        reasoning_content: str = None,
+        reasoning_details: Any = None,
+        codex_reasoning_items: Any = None,
+        codex_message_items: Any = None,
+        platform_message_id: str = None,
+        client_message_id: str = None,
+    ) -> int:
+        """Atomically append one exact local message identity at most once.
+
+        This is the single-message convenience wrapper around
+        :meth:`append_messages_idempotent`.
+        """
+        return self.append_messages_idempotent(
+            session_id,
+            [
+                {
+                    "role": role,
+                    "content": content,
+                    "tool_name": tool_name,
+                    "tool_calls": tool_calls,
+                    "tool_call_id": tool_call_id,
+                    "token_count": token_count,
+                    "finish_reason": finish_reason,
+                    "reasoning": reasoning,
+                    "reasoning_content": reasoning_content,
+                    "reasoning_details": reasoning_details,
+                    "codex_reasoning_items": codex_reasoning_items,
+                    "codex_message_items": codex_message_items,
+                    "platform_message_id": platform_message_id,
+                    "client_message_id": client_message_id,
+                }
+            ],
+        )[0]
+
+    _IDEMPOTENT_MESSAGE_FIELDS = frozenset(
+        {
+            "role",
+            "content",
+            "tool_name",
+            "tool_calls",
+            "tool_call_id",
+            "token_count",
+            "finish_reason",
+            "reasoning",
+            "reasoning_content",
+            "reasoning_details",
+            "codex_reasoning_items",
+            "codex_message_items",
+            "platform_message_id",
+            "client_message_id",
+        }
+    )
+    _IDEMPOTENT_DURABLE_COLUMNS = (
+        "role",
+        "content",
+        "tool_call_id",
+        "tool_calls",
+        "tool_name",
+        "token_count",
+        "finish_reason",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+        "platform_message_id",
+    )
+
+    def _prepare_idempotent_message(
+        self,
+        message: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(message, dict):
+            raise TypeError("idempotent batch messages must be dictionaries")
+        unknown_fields = set(message) - self._IDEMPOTENT_MESSAGE_FIELDS
+        if unknown_fields:
+            names = ", ".join(sorted(unknown_fields))
+            raise TypeError(f"unsupported idempotent message fields: {names}")
+        if "role" not in message:
+            raise ValueError("idempotent append requires role")
+        client_message_id = message.get("client_message_id")
+        if not client_message_id:
+            raise ValueError("idempotent append requires client_message_id")
+
+        role = message["role"]
+        content = self._encode_content(message.get("content"))
+        tool_calls = message.get("tool_calls")
+        tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+        reasoning_details = message.get("reasoning_details")
+        reasoning_details_json = (
+            json.dumps(reasoning_details) if reasoning_details else None
+        )
+        codex_reasoning_items = message.get("codex_reasoning_items")
+        codex_items_json = (
+            json.dumps(codex_reasoning_items)
+            if codex_reasoning_items
+            else None
+        )
+        codex_message_items = message.get("codex_message_items")
+        codex_message_items_json = (
+            json.dumps(codex_message_items)
+            if codex_message_items
+            else None
+        )
+        num_tool_calls = (
+            len(tool_calls)
+            if isinstance(tool_calls, list)
+            else (1 if tool_calls is not None else 0)
+        )
+        return {
+            "role": role,
+            "content": content,
+            "tool_call_id": message.get("tool_call_id"),
+            "tool_calls": tool_calls_json,
+            "tool_name": message.get("tool_name"),
+            "token_count": message.get("token_count"),
+            "finish_reason": message.get("finish_reason"),
+            "reasoning": message.get("reasoning"),
+            "reasoning_content": message.get("reasoning_content"),
+            "reasoning_details": reasoning_details_json,
+            "codex_reasoning_items": codex_items_json,
+            "codex_message_items": codex_message_items_json,
+            "platform_message_id": message.get("platform_message_id"),
+            "client_message_id": client_message_id,
+            "timestamp": time.time(),
+            "num_tool_calls": num_tool_calls,
+            "expected_state": (
+                role,
+                content,
+                message.get("tool_call_id"),
+                tool_calls_json,
+                message.get("tool_name"),
+                message.get("token_count"),
+                message.get("finish_reason"),
+                message.get("reasoning"),
+                message.get("reasoning_content"),
+                reasoning_details_json,
+                codex_items_json,
+                codex_message_items_json,
+                message.get("platform_message_id"),
+            ),
+        }
+
+    @staticmethod
+    def _insert_prepared_idempotent_message(
+        conn: sqlite3.Connection,
+        session_id: str,
+        prepared: Dict[str, Any],
+    ) -> int:
+        cursor = conn.execute(
+            """INSERT INTO messages (session_id, role, content,
+               tool_call_id, tool_calls, tool_name, timestamp, token_count,
+               finish_reason, reasoning, reasoning_content,
+               reasoning_details, codex_reasoning_items,
+               codex_message_items, platform_message_id,
+               client_message_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                prepared["role"],
+                prepared["content"],
+                prepared["tool_call_id"],
+                prepared["tool_calls"],
+                prepared["tool_name"],
+                prepared["timestamp"],
+                prepared["token_count"],
+                prepared["finish_reason"],
+                prepared["reasoning"],
+                prepared["reasoning_content"],
+                prepared["reasoning_details"],
+                prepared["codex_reasoning_items"],
+                prepared["codex_message_items"],
+                prepared["platform_message_id"],
+                prepared["client_message_id"],
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _shadow_prepared_idempotent_message(
+        session_id: str,
+        prepared: Dict[str, Any],
+    ) -> None:
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_append_message
+
+            content = prepared["content"]
+            shadow_append_message(
+                session_id,
+                prepared["role"],
+                content=content if isinstance(content, str) else None,
+                tool_name=prepared["tool_name"],
+                tool_calls_json=prepared["tool_calls"],
+                tool_call_id=prepared["tool_call_id"],
+                token_count=prepared["token_count"],
+                finish_reason=prepared["finish_reason"],
+                reasoning=prepared["reasoning"],
+                reasoning_content=prepared["reasoning_content"],
+                reasoning_details_json=prepared["reasoning_details"],
+                codex_reasoning_items_json=prepared["codex_reasoning_items"],
+                codex_message_items_json=prepared["codex_message_items"],
+                platform_message_id=prepared["platform_message_id"],
+                client_message_id=prepared["client_message_id"],
+                timestamp=prepared["timestamp"],
+                num_tool_calls=prepared["num_tool_calls"],
+            )
+        except Exception as exc:
+            logger.debug(
+                "PG shadow idempotent append failed for %s: %s",
+                session_id,
+                exc,
+            )
+
+    def append_messages_idempotent(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> List[int]:
+        """Atomically append an ordered batch of exact message identities.
+
+        Every lookup, conflict check, insert, and counter update runs in one
+        ``BEGIN IMMEDIATE`` transaction. Exact replays return their existing
+        row ids in input order. Any conflict or SQLite failure rolls back all
+        new rows and counter changes from the batch. Only newly inserted rows
+        are shadowed, in input order, after the complete local commit.
+        """
+        prepared_messages = [
+            self._prepare_idempotent_message(message) for message in messages
+        ]
+        if not prepared_messages:
+            return []
+
+        durable_columns = self._IDEMPOTENT_DURABLE_COLUMNS
+
+        def _do(conn):
+            row_ids: List[int] = []
+            inserted_indexes: List[int] = []
+            for index, prepared in enumerate(prepared_messages):
+                client_message_id = prepared["client_message_id"]
+                rows = conn.execute(
+                    "SELECT id, "
+                    + ", ".join(durable_columns)
+                    + " FROM messages WHERE session_id = ? "
+                    "AND client_message_id = ? ORDER BY id",
+                    (session_id, client_message_id),
+                ).fetchall()
+                if rows:
+                    for existing in rows:
+                        existing_state = tuple(
+                            existing[column] for column in durable_columns
+                        )
+                        if existing_state != prepared["expected_state"]:
+                            raise SessionMessageConflictError(
+                                session_id,
+                                client_message_id,
+                            )
+                    row_ids.append(int(rows[0]["id"]))
+                    continue
+
+                row_ids.append(
+                    self._insert_prepared_idempotent_message(
+                        conn,
+                        session_id,
+                        prepared,
+                    )
+                )
+                inserted_indexes.append(index)
+
+            if inserted_indexes:
+                tool_call_delta = sum(
+                    prepared_messages[index]["num_tool_calls"]
+                    for index in inserted_indexes
+                )
+                conn.execute(
+                    "UPDATE sessions SET message_count = message_count + ?, "
+                    "tool_call_count = tool_call_count + ? WHERE id = ?",
+                    (len(inserted_indexes), tool_call_delta, session_id),
+                )
+            return row_ids, inserted_indexes
+
+        row_ids, inserted_indexes = self._execute_write(_do)
+        for index in inserted_indexes:
+            self._shadow_prepared_idempotent_message(
+                session_id,
+                prepared_messages[index],
+            )
+        return row_ids
 
     @staticmethod
     def _decode_prompt_receipt(row: sqlite3.Row) -> Dict[str, Any]:
@@ -4799,6 +5111,19 @@ class SessionDB:
                 row["client_message_id"]
                 or f"legacy.{_row_sid}.{_ordinal}"
             )
+            # Guidance reservations use the existing finish_reason column as
+            # a durable user-row marker. Restore only the exact allowlisted
+            # generic/lane markers; every other user finish reason stays hidden.
+            if (
+                row["role"] == "user"
+                and row["finish_reason"]
+                in {
+                    "guidance_reserved",
+                    "guidance_reserved_steer",
+                    "guidance_reserved_soft",
+                }
+            ):
+                msg["finish_reason"] = row["finish_reason"]
             # Restore reasoning fields on assistant messages so providers
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.

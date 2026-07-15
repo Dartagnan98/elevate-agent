@@ -10,7 +10,7 @@ reasoning configuration, temperature handling, and extra_body assembly.
 """
 
 import copy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
@@ -112,61 +112,78 @@ class ChatCompletionsTransport(ProviderTransport):
     def convert_messages(
         self, messages: list[dict[str, Any]], **kwargs
     ) -> list[dict[str, Any]]:
-        """Messages are already in OpenAI format — strip internal fields
-        that strict chat-completions providers reject with HTTP 400/422.
+        """Project durable messages onto the Chat Completions schema.
 
-        Strips:
-
-        - Codex Responses API fields: ``codex_reasoning_items`` /
-          ``codex_message_items`` on the message, ``call_id`` /
-          ``response_item_id`` on ``tool_calls`` entries.
-        - ``tool_name`` on tool-result messages — written by
-          ``make_tool_result_message()`` for the SQLite FTS index, but not
-          part of the Chat Completions schema. Strict providers (Fireworks,
-          Moonshot/Kimi) reject any payload containing it with
-          ``Extra inputs are not permitted, field: 'messages[N].tool_name'``.
-          Permissive providers (OpenRouter, MiniMax) silently ignore the
-          field, which masked the bug for months.
+        Session rows intentionally carry local metadata such as stable client
+        ids, timestamps, token counts, UI display text, and platform message
+        ids. A denylist inevitably misses new fields, so strict providers get a
+        role-aware allowlist projection here at the final transport boundary.
+        The original durable message graph is never mutated.
         """
-        needs_sanitize = False
+        common_fields = ("role", "content", "name", "cache_control")
+        assistant_fields = (
+            "tool_calls",
+            "function_call",
+            "audio",
+            "refusal",
+            "reasoning_content",
+            "reasoning_details",
+        )
+        tool_fields = ("tool_call_id",)
+
+        def _project_function(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return copy.deepcopy(value)
+            return {
+                key: copy.deepcopy(value[key])
+                for key in ("name", "arguments")
+                if key in value
+            }
+
+        def _project_tool_call(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return copy.deepcopy(value)
+            projected: dict[str, Any] = {}
+            for key in ("id", "type", "extra_content"):
+                if key in value:
+                    projected[key] = copy.deepcopy(value[key])
+            if "function" in value:
+                projected["function"] = _project_function(value["function"])
+            return projected
+
+        projected_messages: list[dict[str, Any]] = []
+        changed = False
         for msg in messages:
             if not isinstance(msg, dict):
+                projected_messages.append(msg)
                 continue
-            if (
-                "codex_reasoning_items" in msg
-                or "codex_message_items" in msg
-                or "tool_name" in msg
-            ):
-                needs_sanitize = True
-                break
-            tool_calls = msg.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if isinstance(tc, dict) and (
-                        "call_id" in tc or "response_item_id" in tc
-                    ):
-                        needs_sanitize = True
-                        break
-                if needs_sanitize:
-                    break
+            role = msg.get("role")
+            allowed_fields = common_fields
+            if role == "assistant":
+                allowed_fields += assistant_fields
+            elif role == "tool":
+                allowed_fields += tool_fields
 
-        if not needs_sanitize:
-            return messages
+            projected = {
+                key: copy.deepcopy(msg[key])
+                for key in allowed_fields
+                if key in msg
+            }
+            if role == "assistant":
+                if isinstance(projected.get("tool_calls"), list):
+                    projected["tool_calls"] = [
+                        _project_tool_call(tool_call)
+                        for tool_call in projected["tool_calls"]
+                    ]
+                if "function_call" in projected:
+                    projected["function_call"] = _project_function(
+                        projected["function_call"]
+                    )
+            if projected != msg:
+                changed = True
+            projected_messages.append(projected)
 
-        sanitized = copy.deepcopy(messages)
-        for msg in sanitized:
-            if not isinstance(msg, dict):
-                continue
-            msg.pop("codex_reasoning_items", None)
-            msg.pop("codex_message_items", None)
-            msg.pop("tool_name", None)
-            tool_calls = msg.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if isinstance(tc, dict):
-                        tc.pop("call_id", None)
-                        tc.pop("response_item_id", None)
-        return sanitized
+        return projected_messages if changed else messages
 
     def convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tools are already in OpenAI format — identity."""
@@ -280,7 +297,6 @@ class ChatCompletionsTransport(ProviderTransport):
         ephemeral = params.get("ephemeral_max_output_tokens")
         max_tokens = params.get("max_tokens")
         anthropic_max_out = params.get("anthropic_max_output")
-        is_nvidia_nim = params.get("is_nvidia_nim", False)
         is_kimi = params.get("is_kimi", False)
         is_tokenhub = params.get("is_tokenhub", False)
         reasoning_config = params.get("reasoning_config")
@@ -350,7 +366,6 @@ class ChatCompletionsTransport(ProviderTransport):
         extra_body: dict[str, Any] = {}
 
         is_openrouter = params.get("is_openrouter", False)
-        is_nous = params.get("is_nous", False)
         is_github_models = params.get("is_github_models", False)
         provider_name = str(params.get("provider_name") or "").strip().lower()
         base_url = params.get("base_url")

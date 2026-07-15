@@ -1,11 +1,4 @@
-"""A3 regression — a mid-batch append failure must not duplicate rows on retry.
-
-_flush_messages_to_session_db advanced its cursor (_last_flushed_db_idx) only
-after the whole batch, so a failure on message N left rows 0..N-1 committed but
-the cursor unmoved — the next flush replayed them, duplicating transcript rows
-(messages has no UNIQUE on client_message_id). The cursor now advances per
-successful append, so a retry resumes at the failed message.
-"""
+"""A3 regression — ordered SessionDB projection is one atomic retry unit."""
 import os
 from unittest.mock import patch
 
@@ -39,28 +32,44 @@ def test_partial_flush_failure_does_not_duplicate_on_retry(tmp_path):
         {"role": "user", "content": "m4"},
     ]
 
-    real_append = db.append_message
+    real_batch = db.append_messages_idempotent
     calls = {"n": 0}
 
-    def flaky_append(*args, **kwargs):
+    def flaky_batch(*args, **kwargs):
         calls["n"] += 1
-        if calls["n"] == 3:  # fail on the 3rd message (index 2)
-            raise RuntimeError("transient DB lock")
-        return real_append(*args, **kwargs)
+        assert len(args[1]) == 5
+        raise RuntimeError("transient atomic batch failure")
 
-    # First flush: append fails on index 2 → rows 0,1 committed, cursor lands at 2.
-    with patch.object(db, "append_message", side_effect=flaky_append):
+    # The integration calls the batch API once. A failed transaction leaves
+    # no prefix rows and the retry cursor remains at the batch start.
+    with patch.object(
+        db, "append_messages_idempotent", side_effect=flaky_batch
+    ):
         agent._flush_messages_to_session_db(messages, [])
 
     rows = db.get_messages(agent.session_id)
-    assert len(rows) == 2, f"expected 2 rows committed before the failure, got {len(rows)}"
-    assert agent._last_flushed_db_idx == 2, (
-        f"cursor must sit at the failed message, got {agent._last_flushed_db_idx}"
-    )
+    assert rows == []
+    assert calls["n"] == 1
+    assert agent._last_flushed_db_idx == 0
+    stable_ids = [message["client_message_id"] for message in messages]
 
-    # Retry with healthy append: only 2,3,4 get written — NOT a replay of 0,1.
-    agent._flush_messages_to_session_db(messages, [])
+    # Retry the exact stable identities through the healthy atomic batch.
+    with patch.object(
+        db, "append_messages_idempotent", wraps=real_batch
+    ) as healthy_batch:
+        agent._flush_messages_to_session_db(messages, [])
+    healthy_batch.assert_called_once()
     rows = db.get_messages(agent.session_id)
-    assert len(rows) == 5, f"expected 5 total after retry (no duplicates), got {len(rows)}"
+    assert len(rows) == 5
     contents = [r["content"] for r in rows]
-    assert contents == ["m0", "m1", "m2", "m3", "m4"], f"duplicate/misordered rows: {contents}"
+    assert contents == ["m0", "m1", "m2", "m3", "m4"]
+    assert [row["client_message_id"] for row in rows] == stable_ids
+    assert agent._last_flushed_db_idx == 5
+
+    # A later flush is a cursor no-op: no duplicate batch call or rows.
+    with patch.object(
+        db, "append_messages_idempotent", wraps=real_batch
+    ) as no_op_batch:
+        agent._flush_messages_to_session_db(messages, [])
+    no_op_batch.assert_not_called()
+    assert len(db.get_messages(agent.session_id)) == 5

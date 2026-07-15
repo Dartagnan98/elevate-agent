@@ -780,6 +780,7 @@ def attribute_turn_safely(
     main_runtime: Mapping[str, Any] | None = None,
     wait: bool = False,
     wait_timeout: float = _INFERENCE_WAIT_TIMEOUT,
+    allow_background: bool = True,
 ) -> None:
     """Fire-and-forget post-turn attribution for the live agent loop.
 
@@ -829,7 +830,7 @@ def attribute_turn_safely(
         # still reaches the checklist — the exact case freshness logging misses.
         # Off-thread; self-bounded so it only spends an aux call when the
         # resolved deal actually has open current-stage cells.
-        if _scorecard_inference_enabled():
+        if _scorecard_inference_enabled() and allow_background:
             import threading
             t = threading.Thread(
                 target=run_scorecard_inference,
@@ -849,7 +850,12 @@ def attribute_turn_safely(
 
         # Step 3 — micro-resolver backstop. Tool turns only, operator opt-in, and
         # only when the deterministic layers placed NOTHING. Off-thread.
-        if turn_has_tools and not logged and _resolver_enabled():
+        if (
+            allow_background
+            and turn_has_tools
+            and not logged
+            and _resolver_enabled()
+        ):
             tools_used = [name for name, _ in _iter_tool_calls(turn) if name]
             text = _turn_text(turn)
             if text.strip():
@@ -862,5 +868,10 @@ def attribute_turn_safely(
                     ),
                     daemon=True,
                 ).start()
+        elif not allow_background:
+            logger.debug(
+                "Deferred detached scorecard/micro-resolver work for a "
+                "generation-bound turn"
+            )
     except Exception as exc:  # never let attribution break a turn
         logger.debug("attribute_turn_safely skipped: %s", exc)
