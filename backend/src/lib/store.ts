@@ -1235,6 +1235,84 @@ export class DeviceGrantProposalConflictError extends Error {
   }
 }
 
+const DEVICE_V3_USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+export function formatDeviceV3UserCode(bytes: Uint8Array): string {
+  if (bytes.length < 8) throw new Error("device v3 user code needs eight bytes");
+  let out = "";
+  for (let i = 0; i < 8; i += 1) {
+    out += DEVICE_V3_USER_CODE_ALPHABET[
+      bytes[i] % DEVICE_V3_USER_CODE_ALPHABET.length
+    ];
+  }
+  return `${out.slice(0, 4)}-${out.slice(4)}`;
+}
+
+export type DeviceGrantStartV3Result =
+  | {
+      result: "created" | "replay";
+      user_code: string;
+      expires_at: string;
+    }
+  | { result: "resume_poll"; grant_status: "approved" | "claimed" }
+  | { result: "denied" | "expired" | "conflict" | "user_code_conflict" };
+
+export async function startDeviceGrantV3(input: {
+  userCode: string;
+  deviceCodeHash: string;
+  proposedRefreshTokenHash: string;
+  deviceLabel: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  expiresAt: Date;
+}): Promise<DeviceGrantStartV3Result> {
+  const { data, error } = await supabase().rpc("start_device_grant_atomic_v3", {
+    p_device_code_hash: input.deviceCodeHash,
+    p_proposed_refresh_token_hash: input.proposedRefreshTokenHash,
+    p_user_code: input.userCode,
+    p_device_label: input.deviceLabel,
+    p_ip_addr: input.ipAddress,
+    p_user_agent: input.userAgent,
+    p_expires_at: input.expiresAt.toISOString(),
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic device v3 start result");
+  }
+
+  const value = data as Record<string, unknown>;
+  if (value.result === "created" || value.result === "replay") {
+    if (
+      typeof value.user_code !== "string" ||
+      typeof value.expires_at !== "string" ||
+      !Number.isFinite(Date.parse(value.expires_at))
+    ) {
+      throw new Error("invalid atomic device v3 start result");
+    }
+    return {
+      result: value.result,
+      user_code: value.user_code,
+      expires_at: value.expires_at,
+    };
+  }
+  if (
+    value.result === "resume_poll" &&
+    (value.grant_status === "approved" || value.grant_status === "claimed")
+  ) {
+    return { result: "resume_poll", grant_status: value.grant_status };
+  }
+  if (
+    value.result === "denied" ||
+    value.result === "expired" ||
+    value.result === "conflict" ||
+    value.result === "user_code_conflict"
+  ) {
+    return { result: value.result };
+  }
+  throw new Error("invalid atomic device v3 start result");
+}
+
 function deviceGrantUniqueConstraint(
   error: unknown,
 ): "proposal" | "user_code" | null {

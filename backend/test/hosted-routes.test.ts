@@ -3364,6 +3364,15 @@ describe("hosted route handlers", () => {
         id: `device-v2-${slot}-collision-browser`,
         user_id: user.id,
       });
+      const bearer = await issueAccessToken(user, browser);
+      const startBody = await responseJson(
+        await start.POST(jsonRequest("/api/device/start", deviceV2StartBody())),
+      );
+      const grant = db.device_grants[0];
+      // Simulate a legacy/server-random residual committed after the proposal.
+      // New client-controlled writers and v2 table inserts are serialized by
+      // the shared capability lock, but approval must still fail closed for an
+      // already-existing cross-table collision.
       seedLicense({
         id: `device-v2-${slot}-collision-license`,
         user_id: user.id,
@@ -3372,11 +3381,6 @@ describe("hosted route handlers", () => {
         previous_refresh_token_hash:
           slot === "recovery" ? refreshHash(REFRESH_V2_B) : null,
       });
-      const bearer = await issueAccessToken(user, browser);
-      const startBody = await responseJson(
-        await start.POST(jsonRequest("/api/device/start", deviceV2StartBody())),
-      );
-      const grant = db.device_grants[0];
 
       const response = await approve.POST(
         jsonRequest(

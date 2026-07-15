@@ -241,6 +241,27 @@ let nextRpcAfterHook: {
   name: string;
   run: () => void | Promise<void>;
 } | null = null;
+let nextCapabilityOperationBarrier: {
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
+let refreshCapabilityLockTails = new Map<string, Promise<void>>();
+let nextDeviceApprovalCapabilityReadHook: (() => void | Promise<void>) | null = null;
+let nextDeviceApprovalUserLockGate: {
+  reached: Promise<void>;
+  markReached: () => void;
+  released: Promise<void>;
+  release: () => void;
+} | null = null;
+let nextDeviceGrantRowOperationBarrier: {
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
+let deviceGrantRowLockTails = new Map<string, Promise<void>>();
 let nextInitialIssuanceBeforeInsertHook: (() => void) | null = null;
 let nextDeviceGrantDecisionBarrier: {
   parties: number;
@@ -259,6 +280,10 @@ export type AtomicDeviceV2FailureStage =
   | "approval_after_audit_insert"
   | "claim_after_grant_update";
 let nextAtomicDeviceV2Failure: AtomicDeviceV2FailureStage | null = null;
+export type AtomicDeviceStartV3FailureStage =
+  | "user_code_conflict"
+  | "after_insert";
+let nextAtomicDeviceStartV3Failure: AtomicDeviceStartV3FailureStage | null = null;
 let nextLoginCodeOperationBarrier: {
   parties: number;
   arrived: number;
@@ -330,10 +355,17 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextRpcBarrier = null;
   nextRpcGate = null;
   nextRpcAfterHook = null;
+  nextCapabilityOperationBarrier = null;
+  refreshCapabilityLockTails = new Map<string, Promise<void>>();
+  nextDeviceApprovalCapabilityReadHook = null;
+  nextDeviceApprovalUserLockGate = null;
+  nextDeviceGrantRowOperationBarrier = null;
+  deviceGrantRowLockTails = new Map<string, Promise<void>>();
   nextInitialIssuanceBeforeInsertHook = null;
   nextDeviceGrantDecisionBarrier = null;
   nextAtomicDeviceApprovalFailure = null;
   nextAtomicDeviceV2Failure = null;
+  nextAtomicDeviceStartV3Failure = null;
   nextLoginCodeOperationBarrier = null;
   nextAtomicLoginCodeFailure = null;
   nextMembershipOperationBarrier = null;
@@ -357,6 +389,14 @@ export function barrierNextSupabaseRpcs(name: string, parties = 2): void {
     release = resolve;
   });
   nextRpcBarrier = { name, parties, arrived: 0, promise, release };
+}
+
+export function barrierNextRefreshCapabilityOperations(parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextCapabilityOperationBarrier = { parties, arrived: 0, promise, release };
 }
 
 export function gateNextSupabaseRpc(name: string): {
@@ -389,6 +429,50 @@ export function afterNextSupabaseRpc(
   nextRpcAfterHook = { name, run };
 }
 
+export function afterNextDeviceApprovalCapabilityRead(
+  run: () => void | Promise<void>,
+): void {
+  nextDeviceApprovalCapabilityReadHook = run;
+}
+
+export function gateNextDeviceApprovalUserLock(): {
+  reached: Promise<void>;
+  release: () => void;
+} {
+  let markReached = () => {};
+  let release = () => {};
+  const reached = new Promise<void>((resolve) => {
+    markReached = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const gate = { reached, markReached, released, release };
+  nextDeviceApprovalUserLockGate = gate;
+  return {
+    reached,
+    release: () => {
+      if (nextDeviceApprovalUserLockGate === gate) {
+        nextDeviceApprovalUserLockGate = null;
+      }
+      release();
+    },
+  };
+}
+
+export function barrierNextDeviceGrantRowOperations(parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextDeviceGrantRowOperationBarrier = {
+    parties,
+    arrived: 0,
+    promise,
+    release,
+  };
+}
+
 export function beforeNextInitialIssuanceInsert(run: () => void): void {
   nextInitialIssuanceBeforeInsertHook = run;
 }
@@ -409,6 +493,12 @@ export function failNextAtomicDeviceApproval(
 
 export function failNextAtomicDeviceV2(stage: AtomicDeviceV2FailureStage): void {
   nextAtomicDeviceV2Failure = stage;
+}
+
+export function failNextAtomicDeviceStartV3(
+  stage: AtomicDeviceStartV3FailureStage,
+): void {
+  nextAtomicDeviceStartV3Failure = stage;
 }
 
 export function failNextDeviceGrantInsertConflict(
@@ -1131,6 +1221,15 @@ function atomicLicenseRefreshV2(body: unknown): Response {
     return okJson({ result: "expired" });
   }
 
+  if (
+    activeDb.device_grants.some(
+      (candidate) => candidate.proposed_refresh_token_hash === nextHash,
+    )
+  ) {
+    license.revoked = true;
+    return okJson({ result: "conflict" });
+  }
+
   const isFirstExecution = license.refresh_token_hash === currentHash;
   if (isFirstExecution) {
     if (
@@ -1216,6 +1315,14 @@ function atomicIssueExistingUserLicenseV2(body: unknown): Response {
     return okJson({ message: "invalid initial issuance material" }, 400);
   }
 
+  if (
+    activeDb.device_grants.some(
+      (candidate) => candidate.proposed_refresh_token_hash === refreshTokenHash,
+    )
+  ) {
+    return okJson({ result: "collision" });
+  }
+
   const candidate = initialIssuanceCandidate(refreshTokenHash);
   const user = activeDb.users.find((row) => row.id === userId);
   if (!user || user.password_hash !== expectedPasswordHash) {
@@ -1292,6 +1399,14 @@ function atomicSignupWithLicenseV2(body: unknown): Response {
     !/^[0-9a-f]{64}$/.test(refreshTokenHash)
   ) {
     return okJson({ message: "invalid signup issuance material" }, 400);
+  }
+
+  if (
+    activeDb.device_grants.some(
+      (candidate) => candidate.proposed_refresh_token_hash === refreshTokenHash,
+    )
+  ) {
+    return okJson({ result: "collision" });
   }
 
   if (activeDb.users.some((candidate) => candidate.email === email)) {
@@ -1375,6 +1490,14 @@ function atomicReplaySignupLicenseV2(body: unknown): Response {
     !/^[0-9a-f]{64}$/.test(refreshTokenHash)
   ) {
     return okJson({ message: "invalid signup replay material" }, 400);
+  }
+
+  if (
+    activeDb.device_grants.some(
+      (candidate) => candidate.proposed_refresh_token_hash === refreshTokenHash,
+    )
+  ) {
+    return okJson({ result: "invalid" });
   }
 
   const candidate = initialIssuanceCandidate(refreshTokenHash);
@@ -1522,6 +1645,170 @@ function atomicDeviceApproval(body: unknown): Response {
   activeDb.audit_log.push(audit);
 
   return okJson({ result: "approved", license_id: license.id });
+}
+
+function atomicDeviceStartV3(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const deviceCodeHash = String(input.p_device_code_hash || "");
+  const proposedRefreshTokenHash = String(
+    input.p_proposed_refresh_token_hash || "",
+  );
+  const userCode = String(input.p_user_code || "");
+  const deviceLabel = input.p_device_label as string | null | undefined;
+  const ipAddress = input.p_ip_addr as string | null | undefined;
+  const userAgent = input.p_user_agent as string | null | undefined;
+  const expiresAt = String(input.p_expires_at || "");
+  const nowMs = Date.now();
+  const expiresAtMs = Date.parse(expiresAt);
+  if (
+    !/^[0-9a-f]{64}$/.test(deviceCodeHash) ||
+    !/^[0-9a-f]{64}$/.test(proposedRefreshTokenHash) ||
+    !/^[A-HJ-KM-NP-Z2-9]{4}-[A-HJ-KM-NP-Z2-9]{4}$/.test(userCode) ||
+    !Number.isFinite(expiresAtMs) ||
+    expiresAtMs <= nowMs ||
+    expiresAtMs > nowMs + 11 * 60 * 1000 ||
+    String(deviceLabel || "").length > 120 ||
+    String(ipAddress || "").length > 255 ||
+    String(userAgent || "").length > 1024
+  ) {
+    return okJson({ message: "invalid device v3 start material" }, 400);
+  }
+
+  const byDevice = activeDb.device_grants.find(
+    (candidate) => candidate.device_code_hash === deviceCodeHash,
+  );
+  if (byDevice) {
+    if (byDevice.proposed_refresh_token_hash !== proposedRefreshTokenHash) {
+      return okJson({ result: "conflict" });
+    }
+    if (byDevice.status === "pending") {
+      if (Date.parse(byDevice.expires_at) <= nowMs) {
+        Object.assign(byDevice, {
+          status: "expired",
+          refresh_token_plain: null,
+          claim_retry_until: null,
+        });
+        return okJson({ result: "expired" });
+      }
+      if (
+        !byDevice.user_id &&
+        !byDevice.license_id &&
+        !byDevice.refresh_token_plain &&
+        !byDevice.claim_retry_until
+      ) {
+        if (
+          activeDb.licenses.some(
+            (candidate) =>
+              candidate.refresh_token_hash === proposedRefreshTokenHash ||
+              candidate.previous_refresh_token_hash === proposedRefreshTokenHash,
+          )
+        ) {
+          return okJson({ result: "conflict" });
+        }
+        return okJson({
+          result: "replay",
+          user_code: byDevice.user_code,
+          expires_at: byDevice.expires_at,
+        });
+      }
+      return okJson({ result: "conflict" });
+    }
+    if (byDevice.status === "approved") {
+      if (Date.parse(byDevice.expires_at) <= nowMs) {
+        const orphan = activeDb.licenses.find(
+          (candidate) =>
+            candidate.id === byDevice.license_id &&
+            candidate.user_id === byDevice.user_id &&
+            (candidate.refresh_token_hash === proposedRefreshTokenHash ||
+              candidate.previous_refresh_token_hash === proposedRefreshTokenHash),
+        );
+        if (orphan) orphan.revoked = true;
+        Object.assign(byDevice, {
+          status: "expired",
+          refresh_token_plain: null,
+          claim_retry_until: null,
+        });
+        return okJson({ result: "expired" });
+      }
+      const license = activeDb.licenses.find(
+        (candidate) =>
+          candidate.id === byDevice.license_id &&
+          candidate.user_id === byDevice.user_id &&
+          (candidate.refresh_token_hash === proposedRefreshTokenHash ||
+            candidate.previous_refresh_token_hash === proposedRefreshTokenHash),
+      );
+      if (byDevice.user_id && byDevice.license_id && !byDevice.refresh_token_plain && license) {
+        return okJson({ result: "resume_poll", grant_status: "approved" });
+      }
+      return okJson({ result: "conflict" });
+    }
+    if (byDevice.status === "claimed") {
+      const license = activeDb.licenses.find(
+        (candidate) =>
+          candidate.id === byDevice.license_id &&
+          candidate.user_id === byDevice.user_id &&
+          (candidate.refresh_token_hash === proposedRefreshTokenHash ||
+            candidate.previous_refresh_token_hash === proposedRefreshTokenHash),
+      );
+      if (byDevice.user_id && byDevice.license_id && !byDevice.refresh_token_plain && license) {
+        return okJson({ result: "resume_poll", grant_status: "claimed" });
+      }
+      return okJson({ result: "conflict" });
+    }
+    if (byDevice.status === "denied") return okJson({ result: "denied" });
+    if (byDevice.status === "expired") return okJson({ result: "expired" });
+    return okJson({ result: "conflict" });
+  }
+
+  if (
+    activeDb.device_grants.some(
+      (candidate) =>
+        candidate.proposed_refresh_token_hash === proposedRefreshTokenHash,
+    ) ||
+    activeDb.licenses.some(
+      (candidate) =>
+        candidate.refresh_token_hash === proposedRefreshTokenHash ||
+        candidate.previous_refresh_token_hash === proposedRefreshTokenHash,
+    )
+  ) {
+    return okJson({ result: "conflict" });
+  }
+
+  if (activeDb.device_grants.some((candidate) => candidate.user_code === userCode)) {
+    return okJson({ result: "user_code_conflict" });
+  }
+  if (nextAtomicDeviceStartV3Failure === "user_code_conflict") {
+    nextAtomicDeviceStartV3Failure = null;
+    return okJson({ result: "user_code_conflict" });
+  }
+
+  const grant: DeviceGrantRow = {
+    id: `grant-${nextGrantId}`,
+    user_code: userCode,
+    device_code_hash: deviceCodeHash,
+    user_id: null,
+    license_id: null,
+    status: "pending",
+    device_label: deviceLabel ?? null,
+    ip_addr: ipAddress ?? null,
+    user_agent: userAgent ?? null,
+    created_at: new Date(nowMs).toISOString(),
+    expires_at: expiresAt,
+    approved_at: null,
+    claimed_at: null,
+    last_polled_at: null,
+    refresh_token_plain: null,
+    proposed_refresh_token_hash: proposedRefreshTokenHash,
+    claim_retry_until: null,
+  };
+  if (nextAtomicDeviceStartV3Failure === "after_insert") {
+    nextAtomicDeviceStartV3Failure = null;
+    return okJson({ message: "injected device v3 start rollback" }, 500);
+  }
+
+  activeDb.device_grants.push(grant);
+  nextGrantId += 1;
+  return okJson({ result: "created", user_code: userCode, expires_at: expiresAt });
 }
 
 function atomicDeviceApprovalV2(body: unknown): Response {
@@ -2321,6 +2608,103 @@ function headerValue(headers: HeadersInit | undefined, name: string): string {
   return String(record[name] || record[name.toLowerCase()] || "");
 }
 
+async function waitForRefreshCapabilityOperationBarrier(): Promise<void> {
+  if (!nextCapabilityOperationBarrier) return;
+  const barrier = nextCapabilityOperationBarrier;
+  barrier.arrived += 1;
+  if (barrier.arrived === barrier.parties) {
+    nextCapabilityOperationBarrier = null;
+    barrier.release();
+    return;
+  }
+  await barrier.promise;
+}
+
+async function withRefreshCapabilityLock<T>(
+  refreshTokenHash: string,
+  run: () => T | Promise<T>,
+): Promise<T> {
+  const previous = refreshCapabilityLockTails.get(refreshTokenHash) ?? Promise.resolve();
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => held);
+  refreshCapabilityLockTails.set(refreshTokenHash, tail);
+  await previous;
+  try {
+    return await run();
+  } finally {
+    release();
+    if (refreshCapabilityLockTails.get(refreshTokenHash) === tail) {
+      refreshCapabilityLockTails.delete(refreshTokenHash);
+    }
+  }
+}
+
+async function waitForDeviceGrantRowOperationBarrier(): Promise<void> {
+  if (!nextDeviceGrantRowOperationBarrier) return;
+  const barrier = nextDeviceGrantRowOperationBarrier;
+  barrier.arrived += 1;
+  if (barrier.arrived === barrier.parties) {
+    nextDeviceGrantRowOperationBarrier = null;
+    barrier.release();
+    return;
+  }
+  await barrier.promise;
+}
+
+async function withDeviceGrantRowLock<T>(
+  grantId: string,
+  run: () => T | Promise<T>,
+): Promise<T> {
+  const previous = deviceGrantRowLockTails.get(grantId) ?? Promise.resolve();
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => held);
+  deviceGrantRowLockTails.set(grantId, tail);
+  await previous;
+  try {
+    return await run();
+  } finally {
+    release();
+    if (deviceGrantRowLockTails.get(grantId) === tail) {
+      deviceGrantRowLockTails.delete(grantId);
+    }
+  }
+}
+
+async function runAfterDeviceApprovalCapabilityReadHook(): Promise<void> {
+  if (!nextDeviceApprovalCapabilityReadHook) return;
+  const hook = nextDeviceApprovalCapabilityReadHook;
+  nextDeviceApprovalCapabilityReadHook = null;
+  await hook();
+}
+
+async function waitForDeviceApprovalUserLockGate(): Promise<void> {
+  if (!nextDeviceApprovalUserLockGate) return;
+  const gate = nextDeviceApprovalUserLockGate;
+  gate.markReached();
+  await gate.released;
+  if (nextDeviceApprovalUserLockGate === gate) {
+    nextDeviceApprovalUserLockGate = null;
+  }
+}
+
+async function runRefreshCapabilityRpc(
+  body: unknown,
+  parameter: string,
+  run: () => Response,
+): Promise<Response> {
+  const input = (body || {}) as Record<string, unknown>;
+  const refreshTokenHash = String(input[parameter] || "");
+  if (!/^[0-9a-f]{64}$/.test(refreshTokenHash)) return run();
+  await waitForRefreshCapabilityOperationBarrier();
+  return withRefreshCapabilityLock(refreshTokenHash, run);
+}
+
 async function waitForDeviceGrantDecisionBarrier(): Promise<void> {
   if (!nextDeviceGrantDecisionBarrier) return;
   const barrier = nextDeviceGrantDecisionBarrier;
@@ -2403,7 +2787,11 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     activeDb.calls.push({ table: "issue_existing_user_license_v2", method, body });
     await waitForNamedRpcGate("issue_existing_user_license_v2");
     await waitForNamedRpcBarrier("issue_existing_user_license_v2");
-    const response = atomicIssueExistingUserLicenseV2(body);
+    const response = await runRefreshCapabilityRpc(
+      body,
+      "p_refresh_token_hash",
+      () => atomicIssueExistingUserLicenseV2(body),
+    );
     await runAfterNamedRpcHook("issue_existing_user_license_v2");
     return response;
   }
@@ -2412,7 +2800,11 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     activeDb.calls.push({ table: "signup_with_license_v2", method, body });
     await waitForNamedRpcGate("signup_with_license_v2");
     await waitForNamedRpcBarrier("signup_with_license_v2");
-    const response = atomicSignupWithLicenseV2(body);
+    const response = await runRefreshCapabilityRpc(
+      body,
+      "p_refresh_token_hash",
+      () => atomicSignupWithLicenseV2(body),
+    );
     await runAfterNamedRpcHook("signup_with_license_v2");
     return response;
   }
@@ -2421,7 +2813,11 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     activeDb.calls.push({ table: "replay_signup_license_v2", method, body });
     await waitForNamedRpcGate("replay_signup_license_v2");
     await waitForNamedRpcBarrier("replay_signup_license_v2");
-    const response = atomicReplaySignupLicenseV2(body);
+    const response = await runRefreshCapabilityRpc(
+      body,
+      "p_refresh_token_hash",
+      () => atomicReplaySignupLicenseV2(body),
+    );
     await runAfterNamedRpcHook("replay_signup_license_v2");
     return response;
   }
@@ -2429,14 +2825,68 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
   if (url.pathname.includes("/rpc/rotate_license_refresh_v2")) {
     activeDb.calls.push({ table: "rotate_license_refresh_v2", method, body });
     await waitForNamedRpcBarrier("rotate_license_refresh_v2");
-    return atomicLicenseRefreshV2(body);
+    return runRefreshCapabilityRpc(
+      body,
+      "p_next_refresh_token_hash",
+      () => atomicLicenseRefreshV2(body),
+    );
+  }
+
+  if (url.pathname.includes("/rpc/start_device_grant_atomic_v3")) {
+    activeDb.calls.push({ table: "start_device_grant_atomic_v3", method, body });
+    await waitForNamedRpcGate("start_device_grant_atomic_v3");
+    await waitForNamedRpcBarrier("start_device_grant_atomic_v3");
+    const response = await runRefreshCapabilityRpc(
+      body,
+      "p_proposed_refresh_token_hash",
+      () => atomicDeviceStartV3(body),
+    );
+    await runAfterNamedRpcHook("start_device_grant_atomic_v3");
+    return response;
   }
 
   if (url.pathname.includes("/rpc/approve_device_grant_atomic_v2")) {
     activeDb.calls.push({ table: "approve_device_grant_atomic_v2", method, body });
     await waitForDeviceGrantDecisionBarrier();
     await waitForNamedRpcBarrier("approve_device_grant_atomic_v2");
-    return atomicDeviceApprovalV2(body);
+    const input = (body || {}) as Record<string, unknown>;
+    const grantId = String(input.p_grant_id || "");
+    const proposedRefreshTokenHash =
+      activeDb.device_grants.find((candidate) => candidate.id === grantId)
+        ?.proposed_refresh_token_hash ?? "";
+    await runAfterDeviceApprovalCapabilityReadHook();
+    if (!/^[0-9a-f]{64}$/.test(proposedRefreshTokenHash)) {
+      return atomicDeviceApprovalV2(body);
+    }
+    await waitForRefreshCapabilityOperationBarrier();
+    return withRefreshCapabilityLock(proposedRefreshTokenHash, async () => {
+      await waitForDeviceGrantRowOperationBarrier();
+      return withDeviceGrantRowLock(grantId, async () => {
+        const lockedGrant = activeDb.device_grants.find(
+          (candidate) => candidate.id === grantId,
+        );
+        if (
+          lockedGrant &&
+          lockedGrant.proposed_refresh_token_hash !== proposedRefreshTokenHash
+        ) {
+          return okJson({
+            result: "conflict",
+            grant_status: lockedGrant.status,
+          });
+        }
+        await waitForDeviceApprovalUserLockGate();
+        const userId = String(input.p_user_id || "");
+        const lockedUser = activeDb.users.find(
+          (candidate) =>
+            candidate.id === userId &&
+            ["active", "trialing"].includes(candidate.status),
+        );
+        if (!lockedUser) {
+          return okJson({ message: "device approver is not active" }, 500);
+        }
+        return atomicDeviceApprovalV2(body);
+      });
+    });
   }
 
   if (url.pathname.includes("/rpc/poll_device_grant_pending_v2")) {
@@ -2449,7 +2899,14 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
   if (url.pathname.includes("/rpc/claim_device_grant_atomic_v2")) {
     activeDb.calls.push({ table: "claim_device_grant_atomic_v2", method, body });
     await waitForNamedRpcBarrier("claim_device_grant_atomic_v2");
-    return atomicDeviceClaimV2(body);
+    const input = (body || {}) as Record<string, unknown>;
+    const deviceCodeHash = String(input.p_device_code_hash || "");
+    const grant = activeDb.device_grants.find(
+      (candidate) => candidate.device_code_hash === deviceCodeHash,
+    );
+    if (!grant) return atomicDeviceClaimV2(body);
+    await waitForDeviceGrantRowOperationBarrier();
+    return withDeviceGrantRowLock(grant.id, () => atomicDeviceClaimV2(body));
   }
 
   if (url.pathname.includes("/rpc/expire_stale_device_grants_v2")) {
@@ -2530,37 +2987,75 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     }
     if (table === "device_grants") {
       const row = asArrayBody(body)[0] || {};
-      if (nextDeviceGrantInsertConflict) {
-        const conflict = nextDeviceGrantInsertConflict;
-        nextDeviceGrantInsertConflict = null;
-        return uniqueConstraintError(
-          conflict === "proposal"
-            ? "device_grants_proposed_refresh_token_hash_uidx"
-            : "device_grants_user_code_key",
-        );
-      }
-      if (
-        activeDb.device_grants.some(
-          (candidate) => candidate.user_code === String(row.user_code),
-        )
-      ) {
-        return uniqueConstraintError("device_grants_user_code_key");
-      }
       const proposal = row.proposed_refresh_token_hash;
-      if (
-        typeof proposal === "string" &&
-        activeDb.device_grants.some(
-          (candidate) => candidate.proposed_refresh_token_hash === proposal,
-        )
-      ) {
-        return uniqueConstraintError(
-          "device_grants_proposed_refresh_token_hash_uidx",
-        );
+      const insertDeviceGrant = (): Response => {
+        if (nextDeviceGrantInsertConflict) {
+          const conflict = nextDeviceGrantInsertConflict;
+          nextDeviceGrantInsertConflict = null;
+          return uniqueConstraintError(
+            conflict === "proposal"
+              ? "device_grants_proposed_refresh_token_hash_uidx"
+              : "device_grants_user_code_key",
+          );
+        }
+        if (
+          activeDb.device_grants.some(
+            (candidate) => candidate.user_code === String(row.user_code),
+          )
+        ) {
+          return uniqueConstraintError("device_grants_user_code_key");
+        }
+        if (
+          typeof proposal === "string" &&
+          (activeDb.device_grants.some(
+            (candidate) => candidate.proposed_refresh_token_hash === proposal,
+          ) ||
+            activeDb.licenses.some(
+              (candidate) =>
+                candidate.refresh_token_hash === proposal ||
+                candidate.previous_refresh_token_hash === proposal,
+            ))
+        ) {
+          return uniqueConstraintError(
+            "device_grants_proposed_refresh_token_hash_uidx",
+          );
+        }
+        return okJson(insertRows(table, body), 201);
+      };
+      if (typeof proposal === "string" && /^[0-9a-f]{64}$/.test(proposal)) {
+        await waitForRefreshCapabilityOperationBarrier();
+        return withRefreshCapabilityLock(proposal, insertDeviceGrant);
       }
+      return insertDeviceGrant();
     }
     return okJson(insertRows(table, body), 201);
   }
   if (method === "PATCH") {
+    if (
+      table === "device_grants" &&
+      Object.prototype.hasOwnProperty.call(
+        (body || {}) as Record<string, unknown>,
+        "proposed_refresh_token_hash",
+      )
+    ) {
+      const replacement = (body as Record<string, unknown>)
+        .proposed_refresh_token_hash;
+      const id = readEq(url.searchParams, "id");
+      const changesProposal = activeDb.device_grants.some(
+        (grant) =>
+          (!id || grant.id === id) &&
+          grant.proposed_refresh_token_hash !== replacement,
+      );
+      if (changesProposal) {
+        return okJson(
+          {
+            code: "23514",
+            message: "device grant refresh proposal is immutable",
+          },
+          400,
+        );
+      }
+    }
     if (
       table === "device_grants" &&
       (body as Record<string, unknown> | null)?.status === "denied"
