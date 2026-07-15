@@ -470,10 +470,12 @@ def test_exact_beta_refresh_sends_recoverable_triplet_only_to_signed_backend(
     assert os.environ["ELEVATE_BACKEND_URL"] == ATTACKER_BACKEND
 
 
-def test_exact_beta_device_link_starts_only_on_signed_backend_without_state_change(
+def test_exact_beta_device_v3_start_uses_signed_backend_and_preserves_local_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from elevate_cli import refresh_pending
+
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setenv("ELEVATE_BACKEND_URL", ATTACKER_BACKEND)
     monkeypatch.setattr(license_mod, "BACKEND_URL", ATTACKER_BACKEND)
@@ -493,14 +495,20 @@ def test_exact_beta_device_link_starts_only_on_signed_backend_without_state_chan
     with pytest.raises(license_mod.LicenseError, match="Could not start device link"):
         license_mod.link_device("Realtor Mac", interval_override=1)
 
-    assert calls == [
-        {
-            "url": f"{license_mod.DEFAULT_BACKEND}/api/device/start",
-            "json": {"device_label": "Realtor Mac"},
-        }
-    ]
+    assert len(calls) == 1
+    assert calls[0]["url"] == f"{license_mod.DEFAULT_BACKEND}/api/device/start"
+    request = calls[0]["json"]
+    assert request["protocol_version"] == 3
+    assert request["device_label"] == "Realtor Mac"
+    assert refresh_pending.canonical_token32(request["device_code"])
+    pending = refresh_pending.read_device_pending(license_mod._beta_profile_root())
+    assert pending is not None
+    assert request["proposed_refresh_token_hash"] == hashlib.sha256(
+        pending.initial_refresh_token.encode("ascii")
+    ).hexdigest()
     assert not calls[0]["url"].startswith(ATTACKER_BACKEND)
     assert license_path.read_bytes() == before_bytes
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
 
 
 def test_exact_beta_success_persists_one_complete_verified_entitlement_snapshot(
@@ -779,6 +787,8 @@ def test_exact_beta_every_token_auth_flow_rejects_incomplete_entitlement_success
 def test_exact_beta_device_link_rejects_incomplete_approved_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from elevate_cli import refresh_pending
+
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setattr(license_mod.time, "sleep", lambda _seconds: None)
     stale = _beta_license(
@@ -787,28 +797,35 @@ def test_exact_beta_device_link_rejects_incomplete_approved_snapshot(
         entitlements=["real_estate_sales"],
     )
     license_mod.save(stale)
-    payloads = [
-        {
-            "device_code": "device-code",
-            "user_code": "ABCD-EFGH",
-            "verification_uri": "https://example.test/link",
-            "expires_in": 60,
-            "interval": 1,
-        },
-        {
-            "status": "approved",
-            "email": "agent@example.test",
-            "access_token": _access_token(),
-            "refresh_token": "refresh-secret",
-            "license_id": "license-1",
-            "tier": "pro",
-        },
-    ]
-    calls: list[str] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _IncompleteDeviceClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append((url, dict(json)))
+            if url.endswith("/api/device/start"):
+                return _SuccessResponse(_device_v3_start_payload(json))
+            return _SuccessResponse(
+                {
+                    "status": "approved",
+                    "protocol_version": 2,
+                    "email": "agent@example.test",
+                    "access_token": _access_token(),
+                    "refresh_token": json["refresh_token"],
+                    "license_id": "license-1",
+                    "tier": "pro",
+                }
+            )
+
     monkeypatch.setattr(
         license_mod.httpx,
         "Client",
-        lambda **kwargs: _SequenceClient(calls, payloads, **kwargs),
+        lambda **_kwargs: _IncompleteDeviceClient(),
     )
 
     with pytest.raises(license_mod.LicenseError) as exc_info:
@@ -816,10 +833,17 @@ def test_exact_beta_device_link_rejects_incomplete_approved_snapshot(
 
     assert exc_info.value.code == "beta_entitlement_assertion_missing"
     assert license_mod.load() == stale
-    assert calls == [
+    assert [url for url, _payload in calls] == [
         f"{license_mod.DEFAULT_BACKEND}/api/device/start",
         f"{license_mod.DEFAULT_BACKEND}/api/device/poll",
     ]
+    pending = refresh_pending.read_device_pending(license_mod._beta_profile_root())
+    assert pending is not None
+    assert calls[0][1]["device_code"] == pending.device_code
+    assert calls[1][1] == {
+        "device_code": pending.device_code,
+        "refresh_token": pending.initial_refresh_token,
+    }
 
 
 @pytest.mark.parametrize("status_code", [401, 402])
@@ -1148,33 +1172,55 @@ def test_exact_beta_ambiguous_4xx_retains_marker_without_v1_fallback(
 def test_exact_beta_device_link_accepts_only_signed_approved_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from elevate_cli import refresh_pending
+
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setattr(license_mod.time, "sleep", lambda _seconds: None)
-    approved = {
-        "status": "approved",
-        **_signed_payload(entitlements=["real_estate_admin"]),
-    }
-    payloads = [
-        {
-            "device_code": "device-code",
-            "user_code": "ABCD-EFGH",
-            "verification_uri": "https://example.test/link",
-            "expires_in": 60,
-            "interval": 1,
-        },
-        approved,
-    ]
-    calls: list[str] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _SignedDeviceClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append((url, dict(json)))
+            if url.endswith("/api/device/start"):
+                return _SuccessResponse(_device_v3_start_payload(json))
+            if url.endswith("/api/device/poll"):
+                return _SuccessResponse(
+                    {
+                        "status": "approved",
+                        "protocol_version": 2,
+                        **_signed_payload(
+                            refresh_token=json["refresh_token"],
+                            entitlements=["real_estate_admin"],
+                        ),
+                    }
+                )
+            return _SuccessResponse(
+                _signed_payload(
+                    refresh_token=json["next_refresh_token"],
+                    entitlements=["real_estate_admin"],
+                )
+            )
+
     monkeypatch.setattr(
         license_mod.httpx,
         "Client",
-        lambda **kwargs: _SequenceClient(calls, payloads, **kwargs),
+        lambda **_kwargs: _SignedDeviceClient(),
     )
 
     lic = license_mod.link_device("Realtor Mac", interval_override=1)
 
     assert lic.entitlements == ["real_estate_admin"]
     assert license_mod.load() == lic
+    assert calls[0][1]["protocol_version"] == 3
+    assert calls[1][1]["refresh_token"] != lic.refresh_token
+    assert calls[2][1]["next_refresh_token"] == lic.refresh_token
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
 
 
 def test_exact_beta_entitlement_verification_failure_removes_partial_login(
@@ -1658,6 +1704,21 @@ CANONICAL_DEVICE_D = _b64url(b"D" * 32)
 CANONICAL_DEVICE_I = _b64url(b"I" * 32)
 
 
+def _device_v3_start_payload(request: dict[str, Any]) -> dict[str, Any]:
+    user_code = "ABCD-EFGH"
+    return {
+        "protocol_version": 3,
+        "device_code": request["device_code"],
+        "user_code": user_code,
+        "verification_uri": f"{license_mod.DEFAULT_BACKEND}/link",
+        "verification_uri_complete": (
+            f"{license_mod.DEFAULT_BACKEND}/link?code={user_code}"
+        ),
+        "expires_in": 60,
+        "interval": 1,
+    }
+
+
 def _write_device_pending() -> Any:
     from elevate_cli import refresh_pending
 
@@ -1721,7 +1782,7 @@ def test_exact_beta_device_reconciliation_cleans_only_verified_current_b_or_c(
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
+    pending = _write_device_pending()
     lic = _beta_license(refresh_token=refresh_token, entitlements=[])
     _install_beta_snapshot(lic)
     real_sync = license_mod.sync_license_entitlements
@@ -1741,11 +1802,16 @@ def test_exact_beta_device_reconciliation_cleans_only_verified_current_b_or_c(
 
     outcome = license_mod.reconcile_device_pending()
 
-    assert outcome.status == "already_persisted"
+    expected_final = refresh_token == CANONICAL_REFRESH_C
+    assert outcome.status == (
+        "already_persisted" if expected_final else "interim_persisted"
+    )
     assert outcome.license == lic
-    assert outcome.pending is None
+    assert outcome.pending == (None if expected_final else pending)
     assert events == ["mirror"]
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert refresh_pending.read_device_pending(
+        license_mod._beta_profile_root()
+    ) == (None if expected_final else pending)
 
 
 def test_exact_beta_device_reconciliation_retains_marker_when_mirror_fails(
@@ -1774,13 +1840,13 @@ def test_exact_beta_device_reconciliation_retains_marker_when_mirror_fails(
     assert license_mod.read_verified_beta_license_snapshot(require_current=True) == lic
 
 
-def test_exact_beta_expired_explicit_auth_snapshot_supersedes_stale_device_marker(
+def test_exact_beta_reconciliation_retains_unordered_signed_predecessor_and_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
+    pending = _write_device_pending()
     expired = license_mod._beta_license_from_mapping(
         _signed_payload(
             refresh_token=CANONICAL_REFRESH_A,
@@ -1793,21 +1859,22 @@ def test_exact_beta_expired_explicit_auth_snapshot_supersedes_stale_device_marke
 
     outcome = license_mod.reconcile_device_pending()
 
-    assert outcome.status == "beta_auth_superseded"
+    assert outcome.status == "predecessor_unverifiable"
     assert outcome.license == expired
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert outcome.pending == pending
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
     assert license_mod.read_verified_beta_license_snapshot(
         require_current=False
     ) == expired
 
 
-def test_exact_beta_expired_paid_supersession_clears_device_then_refreshes(
+def test_exact_beta_expired_unordered_predecessor_cannot_destroy_device_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
+    pending = _write_device_pending()
     expired = license_mod._beta_license_from_mapping(
         _signed_payload(
             refresh_token=CANONICAL_REFRESH_A,
@@ -1828,13 +1895,12 @@ def test_exact_beta_expired_paid_supersession_clears_device_then_refreshes(
         lambda **kwargs: _SuccessClient(calls, fresh_payload, **kwargs),
     )
 
-    fresh = license_mod.ensure_valid()
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.ensure_valid()
 
-    assert calls == [f"{license_mod.DEFAULT_BACKEND}/api/license/refresh"]
-    assert fresh.entitlements == ["real_estate_admin"]
-    assert fresh.expires_at > int(time.time())
-    assert fresh.refresh_token != CANONICAL_REFRESH_A
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert caught.value.code == "beta_refresh_state_conflict"
+    assert calls == []
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
     assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None
 
 
@@ -2005,7 +2071,7 @@ def test_exact_beta_device_cas_never_clears_a_replaced_marker(
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     _write_device_pending()
-    lic = _beta_license(refresh_token=CANONICAL_REFRESH_B, entitlements=[])
+    lic = _beta_license(refresh_token=CANONICAL_REFRESH_C, entitlements=[])
     _install_beta_snapshot(lic)
     replacement = refresh_pending.PendingDevice(
         schema=1,
@@ -2039,18 +2105,18 @@ def test_exact_beta_device_cas_never_clears_a_replaced_marker(
     assert license_mod.read_verified_beta_license_snapshot(require_current=True) == lic
 
 
-def test_exact_beta_readiness_keeps_valid_superseding_auth_signed_in(
+def test_exact_beta_readiness_keeps_valid_unordered_predecessor_and_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
+    pending = _write_device_pending()
     lic = _beta_license(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
     _install_beta_snapshot(lic)
 
     assert license_mod.ensure_valid() == lic
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
 
 
 def test_exact_beta_explicit_auth_cas_failure_rolls_back_only_its_snapshot(
@@ -2098,13 +2164,13 @@ def test_exact_beta_explicit_auth_cas_failure_rolls_back_only_its_snapshot(
     assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == replacement
 
 
-def test_exact_beta_historical_supersession_skips_current_only_access_projection(
+def test_exact_beta_historical_unordered_predecessor_skips_current_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
+    pending = _write_device_pending()
     expired = license_mod._beta_license_from_mapping(
         _signed_payload(
             refresh_token=CANONICAL_REFRESH_A,
@@ -2126,8 +2192,10 @@ def test_exact_beta_historical_supersession_skips_current_only_access_projection
 
     outcome = license_mod.reconcile_device_pending()
 
-    assert outcome.status == "beta_auth_superseded"
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert outcome.status == "predecessor_unverifiable"
+    assert outcome.license == expired
+    assert outcome.pending == pending
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
     assert license_mod.read_verified_beta_license_snapshot(
         require_current=False
     ) == expired
@@ -2287,23 +2355,8 @@ def test_exact_beta_delayed_device_approval_cannot_overwrite_newer_login(
         refresh_token=winner_refresh_token,
         entitlements=["real_estate_sales"],
     )
-    stale_approval = {
-        "status": "approved",
-        **_signed_payload(
-            access_token="stale-device-access",
-            refresh_token=CANONICAL_REFRESH_B,
-            entitlements=[],
-        ),
-    }
-    start_payload = {
-        "device_code": "device-code",
-        "user_code": "ABCD-EFGH",
-        "verification_uri": "https://example.test/link",
-        "expires_in": 60,
-        "interval": 1,
-    }
     _install_beta_snapshot(prior)
-    pending_device = _write_device_pending()
+    pending_device: Any | None = None
 
     class _DelayedDeviceClient:
         def __enter__(self):
@@ -2313,12 +2366,34 @@ def test_exact_beta_delayed_device_approval_cannot_overwrite_newer_login(
             return None
 
         def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            nonlocal pending_device
             assert json
             if url.endswith("/api/device/start"):
-                return _SuccessResponse(start_payload)
+                pending_device = refresh_pending.read_device_pending(
+                    license_mod._beta_profile_root()
+                )
+                assert pending_device is not None
+                assert json["protocol_version"] == 3
+                assert json["device_code"] == pending_device.device_code
+                return _SuccessResponse(_device_v3_start_payload(json))
             assert url.endswith("/api/device/poll")
+            assert pending_device is not None
+            assert json == {
+                "device_code": pending_device.device_code,
+                "refresh_token": pending_device.initial_refresh_token,
+            }
             _install_beta_snapshot(winner)
-            return _SuccessResponse(stale_approval)
+            return _SuccessResponse(
+                {
+                    "status": "approved",
+                    "protocol_version": 2,
+                    **_signed_payload(
+                        access_token="stale-device-access",
+                        refresh_token=pending_device.initial_refresh_token,
+                        entitlements=[],
+                    ),
+                }
+            )
 
     monkeypatch.setattr(
         license_mod.httpx,
@@ -2333,6 +2408,7 @@ def test_exact_beta_delayed_device_approval_cannot_overwrite_newer_login(
     assert license_mod.read_verified_beta_license_snapshot(
         require_current=True
     ) == winner
+    assert pending_device is not None
     assert refresh_pending.read_device_pending(
         license_mod._beta_profile_root()
     ) == pending_device

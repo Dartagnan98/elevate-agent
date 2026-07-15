@@ -31,6 +31,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import time
@@ -133,9 +134,11 @@ class LicenseError(Exception):
 class DevicePendingReconciliation:
     """Typed result of reconciling one exact-Beta Device marker.
 
-    ``pending`` preserves the pre-license recovery authority.  The other two
-    outcomes prove that a signed local snapshot made the marker obsolete and
-    that the exact marker was durably removed.
+    ``pending`` preserves pre-license recovery authority. ``interim_persisted``
+    keeps signed B and the marker. ``already_persisted`` proves that signed C
+    made the marker obsolete and durably removes it.
+    ``predecessor_unverifiable`` retains both a signed non-B/C snapshot and the
+    marker because their ordering cannot be reconstructed after restart.
     """
 
     status: str
@@ -947,15 +950,19 @@ def _reconcile_device_pending_unlocked(
     if not (LICENSE_PATH.exists() or LICENSE_PATH.is_symlink()):
         return DevicePendingReconciliation("pending", None, pending_device)
 
-    # A B/C snapshot is the result of this Device attempt.  It must still be
-    # current and its local entitlement mirror must match before recovery
-    # authority is discarded.
+    # Signed B is a durable interim result but cannot discard D/B/C/I: another
+    # process may already have rotated the server to C. Signed C is final and
+    # may remove the exact marker after currentness and mirror verification.
     historical = read_verified_beta_license_snapshot(require_current=False)
-    device_tokens = {
-        pending_device.initial_refresh_token,
-        pending_device.recovery_refresh_token,
-    }
-    if historical.refresh_token in device_tokens:
+    if historical.refresh_token == pending_device.initial_refresh_token:
+        current = read_verified_beta_license_snapshot(require_current=True)
+        sync_license_entitlements(current)
+        return DevicePendingReconciliation(
+            "interim_persisted",
+            current,
+            pending_device,
+        )
+    if historical.refresh_token == pending_device.recovery_refresh_token:
         current = read_verified_beta_license_snapshot(require_current=True)
         sync_license_entitlements(current)
         lock_guard.assert_held()
@@ -970,22 +977,16 @@ def _reconcile_device_pending_unlocked(
         )
         return DevicePendingReconciliation("already_persisted", current, None)
 
-    # A different fully verified token proves a later explicit authentication
-    # commit.  Historical validity is sufficient: ordinary access-token expiry
-    # must not strand a stale pre-license Device marker. Paid access remains
-    # fail-closed while expired; readiness refreshes and validates the current
-    # entitlement projection after this stale marker is removed.
-    lock_guard.assert_held()
-    _remove_exact_device_pending_unlocked(
-        root,
+    # The seven-field marker has no signed-predecessor fingerprint. A non-B/C
+    # snapshot could be either the A that existed before this Device attempt or
+    # a later explicit-auth winner. Cooperative explicit auth removes the
+    # marker inside its own commit lock; a remaining pair is therefore not
+    # proof of ordering. Preserve both instead of erasing recovery authority.
+    return DevicePendingReconciliation(
+        "predecessor_unverifiable",
+        historical,
         pending_device,
-        failure_code="beta_auth_superseded",
-        failure_message=(
-            "A newer Realtor Beta Device authorization replaced the stale "
-            "recovery state."
-        ),
     )
-    return DevicePendingReconciliation("beta_auth_superseded", historical, None)
 
 
 def reconcile_device_pending() -> DevicePendingReconciliation:
@@ -2099,6 +2100,805 @@ def cmd_license(args) -> int:
 
 # --- Device-link flow (web-driven activation) ---
 
+_BETA_DEVICE_PROTOCOL_VERSION = 3
+_BETA_DEVICE_CLAIM_PROTOCOL_VERSION = 2
+_BETA_DEVICE_GRANT_LIFETIME_SECONDS = 10 * 60
+_BETA_DEVICE_MIN_POLL_INTERVAL_SECONDS = 1
+_BETA_DEVICE_MAX_POLL_INTERVAL_SECONDS = 60
+_BETA_DEVICE_USER_CODE = re.compile(
+    r"^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-"
+    r"[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$"
+)
+
+
+@dataclass(frozen=True)
+class _BetaDeviceAttempt:
+    pending: Any
+    starting_snapshot: _BetaLocalSnapshotState
+
+
+@dataclass(frozen=True)
+class _BetaDeviceStart:
+    resumed: bool
+    user_code: str | None
+    verification_uri: str | None
+    verification_uri_complete: str | None
+    expires_in: int | None
+    interval: int
+
+
+def _new_beta_device_token() -> str:
+    """Return one canonical, unpadded 256-bit Device credential."""
+    return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+
+
+def _beta_device_protocol_error(message: str) -> LicenseError:
+    return LicenseError(message, code="beta_device_protocol_invalid")
+
+
+def _beta_device_http_status(response: Any) -> int:
+    status_code = getattr(response, "status_code", None)
+    if type(status_code) is not int or not 100 <= status_code <= 599:
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device response status."
+        )
+    return status_code
+
+
+def _beta_device_response_mapping(response: Any) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        json.JSONDecodeError,
+    ):
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device response."
+        ) from None
+    if not isinstance(data, dict):
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device response."
+        )
+    return data
+
+
+def _beta_device_interval(value: object) -> int:
+    if (
+        type(value) is not int
+        or value < _BETA_DEVICE_MIN_POLL_INTERVAL_SECONDS
+        or value > _BETA_DEVICE_MAX_POLL_INTERVAL_SECONDS
+    ):
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device polling interval."
+        )
+    return value
+
+
+def _parse_beta_device_start(
+    response: Any,
+    *,
+    base_url: str,
+    pending: Any,
+) -> _BetaDeviceStart:
+    """Strictly bind one exact-v3 start or credential-free resume response."""
+    status_code = _beta_device_http_status(response)
+    if status_code != 200:
+        try:
+            error_data = _beta_device_response_mapping(response)
+        except LicenseError:
+            error_data = None
+        if status_code == 403 and error_data == {"error": "authorization_denied"}:
+            raise LicenseError(
+                "The Device sign-in request was denied on the web.",
+                code="beta_device_link_denied",
+            )
+        if status_code == 410 and error_data == {"error": "expired_token"}:
+            raise LicenseError(
+                "The Device sign-in request expired.",
+                code="beta_device_link_expired",
+            )
+        raise LicenseError(
+            "Could not start device link through Elevation HQ "
+            f"(HTTP {status_code}). The recovery state was preserved.",
+            code=(
+                "beta_device_link_conflict"
+                if status_code == 409
+                else "beta_device_link_upstream_failed"
+            ),
+        )
+
+    data = _beta_device_response_mapping(response)
+
+    if (
+        type(data.get("protocol_version")) is not int
+        or data.get("protocol_version") != _BETA_DEVICE_PROTOCOL_VERSION
+    ):
+        raise _beta_device_protocol_error(
+            "Elevation HQ did not confirm the required Device protocol."
+        )
+
+    if data.get("status") == "resume_poll":
+        if frozenset(data) != frozenset(
+            {"protocol_version", "status", "grant_status", "interval"}
+        ):
+            raise _beta_device_protocol_error(
+                "Elevation HQ returned an invalid Device resume response."
+            )
+        if data.get("grant_status") not in {"approved", "claimed"}:
+            raise _beta_device_protocol_error(
+                "Elevation HQ returned an invalid Device resume state."
+            )
+        return _BetaDeviceStart(
+            resumed=True,
+            user_code=None,
+            verification_uri=None,
+            verification_uri_complete=None,
+            expires_in=None,
+            interval=_beta_device_interval(data.get("interval")),
+        )
+
+    required = frozenset(
+        {
+            "protocol_version",
+            "device_code",
+            "user_code",
+            "verification_uri",
+            "verification_uri_complete",
+            "expires_in",
+            "interval",
+        }
+    )
+    if frozenset(data) != required:
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an incomplete Device start response."
+        )
+    if data.get("device_code") != pending.device_code:
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned a Device code that did not match this attempt."
+        )
+    user_code = data.get("user_code")
+    if (
+        not isinstance(user_code, str)
+        or _BETA_DEVICE_USER_CODE.fullmatch(user_code) is None
+    ):
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device confirmation code."
+        )
+    pinned_link = f"{base_url}/link"
+    if (
+        not base_url.startswith("https://")
+        or data.get("verification_uri") != pinned_link
+    ):
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an untrusted Device verification address."
+        )
+    complete_link = f"{pinned_link}?code={user_code}"
+    if data.get("verification_uri_complete") != complete_link:
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device verification address."
+        )
+    expires_in = data.get("expires_in")
+    if (
+        type(expires_in) is not int
+        or expires_in < 1
+        or expires_in > _BETA_DEVICE_GRANT_LIFETIME_SECONDS
+    ):
+        raise _beta_device_protocol_error(
+            "Elevation HQ returned an invalid Device expiry."
+        )
+    return _BetaDeviceStart(
+        resumed=False,
+        user_code=user_code,
+        verification_uri=pinned_link,
+        verification_uri_complete=complete_link,
+        expires_in=expires_in,
+        interval=_beta_device_interval(data.get("interval")),
+    )
+
+
+def _post_beta_device(
+    base_url: str,
+    path: str,
+    payload: dict[str, Any],
+) -> Any:
+    """Make one Device request without exposing its credential-bearing body."""
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            return client.post(f"{base_url}{path}", json=payload)
+    except httpx.HTTPError:
+        raise LicenseError(
+            "Elevation HQ could not be reached during Device sign-in. "
+            "The recovery state was preserved.",
+            code="beta_device_link_upstream_unavailable",
+        ) from None
+
+
+def _prepare_beta_device_attempt() -> License | _BetaDeviceAttempt:
+    """Resume or durably create D/B/C/I while holding no network authority."""
+    from elevate_cli import refresh_pending
+
+    root = _beta_profile_root().expanduser().absolute()
+    try:
+        preflight_beta_license_store(require_writable=True)
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            preflight_beta_license_store(require_writable=True)
+            lock_guard.assert_held()
+            pending_refresh, pending = _read_beta_credential_markers_unlocked(root)
+            del pending_refresh
+            starting_snapshot = _read_beta_local_snapshot_state_unlocked()
+
+            if pending is not None:
+                if isinstance(starting_snapshot, _InvalidBetaSnapshotFingerprint):
+                    # The seven-field marker deliberately contains no local
+                    # predecessor fingerprint. After a restart there is no
+                    # sound way to prove whether this corrupt artifact existed
+                    # when D/B/C/I was created or is a later local winner.
+                    # Retain both artifacts and require explicit repair rather
+                    # than silently blessing the current bytes as predecessor.
+                    raise LicenseError(
+                        "Realtor Beta cannot safely resume Device sign-in while "
+                        "the local account snapshot is invalid. The recovery "
+                        "state was preserved.",
+                        code="beta_device_predecessor_unverifiable",
+                    )
+                if isinstance(starting_snapshot, License):
+                    if (
+                        starting_snapshot.refresh_token
+                        == pending.recovery_refresh_token
+                    ):
+                        try:
+                            _validate_complete_beta_license(
+                                starting_snapshot,
+                                require_current=True,
+                            )
+                            sync_license_entitlements(starting_snapshot)
+                        except LicenseError:
+                            # A historical B/C snapshot or an incomplete mirror
+                            # is still recoverable from the exact marker.
+                            pass
+                        else:
+                            lock_guard.assert_held()
+                            _remove_exact_device_pending_unlocked(
+                                root,
+                                pending,
+                                failure_code="beta_auth_superseded",
+                                failure_message=(
+                                    "A newer Device authorization replaced the "
+                                    "completed recovery state."
+                                ),
+                            )
+                            return starting_snapshot
+                    elif (
+                        starting_snapshot.refresh_token
+                        == pending.initial_refresh_token
+                    ):
+                        # B is deliberately provisional. Even a current,
+                        # mirror-verified B keeps D/B/C/I so every process can
+                        # converge on exact C through the idempotent recovery
+                        # triplet rather than strand a concurrent server C.
+                        pass
+                    else:
+                        # The marker does not persist its signed predecessor.
+                        # After restart an unrelated A could be either the
+                        # original snapshot this Device attempt intended to
+                        # replace or a later explicit-auth winner. Returning A
+                        # would let `cmd_link` falsely report this abandoned
+                        # Device request as linked; clearing D/B/C/I would lose
+                        # its recovery authority. Preserve both and fail closed.
+                        raise LicenseError(
+                            "Realtor Beta cannot prove whether the signed local "
+                            "session predates this Device attempt. The recovery "
+                            "state was preserved.",
+                            code="beta_device_predecessor_unverifiable",
+                        )
+
+            if pending is None:
+                lock_guard.assert_held()
+                pending = refresh_pending.write_device_pending(
+                    root,
+                    device_code=_new_beta_device_token(),
+                    initial_refresh_token=_new_beta_device_token(),
+                    recovery_refresh_token=_new_beta_device_token(),
+                    recovery_attempt_id=_new_beta_device_token(),
+                )
+            return _BetaDeviceAttempt(
+                pending=pending,
+                starting_snapshot=starting_snapshot,
+            )
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _read_completed_beta_device_license_unlocked(
+    pending: Any,
+) -> License | None:
+    """Recognize only durable final C left before marker cleanup."""
+    current = _read_beta_local_snapshot_state_unlocked()
+    if (
+        not isinstance(current, License)
+        or current.refresh_token != pending.recovery_refresh_token
+    ):
+        return None
+    try:
+        _validate_complete_beta_license(current, require_current=True)
+        sync_license_entitlements(current)
+    except LicenseError:
+        # Historical C or an incomplete entitlement projection remains a
+        # recovery predecessor, not completed activation. Signed B is never
+        # considered here because it is provisional by definition.
+        return None
+    return current
+
+
+def _terminalize_beta_device_attempt(
+    attempt: _BetaDeviceAttempt,
+) -> License | None:
+    """CAS-clear a definitive denial/expiry, never a newer local winner."""
+    from elevate_cli import refresh_pending
+
+    root = _beta_profile_root().expanduser().absolute()
+    try:
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            lock_guard.assert_held()
+            pending_refresh, current_pending = _read_beta_credential_markers_unlocked(
+                root
+            )
+            del pending_refresh
+            completed = _read_completed_beta_device_license_unlocked(attempt.pending)
+            if completed is not None:
+                if current_pending is not None and current_pending != attempt.pending:
+                    raise LicenseError(
+                        "A newer Device authorization superseded this result.",
+                        code="beta_auth_superseded",
+                    )
+                if current_pending == attempt.pending:
+                    lock_guard.assert_held()
+                    _remove_exact_device_pending_unlocked(
+                        root,
+                        attempt.pending,
+                        failure_code="beta_auth_superseded",
+                        failure_message=(
+                            "A newer Device authorization replaced the completed state."
+                        ),
+                    )
+                return completed
+            current_snapshot = _read_beta_local_snapshot_state_unlocked()
+            if isinstance(
+                current_snapshot, License
+            ) and current_snapshot.refresh_token in {
+                attempt.pending.initial_refresh_token,
+                attempt.pending.recovery_refresh_token,
+            }:
+                raise LicenseError(
+                    "Realtor Beta found an incomplete signed Device result. "
+                    "The recovery state was preserved.",
+                    code="beta_device_completion_incomplete",
+                )
+            if (
+                current_pending != attempt.pending
+                or not _same_beta_local_snapshot_state(
+                    current_snapshot,
+                    attempt.starting_snapshot,
+                )
+            ):
+                raise LicenseError(
+                    "A newer Realtor Beta session superseded Device sign-in.",
+                    code="beta_auth_superseded",
+                )
+            lock_guard.assert_held()
+            _remove_exact_device_pending_unlocked(
+                root,
+                attempt.pending,
+                failure_code="beta_auth_superseded",
+                failure_message=(
+                    "A newer Device authorization replaced the terminal state."
+                ),
+            )
+            return None
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _commit_beta_device_license(
+    attempt: _BetaDeviceAttempt,
+    lic: License,
+    *,
+    expected_refresh_token: str,
+    final: bool,
+) -> License:
+    """Commit signed B provisionally or signed C as final Device state.
+
+    This is intentionally separate from generic auth persistence: marker
+    discovery after network could authorize a different Device attempt. The
+    exact marker and full signed/corrupt/absent predecessor are revalidated
+    under the shared lock immediately before local mutation. B never removes
+    D/B/C/I: another process may already have rotated the server to C. C is the
+    only final Device credential and may replace an exact local B under the
+    still-matching marker.
+    """
+    from elevate_cli import refresh_pending
+
+    if lic.refresh_token != expected_refresh_token:
+        raise LicenseError(
+            "Elevation HQ returned credentials that did not match the protected "
+            "Device attempt.",
+            code="beta_device_refresh_token_mismatch",
+        )
+    _validate_complete_beta_license(lic, require_current=True)
+    root = _beta_profile_root().expanduser().absolute()
+    try:
+        preflight_beta_license_store(require_writable=True)
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            preflight_beta_license_store(require_writable=True)
+            lock_guard.assert_held()
+            pending_refresh, current_pending = _read_beta_credential_markers_unlocked(
+                root
+            )
+            del pending_refresh
+            current_snapshot = _read_beta_local_snapshot_state_unlocked()
+            current_device_snapshot = (
+                current_snapshot
+                if isinstance(current_snapshot, License)
+                and current_snapshot.refresh_token
+                in {
+                    attempt.pending.initial_refresh_token,
+                    attempt.pending.recovery_refresh_token,
+                }
+                else None
+            )
+
+            # Exact signed C is a newer successful result than every late B
+            # response. A different live marker is nevertheless authoritative:
+            # an old attempt must not report its C as the result of that newer
+            # in-progress Device authorization.
+            if (
+                current_device_snapshot is not None
+                and current_device_snapshot.refresh_token
+                == attempt.pending.recovery_refresh_token
+            ):
+                if current_pending is not None and current_pending != attempt.pending:
+                    raise LicenseError(
+                        "A newer Device authorization superseded this result.",
+                        code="beta_auth_superseded",
+                    )
+                try:
+                    _validate_complete_beta_license(
+                        current_device_snapshot,
+                        require_current=True,
+                    )
+                    sync_license_entitlements(current_device_snapshot)
+                except LicenseError:
+                    if current_pending is None:
+                        raise LicenseError(
+                            "A newer Device authorization superseded this result.",
+                            code="beta_auth_superseded",
+                        ) from None
+                    if not final:
+                        raise LicenseError(
+                            "Realtor Beta found an incomplete signed Device result. "
+                            "The recovery state was preserved.",
+                            code="beta_device_completion_incomplete",
+                        ) from None
+                    if (
+                        current_device_snapshot.license_id != lic.license_id
+                        or current_device_snapshot.email != lic.email
+                        or current_device_snapshot.subject != lic.subject
+                    ):
+                        raise LicenseError(
+                            "The recovered Realtor Beta account changed signed identity.",
+                            code="beta_entitlement_response_mismatch",
+                        ) from None
+                    # With the exact marker still authoritative, fresh signed C
+                    # may repair a historical C assertion or entitlement mirror.
+                else:
+                    if current_pending == attempt.pending:
+                        lock_guard.assert_held()
+                        _remove_exact_device_pending_unlocked(
+                            root,
+                            attempt.pending,
+                            failure_code="beta_auth_superseded",
+                            failure_message=(
+                                "A newer Device authorization replaced the "
+                                "completed state."
+                            ),
+                        )
+                    return current_device_snapshot
+
+            if current_pending != attempt.pending:
+                raise LicenseError(
+                    "A newer Device authorization superseded this result.",
+                    code="beta_auth_superseded",
+                )
+
+            # A locally durable B under the exact marker is shared interim
+            # state. A late/different signed-B response must preserve it; a C
+            # response is authorized to advance it regardless of which process
+            # originally captured the pre-B predecessor.
+            if (
+                current_device_snapshot is not None
+                and current_device_snapshot.refresh_token
+                == attempt.pending.initial_refresh_token
+            ):
+                if (
+                    current_device_snapshot.license_id != lic.license_id
+                    or current_device_snapshot.email != lic.email
+                    or current_device_snapshot.subject != lic.subject
+                ):
+                    raise LicenseError(
+                        "The recovered Realtor Beta account changed signed identity.",
+                        code="beta_entitlement_response_mismatch",
+                    )
+                if not final:
+                    try:
+                        _validate_complete_beta_license(
+                            current_device_snapshot,
+                            require_current=True,
+                        )
+                        sync_license_entitlements(current_device_snapshot)
+                    except LicenseError:
+                        # A fresh signed-B response may repair an expired or
+                        # incompletely projected B while D/B/C/I still matches.
+                        pass
+                    else:
+                        return current_device_snapshot
+            elif (
+                current_device_snapshot is None
+                or current_device_snapshot.refresh_token
+                != attempt.pending.recovery_refresh_token
+            ) and not _same_beta_local_snapshot_state(
+                current_snapshot,
+                attempt.starting_snapshot,
+            ):
+                raise LicenseError(
+                    "A newer Realtor Beta session superseded Device sign-in.",
+                    code="beta_auth_superseded",
+                )
+
+            if final and expected_refresh_token != attempt.pending.recovery_refresh_token:
+                raise LicenseError(
+                    "Realtor Beta rejected an invalid final Device credential.",
+                    code="beta_device_protocol_invalid",
+                )
+            if not final and expected_refresh_token != attempt.pending.initial_refresh_token:
+                raise LicenseError(
+                    "Realtor Beta rejected an invalid interim Device credential.",
+                    code="beta_device_protocol_invalid",
+                )
+
+            lock_guard.assert_held()
+            _save_exact_beta_unlocked(
+                lic,
+                starting_snapshot=current_snapshot,
+            )
+            persisted = read_verified_beta_license_snapshot(require_current=True)
+            if persisted.to_dict() != lic.to_dict():
+                raise LicenseError(
+                    "Realtor Beta could not verify its Device sign-in snapshot.",
+                    code="beta_license_persistence_mismatch",
+                )
+            # The entitlement projection and its strict readback are part of
+            # both provisional and final local durability.
+            sync_license_entitlements(persisted)
+            _verify_beta_entitlement_mirror(persisted, require_current=True)
+            lock_guard.assert_held()
+            if refresh_pending.read_device_pending(root) != attempt.pending:
+                raise LicenseError(
+                    "A newer Device authorization superseded this result.",
+                    code="beta_auth_superseded",
+                )
+            if final:
+                _remove_exact_device_pending_unlocked(
+                    root,
+                    attempt.pending,
+                    failure_code="beta_auth_superseded",
+                    failure_message=(
+                        "A newer Device authorization replaced the completed state."
+                    ),
+                )
+            return persisted
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _recover_beta_device_claim(
+    attempt: _BetaDeviceAttempt,
+    *,
+    base_url: str,
+) -> License:
+    """Replay exact B -> C/I after the bounded Device claim window."""
+    # The seven-field cross-runtime marker intentionally has no phase bit.
+    # B/C/I is already durable before Device start, and Refresh-v2 is exactly
+    # replayable, so restart recovery reuses the same marker instead of a
+    # misleading same-value marker replacement.
+    response = _post_beta_device(
+        base_url,
+        "/api/license/refresh",
+        {
+            "refresh_token": attempt.pending.initial_refresh_token,
+            "next_refresh_token": attempt.pending.recovery_refresh_token,
+            "refresh_attempt_id": attempt.pending.recovery_attempt_id,
+        },
+    )
+    status_code = _beta_device_http_status(response)
+    if status_code != 200:
+        # Even 401 is ambiguous here: B may have rotated to C before a lost
+        # response. Preserve B/C/I so the identical request can be replayed.
+        raise LicenseError(
+            "Elevation HQ could not safely recover Device sign-in "
+            f"(HTTP {status_code}). The recovery state was preserved.",
+            code=(
+                "beta_device_recovery_rejected"
+                if 400 <= status_code < 500
+                else "beta_device_link_upstream_failed"
+            ),
+        )
+    data = _beta_device_response_mapping(response)
+    lic = _license_from_auth_response(data, email="")
+    return _commit_beta_device_license(
+        attempt,
+        lic,
+        expected_refresh_token=attempt.pending.recovery_refresh_token,
+        final=True,
+    )
+
+
+def _link_device_exact_beta(
+    device_label: Optional[str],
+    *,
+    interval_override: Optional[int],
+) -> License:
+    base_url = backend_url()
+    prepared = _prepare_beta_device_attempt()
+    if isinstance(prepared, License):
+        return prepared
+    attempt = prepared
+    label = device_label or os.uname().nodename
+
+    start_response = _post_beta_device(
+        base_url,
+        "/api/device/start",
+        {
+            "protocol_version": _BETA_DEVICE_PROTOCOL_VERSION,
+            "device_code": attempt.pending.device_code,
+            "device_label": label,
+            "proposed_refresh_token_hash": hashlib.sha256(
+                attempt.pending.initial_refresh_token.encode("ascii")
+            ).hexdigest(),
+        },
+    )
+    try:
+        start = _parse_beta_device_start(
+            start_response,
+            base_url=base_url,
+            pending=attempt.pending,
+        )
+    except LicenseError as exc:
+        if exc.code in {"beta_device_link_denied", "beta_device_link_expired"}:
+            completed = _terminalize_beta_device_attempt(attempt)
+            if completed is not None:
+                return completed
+        raise
+
+    if interval_override is not None:
+        interval = _beta_device_interval(interval_override)
+    else:
+        interval = start.interval
+
+    if start.resumed:
+        print()
+        print("  Resuming the protected Device sign-in already in progress.")
+        print()
+        # The local marker predates the server grant, so its age is a safe
+        # lower bound. Always permit one poll to discover claimed recovery.
+        now = time.time()
+        deadline = max(
+            now + interval + 1,
+            attempt.pending.created_at + _BETA_DEVICE_GRANT_LIFETIME_SECONDS,
+        )
+        deadline = min(deadline, now + _BETA_DEVICE_GRANT_LIFETIME_SECONDS)
+    else:
+        assert start.verification_uri is not None
+        assert start.verification_uri_complete is not None
+        assert start.user_code is not None
+        assert start.expires_in is not None
+        print()
+        print(f"  1. Open: {start.verification_uri_complete}")
+        print(f"  2. Sign in if prompted, then enter this code: {start.user_code}")
+        print()
+        print(f"  (waiting up to {start.expires_in // 60} min — Ctrl-C to cancel)")
+        print()
+        deadline = time.time() + start.expires_in
+    sys.stdout.flush()
+
+    while time.time() < deadline:
+        time.sleep(interval)
+        response = _post_beta_device(
+            base_url,
+            "/api/device/poll",
+            {
+                "device_code": attempt.pending.device_code,
+                "refresh_token": attempt.pending.initial_refresh_token,
+            },
+        )
+        status_code = _beta_device_http_status(response)
+        data = _beta_device_response_mapping(response)
+
+        if status_code == 403 and data == {
+            "error": "access_denied",
+            "status": "denied",
+        }:
+            completed = _terminalize_beta_device_attempt(attempt)
+            if completed is not None:
+                return completed
+            raise LicenseError(
+                "The Device sign-in request was denied on the web.",
+                code="beta_device_link_denied",
+            )
+        if status_code == 410 and data == {
+            "error": "expired_token",
+            "status": "expired",
+        }:
+            completed = _terminalize_beta_device_attempt(attempt)
+            if completed is not None:
+                return completed
+            raise LicenseError(
+                "The Device sign-in request expired.",
+                code="beta_device_link_expired",
+            )
+        if status_code == 410 and data == {
+            "error": "claim_retry_expired",
+            "status": "claimed",
+        }:
+            return _recover_beta_device_claim(attempt, base_url=base_url)
+        if status_code == 401 and data.get("error") == "invalid_grant":
+            return _recover_beta_device_claim(attempt, base_url=base_url)
+        if status_code != 200:
+            raise LicenseError(
+                "Elevation HQ could not safely continue Device sign-in "
+                f"(HTTP {status_code}). The recovery state was preserved.",
+                code=(
+                    "beta_device_link_protocol_rejected"
+                    if 400 <= status_code < 500
+                    else "beta_device_link_upstream_failed"
+                ),
+            )
+        if data.get("status") == "pending":
+            if frozenset(data) != frozenset({"status", "interval"}):
+                raise _beta_device_protocol_error(
+                    "Elevation HQ returned an invalid pending Device response."
+                )
+            server_interval = _beta_device_interval(data.get("interval"))
+            if interval_override is None:
+                interval = server_interval
+            continue
+        if (
+            data.get("status") != "approved"
+            or type(data.get("protocol_version")) is not int
+            or data.get("protocol_version") != _BETA_DEVICE_CLAIM_PROTOCOL_VERSION
+        ):
+            raise _beta_device_protocol_error(
+                "Elevation HQ returned an invalid Device approval response."
+            )
+        lic = _license_from_auth_response(data, email="")
+        interim = _commit_beta_device_license(
+            attempt,
+            lic,
+            expected_refresh_token=attempt.pending.initial_refresh_token,
+            final=False,
+        )
+        if interim.refresh_token == attempt.pending.recovery_refresh_token:
+            return interim
+        return _recover_beta_device_claim(attempt, base_url=base_url)
+
+    raise LicenseError(
+        "Device sign-in is still incomplete. Run the link command again to resume it.",
+        code="beta_device_link_timeout",
+    )
+
+
 def link_device(device_label: Optional[str] = None, *, interval_override: Optional[int] = None) -> License:
     """OAuth-style device-authorization grant.
 
@@ -2106,6 +2906,12 @@ def link_device(device_label: Optional[str] = None, *, interval_override: Option
     visit, then polls until the user approves or denies on the web. Persists
     the resulting license locally just like cmd_activate.
     """
+    if _exact_realtor_beta_active():
+        return _link_device_exact_beta(
+            device_label,
+            interval_override=interval_override,
+        )
+
     base_url = backend_url()
     starting_snapshot = _capture_explicit_auth_starting_snapshot()
     label = device_label or os.uname().nodename
