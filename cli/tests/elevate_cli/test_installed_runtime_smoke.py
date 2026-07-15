@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = REPO_ROOT / "cli/scripts/installed_runtime_smoke.py"
@@ -98,7 +100,7 @@ def test_bundled_runtime_dependency_smoke_uses_isolated_python(monkeypatch, tmp_
         ["-I", "-B", "-m", "pip"],
         ["-I", "-B", "-c", smoke.RUNTIME_AGENT_PROBE],
     ]
-    assert calls[1][0][-1] == str(installed_cli)
+    assert calls[1][0][-2:] == [str(installed_cli), ""]
     assert calls[0][1]["env"]["ELEVATE_HOME"].endswith("/.elevate")
     assert "PYTHONPATH" not in calls[0][1]["env"]
     assert result.ok is True
@@ -108,6 +110,78 @@ def test_bundled_runtime_dependency_smoke_uses_isolated_python(monkeypatch, tmp_
         "backend_agent_init",
     ]
     assert "bundled Python dependency closure and backend/agent initialization pass" in result.checks
+
+
+def test_bundled_runtime_dependency_smoke_uses_beta_provider_contract(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    runtime_python = tmp_path / "runtime/python/bin/python3.12"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    installed_cli = tmp_path / "cli"
+    installed_cli.mkdir()
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        if "-c" in command:
+            observed["command"] = command
+            observed["env"] = kwargs["env"]
+            observed["auth"] = json.loads(
+                (Path(kwargs["env"]["ELEVATE_HOME"]) / "auth.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+
+    result = smoke.SmokeResult()
+    smoke.run_bundled_runtime_dependency_smoke(
+        runtime_python=runtime_python,
+        installed_cli=installed_cli,
+        timeout=5.0,
+        result=result,
+        release_channel="beta",
+        elevate_home_name=".elevate-beta",
+    )
+
+    assert observed["command"][-2:] == [str(installed_cli), "beta"]
+    assert observed["env"]["ELEVATE_RELEASE_CHANNEL"] == "beta"
+    assert observed["env"]["ELEVATE_HOME"].endswith("/.elevate-beta")
+    assert "openai-codex" in observed["auth"]["providers"]
+    assert result.ok is True
+
+
+def test_bundled_runtime_dependency_smoke_rejects_home_path_escape(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    runtime_python = tmp_path / "runtime/python/bin/python3.12"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    installed_cli = tmp_path / "cli"
+    installed_cli.mkdir()
+    outside = tmp_path / "outside"
+
+    monkeypatch.setattr(
+        smoke.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("unsafe profile must fail before subprocesses"),
+    )
+
+    for unsafe_name in (str(outside), "../outside", "nested/home", ".", ""):
+        result = smoke.SmokeResult()
+        smoke.run_bundled_runtime_dependency_smoke(
+            runtime_python=runtime_python,
+            installed_cli=installed_cli,
+            timeout=5.0,
+            result=result,
+            release_channel="beta",
+            elevate_home_name=unsafe_name,
+        )
+        assert result.ok is False
+        assert result.failures == [
+            "release profile elevate home name must be one relative directory"
+        ]
+
+    assert not (outside / "auth.json").exists()
 
 
 def test_bundled_runtime_dependency_smoke_reports_missing_transitive_dependency(monkeypatch, tmp_path):
@@ -349,6 +423,61 @@ def test_main_records_selected_dashboard_port(monkeypatch, tmp_path):
         app / "Contents/Resources/runtime/python/bin/python3.12"
     )
     assert dependency_probe["installed_cli"] == app / "Contents/Resources/cli"
+    assert dependency_probe["release_channel"] == ""
+    assert dependency_probe["elevate_home_name"] == ".elevate"
+
+
+def test_main_passes_beta_candidate_profile_to_dependency_probe(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    app = tmp_path / "Elevate Beta.app"
+    app.mkdir()
+    receipt = tmp_path / "candidate-receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "release": {
+                    "channel": "beta",
+                    "profile": {
+                        "elevateHomeName": ".elevate-beta",
+                        "preferredPort": 9139,
+                        "productName": "Elevate Beta",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "smoke.json"
+    dependency_probe = {}
+
+    monkeypatch.setattr(smoke, "verify_candidate_binding", lambda **_kwargs: None)
+    monkeypatch.setattr(smoke, "read_recent_log_hits", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(smoke, "run_installed_whatsapp_bridge", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        smoke,
+        "run_bundled_runtime_dependency_smoke",
+        lambda **kwargs: dependency_probe.update(kwargs),
+    )
+
+    rc = smoke.main(
+        [
+            "--installed-app",
+            str(app),
+            "--candidate-receipt",
+            str(receipt),
+            "--candidate-architecture",
+            "arm64",
+            "--skip-seal",
+            "--skip-parity",
+            "--skip-sidecar",
+            "--json-out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    assert dependency_probe["release_channel"] == "beta"
+    assert dependency_probe["elevate_home_name"] == ".elevate-beta"
 
 
 def test_installed_dashboard_assets_extract_index_and_chat(tmp_path):

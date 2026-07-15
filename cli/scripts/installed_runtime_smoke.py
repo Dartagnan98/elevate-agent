@@ -60,17 +60,26 @@ sys.path.insert(0, sys.argv[1])
 import elevate_cli.main  # noqa: F401
 from run_agent import AIAgent
 
-AIAgent(
-    model="dependency-smoke",
-    provider="custom",
-    base_url="http://127.0.0.1:9/v1",
-    api_key="dependency-smoke",
+release_channel = sys.argv[2]
+agent_options = dict(
     enabled_toolsets=[],
     quiet_mode=True,
     skip_context_files=True,
     skip_memory=True,
     persist_session=False,
 )
+if release_channel == "beta":
+    from elevate_cli.beta_provider_policy import BETA_ALLOWED_PROVIDER, BETA_DEFAULT_MODEL
+
+    agent_options.update(model=BETA_DEFAULT_MODEL, provider=BETA_ALLOWED_PROVIDER)
+else:
+    agent_options.update(
+        model="dependency-smoke",
+        provider="custom",
+        base_url="http://127.0.0.1:9/v1",
+        api_key="dependency-smoke",
+    )
+AIAgent(**agent_options)
 """
 
 
@@ -347,6 +356,8 @@ def run_bundled_runtime_dependency_smoke(
     installed_cli: Path,
     timeout: float,
     result: SmokeResult,
+    release_channel: str = "",
+    elevate_home_name: str = ".elevate",
 ) -> None:
     """Prove the bundled interpreter can satisfy and initialize core runtime code."""
 
@@ -363,6 +374,16 @@ def run_bundled_runtime_dependency_smoke(
     if not installed_cli.is_dir():
         result.fail(f"installed CLI missing: {installed_cli}")
         return
+    home_component = str(elevate_home_name or "").strip()
+    home_path = Path(home_component)
+    if (
+        not home_component
+        or home_path.is_absolute()
+        or len(home_path.parts) != 1
+        or home_component in {".", ".."}
+    ):
+        result.fail("release profile elevate home name must be one relative directory")
+        return
 
     with TemporaryDirectory(prefix="elevate-runtime-dependency-") as tmp:
         env = os.environ.copy()
@@ -371,13 +392,32 @@ def run_bundled_runtime_dependency_smoke(
                 ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
             ):
                 env.pop(key, None)
-        env.update(
-            {
-                "HOME": tmp,
-                "ELEVATE_HOME": str(Path(tmp) / ".elevate"),
-                "NO_COLOR": "1",
-            }
-        )
+        elevate_home = Path(tmp) / home_component
+        elevate_home.mkdir(parents=True, exist_ok=True)
+        env.update({"HOME": tmp, "ELEVATE_HOME": str(elevate_home), "NO_COLOR": "1"})
+        if release_channel:
+            env["ELEVATE_RELEASE_CHANNEL"] = release_channel
+        else:
+            env.pop("ELEVATE_RELEASE_CHANNEL", None)
+        if release_channel == "beta":
+            auth_path = elevate_home / "auth.json"
+            auth_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "openai-codex": {
+                                "tokens": {
+                                    "access_token": "dependency-smoke",
+                                    "refresh_token": "dependency-smoke-refresh",
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auth_path.chmod(0o600)
         commands = [
             (
                 "pip_check",
@@ -392,6 +432,7 @@ def run_bundled_runtime_dependency_smoke(
                     "-c",
                     RUNTIME_AGENT_PROBE,
                     str(installed_cli),
+                    release_channel,
                 ],
             ),
         ]
@@ -1646,6 +1687,10 @@ def main(argv: list[str]) -> int:
         installed_cli=installed_cli,
         timeout=args.timeout,
         result=result,
+        release_channel=str(
+            release.get("channel") or os.environ.get("ELEVATE_RELEASE_CHANNEL") or ""
+        ),
+        elevate_home_name=str(release_profile.get("elevateHomeName") or ".elevate"),
     )
 
     if not args.skip_seal:
