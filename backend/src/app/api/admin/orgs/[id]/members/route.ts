@@ -5,11 +5,10 @@ import { requireAdmin } from "@/lib/admin-guard";
 import { inviteEmail, mailerEnabled, sendMail } from "@/lib/mailer";
 import { publicBaseUrl } from "@/lib/base-url";
 import {
-  addMembership,
+  addOrgMembershipAtomic,
   createInvitation,
   findOrgById,
   findUserByEmail,
-  getMembership,
   listMembershipsForOrg,
   logAdminAction,
 } from "@/lib/store";
@@ -37,16 +36,32 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const { email, role } = parsed.data;
 
   const existing = await findUserByEmail(email);
-  const memberCount = (await listMembershipsForOrg(orgId)).length;
   if (existing) {
-    const already = await getMembership(orgId, existing.id);
-    if (already) {
+    let allocation: Awaited<ReturnType<typeof addOrgMembershipAtomic>>;
+    try {
+      allocation = await addOrgMembershipAtomic({
+        org_id: orgId,
+        user_id: existing.id,
+        role,
+      });
+    } catch (error) {
+      console.error("[admin/orgs/members] atomic membership add failed:", error);
+      return NextResponse.json({ error: "member add unavailable" }, { status: 503 });
+    }
+
+    if (allocation.result === "already_member") {
       return NextResponse.json({ error: "user already a member" }, { status: 409 });
     }
-    if (memberCount >= org.seat_limit) {
+    if (allocation.result === "seat_limit") {
       return NextResponse.json({ error: "seat limit reached" }, { status: 409 });
     }
-    const membership = await addMembership({ org_id: orgId, user_id: existing.id, role });
+    if (allocation.result === "org_not_found") {
+      return NextResponse.json({ error: "org not found" }, { status: 404 });
+    }
+    if (allocation.result === "user_not_found") {
+      return NextResponse.json({ error: "user not found" }, { status: 404 });
+    }
+
     await logAdminAction({
       actor_user_id: guard.claims.sub,
       target_user_id: existing.id,
@@ -54,9 +69,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       org_id: orgId,
       payload: { role, org_id: orgId },
     });
-    return NextResponse.json({ added: true, membership });
+    return NextResponse.json({ added: true, membership: allocation.membership });
   }
 
+  const memberCount = (await listMembershipsForOrg(orgId)).length;
   if (memberCount >= org.seat_limit) {
     return NextResponse.json({ error: "seat limit reached" }, { status: 409 });
   }

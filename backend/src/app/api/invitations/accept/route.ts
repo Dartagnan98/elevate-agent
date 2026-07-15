@@ -3,12 +3,8 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { z } from "zod";
 import {
-  acceptInvitation,
-  addMembership,
-  createLicense,
-  createUser,
+  acceptInvitationAtomic,
   effectiveAccess,
-  findActiveUser,
   findInvitationByTokenHash,
   findOrgById,
   findUserByEmail,
@@ -44,7 +40,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invitation expired" }, { status: 410 });
   }
 
-  let user = await findUserByEmail(inv.email);
+  const user = await findUserByEmail(inv.email);
   const existing = user ? await getMembership(inv.org_id, user.id) : null;
   if (!existing) {
     const org = await findOrgById(inv.org_id);
@@ -69,47 +65,77 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
   }
 
-  if (!user) {
-    if (!password) throw new Error("validated invitation password is missing");
-    const password_hash = await bcrypt.hash(password, 12);
-    user = await createUser({
-      email: inv.email,
-      password_hash,
-      role: "user",
+  // Prepare every credential/input that does not depend on the committed
+  // membership before the transactional RPC. The RPC resolves the invited
+  // email again, creates it from these route-generated values only if needed,
+  // rechecks active status, allocates the seat, consumes the invite, and creates
+  // this exact license as one commit.
+  const passwordHash = password ? await bcrypt.hash(password, 12) : null;
+  const refresh = generateRefreshToken();
+  const licenseId = crypto.randomUUID();
+  let accepted: Awaited<ReturnType<typeof acceptInvitationAtomic>>;
+  try {
+    accepted = await acceptInvitationAtomic({
+      invitationId: inv.id,
+      tokenHash,
+      newUserId: crypto.randomUUID(),
+      newUserPasswordHash: passwordHash,
+      licenseId,
+      refreshTokenHash: refresh.hash,
     });
+  } catch (error) {
+    console.error("[invitations/accept] atomic acceptance failed:", error);
+    return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
   }
 
-  // Mint a license only for an ACTIVE subscription — same gate as /auth/login
-  // and /auth/login-code/verify. A newly created invitee is `active` by default;
-  // this blocks an EXISTING lapsed user from re-accepting a pending invite to
-  // consuming the invite, joining the org, or bypassing the paywall.
-  const active = await findActiveUser(user.id);
-  if (!active) {
+  if (accepted.result === "invalid") {
+    return NextResponse.json({ error: "invalid invitation" }, { status: 404 });
+  }
+  if (accepted.result === "already_accepted") {
+    return NextResponse.json({ error: "invitation accepted" }, { status: 410 });
+  }
+  if (accepted.result === "revoked") {
+    return NextResponse.json({ error: "invitation revoked" }, { status: 410 });
+  }
+  if (accepted.result === "expired") {
+    return NextResponse.json({ error: "invitation expired" }, { status: 410 });
+  }
+  if (accepted.result === "org_not_found") {
+    return NextResponse.json({ error: "org not found" }, { status: 404 });
+  }
+  if (accepted.result === "seat_limit") {
+    return NextResponse.json({ error: "seat limit reached" }, { status: 409 });
+  }
+  if (accepted.result === "password_required") {
+    return NextResponse.json(
+      {
+        error: "password required to create account",
+        needs_password: true,
+        email: accepted.email || inv.email,
+      },
+      { status: 400 },
+    );
+  }
+  if (accepted.result === "inactive") {
     return NextResponse.json({ error: "no active subscription" }, { status: 402 });
   }
 
-  if (!existing) {
-    await addMembership({ org_id: inv.org_id, user_id: user.id, role: inv.role });
-  }
-
-  await acceptInvitation(inv.id, user.id);
-
-  const access_info = await effectiveAccess(user.id);
-  const refresh = generateRefreshToken();
-  const license = await createLicense(user.id, refresh.hash, "invite-accept");
+  // Entitlements depend on the just-committed membership, so this is the first
+  // point where the final access envelope can be constructed truthfully.
+  const access_info = await effectiveAccess(accepted.user.id);
   const access = await signAccessToken({
-    sub: user.id,
-    email: user.email,
+    sub: accepted.user.id,
+    email: accepted.user.email,
     tier: access_info.tier,
-    license_id: license.id,
+    license_id: licenseId,
   });
 
   const envelope = createEntitlementEnvelope({
     access_token: access,
     refresh_token: refresh.token,
-    sub: user.id,
-    license_id: license.id,
-    email: user.email,
+    sub: accepted.user.id,
+    license_id: licenseId,
+    email: accepted.user.email,
     tier: access_info.tier,
     entitlements: access_info.entitlements,
   }, entitlementSigner);

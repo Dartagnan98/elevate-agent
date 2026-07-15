@@ -435,6 +435,47 @@ export type StoreInvitation = {
   created_at: string;
 };
 
+function parseStoreMembership(value: unknown, source: string): StoreMembership {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`invalid ${source} membership`);
+  }
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.id !== "string" ||
+    typeof row.org_id !== "string" ||
+    typeof row.user_id !== "string" ||
+    !["owner", "admin", "member"].includes(String(row.role)) ||
+    typeof row.created_at !== "string"
+  ) {
+    throw new Error(`invalid ${source} membership`);
+  }
+  return row as unknown as StoreMembership;
+}
+
+function parseStoreOrg(value: unknown, source: string): StoreOrg {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`invalid ${source} organization`);
+  }
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.id !== "string" ||
+    typeof row.slug !== "string" ||
+    typeof row.name !== "string" ||
+    !["pro", "builder"].includes(String(row.tier)) ||
+    !["active", "trialing", "inactive", "canceled", "past_due"].includes(
+      String(row.status),
+    ) ||
+    !Array.isArray(row.entitlements) ||
+    !row.entitlements.every((entry) => typeof entry === "string") ||
+    !Number.isInteger(row.seat_limit) ||
+    typeof row.created_at !== "string" ||
+    typeof row.updated_at !== "string"
+  ) {
+    throw new Error(`invalid ${source} organization`);
+  }
+  return row as unknown as StoreOrg;
+}
+
 export async function listOrgs(): Promise<StoreOrg[]> {
   const { data, error } = await supabase()
     .from("organizations")
@@ -486,6 +527,43 @@ export async function createOrg(input: {
     .single();
   if (error) throw error;
   return data as StoreOrg;
+}
+
+export type CreateOrgWithOwnerResult =
+  | {
+      result: "created";
+      organization: StoreOrg;
+      membership: StoreMembership;
+    }
+  | { result: "owner_not_found" };
+
+export async function createOrgWithOwnerAtomic(input: {
+  orgId: string;
+  ownerUserId: string;
+  slug: string;
+  name: string;
+}): Promise<CreateOrgWithOwnerResult> {
+  const { data, error } = await supabase().rpc("create_org_with_owner_atomic", {
+    p_org_id: input.orgId,
+    p_owner_user_id: input.ownerUserId,
+    p_slug: input.slug,
+    p_name: input.name,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic organization creation result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "owner_not_found") return { result: "owner_not_found" };
+  if (value.result !== "created") {
+    throw new Error("invalid atomic organization creation result");
+  }
+  return {
+    result: "created",
+    organization: parseStoreOrg(value.organization, "organization creation"),
+    membership: parseStoreMembership(value.membership, "organization creation"),
+  };
 }
 
 export async function updateOrg(
@@ -549,22 +627,41 @@ export async function getMembership(
   return (data as StoreMembership) ?? null;
 }
 
-export async function addMembership(input: {
+export type AddOrgMembershipResult =
+  | { result: "added"; membership: StoreMembership }
+  | { result: "already_member"; membership: StoreMembership }
+  | { result: "seat_limit" }
+  | { result: "org_not_found" }
+  | { result: "user_not_found" };
+
+export async function addOrgMembershipAtomic(input: {
   org_id: string;
   user_id: string;
   role?: StoreMembership["role"];
-}): Promise<StoreMembership> {
-  const { data, error } = await supabase()
-    .from("memberships")
-    .insert({
-      org_id: input.org_id,
-      user_id: input.user_id,
-      role: input.role ?? "member",
-    })
-    .select("*")
-    .single();
+}): Promise<AddOrgMembershipResult> {
+  const { data, error } = await supabase().rpc("add_org_membership_atomic", {
+    p_org_id: input.org_id,
+    p_user_id: input.user_id,
+    p_role: input.role ?? "member",
+  });
   if (error) throw error;
-  return data as StoreMembership;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic membership allocation result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "added" || value.result === "already_member") {
+    return {
+      result: value.result,
+      membership: parseStoreMembership(value.membership, "membership allocation"),
+    };
+  }
+  if (["seat_limit", "org_not_found", "user_not_found"].includes(String(value.result))) {
+    return {
+      result: value.result as "seat_limit" | "org_not_found" | "user_not_found",
+    };
+  }
+  throw new Error("invalid atomic membership allocation result");
 }
 
 export async function updateMembershipRole(
@@ -633,19 +730,105 @@ export async function listPendingInvitationsForOrg(
   return (data ?? []) as StoreInvitation[];
 }
 
-export async function acceptInvitation(
-  invitationId: string,
-  acceptedUserId: string,
-): Promise<void> {
-  const { error } = await supabase()
-    .from("invitations")
-    .update({
-      status: "accepted",
-      accepted_at: new Date().toISOString(),
-      accepted_user_id: acceptedUserId,
-    })
-    .eq("id", invitationId);
+export type AcceptInvitationAtomicResult =
+  | {
+      result: "accepted";
+      license_id: string;
+      user: Pick<StoreUser, "id" | "email" | "tier" | "status">;
+      membership_result: "added" | "already_member";
+      membership: StoreMembership;
+      user_created: boolean;
+    }
+  | {
+      result: "password_required";
+      email?: string;
+    }
+  | { result: "invalid" }
+  | { result: "already_accepted" }
+  | { result: "revoked" }
+  | { result: "expired" }
+  | { result: "org_not_found" }
+  | { result: "seat_limit" }
+  | { result: "inactive" };
+
+export async function acceptInvitationAtomic(input: {
+  invitationId: string;
+  tokenHash: string;
+  newUserId: string;
+  newUserPasswordHash: string | null;
+  licenseId: string;
+  refreshTokenHash: string;
+}): Promise<AcceptInvitationAtomicResult> {
+  const { data, error } = await supabase().rpc("accept_invitation_atomic", {
+    p_invitation_id: input.invitationId,
+    p_token_hash: input.tokenHash,
+    p_new_user_id: input.newUserId,
+    p_new_user_password_hash: input.newUserPasswordHash,
+    p_license_id: input.licenseId,
+    p_refresh_token_hash: input.refreshTokenHash,
+  });
   if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic invitation acceptance result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "accepted" && typeof value.license_id === "string") {
+    if (value.license_id !== input.licenseId || typeof value.user_created !== "boolean") {
+      throw new Error("invalid atomic invitation acceptance result");
+    }
+    const user = value.user;
+    if (!user || typeof user !== "object" || Array.isArray(user)) {
+      throw new Error("invalid atomic invitation acceptance result");
+    }
+    const userValue = user as Record<string, unknown>;
+    if (
+      typeof userValue.id !== "string" ||
+      typeof userValue.email !== "string" ||
+      !["pro", "builder"].includes(String(userValue.tier)) ||
+      !["active", "trialing"].includes(String(userValue.status)) ||
+      !["added", "already_member"].includes(String(value.membership_result))
+    ) {
+      throw new Error("invalid atomic invitation acceptance result");
+    }
+    return {
+      result: "accepted",
+      license_id: value.license_id,
+      user: {
+        id: userValue.id,
+        email: userValue.email,
+        tier: userValue.tier as StoreUser["tier"],
+        status: userValue.status as StoreUser["status"],
+      },
+      membership_result: value.membership_result as "added" | "already_member",
+      membership: parseStoreMembership(value.membership, "invitation acceptance"),
+      user_created: value.user_created,
+    };
+  }
+
+  if (value.result === "accepted") {
+    return { result: "already_accepted" };
+  }
+
+  const terminalResults = [
+    "invalid",
+    "revoked",
+    "expired",
+    "org_not_found",
+    "seat_limit",
+    "password_required",
+    "inactive",
+  ] as const;
+  if (terminalResults.includes(value.result as (typeof terminalResults)[number])) {
+    if (value.email !== undefined && typeof value.email !== "string") {
+      throw new Error("invalid atomic invitation acceptance result");
+    }
+    return {
+      result: value.result as (typeof terminalResults)[number],
+      ...(typeof value.email === "string" ? { email: value.email } : {}),
+    };
+  }
+  throw new Error("invalid atomic invitation acceptance result");
 }
 
 export async function revokeInvitation(invitationId: string): Promise<void> {

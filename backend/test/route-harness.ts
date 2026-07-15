@@ -203,6 +203,12 @@ let nextLoginCodeOperationBarrier: {
   promise: Promise<void>;
   release: () => void;
 } | null = null;
+let nextMembershipOperationBarrier: {
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
 export type AtomicLoginCodeFailureStage =
   | "issue_after_invalidate"
   | "issue_after_insert"
@@ -211,6 +217,14 @@ export type AtomicLoginCodeFailureStage =
   | "redeem_after_consume"
   | "redeem_after_license_insert";
 let nextAtomicLoginCodeFailure: AtomicLoginCodeFailureStage | null = null;
+export type AtomicMembershipFailureStage =
+  | "invitation_after_user_insert"
+  | "invitation_after_membership_insert"
+  | "invitation_after_invitation_update"
+  | "invitation_after_license_insert"
+  | "org_owner_after_org_insert"
+  | "org_owner_after_membership_insert";
+let nextAtomicMembershipFailure: AtomicMembershipFailureStage | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -248,6 +262,8 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextAtomicDeviceApprovalFailure = null;
   nextLoginCodeOperationBarrier = null;
   nextAtomicLoginCodeFailure = null;
+  nextMembershipOperationBarrier = null;
+  nextAtomicMembershipFailure = null;
   return activeDb;
 }
 
@@ -291,6 +307,18 @@ export function barrierNextLoginCodeOperations(parties = 2): void {
 
 export function failNextAtomicLoginCode(stage: AtomicLoginCodeFailureStage): void {
   nextAtomicLoginCodeFailure = stage;
+}
+
+export function barrierNextMembershipOperations(parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextMembershipOperationBarrier = { parties, arrived: 0, promise, release };
+}
+
+export function failNextAtomicMembership(stage: AtomicMembershipFailureStage): void {
+  nextAtomicMembershipFailure = stage;
 }
 
 export function failNextSupabasePatch(
@@ -1014,6 +1042,278 @@ function atomicDeviceApproval(body: unknown): Response {
   return okJson({ result: "approved", license_id: license.id });
 }
 
+type PlannedMembershipAllocation =
+  | { result: "added" | "already_member"; membership: MembershipRow }
+  | { result: "seat_limit" | "org_not_found" | "user_not_found" };
+
+function membershipForRpc(membership: MembershipRow): Omit<MembershipRow, "organization"> {
+  const { organization: _organization, ...row } = membership;
+  return row;
+}
+
+function planMembershipAllocation(
+  orgId: string,
+  userId: string,
+  role: MembershipRow["role"],
+  view: {
+    organizations?: OrgRow[];
+    users?: UserRow[];
+    memberships?: MembershipRow[];
+  } = {},
+): PlannedMembershipAllocation {
+  const organizations = view.organizations ?? activeDb.organizations;
+  const users = view.users ?? activeDb.users;
+  const memberships = view.memberships ?? activeDb.memberships;
+  const organization = organizations.find((candidate) => candidate.id === orgId);
+  if (!organization) return { result: "org_not_found" };
+
+  const existing = memberships.find(
+    (candidate) => candidate.org_id === orgId && candidate.user_id === userId,
+  );
+  if (existing) return { result: "already_member", membership: existing };
+  if (!users.some((candidate) => candidate.id === userId)) {
+    return { result: "user_not_found" };
+  }
+  if (memberships.filter((candidate) => candidate.org_id === orgId).length >= organization.seat_limit) {
+    return { result: "seat_limit" };
+  }
+
+  return {
+    result: "added",
+    membership: {
+      id: `membership-${memberships.length + 1}`,
+      org_id: orgId,
+      user_id: userId,
+      role,
+      created_at: new Date().toISOString(),
+      organization,
+    },
+  };
+}
+
+function atomicMembershipAdd(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const orgId = String(input.p_org_id || "");
+  const userId = String(input.p_user_id || "");
+  const role = String(input.p_role || "") as MembershipRow["role"];
+  if (!orgId || !userId || !["owner", "admin", "member"].includes(role)) {
+    return okJson({ message: "invalid membership allocation parameters" }, 400);
+  }
+
+  const planned = planMembershipAllocation(orgId, userId, role);
+  if (planned.result === "added") activeDb.memberships.push(planned.membership);
+  if (planned.result === "added" || planned.result === "already_member") {
+    return okJson({ result: planned.result, membership: membershipForRpc(planned.membership) });
+  }
+  return okJson({ result: planned.result });
+}
+
+function consumeAtomicMembershipFailure(stage: AtomicMembershipFailureStage): boolean {
+  if (nextAtomicMembershipFailure !== stage) return false;
+  nextAtomicMembershipFailure = null;
+  return true;
+}
+
+function atomicOrgWithOwnerCreate(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const orgId = String(input.p_org_id || "");
+  const ownerUserId = String(input.p_owner_user_id || "");
+  const slug = String(input.p_slug || "");
+  const name = String(input.p_name || "");
+  if (
+    !orgId ||
+    !ownerUserId ||
+    !/^[a-z0-9-]{2,60}$/.test(slug) ||
+    name.length < 2 ||
+    name.length > 80
+  ) {
+    return okJson({ message: "invalid organization creation parameters" }, 400);
+  }
+  if (!activeDb.users.some((candidate) => candidate.id === ownerUserId)) {
+    return okJson({ result: "owner_not_found" });
+  }
+  if (
+    activeDb.organizations.some(
+      (candidate) => candidate.id === orgId || candidate.slug === slug,
+    )
+  ) {
+    return okJson({ message: "duplicate organization" }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const organization: OrgRow = {
+    id: orgId,
+    slug,
+    name,
+    stripe_customer: null,
+    tier: "pro",
+    status: "active",
+    current_period_end: null,
+    entitlements: [],
+    seat_limit: 1,
+    created_at: now,
+    updated_at: now,
+  };
+  if (consumeAtomicMembershipFailure("org_owner_after_org_insert")) {
+    return okJson({ message: "injected organization failure after org insert" }, 500);
+  }
+
+  const allocation = planMembershipAllocation(orgId, ownerUserId, "owner", {
+    organizations: [...activeDb.organizations, organization],
+  });
+  if (allocation.result !== "added") {
+    return okJson({ message: `initial owner allocation failed: ${allocation.result}` }, 500);
+  }
+  if (consumeAtomicMembershipFailure("org_owner_after_membership_insert")) {
+    return okJson({ message: "injected organization failure after owner insert" }, 500);
+  }
+
+  activeDb.organizations.push(organization);
+  activeDb.memberships.push(allocation.membership);
+  return okJson({
+    result: "created",
+    organization,
+    membership: membershipForRpc(allocation.membership),
+  });
+}
+
+function atomicInvitationAccept(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const invitationId = String(input.p_invitation_id || "");
+  const tokenHashValue = String(input.p_token_hash || "");
+  const newUserId = String(input.p_new_user_id || "");
+  const passwordHashValue =
+    typeof input.p_new_user_password_hash === "string"
+      ? input.p_new_user_password_hash
+      : null;
+  const licenseId = String(input.p_license_id || "");
+  const refreshHashValue = String(input.p_refresh_token_hash || "");
+  if (
+    !invitationId ||
+    !newUserId ||
+    !licenseId ||
+    !/^[0-9a-f]{64}$/.test(tokenHashValue) ||
+    !/^[0-9a-f]{64}$/.test(refreshHashValue) ||
+    (passwordHashValue !== null &&
+      (passwordHashValue.length < 50 || passwordHashValue.length > 100))
+  ) {
+    return okJson({ message: "invalid invitation acceptance parameters" }, 400);
+  }
+
+  const invitation = activeDb.invitations.find(
+    (candidate) => candidate.id === invitationId && candidate.token_hash === tokenHashValue,
+  );
+  if (!invitation) return okJson({ result: "invalid" });
+  if (invitation.status !== "pending") return okJson({ result: invitation.status });
+  if (Date.parse(invitation.expires_at) <= Date.now()) return okJson({ result: "expired" });
+
+  const organization = activeDb.organizations.find(
+    (candidate) => candidate.id === invitation.org_id,
+  );
+  if (!organization) return okJson({ result: "org_not_found" });
+
+  let user = activeDb.users.find(
+    (candidate) => candidate.email === invitation.email.toLowerCase(),
+  );
+  let stagedUser: UserRow | null = null;
+  if (!user) {
+    const memberCount = activeDb.memberships.filter(
+      (candidate) => candidate.org_id === invitation.org_id,
+    ).length;
+    if (memberCount >= organization.seat_limit) return okJson({ result: "seat_limit" });
+    if (!passwordHashValue) {
+      return okJson({ result: "password_required", email: invitation.email });
+    }
+    if (activeDb.users.some((candidate) => candidate.id === newUserId)) {
+      return okJson({ message: "duplicate invited user id" }, 409);
+    }
+    const now = new Date().toISOString();
+    stagedUser = {
+      id: newUserId,
+      email: invitation.email.toLowerCase(),
+      password_hash: passwordHashValue,
+      stripe_customer: null,
+      tier: "pro",
+      status: "active",
+      current_period_end: null,
+      entitlements: [],
+      blocked_entitlements: [],
+      role: "user",
+      is_developer: false,
+      first_name: null,
+      last_name: null,
+      created_at: now,
+      updated_at: now,
+    };
+    user = stagedUser;
+    if (consumeAtomicMembershipFailure("invitation_after_user_insert")) {
+      return okJson({ message: "injected invitation failure after user insert" }, 500);
+    }
+  }
+
+  if (!["active", "trialing"].includes(user.status)) return okJson({ result: "inactive" });
+
+  const allocation = planMembershipAllocation(invitation.org_id, user.id, invitation.role, {
+    users: stagedUser ? [...activeDb.users, stagedUser] : activeDb.users,
+  });
+  if (allocation.result === "seat_limit") return okJson({ result: "seat_limit" });
+  if (allocation.result !== "added" && allocation.result !== "already_member") {
+    return okJson({ message: `invitation membership failed: ${allocation.result}` }, 500);
+  }
+  if (consumeAtomicMembershipFailure("invitation_after_membership_insert")) {
+    return okJson({ message: "injected invitation failure after membership insert" }, 500);
+  }
+
+  const acceptedAt = new Date().toISOString();
+  if (consumeAtomicMembershipFailure("invitation_after_invitation_update")) {
+    return okJson({ message: "injected invitation failure after invitation update" }, 500);
+  }
+
+  if (
+    activeDb.licenses.some(
+      (candidate) =>
+        candidate.id === licenseId || candidate.refresh_token_hash === refreshHashValue,
+    )
+  ) {
+    return okJson({ message: "duplicate invitation license" }, 409);
+  }
+  const license: LicenseRow = {
+    id: licenseId,
+    user_id: user.id,
+    refresh_token_hash: refreshHashValue,
+    device_label: "invite-accept",
+    revoked: false,
+    last_used_at: null,
+    created_at: acceptedAt,
+  };
+  if (consumeAtomicMembershipFailure("invitation_after_license_insert")) {
+    return okJson({ message: "injected invitation failure after license insert" }, 500);
+  }
+
+  if (stagedUser) activeDb.users.push(stagedUser);
+  if (allocation.result === "added") activeDb.memberships.push(allocation.membership);
+  Object.assign(invitation, {
+    status: "accepted",
+    accepted_at: acceptedAt,
+    accepted_user_id: user.id,
+  });
+  activeDb.licenses.push(license);
+
+  return okJson({
+    result: "accepted",
+    license_id: license.id,
+    user: {
+      id: user.id,
+      email: user.email,
+      tier: user.tier,
+      status: user.status,
+    },
+    membership_result: allocation.result,
+    membership: membershipForRpc(allocation.membership),
+    user_created: Boolean(stagedUser),
+  });
+}
+
 function latestActiveLoginCode(userId: string, now = Date.now()): LoginCodeRow | null {
   return (
     activeDb.login_codes
@@ -1220,6 +1520,18 @@ async function waitForLoginCodeOperationBarrier(): Promise<void> {
   await barrier.promise;
 }
 
+async function waitForMembershipOperationBarrier(): Promise<void> {
+  if (!nextMembershipOperationBarrier) return;
+  const barrier = nextMembershipOperationBarrier;
+  barrier.arrived += 1;
+  if (barrier.arrived === barrier.parties) {
+    nextMembershipOperationBarrier = null;
+    barrier.release();
+    return;
+  }
+  await barrier.promise;
+}
+
 async function waitForNamedRpcBarrier(name: string): Promise<void> {
   if (nextRpcBarrier?.name !== name) return;
   const barrier = nextRpcBarrier;
@@ -1252,6 +1564,27 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     await waitForDeviceGrantDecisionBarrier();
     await waitForNamedRpcBarrier("approve_device_grant_atomic");
     return atomicDeviceApproval(body);
+  }
+
+  if (url.pathname.includes("/rpc/add_org_membership_atomic")) {
+    activeDb.calls.push({ table: "add_org_membership_atomic", method, body });
+    await waitForMembershipOperationBarrier();
+    await waitForNamedRpcBarrier("add_org_membership_atomic");
+    return atomicMembershipAdd(body);
+  }
+
+  if (url.pathname.includes("/rpc/create_org_with_owner_atomic")) {
+    activeDb.calls.push({ table: "create_org_with_owner_atomic", method, body });
+    await waitForMembershipOperationBarrier();
+    await waitForNamedRpcBarrier("create_org_with_owner_atomic");
+    return atomicOrgWithOwnerCreate(body);
+  }
+
+  if (url.pathname.includes("/rpc/accept_invitation_atomic")) {
+    activeDb.calls.push({ table: "accept_invitation_atomic", method, body });
+    await waitForMembershipOperationBarrier();
+    await waitForNamedRpcBarrier("accept_invitation_atomic");
+    return atomicInvitationAccept(body);
   }
 
   if (url.pathname.includes("/rpc/issue_login_code_atomic")) {

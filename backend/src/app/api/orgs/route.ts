@@ -2,11 +2,11 @@
 // Caller automatically becomes the org owner. Starts on pro tier with
 // 1 seat (themselves); upgrade/seat-buy flow lives in admin/billing.
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "node:crypto";
 import { z } from "zod";
 import { requireAccess } from "@/lib/auth-guard";
 import {
-  addMembership,
-  createOrg,
+  createOrgWithOwnerAtomic,
   findOrgBySlug,
   listMembershipsForUser,
   logAdminAction,
@@ -76,15 +76,16 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const org = await createOrg({
-      name: parsed.data.name,
+    const created = await createOrgWithOwnerAtomic({
+      orgId: crypto.randomUUID(),
+      ownerUserId: guard.user.id,
       slug,
-      tier: "pro",
-      status: "active",
-      entitlements: [],
-      seat_limit: 1,
+      name: parsed.data.name,
     });
-    await addMembership({ org_id: org.id, user_id: guard.user.id, role: "owner" });
+    if (created.result === "owner_not_found") {
+      return NextResponse.json({ error: "user not found" }, { status: 404 });
+    }
+    const org = created.organization;
     await logAdminAction({
       actor_user_id: guard.user.id,
       target_user_id: null,

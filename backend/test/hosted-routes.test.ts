@@ -8,11 +8,13 @@ import {
   assertNoRawDiagnosticsText,
   barrierNextDeviceGrantDecisions,
   barrierNextLoginCodeOperations,
+  barrierNextMembershipOperations,
   barrierNextSupabasePatches,
   barrierNextSupabaseRpcs,
   createFakeDb,
   failNextAtomicDeviceApproval,
   failNextAtomicLoginCode,
+  failNextAtomicMembership,
   failNextSupabaseInsert,
   failNextSupabasePatch,
   failNextSupabaseSelect,
@@ -61,6 +63,74 @@ async function requestDevLoginCode(
   const code = String((body.dev_only as { code?: string } | undefined)?.code || "");
   assert.match(code, /^\d{6}$/);
   return code;
+}
+
+function seedTestOrg(
+  db: ReturnType<typeof useFakeDb>,
+  input: { id: string; seatLimit: number; entitlements?: string[] },
+) {
+  const now = new Date().toISOString();
+  const org = {
+    id: input.id,
+    slug: input.id,
+    name: input.id,
+    stripe_customer: null,
+    tier: "pro" as const,
+    status: "active" as const,
+    current_period_end: null,
+    entitlements: input.entitlements ?? [],
+    seat_limit: input.seatLimit,
+    created_at: now,
+    updated_at: now,
+  };
+  db.organizations.push(org);
+  return org;
+}
+
+function seedTestMembership(
+  db: ReturnType<typeof useFakeDb>,
+  org: ReturnType<typeof seedTestOrg>,
+  userId: string,
+  role: "owner" | "admin" | "member" = "member",
+) {
+  const membership = {
+    id: `seed-membership-${org.id}-${userId}`,
+    org_id: org.id,
+    user_id: userId,
+    role,
+    created_at: new Date().toISOString(),
+    organization: org,
+  };
+  db.memberships.push(membership);
+  return membership;
+}
+
+function seedTestInvitation(
+  db: ReturnType<typeof useFakeDb>,
+  input: {
+    id: string;
+    orgId: string;
+    email: string;
+    token: string;
+    role?: "owner" | "admin" | "member";
+    invitedBy?: string | null;
+  },
+) {
+  const invitation = {
+    id: input.id,
+    org_id: input.orgId,
+    email: input.email.toLowerCase(),
+    role: input.role ?? ("member" as const),
+    token_hash: crypto.createHash("sha256").update(input.token).digest("hex"),
+    invited_by: input.invitedBy ?? null,
+    status: "pending" as const,
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    accepted_at: null,
+    accepted_user_id: null,
+    created_at: new Date().toISOString(),
+  };
+  db.invitations.push(invitation);
+  return invitation;
 }
 
 describe("hosted route handlers", () => {
@@ -460,6 +530,35 @@ describe("hosted route handlers", () => {
       });
       assert.equal(license.refresh_token_hash, originalHash);
       assert.equal(license.last_used_at, null);
+
+      const inviteDb = useFakeDb();
+      const invitee = await makeUser({
+        id: "invite-signing-order-user",
+        email: "invite-signing-order@example.com",
+      });
+      inviteDb.users.push(invitee);
+      const inviteOrg = seedTestOrg(inviteDb, {
+        id: "invite-signing-order-org",
+        seatLimit: 1,
+      });
+      const invitation = seedTestInvitation(inviteDb, {
+        id: "invite-signing-order-invite",
+        orgId: inviteOrg.id,
+        email: invitee.email,
+        token: "invite-signing-order-token",
+      });
+      const accept = await loadRoute<PostRoute>("invitations/accept");
+
+      const inviteResponse = await accept.POST(
+        jsonRequest("/api/invitations/accept", { token: "invite-signing-order-token" }),
+      );
+      assert.equal(inviteResponse.status, 503);
+      assert.deepEqual(await responseJson(inviteResponse), {
+        error: "license issuance unavailable",
+      });
+      assert.equal(invitation.status, "pending");
+      assert.equal(inviteDb.memberships.length, 0);
+      assert.equal(inviteDb.licenses.length, 0);
     } finally {
       console.error = previousConsoleError;
       if (previousKey === undefined) {
@@ -1266,9 +1365,11 @@ describe("hosted route handlers", () => {
     assert.equal(body.accepted, true);
     assert.equal(db.invitations[0].status, "accepted");
     assert.equal(db.memberships[0].user_id, invitee.id);
+    assert.match(String(body.license_id), /^[0-9a-f-]{36}$/);
+    assert.equal(db.licenses[0].id, body.license_id);
     assertEntitlementEnvelope(body, {
       sub: invitee.id,
-      license_id: "license-1",
+      license_id: String(body.license_id),
       email: invitee.email,
       tier: "pro",
       entitlements: ["real_estate_admin", "real_estate_cma", "real_estate_sales"],
@@ -1340,6 +1441,240 @@ describe("hosted route handlers", () => {
     assert.equal(db.memberships.some((membership) => membership.user_id === invitee.id), false);
     assert.equal(db.licenses.some((license) => license.user_id === invitee.id), false);
   });
+
+  it("concurrent invitations competing for the final seat have one winner", async () => {
+    const db = useFakeDb();
+    const owner = await makeUser({ id: "invite-race-owner", email: "invite-race-owner@example.com" });
+    const first = await makeUser({ id: "invite-race-first", email: "invite-race-first@example.com" });
+    const second = await makeUser({ id: "invite-race-second", email: "invite-race-second@example.com" });
+    db.users.push(owner, first, second);
+    const org = seedTestOrg(db, { id: "invite-final-seat-org", seatLimit: 2 });
+    seedTestMembership(db, org, owner.id, "owner");
+    seedTestInvitation(db, {
+      id: "invite-final-seat-first",
+      orgId: org.id,
+      email: first.email,
+      token: "invite-final-seat-token-first",
+    });
+    seedTestInvitation(db, {
+      id: "invite-final-seat-second",
+      orgId: org.id,
+      email: second.email,
+      token: "invite-final-seat-token-second",
+    });
+    const route = await loadRoute<PostRoute>("invitations/accept");
+
+    barrierNextMembershipOperations();
+    const responses = await Promise.all([
+      route.POST(
+        jsonRequest("/api/invitations/accept", { token: "invite-final-seat-token-first" }),
+      ),
+      route.POST(
+        jsonRequest("/api/invitations/accept", { token: "invite-final-seat-token-second" }),
+      ),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+    assert.equal(db.memberships.length, 2);
+    assert.equal(db.licenses.length, 1);
+    assert.equal(db.invitations.filter((invitation) => invitation.status === "accepted").length, 1);
+    assert.equal(db.invitations.filter((invitation) => invitation.status === "pending").length, 1);
+    const loser = bodies[responses.findIndex((response) => response.status === 409)];
+    assert.deepEqual(loser, { error: "seat limit reached" });
+  });
+
+  it("concurrent direct add and invitation accept share the final-seat lock", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "mixed-seat-admin", email: "mixed-seat-admin@example.com", role: "admin" });
+    const owner = await makeUser({ id: "mixed-seat-owner", email: "mixed-seat-owner@example.com" });
+    const direct = await makeUser({ id: "mixed-seat-direct", email: "mixed-seat-direct@example.com" });
+    const invitee = await makeUser({ id: "mixed-seat-invitee", email: "mixed-seat-invitee@example.com" });
+    db.users.push(admin, owner, direct, invitee);
+    const adminLicense = seedLicense({ id: "mixed-seat-admin-license", user_id: admin.id });
+    const bearer = await issueAccessToken(admin, adminLicense);
+    const org = seedTestOrg(db, { id: "mixed-final-seat-org", seatLimit: 2 });
+    seedTestMembership(db, org, owner.id, "owner");
+    const invitation = seedTestInvitation(db, {
+      id: "mixed-final-seat-invite",
+      orgId: org.id,
+      email: invitee.email,
+      token: "mixed-final-seat-token",
+      invitedBy: admin.id,
+    });
+    const memberRoute = await loadRoute<{
+      POST: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/orgs/[id]/members");
+    const inviteRoute = await loadRoute<PostRoute>("invitations/accept");
+
+    barrierNextMembershipOperations();
+    const [directResponse, inviteResponse] = await Promise.all([
+      memberRoute.POST(
+        jsonRequest(
+          `/api/admin/orgs/${org.id}/members`,
+          { email: direct.email, role: "member" },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+        { params: Promise.resolve({ id: org.id }) },
+      ),
+      inviteRoute.POST(
+        jsonRequest("/api/invitations/accept", { token: "mixed-final-seat-token" }),
+      ),
+    ]);
+
+    assert.deepEqual([directResponse.status, inviteResponse.status].sort(), [200, 409]);
+    assert.equal(db.memberships.length, 2);
+    const newMembers = db.memberships.filter((membership) => membership.user_id !== owner.id);
+    assert.equal(newMembers.length, 1);
+    if (inviteResponse.status === 200) {
+      assert.equal(invitation.status, "accepted");
+      assert.equal(db.licenses.filter((license) => license.user_id === invitee.id).length, 1);
+      assert.equal(newMembers[0].user_id, invitee.id);
+    } else {
+      assert.equal(invitation.status, "pending");
+      assert.equal(db.licenses.filter((license) => license.user_id === invitee.id).length, 0);
+      assert.equal(newMembers[0].user_id, direct.id);
+    }
+  });
+
+  it("concurrent acceptance of the same invitation creates one license", async () => {
+    const db = useFakeDb();
+    const owner = await makeUser({ id: "same-invite-owner", email: "same-invite-owner@example.com" });
+    const invitee = await makeUser({ id: "same-invite-user", email: "same-invite-user@example.com" });
+    db.users.push(owner, invitee);
+    const org = seedTestOrg(db, { id: "same-invite-org", seatLimit: 2 });
+    seedTestMembership(db, org, owner.id, "owner");
+    seedTestInvitation(db, {
+      id: "same-invite",
+      orgId: org.id,
+      email: invitee.email,
+      token: "same-invite-token",
+    });
+    const route = await loadRoute<PostRoute>("invitations/accept");
+
+    barrierNextMembershipOperations();
+    const responses = await Promise.all([
+      route.POST(jsonRequest("/api/invitations/accept", { token: "same-invite-token" })),
+      route.POST(jsonRequest("/api/invitations/accept", { token: "same-invite-token" })),
+    ]);
+
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 410]);
+    assert.equal(db.memberships.filter((membership) => membership.user_id === invitee.id).length, 1);
+    assert.equal(db.licenses.filter((license) => license.user_id === invitee.id).length, 1);
+  });
+
+  it("an already-member invite accepts safely even when every seat is occupied", async () => {
+    const db = useFakeDb();
+    const invitee = await makeUser({ id: "already-member-invitee", email: "already-member@example.com" });
+    db.users.push(invitee);
+    const org = seedTestOrg(db, { id: "already-member-invite-org", seatLimit: 1 });
+    const existing = seedTestMembership(db, org, invitee.id, "admin");
+    const invitation = seedTestInvitation(db, {
+      id: "already-member-invite",
+      orgId: org.id,
+      email: invitee.email,
+      token: "already-member-token",
+      role: "member",
+    });
+    const route = await loadRoute<PostRoute>("invitations/accept");
+
+    const response = await route.POST(
+      jsonRequest("/api/invitations/accept", { token: "already-member-token" }),
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(db.memberships.length, 1);
+    assert.equal(existing.role, "admin");
+    assert.equal(invitation.status, "accepted");
+    assert.equal(db.licenses.length, 1);
+  });
+
+  for (const failureStage of [
+    "invitation_after_user_insert",
+    "invitation_after_membership_insert",
+    "invitation_after_invitation_update",
+    "invitation_after_license_insert",
+  ] as const) {
+    it(`invitation acceptance rolls back every write when ${failureStage} fails`, async () => {
+      const db = useFakeDb();
+      const org = seedTestOrg(db, { id: `${failureStage}-org`, seatLimit: 1 });
+      const email = `${failureStage.replaceAll("_", "-")}@example.com`;
+      const token = `${failureStage}-token`;
+      const invitation = seedTestInvitation(db, {
+        id: `${failureStage}-invite`,
+        orgId: org.id,
+        email,
+        token,
+      });
+      const route = await loadRoute<PostRoute>("invitations/accept");
+
+      failNextAtomicMembership(failureStage);
+      const failed = await route.POST(
+        jsonRequest("/api/invitations/accept", { token, password: "password123" }),
+      );
+      assert.equal(failed.status, 503);
+      assert.deepEqual(await responseJson(failed), { error: "license issuance unavailable" });
+      assert.equal(db.users.some((candidate) => candidate.email === email), false);
+      assert.equal(db.memberships.length, 0);
+      assert.equal(db.licenses.length, 0);
+      assert.equal(invitation.status, "pending");
+      assert.equal(invitation.accepted_at, null);
+      assert.equal(invitation.accepted_user_id, null);
+
+      const retry = await route.POST(
+        jsonRequest("/api/invitations/accept", { token, password: "password123" }),
+      );
+      assert.equal(retry.status, 200);
+      assert.equal(db.users.filter((candidate) => candidate.email === email).length, 1);
+      assert.equal(db.memberships.length, 1);
+      assert.equal(db.licenses.length, 1);
+      assert.equal(invitation.status, "accepted");
+      assert.equal(await bcrypt.compare("password123", db.users[0].password_hash), true);
+    });
+  }
+
+  for (const failureStage of [
+    "org_owner_after_org_insert",
+    "org_owner_after_membership_insert",
+  ] as const) {
+    it(`self org creation rolls back org and owner when ${failureStage} fails`, async () => {
+      const db = useFakeDb();
+      const owner = await makeUser({
+        id: `${failureStage}-owner`,
+        email: `${failureStage.replaceAll("_", "-")}@example.com`,
+      });
+      db.users.push(owner);
+      const license = seedLicense({ id: `${failureStage}-license`, user_id: owner.id });
+      const bearer = await issueAccessToken(owner, license);
+      const route = await loadRoute<PostRoute>("orgs");
+      const slug = `${failureStage.replaceAll("_", "-")}-slug`;
+
+      failNextAtomicMembership(failureStage);
+      const failed = await route.POST(
+        jsonRequest(
+          "/api/orgs",
+          { name: "Atomic Owner Org", slug },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      assert.equal(failed.status, 400);
+      assert.equal(db.organizations.length, 0);
+      assert.equal(db.memberships.length, 0);
+
+      const retry = await route.POST(
+        jsonRequest(
+          "/api/orgs",
+          { name: "Atomic Owner Org", slug },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      assert.equal(retry.status, 200);
+      assert.equal(db.organizations.length, 1);
+      assert.equal(db.memberships.length, 1);
+      assert.equal(db.memberships[0].role, "owner");
+      assert.equal(db.memberships[0].user_id, owner.id);
+    });
+  }
 
   it("admin org member mutations preserve an owner", async () => {
     const db = useFakeDb();
