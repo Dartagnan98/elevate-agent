@@ -175,16 +175,21 @@ export async function findLicenseById(
 
 export async function rotateLicenseRefreshToken(
   licenseId: string,
+  expectedHash: string,
   nextHash: string,
-): Promise<void> {
-  const { error } = await supabase()
+): Promise<boolean> {
+  const { data, error } = await supabase()
     .from("licenses")
     .update({
       refresh_token_hash: nextHash,
       last_used_at: new Date().toISOString(),
     })
-    .eq("id", licenseId);
+    .eq("id", licenseId)
+    .eq("refresh_token_hash", expectedHash)
+    .eq("revoked", false)
+    .select("id");
   if (error) throw error;
+  return data?.length === 1;
 }
 
 export async function touchLicense(licenseId: string): Promise<void> {
@@ -898,29 +903,42 @@ export async function approveDeviceGrant(
 export async function denyDeviceGrant(id: string, userId: string): Promise<void> {
   const { error } = await supabase()
     .from("device_grants")
-    .update({ status: "denied", user_id: userId })
+    .update({ status: "denied", user_id: userId, refresh_token_plain: null })
     .eq("id", id);
   if (error) throw error;
 }
 
-export async function markDeviceGrantClaimed(id: string): Promise<void> {
+export async function expireDeviceGrant(id: string): Promise<void> {
   const { error } = await supabase()
+    .from("device_grants")
+    .update({ status: "expired", refresh_token_plain: null })
+    .eq("id", id)
+    .in("status", ["pending", "approved"]);
+  if (error) throw error;
+}
+
+export async function markDeviceGrantClaimed(id: string): Promise<boolean> {
+  const { data, error } = await supabase()
     .from("device_grants")
     .update({
       status: "claimed",
       claimed_at: new Date().toISOString(),
       refresh_token_plain: null,
     })
-    .eq("id", id);
+    .eq("id", id)
+    .eq("status", "approved")
+    .select("id");
   if (error) throw error;
+  return data?.length === 1;
 }
 
 export async function expireStaleDeviceGrants(): Promise<void> {
-  await supabase()
+  const { error } = await supabase()
     .from("device_grants")
-    .update({ status: "expired" })
+    .update({ status: "expired", refresh_token_plain: null })
     .lt("expires_at", new Date().toISOString())
     .in("status", ["pending", "approved"]);
+  if (error) throw error;
 }
 
 // ============================================================================

@@ -172,6 +172,13 @@ let nextPasswordResetTokenId = 1;
 let nextPatchFailure: { table: string; status: number; message: string } | null = null;
 let nextInsertFailure: { table: string; status: number; message: string } | null = null;
 let nextSelectFailure: { table: string; status: number; message: string } | null = null;
+let nextPatchBarrier: {
+  table: string;
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -203,7 +210,16 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextPatchFailure = null;
   nextInsertFailure = null;
   nextSelectFailure = null;
+  nextPatchBarrier = null;
   return activeDb;
+}
+
+export function barrierNextSupabasePatches(table: string, parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextPatchBarrier = { table, parties, arrived: 0, promise, release };
 }
 
 export function failNextSupabasePatch(
@@ -557,8 +573,15 @@ function updateRows(
     return updated;
   }
   if (table === "licenses") {
+    const refreshTokenHash = readEq(filters, "refresh_token_hash");
+    const revoked = readEq(filters, "revoked");
     for (const license of activeDb.licenses) {
-      if (matchesId(license.id) && (!userId || license.user_id === userId)) {
+      if (
+        matchesId(license.id) &&
+        (!userId || license.user_id === userId) &&
+        (!refreshTokenHash || license.refresh_token_hash === refreshTokenHash) &&
+        (!revoked || license.revoked === (revoked === "true"))
+      ) {
         Object.assign(license, body);
         updated.push(license);
       }
@@ -585,8 +608,16 @@ function updateRows(
     return updated;
   }
   if (table === "device_grants") {
+    const status = readEq(filters, "status");
+    const statuses = readIn(filters, "status");
+    const expiresBefore = readLessThan(filters, "expires_at");
     for (const grant of activeDb.device_grants) {
-      if (matchesId(grant.id)) {
+      if (
+        matchesId(grant.id) &&
+        (!status || grant.status === status) &&
+        (!statuses || statuses.includes(grant.status)) &&
+        (!expiresBefore || grant.expires_at < expiresBefore)
+      ) {
         Object.assign(grant, body);
         updated.push(grant);
       }
@@ -677,6 +708,11 @@ function readIsNull(params: URLSearchParams, key: string): boolean {
 function readGreaterThan(params: URLSearchParams, key: string): string | null {
   const raw = params.get(key);
   return raw?.startsWith("gt.") ? raw.slice(3) : null;
+}
+
+function readLessThan(params: URLSearchParams, key: string): string | null {
+  const raw = params.get(key);
+  return raw?.startsWith("lt.") ? raw.slice(3) : null;
 }
 
 function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean): unknown {
@@ -848,6 +884,16 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     return okJson(insertRows(table, body), 201);
   }
   if (method === "PATCH") {
+    if (nextPatchBarrier?.table === table) {
+      const barrier = nextPatchBarrier;
+      barrier.arrived += 1;
+      if (barrier.arrived === barrier.parties) {
+        nextPatchBarrier = null;
+        barrier.release();
+      } else {
+        await barrier.promise;
+      }
+    }
     if (nextPatchFailure?.table === table) {
       const failure = nextPatchFailure;
       nextPatchFailure = null;

@@ -6,6 +6,7 @@ import Stripe from "stripe";
 import {
   assertEntitlementEnvelope,
   assertNoRawDiagnosticsText,
+  barrierNextSupabasePatches,
   createFakeDb,
   failNextSupabaseInsert,
   failNextSupabasePatch,
@@ -317,6 +318,69 @@ describe("hosted route handlers", () => {
     assert.equal(inactiveResponse.status, 402);
     assert.deepEqual(inactiveBody, { error: "subscription inactive" });
     assert.equal(inactiveLicense.revoked, true);
+  });
+
+  it("license refresh has one winner when the same token is used concurrently", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-race-user", email: "race@example.com" });
+    db.users.push(user);
+    const oldHash = refreshHash("shared-refresh");
+    const license = seedLicense({
+      id: "refresh-race-license",
+      user_id: user.id,
+      refresh_token_hash: oldHash,
+    });
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "license/refresh",
+    );
+
+    barrierNextSupabasePatches("licenses");
+    const responses = await Promise.all([
+      route.POST(jsonRequest("/api/license/refresh", { refresh_token: "shared-refresh" })),
+      route.POST(jsonRequest("/api/license/refresh", { refresh_token: "shared-refresh" })),
+    ]);
+    const results = await Promise.all(
+      responses.map(async (response) => ({ response, body: await responseJson(response) })),
+    );
+    const winners = results.filter(({ response }) => response.status === 200);
+    const losers = results.filter(({ response }) => response.status === 401);
+
+    assert.equal(winners.length, 1);
+    assert.equal(losers.length, 1);
+    assert.equal(license.refresh_token_hash, refreshHash(String(winners[0].body.refresh_token)));
+    assert.notEqual(license.refresh_token_hash, oldHash);
+    assert.deepEqual(losers[0].body, { error: "invalid or revoked refresh token" });
+    assert.equal("access_token" in losers[0].body, false);
+    assert.equal("refresh_token" in losers[0].body, false);
+    assert.equal("entitlement_assertion" in losers[0].body, false);
+  });
+
+  it("license refresh rejects and revokes token families past their TTL", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "expired-refresh-user" });
+    db.users.push(user);
+    const license = seedLicense({
+      id: "expired-refresh-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash("expired-refresh"),
+      created_at: new Date(Date.now() - 91 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "license/refresh",
+    );
+
+    const response = await route.POST(
+      jsonRequest("/api/license/refresh", { refresh_token: "expired-refresh" }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 401);
+    assert.deepEqual(body, { error: "invalid or revoked refresh token" });
+    assert.equal("access_token" in body, false);
+    assert.equal("refresh_token" in body, false);
+    assert.equal("entitlement_assertion" in body, false);
+    assert.equal(license.revoked, true);
+    assert.equal(license.refresh_token_hash, refreshHash("expired-refresh"));
   });
 
   it("license issuance fails closed before creating or rotating credentials", async () => {
@@ -1717,6 +1781,212 @@ describe("hosted route handlers", () => {
     assert.deepEqual(secondBody, { error: "already_claimed", status: "claimed" });
   });
 
+  it("device poll has one winner when an approved grant is claimed concurrently", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-race-user", email: "device-race@example.com" });
+    db.users.push(user);
+    const browserLicense = seedLicense({ id: "device-race-browser", user_id: user.id });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Concurrent CLI" })),
+    );
+    const approveResponse = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    assert.equal(approveResponse.status, 200);
+
+    barrierNextSupabasePatches("device_grants");
+    const responses = await Promise.all([
+      poll.POST(jsonRequest("/api/device/poll", { device_code: startBody.device_code })),
+      poll.POST(jsonRequest("/api/device/poll", { device_code: startBody.device_code })),
+    ]);
+    const results = await Promise.all(
+      responses.map(async (response) => ({ response, body: await responseJson(response) })),
+    );
+    const winners = results.filter(({ response }) => response.status === 200);
+    const losers = results.filter(({ response }) => response.status === 410);
+
+    assert.equal(winners.length, 1);
+    assert.equal(losers.length, 1);
+    assert.equal(db.device_grants[0].status, "claimed");
+    assert.equal(db.device_grants[0].refresh_token_plain, null);
+    assert.deepEqual(losers[0].body, { error: "already_claimed", status: "claimed" });
+    assert.equal("access_token" in losers[0].body, false);
+    assert.equal("refresh_token" in losers[0].body, false);
+    assert.equal("entitlement_assertion" in losers[0].body, false);
+  });
+
+  it("device poll revalidates subscription state before issuing credentials", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-inactive-user" });
+    db.users.push(user);
+    const browserLicense = seedLicense({ id: "device-inactive-browser", user_id: user.id });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Inactive CLI" })),
+    );
+    const approveResponse = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    assert.equal(approveResponse.status, 200);
+
+    const deviceLicense = db.licenses.find((candidate) => candidate.id !== browserLicense.id);
+    assert.ok(deviceLicense);
+    user.status = "inactive";
+
+    const response = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 402);
+    assert.deepEqual(body, { error: "subscription inactive" });
+    assert.equal("access_token" in body, false);
+    assert.equal("refresh_token" in body, false);
+    assert.equal("entitlement_assertion" in body, false);
+    assert.equal(deviceLicense.revoked, true);
+    assert.equal(db.device_grants[0].status, "expired");
+    assert.equal(db.device_grants[0].refresh_token_plain, null);
+  });
+
+  it("device poll binds the approved user, license, and stashed refresh token", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "bound-device-user" });
+    const other = await makeUser({ id: "other-device-user", email: "other-device@example.com" });
+    db.users.push(user, other);
+    const browserLicense = seedLicense({ id: "bound-device-browser", user_id: user.id });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Bound CLI" })),
+    );
+    const approveResponse = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    assert.equal(approveResponse.status, 200);
+    const grant = db.device_grants[0];
+    const stashedRefresh = grant.refresh_token_plain;
+    assert.equal(typeof stashedRefresh, "string");
+
+    grant.refresh_token_plain = "refresh-from-another-approval";
+    const mismatchedRefresh = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const mismatchedRefreshBody = await responseJson(mismatchedRefresh);
+    assert.equal(mismatchedRefresh.status, 500);
+    assert.deepEqual(mismatchedRefreshBody, { error: "invalid_grant" });
+    assert.equal("access_token" in mismatchedRefreshBody, false);
+    assert.equal("refresh_token" in mismatchedRefreshBody, false);
+    assert.equal(grant.status, "expired");
+    assert.equal(grant.refresh_token_plain, null);
+
+    grant.status = "approved";
+    grant.refresh_token_plain = stashedRefresh;
+    grant.user_id = other.id;
+    const mismatchedUser = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const mismatchedUserBody = await responseJson(mismatchedUser);
+    assert.equal(mismatchedUser.status, 500);
+    assert.deepEqual(mismatchedUserBody, { error: "invalid_grant" });
+    assert.equal("access_token" in mismatchedUserBody, false);
+    assert.equal("refresh_token" in mismatchedUserBody, false);
+    assert.equal(grant.status, "expired");
+    assert.equal(grant.refresh_token_plain, null);
+  });
+
+  it("device poll expires an approved grant and clears its plaintext refresh stash", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "expired-device-user" });
+    db.users.push(user);
+    const browserLicense = seedLicense({ id: "expired-device-browser", user_id: user.id });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Expired CLI" })),
+    );
+    const approveResponse = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    assert.equal(approveResponse.status, 200);
+    assert.equal(typeof db.device_grants[0].refresh_token_plain, "string");
+    db.device_grants[0].expires_at = new Date(Date.now() - 1000).toISOString();
+
+    const response = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 410);
+    assert.deepEqual(body, { error: "expired_token", status: "expired" });
+    assert.equal("access_token" in body, false);
+    assert.equal("refresh_token" in body, false);
+    assert.equal("entitlement_assertion" in body, false);
+    assert.equal(db.device_grants[0].status, "expired");
+    assert.equal(db.device_grants[0].refresh_token_plain, null);
+  });
+
+  it("device grant expiry cleanup clears only stale pending or approved stashes", async () => {
+    const db = useFakeDb();
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    await start.POST(jsonRequest("/api/device/start", { device_label: "Stale CLI" }));
+    await start.POST(jsonRequest("/api/device/start", { device_label: "Fresh CLI" }));
+    assert.equal(db.device_grants.length, 2);
+
+    db.device_grants[0].status = "approved";
+    db.device_grants[0].expires_at = new Date(Date.now() - 1000).toISOString();
+    db.device_grants[0].refresh_token_plain = "stale-plaintext-refresh";
+    db.device_grants[1].status = "approved";
+    db.device_grants[1].expires_at = new Date(Date.now() + 60_000).toISOString();
+    db.device_grants[1].refresh_token_plain = "fresh-plaintext-refresh";
+
+    const { expireStaleDeviceGrants } = await import("../src/lib/store");
+    await expireStaleDeviceGrants();
+
+    assert.equal(db.device_grants[0].status, "expired");
+    assert.equal(db.device_grants[0].refresh_token_plain, null);
+    assert.equal(db.device_grants[1].status, "approved");
+    assert.equal(db.device_grants[1].refresh_token_plain, "fresh-plaintext-refresh");
+  });
+
   it("device poll does not return a one-shot refresh token when clearing it fails", async () => {
     const db = useFakeDb();
     const user = await makeUser();
@@ -1789,6 +2059,8 @@ describe("hosted route handlers", () => {
     assert.equal(lookupBody.device_label, "CLI lookup");
     assert.equal(lookupBody.user_agent, "lookup-cli");
 
+    db.device_grants[0].refresh_token_plain = "defensive-stale-refresh";
+
     const denyResponse = await deny.POST(
       jsonRequest(
         "/api/device/deny",
@@ -1799,6 +2071,7 @@ describe("hosted route handlers", () => {
 
     assert.equal(denyResponse.status, 200);
     assert.equal(db.device_grants[0].status, "denied");
+    assert.equal(db.device_grants[0].refresh_token_plain, null);
     assert.equal(db.audit_log.length, 1);
 
     const pollResponse = await poll.POST(

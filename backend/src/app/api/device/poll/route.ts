@@ -3,13 +3,15 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   effectiveAccess,
+  expireDeviceGrant,
+  findActiveUser,
   findDeviceGrantByDeviceCodeHash,
   findLicenseById,
-  findUserById,
   markDeviceGrantClaimed,
+  revokeLicense,
   touchDeviceGrantPoll,
 } from "@/lib/store";
-import { signAccessToken } from "@/lib/jwt";
+import { hashRefreshToken, signAccessToken } from "@/lib/jwt";
 import {
   createEntitlementEnvelope,
   tryLoadEntitlementSigner,
@@ -35,7 +37,9 @@ export async function POST(req: NextRequest) {
   }
 
   // Expiry check (covers race where status hasn't been swept yet)
-  if (new Date(grant.expires_at).getTime() < Date.now()) {
+  const expiresAt = Date.parse(grant.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    await expireDeviceGrant(grant.id);
     return NextResponse.json({ error: "expired_token", status: "expired" }, { status: 410 });
   }
 
@@ -63,12 +67,19 @@ export async function POST(req: NextRequest) {
 
   const license = await findLicenseById(grant.license_id);
   if (!license || license.revoked) {
+    await expireDeviceGrant(grant.id);
     return NextResponse.json({ error: "license_revoked" }, { status: 403 });
   }
+  if (license.user_id !== grant.user_id) {
+    await expireDeviceGrant(grant.id);
+    return NextResponse.json({ error: "invalid_grant" }, { status: 500 });
+  }
 
-  const user = await findUserById(grant.user_id);
+  const user = await findActiveUser(grant.user_id);
   if (!user) {
-    return NextResponse.json({ error: "user_not_found" }, { status: 404 });
+    await expireDeviceGrant(grant.id);
+    await revokeLicense(license.id);
+    return NextResponse.json({ error: "subscription inactive" }, { status: 402 });
   }
 
   const access_info = await effectiveAccess(user.id);
@@ -84,6 +95,10 @@ export async function POST(req: NextRequest) {
   try {
     refresh_payload = await readStashedRefresh(grant.id);
   } catch {
+    return NextResponse.json({ error: "invalid_grant" }, { status: 500 });
+  }
+  if (hashRefreshToken(refresh_payload) !== license.refresh_token_hash) {
+    await expireDeviceGrant(grant.id);
     return NextResponse.json({ error: "invalid_grant" }, { status: 500 });
   }
 
@@ -104,7 +119,15 @@ export async function POST(req: NextRequest) {
   }, entitlementSigner);
 
   try {
-    await markDeviceGrantClaimed(grant.id);
+    const claimed = await markDeviceGrantClaimed(grant.id);
+    if (!claimed) {
+      // Another poll won the one-shot claim. Do not return the credentials
+      // prepared by this losing request.
+      return NextResponse.json(
+        { error: "already_claimed", status: "claimed" },
+        { status: 410 },
+      );
+    }
   } catch {
     // The atomic claim+clear write failed, so return no credentials. The grant
     // and its stash remain retryable rather than leaking a one-shot refresh.

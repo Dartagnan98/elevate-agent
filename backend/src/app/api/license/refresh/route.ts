@@ -11,6 +11,7 @@ import {
   signAccessToken,
   generateRefreshToken,
   hashRefreshToken,
+  TTL,
 } from "@/lib/jwt";
 import {
   createEntitlementEnvelope,
@@ -29,6 +30,15 @@ export async function POST(req: NextRequest) {
   const license = await findLicenseByRefreshHash(oldHash);
 
   if (!license || license.revoked) {
+    return NextResponse.json({ error: "invalid or revoked refresh token" }, { status: 401 });
+  }
+
+  const createdAt = Date.parse(license.created_at);
+  if (
+    !Number.isFinite(createdAt) ||
+    Date.now() >= createdAt + TTL.REFRESH_SECONDS * 1000
+  ) {
+    await revokeLicense(license.id);
     return NextResponse.json({ error: "invalid or revoked refresh token" }, { status: 401 });
   }
 
@@ -64,7 +74,12 @@ export async function POST(req: NextRequest) {
 
   // Rotate only after both tokens and their binding assertion exist. If signer
   // configuration is broken, the caller's current refresh remains usable.
-  await rotateLicenseRefreshToken(license.id, next.hash);
+  const rotated = await rotateLicenseRefreshToken(license.id, oldHash, next.hash);
+  if (!rotated) {
+    // Another request already consumed this refresh token. Never return the
+    // credentials we prepared for the losing request.
+    return NextResponse.json({ error: "invalid or revoked refresh token" }, { status: 401 });
+  }
 
   return NextResponse.json({
     ...envelope,
