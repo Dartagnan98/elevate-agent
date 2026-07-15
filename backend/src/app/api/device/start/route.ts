@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { createDeviceGrant } from "@/lib/store";
+import {
+  createDeviceGrant,
+  DeviceGrantProposalConflictError,
+  DeviceGrantUserCodeConflictError,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
 
 const Body = z.object({
   device_label: z.string().max(120).optional(),
+  proposed_refresh_token_hash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 
 // Unambiguous alphabet (no 0/O, no 1/I/L)
@@ -39,6 +44,8 @@ export async function POST(req: NextRequest) {
       await createDeviceGrant({
         user_code: userCode,
         device_code_hash,
+        proposed_refresh_token_hash:
+          parsed.data.proposed_refresh_token_hash ?? null,
         device_label: parsed.data.device_label || null,
         ip_addr: req.headers.get("x-forwarded-for") || null,
         user_agent: req.headers.get("user-agent") || null,
@@ -46,9 +53,28 @@ export async function POST(req: NextRequest) {
       });
       break;
     } catch (e: unknown) {
-      if (attempts === 4) throw e;
-      attempts++;
+      if (e instanceof DeviceGrantProposalConflictError) {
+        return NextResponse.json(
+          { error: "refresh_token_proposal_conflict" },
+          { status: 409 },
+        );
+      }
+      if (e instanceof DeviceGrantUserCodeConflictError) {
+        attempts += 1;
+        continue;
+      }
+      return NextResponse.json(
+        { error: "device authorization unavailable" },
+        { status: 503 },
+      );
     }
+  }
+
+  if (!userCode || attempts >= 5) {
+    return NextResponse.json(
+      { error: "device authorization unavailable" },
+      { status: 503 },
+    );
   }
 
   const origin = req.headers.get("origin") || new URL(req.url).origin;
@@ -60,5 +86,8 @@ export async function POST(req: NextRequest) {
     verification_uri_complete: `${origin}/link?code=${userCode}`,
     expires_in: 600,
     interval: 5,
+    ...(parsed.data.proposed_refresh_token_hash
+      ? { protocol_version: 2 }
+      : {}),
   });
 }

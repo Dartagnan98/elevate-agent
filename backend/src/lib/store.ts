@@ -1068,11 +1068,49 @@ export type DeviceGrant = {
   approved_at: string | null;
   claimed_at: string | null;
   last_polled_at: string | null;
+  proposed_refresh_token_hash: string | null;
+  claim_retry_until: string | null;
 };
+
+export class DeviceGrantUserCodeConflictError extends Error {
+  constructor() {
+    super("device grant user code conflict");
+    this.name = "DeviceGrantUserCodeConflictError";
+  }
+}
+
+export class DeviceGrantProposalConflictError extends Error {
+  constructor() {
+    super("device grant refresh proposal conflict");
+    this.name = "DeviceGrantProposalConflictError";
+  }
+}
+
+function deviceGrantUniqueConstraint(
+  error: unknown,
+): "proposal" | "user_code" | null {
+  if (!error || typeof error !== "object") return null;
+  const value = error as Record<string, unknown>;
+  if (value.code !== "23505") return null;
+  const text = [value.message, value.details, value.hint]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ");
+  if (text.includes("device_grants_proposed_refresh_token_hash_uidx")) {
+    return "proposal";
+  }
+  if (
+    text.includes("device_grants_user_code_key") ||
+    text.includes("device_grants_user_code")
+  ) {
+    return "user_code";
+  }
+  return null;
+}
 
 export async function createDeviceGrant(input: {
   user_code: string;
   device_code_hash: string;
+  proposed_refresh_token_hash: string | null;
   device_label: string | null;
   ip_addr: string | null;
   user_agent: string | null;
@@ -1089,6 +1127,7 @@ export async function createDeviceGrant(input: {
     .insert({
       user_code: input.user_code,
       device_code_hash: input.device_code_hash,
+      proposed_refresh_token_hash: input.proposed_refresh_token_hash,
       device_label: input.device_label,
       ip_addr: input.ip_addr,
       user_agent: input.user_agent,
@@ -1096,7 +1135,12 @@ export async function createDeviceGrant(input: {
     })
     .select("*")
     .single();
-  if (error) throw error;
+  if (error) {
+    const conflict = deviceGrantUniqueConstraint(error);
+    if (conflict === "proposal") throw new DeviceGrantProposalConflictError();
+    if (conflict === "user_code") throw new DeviceGrantUserCodeConflictError();
+    throw error;
+  }
   return data as DeviceGrant;
 }
 
@@ -1133,6 +1177,13 @@ export type DeviceGrantApprovalResult =
   | { result: "expired"; grant_status: "expired" }
   | { result: "conflict"; grant_status: DeviceGrantStatus }
   | { result: "invalid"; grant_status: "expired" };
+
+export type DeviceGrantApprovalV2Result =
+  | { result: "approved"; license_id: string }
+  | { result: "not_found" }
+  | { result: "expired"; grant_status: "expired" }
+  | { result: "conflict"; grant_status: DeviceGrantStatus }
+  | { result: "invalid" | "collision"; grant_status: "expired" };
 
 export async function approveDeviceGrant(input: {
   id: string;
@@ -1176,6 +1227,156 @@ export async function approveDeviceGrant(input: {
   throw new Error("invalid atomic device approval result");
 }
 
+export async function approveDeviceGrantV2(input: {
+  id: string;
+  userId: string;
+}): Promise<DeviceGrantApprovalV2Result> {
+  const { data, error } = await supabase().rpc("approve_device_grant_atomic_v2", {
+    p_grant_id: input.id,
+    p_user_id: input.userId,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic device v2 approval result");
+  }
+
+  const value = data as Record<string, unknown>;
+  if (value.result === "approved" && typeof value.license_id === "string") {
+    return { result: "approved", license_id: value.license_id };
+  }
+  if (value.result === "not_found") return { result: "not_found" };
+  if (value.result === "expired" && value.grant_status === "expired") {
+    return { result: "expired", grant_status: "expired" };
+  }
+  if (
+    (value.result === "invalid" || value.result === "collision") &&
+    value.grant_status === "expired"
+  ) {
+    return { result: value.result, grant_status: "expired" };
+  }
+  if (
+    value.result === "conflict" &&
+    typeof value.grant_status === "string" &&
+    ["pending", "approved", "denied", "expired", "claimed"].includes(
+      value.grant_status,
+    )
+  ) {
+    return {
+      result: "conflict",
+      grant_status: value.grant_status as DeviceGrantStatus,
+    };
+  }
+  throw new Error("invalid atomic device v2 approval result");
+}
+
+export type DeviceGrantClaimV2Result =
+  | {
+      result: "claimed" | "replay";
+      license_id: string;
+      user_id: string;
+      email: string;
+    }
+  | {
+      result:
+        | "not_found"
+        | "pending"
+        | "denied"
+        | "expired"
+        | "retry_expired"
+        | "invalid"
+        | "revoked"
+        | "stale"
+        | "inactive";
+    };
+
+export type DeviceGrantPendingPollV2Result = {
+  result:
+    | "ready"
+    | "pending"
+    | "denied"
+    | "expired"
+    | "not_found"
+    | "invalid";
+};
+
+export async function pollDeviceGrantPendingV2(input: {
+  deviceCodeHash: string;
+  refreshTokenHash: string;
+}): Promise<DeviceGrantPendingPollV2Result> {
+  const { data, error } = await supabase().rpc("poll_device_grant_pending_v2", {
+    p_device_code_hash: input.deviceCodeHash,
+    p_refresh_token_hash: input.refreshTokenHash,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid pending device v2 poll result");
+  }
+
+  const value = data as Record<string, unknown>;
+  const results = [
+    "ready",
+    "pending",
+    "denied",
+    "expired",
+    "not_found",
+    "invalid",
+  ] as const;
+  if (results.includes(value.result as (typeof results)[number])) {
+    return { result: value.result as (typeof results)[number] };
+  }
+  throw new Error("invalid pending device v2 poll result");
+}
+
+export async function claimDeviceGrantV2(input: {
+  deviceCodeHash: string;
+  refreshTokenHash: string;
+}): Promise<DeviceGrantClaimV2Result> {
+  const { data, error } = await supabase().rpc("claim_device_grant_atomic_v2", {
+    p_device_code_hash: input.deviceCodeHash,
+    p_refresh_token_hash: input.refreshTokenHash,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic device v2 claim result");
+  }
+
+  const value = data as Record<string, unknown>;
+  if (value.result === "claimed" || value.result === "replay") {
+    if (
+      typeof value.license_id !== "string" ||
+      typeof value.user_id !== "string" ||
+      typeof value.email !== "string"
+    ) {
+      throw new Error("invalid atomic device v2 claim result");
+    }
+    return {
+      result: value.result,
+      license_id: value.license_id,
+      user_id: value.user_id,
+      email: value.email,
+    };
+  }
+
+  const failures = [
+    "not_found",
+    "pending",
+    "denied",
+    "expired",
+    "retry_expired",
+    "invalid",
+    "revoked",
+    "stale",
+    "inactive",
+  ] as const;
+  if (failures.includes(value.result as (typeof failures)[number])) {
+    return { result: value.result as (typeof failures)[number] };
+  }
+  throw new Error("invalid atomic device v2 claim result");
+}
+
 export async function denyDeviceGrant(id: string, userId: string): Promise<boolean> {
   const { data, error } = await supabase()
     .from("device_grants")
@@ -1213,11 +1414,15 @@ export async function markDeviceGrantClaimed(id: string): Promise<boolean> {
 }
 
 export async function expireStaleDeviceGrants(): Promise<void> {
+  const { error: v2Error } = await supabase().rpc("expire_stale_device_grants_v2");
+  if (v2Error) throw v2Error;
+
   const { error } = await supabase()
     .from("device_grants")
     .update({ status: "expired", refresh_token_plain: null })
     .lt("expires_at", new Date().toISOString())
-    .in("status", ["pending", "approved"]);
+    .in("status", ["pending", "approved"])
+    .is("proposed_refresh_token_hash", null);
   if (error) throw error;
 }
 

@@ -104,6 +104,8 @@ type DeviceGrantRow = {
   claimed_at: string | null;
   last_polled_at: string | null;
   refresh_token_plain?: string | null;
+  proposed_refresh_token_hash: string | null;
+  claim_retry_until: string | null;
 };
 
 type LoginCodeRow = {
@@ -212,6 +214,7 @@ let nextPasswordResetTokenId = 1;
 let nextPatchFailure: { table: string; status: number; message: string } | null = null;
 let nextInsertFailure: { table: string; status: number; message: string } | null = null;
 let nextSelectFailure: { table: string; status: number; message: string } | null = null;
+let nextDeviceGrantInsertConflict: "user_code" | "proposal" | null = null;
 let nextPatchBarrier: {
   table: string;
   parties: number;
@@ -226,6 +229,17 @@ let nextRpcBarrier: {
   promise: Promise<void>;
   release: () => void;
 } | null = null;
+let nextRpcGate: {
+  name: string;
+  reached: Promise<void>;
+  markReached: () => void;
+  released: Promise<void>;
+  release: () => void;
+} | null = null;
+let nextRpcAfterHook: {
+  name: string;
+  run: () => void | Promise<void>;
+} | null = null;
 let nextDeviceGrantDecisionBarrier: {
   parties: number;
   arrived: number;
@@ -237,6 +251,12 @@ export type AtomicDeviceApprovalFailureStage =
   | "after_grant_update"
   | "after_audit_insert";
 let nextAtomicDeviceApprovalFailure: AtomicDeviceApprovalFailureStage | null = null;
+export type AtomicDeviceV2FailureStage =
+  | "approval_after_license_insert"
+  | "approval_after_grant_update"
+  | "approval_after_audit_insert"
+  | "claim_after_grant_update";
+let nextAtomicDeviceV2Failure: AtomicDeviceV2FailureStage | null = null;
 let nextLoginCodeOperationBarrier: {
   parties: number;
   arrived: number;
@@ -298,10 +318,14 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextPatchFailure = null;
   nextInsertFailure = null;
   nextSelectFailure = null;
+  nextDeviceGrantInsertConflict = null;
   nextPatchBarrier = null;
   nextRpcBarrier = null;
+  nextRpcGate = null;
+  nextRpcAfterHook = null;
   nextDeviceGrantDecisionBarrier = null;
   nextAtomicDeviceApprovalFailure = null;
+  nextAtomicDeviceV2Failure = null;
   nextLoginCodeOperationBarrier = null;
   nextAtomicLoginCodeFailure = null;
   nextMembershipOperationBarrier = null;
@@ -326,6 +350,36 @@ export function barrierNextSupabaseRpcs(name: string, parties = 2): void {
   nextRpcBarrier = { name, parties, arrived: 0, promise, release };
 }
 
+export function gateNextSupabaseRpc(name: string): {
+  reached: Promise<void>;
+  release: () => void;
+} {
+  let markReached = () => {};
+  let release = () => {};
+  const reached = new Promise<void>((resolve) => {
+    markReached = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const gate = { name, reached, markReached, released, release };
+  nextRpcGate = gate;
+  return {
+    reached,
+    release: () => {
+      if (nextRpcGate === gate) nextRpcGate = null;
+      release();
+    },
+  };
+}
+
+export function afterNextSupabaseRpc(
+  name: string,
+  run: () => void | Promise<void>,
+): void {
+  nextRpcAfterHook = { name, run };
+}
+
 export function barrierNextDeviceGrantDecisions(parties = 2): void {
   let release = () => {};
   const promise = new Promise<void>((resolve) => {
@@ -338,6 +392,16 @@ export function failNextAtomicDeviceApproval(
   stage: AtomicDeviceApprovalFailureStage,
 ): void {
   nextAtomicDeviceApprovalFailure = stage;
+}
+
+export function failNextAtomicDeviceV2(stage: AtomicDeviceV2FailureStage): void {
+  nextAtomicDeviceV2Failure = stage;
+}
+
+export function failNextDeviceGrantInsertConflict(
+  kind: "user_code" | "proposal",
+): void {
+  nextDeviceGrantInsertConflict = kind;
 }
 
 export function barrierNextLoginCodeOperations(parties = 2): void {
@@ -546,6 +610,18 @@ function noContent(): Response {
   return new Response(null, { status: 204 });
 }
 
+function uniqueConstraintError(constraint: string): Response {
+  return okJson(
+    {
+      code: "23505",
+      message: `duplicate key value violates unique constraint "${constraint}"`,
+      details: null,
+      hint: null,
+    },
+    409,
+  );
+}
+
 function asArrayBody(body: unknown): Record<string, unknown>[] {
   if (Array.isArray(body)) return body as Record<string, unknown>[];
   return [body as Record<string, unknown>];
@@ -659,6 +735,9 @@ function insertRows(table: string, body: unknown): unknown {
         claimed_at: null,
         last_polled_at: null,
         refresh_token_plain: null,
+        proposed_refresh_token_hash:
+          (row.proposed_refresh_token_hash as string | null | undefined) ?? null,
+        claim_retry_until: null,
       };
       activeDb.device_grants.push(grant);
       return grant;
@@ -774,13 +853,18 @@ function updateRows(
     const statuses = readIn(filters, "status");
     const expiresBefore = readLessThan(filters, "expires_at");
     const expiresAfter = readGreaterThan(filters, "expires_at");
+    const proposalIsNull = readIsNull(
+      filters,
+      "proposed_refresh_token_hash",
+    );
     for (const grant of activeDb.device_grants) {
       if (
         matchesId(grant.id) &&
         (!status || grant.status === status) &&
         (!statuses || statuses.includes(grant.status)) &&
         (!expiresBefore || grant.expires_at < expiresBefore) &&
-        (!expiresAfter || grant.expires_at > expiresAfter)
+        (!expiresAfter || grant.expires_at > expiresAfter) &&
+        (!proposalIsNull || grant.proposed_refresh_token_hash === null)
       ) {
         Object.assign(grant, body);
         updated.push(grant);
@@ -1185,6 +1269,339 @@ function atomicDeviceApproval(body: unknown): Response {
   activeDb.audit_log.push(audit);
 
   return okJson({ result: "approved", license_id: license.id });
+}
+
+function atomicDeviceApprovalV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const grantId = String(input.p_grant_id || "");
+  const userId = String(input.p_user_id || "");
+  if (!grantId || !userId) {
+    return okJson({ message: "invalid device v2 approval parameters" }, 400);
+  }
+
+  const user = activeDb.users.find(
+    (candidate) =>
+      candidate.id === userId && ["active", "trialing"].includes(candidate.status),
+  );
+  if (!user) return okJson({ message: "device approver is not active" }, 500);
+
+  const grant = activeDb.device_grants.find((candidate) => candidate.id === grantId);
+  if (!grant) return okJson({ result: "not_found" });
+
+  const expiresAt = Date.parse(grant.expires_at);
+  if (
+    ["pending", "approved"].includes(grant.status) &&
+    (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+  ) {
+    if (grant.status === "approved" && grant.license_id) {
+      const orphan = activeDb.licenses.find(
+        (candidate) => candidate.id === grant.license_id,
+      );
+      if (orphan) orphan.revoked = true;
+    }
+    Object.assign(grant, {
+      status: "expired",
+      refresh_token_plain: null,
+      claim_retry_until: null,
+    });
+    return okJson({ result: "expired", grant_status: "expired" });
+  }
+
+  if (grant.status !== "pending") {
+    return okJson({ result: "conflict", grant_status: grant.status });
+  }
+  const proposedHash = grant.proposed_refresh_token_hash;
+  if (
+    grant.user_id ||
+    grant.license_id ||
+    grant.refresh_token_plain ||
+    !proposedHash ||
+    !/^[0-9a-f]{64}$/.test(proposedHash)
+  ) {
+    Object.assign(grant, {
+      status: "expired",
+      refresh_token_plain: null,
+      claim_retry_until: null,
+    });
+    return okJson({ result: "invalid", grant_status: "expired" });
+  }
+
+  if (
+    activeDb.licenses.some(
+      (candidate) =>
+        candidate.refresh_token_hash === proposedHash ||
+        candidate.previous_refresh_token_hash === proposedHash,
+    )
+  ) {
+    Object.assign(grant, { status: "expired", claim_retry_until: null });
+    return okJson({ result: "collision", grant_status: "expired" });
+  }
+
+  const now = new Date().toISOString();
+  const license: LicenseRow = {
+    id: `license-${nextLicenseId}`,
+    user_id: userId,
+    refresh_token_hash: proposedHash,
+    previous_refresh_token_hash: null,
+    previous_refresh_attempt_hash: null,
+    refresh_family_expires_at: refreshFamilyExpiry(now),
+    device_label: grant.device_label ?? "linked-device",
+    revoked: false,
+    last_used_at: null,
+    created_at: now,
+  };
+  if (nextAtomicDeviceV2Failure === "approval_after_license_insert") {
+    nextAtomicDeviceV2Failure = null;
+    return okJson(
+      { message: "injected device v2 approval failure after license insert" },
+      500,
+    );
+  }
+
+  if (nextAtomicDeviceV2Failure === "approval_after_grant_update") {
+    nextAtomicDeviceV2Failure = null;
+    return okJson(
+      { message: "injected device v2 approval failure after grant update" },
+      500,
+    );
+  }
+
+  const audit = {
+    actor_user_id: userId,
+    target_user_id: userId,
+    action: "device.link.approved.v2",
+    payload: {
+      grant_id: grant.id,
+      user_code: grant.user_code,
+      device_label: grant.device_label,
+      license_id: license.id,
+    },
+  };
+  if (nextAtomicDeviceV2Failure === "approval_after_audit_insert") {
+    nextAtomicDeviceV2Failure = null;
+    return okJson(
+      { message: "injected device v2 approval failure after audit insert" },
+      500,
+    );
+  }
+
+  activeDb.licenses.push(license);
+  nextLicenseId += 1;
+  Object.assign(grant, {
+    status: "approved",
+    user_id: userId,
+    license_id: license.id,
+    approved_at: now,
+    refresh_token_plain: null,
+    claim_retry_until: null,
+  });
+  activeDb.audit_log.push(audit);
+  return okJson({ result: "approved", license_id: license.id });
+}
+
+function atomicPendingDevicePollV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const deviceCodeHash = String(input.p_device_code_hash || "");
+  const refreshTokenHash = String(input.p_refresh_token_hash || "");
+  if (
+    !/^[0-9a-f]{64}$/.test(deviceCodeHash) ||
+    !/^[0-9a-f]{64}$/.test(refreshTokenHash)
+  ) {
+    return okJson(
+      { message: "invalid pending device v2 poll token material" },
+      400,
+    );
+  }
+
+  const grant = activeDb.device_grants.find(
+    (candidate) => candidate.device_code_hash === deviceCodeHash,
+  );
+  if (!grant) return okJson({ result: "not_found" });
+  if (
+    !grant.proposed_refresh_token_hash ||
+    grant.proposed_refresh_token_hash !== refreshTokenHash ||
+    grant.refresh_token_plain
+  ) {
+    return okJson({ result: "invalid" });
+  }
+
+  const nowMs = Date.now();
+  const expiresAt = Date.parse(grant.expires_at);
+  if (
+    ["pending", "approved"].includes(grant.status) &&
+    (!Number.isFinite(expiresAt) || expiresAt <= nowMs)
+  ) {
+    if (grant.status === "approved" && grant.license_id) {
+      const orphan = activeDb.licenses.find(
+        (candidate) => candidate.id === grant.license_id,
+      );
+      if (orphan) orphan.revoked = true;
+    }
+    Object.assign(grant, {
+      status: "expired",
+      refresh_token_plain: null,
+      claim_retry_until: null,
+    });
+    return okJson({ result: "expired" });
+  }
+
+  if (grant.status === "pending") {
+    grant.last_polled_at = new Date(nowMs).toISOString();
+    return okJson({ result: "pending" });
+  }
+  if (grant.status === "denied") return okJson({ result: "denied" });
+  if (grant.status === "expired") return okJson({ result: "expired" });
+  if (grant.status === "approved" || grant.status === "claimed") {
+    return okJson({ result: "ready" });
+  }
+  return okJson({ result: "invalid" });
+}
+
+function atomicDeviceClaimV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const deviceCodeHash = String(input.p_device_code_hash || "");
+  const refreshTokenHash = String(input.p_refresh_token_hash || "");
+  if (
+    !/^[0-9a-f]{64}$/.test(deviceCodeHash) ||
+    !/^[0-9a-f]{64}$/.test(refreshTokenHash)
+  ) {
+    return okJson({ message: "invalid device v2 claim token material" }, 400);
+  }
+
+  const grant = activeDb.device_grants.find(
+    (candidate) => candidate.device_code_hash === deviceCodeHash,
+  );
+  if (!grant) return okJson({ result: "not_found" });
+  if (
+    !grant.proposed_refresh_token_hash ||
+    grant.proposed_refresh_token_hash !== refreshTokenHash ||
+    grant.refresh_token_plain
+  ) {
+    return okJson({ result: "invalid" });
+  }
+
+  const nowMs = Date.now();
+  const expiresAt = Date.parse(grant.expires_at);
+  if (
+    ["pending", "approved"].includes(grant.status) &&
+    (!Number.isFinite(expiresAt) || expiresAt <= nowMs)
+  ) {
+    if (grant.status === "approved" && grant.license_id) {
+      const orphan = activeDb.licenses.find(
+        (candidate) => candidate.id === grant.license_id,
+      );
+      if (orphan) orphan.revoked = true;
+    }
+    Object.assign(grant, {
+      status: "expired",
+      refresh_token_plain: null,
+      claim_retry_until: null,
+    });
+    return okJson({ result: "expired" });
+  }
+
+  if (grant.status === "pending") {
+    grant.last_polled_at = new Date(nowMs).toISOString();
+    return okJson({ result: "pending" });
+  }
+  if (grant.status === "denied") return okJson({ result: "denied" });
+  if (grant.status === "expired") return okJson({ result: "expired" });
+  if (
+    grant.status === "claimed" &&
+    (!grant.claim_retry_until || Date.parse(grant.claim_retry_until) <= nowMs)
+  ) {
+    return okJson({ result: "retry_expired" });
+  }
+  if (
+    !["approved", "claimed"].includes(grant.status) ||
+    !grant.user_id ||
+    !grant.license_id
+  ) {
+    return okJson({ result: "invalid" });
+  }
+
+  const license = activeDb.licenses.find(
+    (candidate) => candidate.id === grant.license_id,
+  );
+  if (!license || license.user_id !== grant.user_id) {
+    return okJson({ result: "invalid" });
+  }
+  if (license.revoked) return okJson({ result: "revoked" });
+  if (license.refresh_token_hash !== refreshTokenHash) {
+    return okJson({ result: "stale" });
+  }
+
+  const familyExpiresAt = Date.parse(license.refresh_family_expires_at);
+  if (!Number.isFinite(familyExpiresAt) || familyExpiresAt <= nowMs) {
+    license.revoked = true;
+    Object.assign(grant, { status: "expired", claim_retry_until: null });
+    return okJson({ result: "expired" });
+  }
+
+  const user = activeDb.users.find((candidate) => candidate.id === grant.user_id);
+  if (!user || !["active", "trialing"].includes(user.status)) {
+    license.revoked = true;
+    Object.assign(grant, { status: "expired", claim_retry_until: null });
+    return okJson({ result: "inactive" });
+  }
+
+  const wasApproved = grant.status === "approved";
+  const now = new Date(nowMs).toISOString();
+  if (wasApproved) {
+    if (nextAtomicDeviceV2Failure === "claim_after_grant_update") {
+      nextAtomicDeviceV2Failure = null;
+      return okJson(
+        { message: "injected device v2 claim failure after grant update" },
+        500,
+      );
+    }
+    Object.assign(grant, {
+      status: "claimed",
+      claimed_at: now,
+      claim_retry_until: new Date(
+        Math.min(nowMs + 2 * 60 * 1000, familyExpiresAt),
+      ).toISOString(),
+      last_polled_at: now,
+      refresh_token_plain: null,
+    });
+  } else {
+    grant.last_polled_at = now;
+  }
+
+  return okJson({
+    result: wasApproved ? "claimed" : "replay",
+    license_id: license.id,
+    user_id: user.id,
+    email: user.email,
+  });
+}
+
+function expireStaleDeviceGrantsV2(): Response {
+  let count = 0;
+  const now = Date.now();
+  for (const grant of activeDb.device_grants) {
+    const expiresAt = Date.parse(grant.expires_at);
+    if (
+      !grant.proposed_refresh_token_hash ||
+      !["pending", "approved"].includes(grant.status) ||
+      (Number.isFinite(expiresAt) && expiresAt > now)
+    ) {
+      continue;
+    }
+    if (grant.status === "approved" && grant.license_id) {
+      const license = activeDb.licenses.find(
+        (candidate) => candidate.id === grant.license_id,
+      );
+      if (license) license.revoked = true;
+    }
+    Object.assign(grant, {
+      status: "expired",
+      refresh_token_plain: null,
+      claim_retry_until: null,
+    });
+    count += 1;
+  }
+  return okJson(count);
 }
 
 type PlannedMembershipAllocation =
@@ -1696,6 +2113,21 @@ async function waitForNamedRpcBarrier(name: string): Promise<void> {
   await barrier.promise;
 }
 
+async function waitForNamedRpcGate(name: string): Promise<void> {
+  if (nextRpcGate?.name !== name) return;
+  const gate = nextRpcGate;
+  gate.markReached();
+  await gate.released;
+  if (nextRpcGate === gate) nextRpcGate = null;
+}
+
+async function runAfterNamedRpcHook(name: string): Promise<void> {
+  if (nextRpcAfterHook?.name !== name) return;
+  const hook = nextRpcAfterHook;
+  nextRpcAfterHook = null;
+  await hook.run();
+}
+
 async function fakeSupabaseFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const request = input instanceof Request ? input : null;
   const url = new URL(request ? request.url : String(input));
@@ -1715,6 +2147,33 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     activeDb.calls.push({ table: "rotate_license_refresh_v2", method, body });
     await waitForNamedRpcBarrier("rotate_license_refresh_v2");
     return atomicLicenseRefreshV2(body);
+  }
+
+  if (url.pathname.includes("/rpc/approve_device_grant_atomic_v2")) {
+    activeDb.calls.push({ table: "approve_device_grant_atomic_v2", method, body });
+    await waitForDeviceGrantDecisionBarrier();
+    await waitForNamedRpcBarrier("approve_device_grant_atomic_v2");
+    return atomicDeviceApprovalV2(body);
+  }
+
+  if (url.pathname.includes("/rpc/poll_device_grant_pending_v2")) {
+    activeDb.calls.push({ table: "poll_device_grant_pending_v2", method, body });
+    await waitForNamedRpcGate("poll_device_grant_pending_v2");
+    await waitForNamedRpcBarrier("poll_device_grant_pending_v2");
+    return atomicPendingDevicePollV2(body);
+  }
+
+  if (url.pathname.includes("/rpc/claim_device_grant_atomic_v2")) {
+    activeDb.calls.push({ table: "claim_device_grant_atomic_v2", method, body });
+    await waitForNamedRpcBarrier("claim_device_grant_atomic_v2");
+    return atomicDeviceClaimV2(body);
+  }
+
+  if (url.pathname.includes("/rpc/expire_stale_device_grants_v2")) {
+    activeDb.calls.push({ table: "expire_stale_device_grants_v2", method, body });
+    const response = expireStaleDeviceGrantsV2();
+    await runAfterNamedRpcHook("expire_stale_device_grants_v2");
+    return response;
   }
 
   if (url.pathname.includes("/rpc/approve_device_grant_atomic")) {
@@ -1785,6 +2244,36 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
       const failure = nextInsertFailure;
       nextInsertFailure = null;
       return okJson({ message: failure.message }, failure.status);
+    }
+    if (table === "device_grants") {
+      const row = asArrayBody(body)[0] || {};
+      if (nextDeviceGrantInsertConflict) {
+        const conflict = nextDeviceGrantInsertConflict;
+        nextDeviceGrantInsertConflict = null;
+        return uniqueConstraintError(
+          conflict === "proposal"
+            ? "device_grants_proposed_refresh_token_hash_uidx"
+            : "device_grants_user_code_key",
+        );
+      }
+      if (
+        activeDb.device_grants.some(
+          (candidate) => candidate.user_code === String(row.user_code),
+        )
+      ) {
+        return uniqueConstraintError("device_grants_user_code_key");
+      }
+      const proposal = row.proposed_refresh_token_hash;
+      if (
+        typeof proposal === "string" &&
+        activeDb.device_grants.some(
+          (candidate) => candidate.proposed_refresh_token_hash === proposal,
+        )
+      ) {
+        return uniqueConstraintError(
+          "device_grants_proposed_refresh_token_hash_uidx",
+        );
+      }
     }
     return okJson(insertRows(table, body), 201);
   }

@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import bcrypt from "bcryptjs";
 import Stripe from "stripe";
 import {
+  afterNextSupabaseRpc,
   assertEntitlementEnvelope,
   assertNoRawDiagnosticsText,
   barrierNextDeviceGrantDecisions,
@@ -13,12 +14,15 @@ import {
   barrierNextSupabaseRpcs,
   createFakeDb,
   failNextAtomicDeviceApproval,
+  failNextAtomicDeviceV2,
   failNextAtomicLoginCode,
   failNextAtomicMembership,
   failNextAtomicRefreshV2,
+  failNextDeviceGrantInsertConflict,
   failNextSupabaseInsert,
   failNextSupabasePatch,
   failNextSupabaseSelect,
+  gateNextSupabaseRpc,
   issueAccessToken,
   jsonRequest,
   loadRoute,
@@ -65,6 +69,26 @@ function refreshV2Body(
     refresh_token: current,
     next_refresh_token: successor,
     refresh_attempt_id: attempt,
+  };
+}
+
+function deviceV2StartBody(
+  refreshToken = REFRESH_V2_B,
+  deviceLabel = "Device v2 CLI",
+): Record<string, string> {
+  return {
+    device_label: deviceLabel,
+    proposed_refresh_token_hash: refreshHash(refreshToken),
+  };
+}
+
+function deviceV2PollBody(
+  startBody: Record<string, unknown>,
+  refreshToken = REFRESH_V2_B,
+): Record<string, string> {
+  return {
+    device_code: String(startBody.device_code),
+    refresh_token: refreshToken,
   };
 }
 
@@ -120,6 +144,50 @@ async function requestDevLoginCode(
   const code = String((body.dev_only as { code?: string } | undefined)?.code || "");
   assert.match(code, /^\d{6}$/);
   return code;
+}
+
+async function approveDeviceV2Flow(input: {
+  db: ReturnType<typeof useFakeDb>;
+  user: Awaited<ReturnType<typeof makeUser>>;
+  bearer: string;
+  refreshToken?: string;
+  deviceLabel?: string;
+}) {
+  const refreshToken = input.refreshToken ?? REFRESH_V2_B;
+  const start = await loadRoute<PostRoute>("device/start");
+  const approve = await loadRoute<PostRoute>("device/approve");
+  const startResponse = await start.POST(
+    jsonRequest(
+      "/api/device/start",
+      deviceV2StartBody(refreshToken, input.deviceLabel),
+    ),
+  );
+  const startBody = await responseJson(startResponse);
+  assert.equal(startResponse.status, 200);
+  assert.equal(startBody.protocol_version, 2);
+
+  const grant = input.db.device_grants.at(-1);
+  assert.ok(grant);
+  const approveResponse = await approve.POST(
+    jsonRequest(
+      "/api/device/approve",
+      { user_code: startBody.user_code },
+      { headers: { authorization: `Bearer ${input.bearer}` } },
+    ),
+  );
+  assert.equal(approveResponse.status, 200);
+  assert.deepEqual(await responseJson(approveResponse), { ok: true });
+  assert.equal(grant.status, "approved");
+  assert.equal(grant.refresh_token_plain, null);
+  assert.equal(grant.proposed_refresh_token_hash, refreshHash(refreshToken));
+  assert.equal(typeof grant.license_id, "string");
+  const license = input.db.licenses.find(
+    (candidate) => candidate.id === grant.license_id,
+  );
+  assert.ok(license);
+  assert.equal(license.user_id, input.user.id);
+  assert.equal(license.refresh_token_hash, refreshHash(refreshToken));
+  return { startBody, grant, license };
 }
 
 function seedTestOrg(
@@ -2768,6 +2836,952 @@ describe("hosted route handlers", () => {
     assert.equal(db.audit_log.length, 0);
   });
 
+  it("device v2 start validates proposals and retries only user-code collisions", async () => {
+    const db = useFakeDb();
+    const start = await loadRoute<PostRoute>("device/start");
+
+    for (const proposed_refresh_token_hash of [
+      "not-a-sha256",
+      refreshHash(REFRESH_V2_B).toUpperCase(),
+    ]) {
+      const response = await start.POST(
+        jsonRequest("/api/device/start", { proposed_refresh_token_hash }),
+      );
+      assert.equal(response.status, 400);
+      assertCredentialFree(await responseJson(response));
+    }
+    assert.equal(db.device_grants.length, 0);
+
+    failNextDeviceGrantInsertConflict("user_code");
+    const recovered = await start.POST(
+      jsonRequest("/api/device/start", deviceV2StartBody()),
+    );
+    const recoveredBody = await responseJson(recovered);
+    assert.equal(recovered.status, 200);
+    assert.equal(recoveredBody.protocol_version, 2);
+    assert.equal(db.device_grants.length, 1);
+    assert.equal(
+      db.calls.filter(
+        (call) => call.table === "device_grants" && call.method === "POST",
+      ).length,
+      2,
+    );
+    assert.equal(JSON.stringify(db.calls).includes(REFRESH_V2_B), false);
+
+    const duplicateProposal = await start.POST(
+      jsonRequest("/api/device/start", deviceV2StartBody()),
+    );
+    assert.equal(duplicateProposal.status, 409);
+    assert.deepEqual(await responseJson(duplicateProposal), {
+      error: "refresh_token_proposal_conflict",
+    });
+    assert.equal(db.device_grants.length, 1);
+
+    const insertsBeforeFailure = db.calls.filter(
+      (call) => call.table === "device_grants" && call.method === "POST",
+    ).length;
+    failNextSupabaseInsert("device_grants");
+    const unavailable = await start.POST(
+      jsonRequest("/api/device/start", deviceV2StartBody(REFRESH_V2_C)),
+    );
+    assert.equal(unavailable.status, 503);
+    assert.deepEqual(await responseJson(unavailable), {
+      error: "device authorization unavailable",
+    });
+    assert.equal(
+      db.calls.filter(
+        (call) => call.table === "device_grants" && call.method === "POST",
+      ).length,
+      insertsBeforeFailure + 1,
+    );
+    assert.equal(db.device_grants.length, 1);
+  });
+
+  it("device v2 approval and exact poll retry use hashes only", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({
+      id: "device-v2-recovery-user",
+      email: "device-v2-recovery@example.com",
+    });
+    db.users.push(user);
+    const browserLicense = seedLicense({
+      id: "device-v2-recovery-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<PostRoute>("device/start");
+    const approve = await loadRoute<PostRoute>("device/approve");
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    const startResponse = await start.POST(
+      jsonRequest("/api/device/start", deviceV2StartBody()),
+    );
+    const startBody = await responseJson(startResponse);
+    assert.equal(startResponse.status, 200);
+    assert.equal(startBody.protocol_version, 2);
+    const grant = db.device_grants[0];
+    assert.equal(grant.proposed_refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(grant.refresh_token_plain, null);
+
+    const pending = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    assert.equal(pending.status, 200);
+    assert.deepEqual(await responseJson(pending), { status: "pending", interval: 5 });
+    const pendingCall = db.calls.find(
+      (call) => call.table === "poll_device_grant_pending_v2",
+    );
+    assert.ok(pendingCall);
+    assert.deepEqual(Object.keys(pendingCall.body as Record<string, unknown>).sort(), [
+      "p_device_code_hash",
+      "p_refresh_token_hash",
+    ]);
+    assert.equal(JSON.stringify(pendingCall.body).includes(REFRESH_V2_B), false);
+
+    const approval = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    assert.equal(approval.status, 200);
+    const license = db.licenses.find((candidate) => candidate.id === grant.license_id);
+    assert.ok(license);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(grant.refresh_token_plain, null);
+    const approvalCall = db.calls.find(
+      (call) => call.table === "approve_device_grant_atomic_v2",
+    );
+    assert.ok(approvalCall);
+    assert.deepEqual(Object.keys(approvalCall.body as Record<string, unknown>).sort(), [
+      "p_grant_id",
+      "p_user_id",
+    ]);
+
+    const first = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () => poll.POST(jsonRequest("/api/device/poll", deviceV2PollBody(startBody))),
+    );
+    const firstBody = await responseJson(first);
+    assert.equal(first.status, 200);
+    assert.equal(firstBody.protocol_version, 2);
+    assert.equal(firstBody.refresh_token, REFRESH_V2_B);
+    assert.equal(grant.status, "claimed");
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(typeof grant.claimed_at, "string");
+    assert.equal(typeof grant.claim_retry_until, "string");
+    assert.ok(Date.parse(String(grant.claim_retry_until)) > Date.now());
+    assert.ok(
+      Date.parse(String(grant.claim_retry_until)) - Date.parse(String(grant.claimed_at)) <=
+        2 * 60 * 1000,
+    );
+    assertEntitlementEnvelope(firstBody, {
+      sub: user.id,
+      license_id: license.id,
+      email: user.email,
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
+    });
+
+    const claimedAt = grant.claimed_at;
+    const retryUntil = grant.claim_retry_until;
+    grant.expires_at = new Date(Date.now() - 1000).toISOString();
+    const replay = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () => poll.POST(jsonRequest("/api/device/poll", deviceV2PollBody(startBody))),
+    );
+    const replayBody = await responseJson(replay);
+    assert.equal(replay.status, 200);
+    assert.equal(replayBody.refresh_token, REFRESH_V2_B);
+    assert.notEqual(replayBody.entitlement_assertion, firstBody.entitlement_assertion);
+    assert.equal(grant.claimed_at, claimedAt);
+    assert.equal(grant.claim_retry_until, retryUntil);
+
+    const claimCalls = db.calls.filter(
+      (call) => call.table === "claim_device_grant_atomic_v2",
+    );
+    assert.equal(claimCalls.length, 2);
+    for (const call of claimCalls) {
+      assert.deepEqual(Object.keys(call.body as Record<string, unknown>).sort(), [
+        "p_device_code_hash",
+        "p_refresh_token_hash",
+      ]);
+      assert.equal(JSON.stringify(call.body).includes(REFRESH_V2_B), false);
+    }
+    assert.equal(JSON.stringify(db.device_grants).includes(REFRESH_V2_B), false);
+
+    grant.claim_retry_until = new Date(Date.now() - 1000).toISOString();
+    const tooLate = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    const tooLateBody = await responseJson(tooLate);
+    assert.equal(tooLate.status, 410);
+    assert.deepEqual(tooLateBody, {
+      error: "claim_retry_expired",
+      status: "claimed",
+    });
+    assertCredentialFree(tooLateBody);
+  });
+
+  it("device v2 approve and deny decisions have one durable winner", async () => {
+    const db = useFakeDb();
+    const approvingUser = await makeUser({
+      id: "device-v2-approve-race-user",
+      email: "device-v2-approve-race@example.com",
+    });
+    const denyingUser = await makeUser({
+      id: "device-v2-deny-race-user",
+      email: "device-v2-deny-race@example.com",
+    });
+    db.users.push(approvingUser, denyingUser);
+    const approvingBrowser = seedLicense({
+      id: "device-v2-approve-race-browser",
+      user_id: approvingUser.id,
+    });
+    const denyingBrowser = seedLicense({
+      id: "device-v2-deny-race-browser",
+      user_id: denyingUser.id,
+    });
+    const approvingBearer = await issueAccessToken(
+      approvingUser,
+      approvingBrowser,
+    );
+    const denyingBearer = await issueAccessToken(denyingUser, denyingBrowser);
+    const start = await loadRoute<PostRoute>("device/start");
+    const approve = await loadRoute<PostRoute>("device/approve");
+    const deny = await loadRoute<PostRoute>("device/deny");
+    const startBody = await responseJson(
+      await start.POST(
+        jsonRequest("/api/device/start", deviceV2StartBody()),
+      ),
+    );
+
+    barrierNextDeviceGrantDecisions();
+    const responses = await Promise.all([
+      approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${approvingBearer}` } },
+        ),
+      ),
+      deny.POST(
+        jsonRequest(
+          "/api/device/deny",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${denyingBearer}` } },
+        ),
+      ),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+
+    assert.equal(responses.filter((response) => response.status === 200).length, 1);
+    assert.equal(responses.filter((response) => response.status === 409).length, 1);
+    for (const body of bodies) assertCredentialFree(body);
+
+    const grant = db.device_grants[0];
+    const deviceLicenses = db.licenses.filter(
+      (license) =>
+        license.id !== approvingBrowser.id && license.id !== denyingBrowser.id,
+    );
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(grant.claim_retry_until, null);
+    if (grant.status === "approved") {
+      assert.equal(responses[0].status, 200);
+      assert.equal(responses[1].status, 409);
+      assert.equal(grant.user_id, approvingUser.id);
+      assert.equal(deviceLicenses.length, 1);
+      assert.equal(deviceLicenses[0].user_id, approvingUser.id);
+      assert.equal(
+        deviceLicenses[0].refresh_token_hash,
+        refreshHash(REFRESH_V2_B),
+      );
+      assert.equal(deviceLicenses[0].revoked, false);
+    } else {
+      assert.equal(grant.status, "denied");
+      assert.equal(responses[0].status, 409);
+      assert.equal(responses[1].status, 200);
+      assert.equal(grant.user_id, denyingUser.id);
+      assert.equal(grant.license_id, null);
+      assert.equal(deviceLicenses.length, 0);
+    }
+    assert.equal(db.audit_log.length, 1);
+  });
+
+  it("device v2 serializes stale pending polls with concurrent approval", async () => {
+    for (const expireAfterApproval of [false, true]) {
+      const db = useFakeDb();
+      const suffix = expireAfterApproval ? "expired" : "claimable";
+      const user = await makeUser({
+        id: `device-v2-stale-pending-${suffix}-user`,
+      });
+      db.users.push(user);
+      const browser = seedLicense({
+        id: `device-v2-stale-pending-${suffix}-browser`,
+        user_id: user.id,
+      });
+      const bearer = await issueAccessToken(user, browser);
+      const start = await loadRoute<PostRoute>("device/start");
+      const approve = await loadRoute<PostRoute>("device/approve");
+      const poll = await loadRoute<PostRoute>("device/poll");
+      const startBody = await responseJson(
+        await start.POST(
+          jsonRequest(
+            "/api/device/start",
+            deviceV2StartBody(REFRESH_V2_B, `Stale pending ${suffix}`),
+          ),
+        ),
+      );
+      const grant = db.device_grants[0];
+      const gate = gateNextSupabaseRpc("poll_device_grant_pending_v2");
+
+      const pollResponse = await withTestEntitlementSigningRing(
+        TEST_ENTITLEMENT_KEY_B,
+        async () => {
+          const pendingPoll = poll.POST(
+            jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+          );
+          await gate.reached;
+          try {
+            const approval = await approve.POST(
+              jsonRequest(
+                "/api/device/approve",
+                { user_code: startBody.user_code },
+                { headers: { authorization: `Bearer ${bearer}` } },
+              ),
+            );
+            assert.equal(approval.status, 200);
+            if (expireAfterApproval) {
+              grant.expires_at = new Date(Date.now() - 1000).toISOString();
+            }
+          } finally {
+            gate.release();
+          }
+          return pendingPoll;
+        },
+      );
+      const pollBody = await responseJson(pollResponse);
+      const license = db.licenses.find(
+        (candidate) => candidate.id === grant.license_id,
+      );
+      assert.ok(license);
+      assert.equal(grant.refresh_token_plain, null);
+
+      if (expireAfterApproval) {
+        assert.equal(pollResponse.status, 410);
+        assert.deepEqual(pollBody, {
+          error: "expired_token",
+          status: "expired",
+        });
+        assertCredentialFree(pollBody);
+        assert.equal(grant.status, "expired");
+        assert.equal(license.revoked, true);
+        assert.equal(
+          db.calls.filter(
+            (call) => call.table === "claim_device_grant_atomic_v2",
+          ).length,
+          0,
+        );
+      } else {
+        assert.equal(pollResponse.status, 200);
+        assert.equal(pollBody.refresh_token, REFRESH_V2_B);
+        assert.equal(grant.status, "claimed");
+        assert.equal(license.revoked, false);
+      }
+    }
+  });
+
+  it("device v2 pending polls do not require a configured signer", async () => {
+    const db = useFakeDb();
+    const start = await loadRoute<PostRoute>("device/start");
+    const poll = await loadRoute<PostRoute>("device/poll");
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", deviceV2StartBody())),
+    );
+    const previousConsoleError = console.error;
+    console.error = () => {};
+    try {
+      await withEntitlementSigningEnvironment(
+        {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: "malformed signing key",
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID: undefined,
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
+        },
+        async () => {
+          const response = await poll.POST(
+            jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+          );
+          assert.equal(response.status, 200);
+          assert.deepEqual(await responseJson(response), {
+            status: "pending",
+            interval: 5,
+          });
+        },
+      );
+    } finally {
+      console.error = previousConsoleError;
+    }
+    assert.equal(db.device_grants[0].status, "pending");
+    assert.equal(
+      db.calls.filter(
+        (call) => call.table === "poll_device_grant_pending_v2",
+      ).length,
+      1,
+    );
+    assert.equal(
+      db.calls.filter(
+        (call) => call.table === "claim_device_grant_atomic_v2",
+      ).length,
+      0,
+    );
+  });
+
+  it("device v2 rejects missing, malformed, wrong, and protocol-mismatched tokens", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-invalid-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-invalid-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    const missing = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    assert.equal(missing.status, 400);
+    assertCredentialFree(await responseJson(missing));
+
+    const malformed = await poll.POST(
+      jsonRequest("/api/device/poll", {
+        device_code: startBody.device_code,
+        refresh_token: `${REFRESH_V2_B}=`,
+      }),
+    );
+    assert.equal(malformed.status, 400);
+    assertCredentialFree(await responseJson(malformed));
+
+    const claimCallsBeforeWrong = db.calls.filter(
+      (call) => call.table === "claim_device_grant_atomic_v2",
+    ).length;
+    const wrong = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody, REFRESH_V2_D)),
+    );
+    const wrongBody = await responseJson(wrong);
+    assert.equal(wrong.status, 401);
+    assertCredentialFree(wrongBody);
+    assert.equal(grant.status, "approved");
+    assert.equal(license.revoked, false);
+    assert.equal(
+      db.calls.filter((call) => call.table === "claim_device_grant_atomic_v2").length,
+      claimCallsBeforeWrong,
+    );
+
+    const legacyStart = await loadRoute<PostRoute>("device/start");
+    const legacyBody = await responseJson(
+      await legacyStart.POST(jsonRequest("/api/device/start", { device_label: "Legacy" })),
+    );
+    const mismatch = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(legacyBody)),
+    );
+    assert.equal(mismatch.status, 409);
+    assert.deepEqual(await responseJson(mismatch), {
+      error: "device_protocol_mismatch",
+    });
+  });
+
+  for (const failureStage of [
+    "approval_after_license_insert",
+    "approval_after_grant_update",
+    "approval_after_audit_insert",
+  ] as const) {
+    it(`device v2 approval rolls back every write when ${failureStage} fails`, async () => {
+      const db = useFakeDb();
+      const user = await makeUser({ id: `device-v2-${failureStage}-user` });
+      db.users.push(user);
+      const browser = seedLicense({
+        id: `device-v2-${failureStage}-browser`,
+        user_id: user.id,
+      });
+      const bearer = await issueAccessToken(user, browser);
+      const start = await loadRoute<PostRoute>("device/start");
+      const approve = await loadRoute<PostRoute>("device/approve");
+      const startBody = await responseJson(
+        await start.POST(jsonRequest("/api/device/start", deviceV2StartBody())),
+      );
+      const grant = db.device_grants[0];
+
+      failNextAtomicDeviceV2(failureStage);
+      const failed = await approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const failedBody = await responseJson(failed);
+      assert.equal(failed.status, 500);
+      assert.deepEqual(failedBody, { error: "approval_failed" });
+      assertCredentialFree(failedBody);
+      assert.equal(grant.status, "pending");
+      assert.equal(grant.user_id, null);
+      assert.equal(grant.license_id, null);
+      assert.equal(grant.refresh_token_plain, null);
+      assert.equal(grant.claim_retry_until, null);
+      assert.equal(db.licenses.length, 1);
+      assert.equal(db.audit_log.length, 0);
+
+      const retry = await approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      assert.equal(retry.status, 200);
+      assert.equal(db.licenses.length, 2);
+      assert.equal(grant.status, "approved");
+      assert.equal(grant.refresh_token_plain, null);
+    });
+  }
+
+  it("device v2 approval rejects current and recovery token collisions", async () => {
+    const approve = await loadRoute<PostRoute>("device/approve");
+    const start = await loadRoute<PostRoute>("device/start");
+    for (const slot of ["current", "recovery"] as const) {
+      const db = useFakeDb();
+      const user = await makeUser({ id: `device-v2-${slot}-collision-user` });
+      db.users.push(user);
+      const browser = seedLicense({
+        id: `device-v2-${slot}-collision-browser`,
+        user_id: user.id,
+      });
+      seedLicense({
+        id: `device-v2-${slot}-collision-license`,
+        user_id: user.id,
+        refresh_token_hash:
+          slot === "current" ? refreshHash(REFRESH_V2_B) : refreshHash(REFRESH_V2_C),
+        previous_refresh_token_hash:
+          slot === "recovery" ? refreshHash(REFRESH_V2_B) : null,
+      });
+      const bearer = await issueAccessToken(user, browser);
+      const startBody = await responseJson(
+        await start.POST(jsonRequest("/api/device/start", deviceV2StartBody())),
+      );
+      const grant = db.device_grants[0];
+
+      const response = await approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const body = await responseJson(response);
+      assert.equal(response.status, 409);
+      assert.deepEqual(body, { error: "refresh_token_proposal_conflict" });
+      assertCredentialFree(body);
+      assert.equal(grant.status, "expired");
+      assert.equal(grant.license_id, null);
+      assert.equal(grant.refresh_token_plain, null);
+      assert.equal(db.licenses.length, 2);
+      assert.equal(db.audit_log.length, 0);
+    }
+  });
+
+  it("device v2 concurrent identical polls claim once and replay equivalently", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-identical-poll-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-identical-poll-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    barrierNextSupabaseRpcs("claim_device_grant_atomic_v2");
+    const responses = await Promise.all([
+      poll.POST(jsonRequest("/api/device/poll", deviceV2PollBody(startBody))),
+      poll.POST(jsonRequest("/api/device/poll", deviceV2PollBody(startBody))),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    assert.deepEqual(
+      bodies.map((body) => body.refresh_token),
+      [REFRESH_V2_B, REFRESH_V2_B],
+    );
+    assert.equal(grant.status, "claimed");
+    assert.equal(typeof grant.claimed_at, "string");
+    assert.equal(typeof grant.claim_retry_until, "string");
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(
+      db.calls.filter((call) => call.table === "claim_device_grant_atomic_v2").length,
+      2,
+    );
+  });
+
+  it("device v2 concurrent conflicting poll returns credentials only for exact B", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-conflicting-poll-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-conflicting-poll-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    const responses = await Promise.all([
+      poll.POST(jsonRequest("/api/device/poll", deviceV2PollBody(startBody))),
+      poll.POST(
+        jsonRequest("/api/device/poll", deviceV2PollBody(startBody, REFRESH_V2_D)),
+      ),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+    const exactIndex = responses.findIndex((response) => response.status === 200);
+    const wrongIndex = responses.findIndex((response) => response.status === 401);
+    assert.notEqual(exactIndex, -1);
+    assert.notEqual(wrongIndex, -1);
+    assert.equal(bodies[exactIndex].refresh_token, REFRESH_V2_B);
+    assertCredentialFree(bodies[wrongIndex]);
+    assert.equal(grant.status, "claimed");
+    assert.equal(license.revoked, false);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(
+      db.calls.filter((call) => call.table === "claim_device_grant_atomic_v2").length,
+      1,
+    );
+  });
+
+  it("device v2 claim rollback leaves the first claim exactly retryable", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-claim-rollback-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-claim-rollback-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    failNextAtomicDeviceV2("claim_after_grant_update");
+    const failed = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    const failedBody = await responseJson(failed);
+    assert.equal(failed.status, 503);
+    assert.deepEqual(failedBody, { error: "device claim unavailable" });
+    assertCredentialFree(failedBody);
+    assert.equal(grant.status, "approved");
+    assert.equal(grant.claimed_at, null);
+    assert.equal(grant.claim_retry_until, null);
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(license.revoked, false);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+
+    const retry = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    const retryBody = await responseJson(retry);
+    assert.equal(retry.status, 200);
+    assert.equal(retryBody.refresh_token, REFRESH_V2_B);
+    assert.equal(grant.status, "claimed");
+  });
+
+  it("device v2 recovers after a post-RPC issuance failure", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-post-rpc-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-post-rpc-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    failNextSupabaseSelect("users");
+    const failed = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    const failedBody = await responseJson(failed);
+    assert.equal(failed.status, 503);
+    assert.deepEqual(failedBody, { error: "license issuance unavailable" });
+    assertCredentialFree(failedBody);
+    assert.equal(grant.status, "claimed");
+    assert.equal(typeof grant.claim_retry_until, "string");
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+
+    const retry = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    const retryBody = await responseJson(retry);
+    assert.equal(retry.status, 200);
+    assert.equal(retryBody.refresh_token, REFRESH_V2_B);
+    assert.equal(license.revoked, false);
+  });
+
+  it("device v2 signer preflight performs zero claim mutation or RPC", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-signer-preflight-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-signer-preflight-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+    const claimCallsBefore = db.calls.filter(
+      (call) => call.table === "claim_device_grant_atomic_v2",
+    ).length;
+    const previousConsoleError = console.error;
+    console.error = () => {};
+    try {
+      await withEntitlementSigningEnvironment(
+        {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: "malformed signing key",
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID: undefined,
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
+        },
+        async () => {
+          const response = await poll.POST(
+            jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+          );
+          const body = await responseJson(response);
+          assert.equal(response.status, 503);
+          assert.deepEqual(body, { error: "license issuance unavailable" });
+          assertCredentialFree(body);
+        },
+      );
+    } finally {
+      console.error = previousConsoleError;
+    }
+    assert.equal(grant.status, "approved");
+    assert.equal(grant.claimed_at, null);
+    assert.equal(grant.claim_retry_until, null);
+    assert.equal(license.revoked, false);
+    assert.equal(
+      db.calls.filter((call) => call.table === "claim_device_grant_atomic_v2").length,
+      claimCallsBefore,
+    );
+  });
+
+  it("device v2 replay stops after B rotates to C", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-later-rotation-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-later-rotation-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { startBody, grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    const poll = await loadRoute<PostRoute>("device/poll");
+    const refresh = await loadRoute<PostRoute>("license/refresh");
+
+    const first = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    assert.equal(first.status, 200);
+    assert.equal(grant.status, "claimed");
+    assert.ok(Date.parse(String(grant.claim_retry_until)) > Date.now());
+
+    const rotated = await refresh.POST(
+      jsonRequest(
+        "/api/license/refresh",
+        refreshV2Body(REFRESH_V2_B, REFRESH_V2_C, REFRESH_V2_I),
+      ),
+    );
+    const rotatedBody = await responseJson(rotated);
+    assert.equal(rotated.status, 200);
+    assert.equal(rotatedBody.refresh_token, REFRESH_V2_C);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_C));
+    assert.equal(license.previous_refresh_token_hash, refreshHash(REFRESH_V2_B));
+
+    const stale = await poll.POST(
+      jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+    );
+    const staleBody = await responseJson(stale);
+    assert.equal(stale.status, 401);
+    assert.deepEqual(staleBody, { error: "invalid_grant" });
+    assertCredentialFree(staleBody);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_C));
+    assert.equal(license.revoked, false);
+  });
+
+  it("device v2 claim rejects expired, revoked, and inactive state credential-free", async () => {
+    const poll = await loadRoute<PostRoute>("device/poll");
+
+    for (const scenario of [
+      { name: "grant_expired", expectedStatus: 410 },
+      { name: "family_expired", expectedStatus: 410 },
+      { name: "revoked", expectedStatus: 403 },
+      { name: "inactive", expectedStatus: 402 },
+    ] as const) {
+      const db = useFakeDb();
+      const user = await makeUser({ id: `device-v2-${scenario.name}-user` });
+      db.users.push(user);
+      const browser = seedLicense({
+        id: `device-v2-${scenario.name}-browser`,
+        user_id: user.id,
+      });
+      const bearer = await issueAccessToken(user, browser);
+      const { startBody, grant, license } = await approveDeviceV2Flow({
+        db,
+        user,
+        bearer,
+        deviceLabel: scenario.name,
+      });
+
+      if (scenario.name === "grant_expired") {
+        grant.expires_at = new Date(Date.now() - 1000).toISOString();
+      } else if (scenario.name === "family_expired") {
+        license.refresh_family_expires_at = new Date(Date.now() - 1000).toISOString();
+      } else if (scenario.name === "revoked") {
+        license.revoked = true;
+      } else {
+        user.status = "inactive";
+      }
+
+      const response = await poll.POST(
+        jsonRequest("/api/device/poll", deviceV2PollBody(startBody)),
+      );
+      const body = await responseJson(response);
+      assert.equal(response.status, scenario.expectedStatus);
+      assertCredentialFree(body);
+      assert.equal(grant.refresh_token_plain, null);
+      if (scenario.name === "grant_expired" || scenario.name === "family_expired") {
+        assert.equal(grant.status, "expired");
+        assert.equal(license.revoked, true);
+      }
+      if (scenario.name === "inactive") {
+        assert.equal(grant.status, "expired");
+        assert.equal(license.revoked, true);
+      }
+      if (scenario.name === "revoked") {
+        assert.equal(grant.status, "approved");
+        assert.equal(license.revoked, true);
+      }
+    }
+  });
+
+  it("device v2 cleanup cannot be bypassed by approval between its two sweeps", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-cleanup-race-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-cleanup-race-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const start = await loadRoute<PostRoute>("device/start");
+    const approve = await loadRoute<PostRoute>("device/approve");
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", deviceV2StartBody())),
+    );
+    const grant = db.device_grants[0];
+    const { expireStaleDeviceGrants } = await import("../src/lib/store");
+
+    afterNextSupabaseRpc("expire_stale_device_grants_v2", async () => {
+      const approval = await approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      assert.equal(approval.status, 200);
+      grant.expires_at = new Date(Date.now() - 1000).toISOString();
+    });
+    await expireStaleDeviceGrants();
+
+    const license = db.licenses.find(
+      (candidate) => candidate.id === grant.license_id,
+    );
+    assert.ok(license);
+    assert.equal(grant.status, "approved");
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(license.revoked, false);
+
+    await expireStaleDeviceGrants();
+    assert.equal(grant.status, "expired");
+    assert.equal(license.revoked, true);
+  });
+
+  it("device v2 start cleanup revokes approved grants that were never polled", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "device-v2-orphan-cleanup-user" });
+    db.users.push(user);
+    const browser = seedLicense({
+      id: "device-v2-orphan-cleanup-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browser);
+    const { grant, license } = await approveDeviceV2Flow({
+      db,
+      user,
+      bearer,
+    });
+    grant.expires_at = new Date(Date.now() - 1000).toISOString();
+    assert.equal(grant.status, "approved");
+    assert.equal(license.revoked, false);
+
+    const start = await loadRoute<PostRoute>("device/start");
+    const replacement = await start.POST(
+      jsonRequest("/api/device/start", deviceV2StartBody(REFRESH_V2_C)),
+    );
+    assert.equal(replacement.status, 200);
+    assert.equal(grant.status, "expired");
+    assert.equal(grant.claim_retry_until, null);
+    assert.equal(grant.refresh_token_plain, null);
+    assert.equal(license.revoked, true);
+    assert.equal(db.device_grants.length, 2);
+    assert.equal(db.device_grants[1].status, "pending");
+    assert.equal(
+      db.calls.filter((call) => call.table === "expire_stale_device_grants_v2").length,
+      2,
+    );
+  });
+
   it("device start, approve, and poll issue tokens once", async () => {
     const db = useFakeDb();
     const user = await makeUser();
@@ -2788,6 +3802,7 @@ describe("hosted route handlers", () => {
     const startBody = await responseJson(startResponse);
 
     assert.equal(startResponse.status, 200);
+    assert.equal("protocol_version" in startBody, false);
     assert.equal(startBody.user_code, db.device_grants[0].user_code);
     assert.equal(startBody.verification_uri_complete, `https://app.test/link?code=${startBody.user_code}`);
 

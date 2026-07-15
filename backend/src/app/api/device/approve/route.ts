@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAccess } from "@/lib/auth-guard";
 import {
   approveDeviceGrant,
+  approveDeviceGrantV2,
   findDeviceGrantByUserCode,
 } from "@/lib/store";
 import { generateRefreshToken } from "@/lib/jwt";
@@ -29,19 +30,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
-  // The database RPC compare-and-swaps an untouched, unexpired pending grant,
-  // creates the matching license, stashes this one-shot refresh bearer, and
-  // writes the audit event in one transaction. A concurrent loser cannot
-  // create a license or overwrite the winner's account/token binding.
-  const refresh = generateRefreshToken();
-  let approval: Awaited<ReturnType<typeof approveDeviceGrant>>;
+  // V2 grants already contain the client's proposed refresh hash. Their RPC
+  // accepts no bearer material and creates the license directly from that
+  // hash. Legacy in-flight grants retain the one-shot plaintext compatibility
+  // path until old clients drain.
+  let approval:
+    | Awaited<ReturnType<typeof approveDeviceGrant>>
+    | Awaited<ReturnType<typeof approveDeviceGrantV2>>;
   try {
-    approval = await approveDeviceGrant({
-      id: grant.id,
-      userId: auth.user.id,
-      refreshTokenHash: refresh.hash,
-      refreshTokenPlain: refresh.token,
-    });
+    if (grant.proposed_refresh_token_hash !== null) {
+      approval = await approveDeviceGrantV2({
+        id: grant.id,
+        userId: auth.user.id,
+      });
+    } else {
+      const refresh = generateRefreshToken();
+      approval = await approveDeviceGrant({
+        id: grant.id,
+        userId: auth.user.id,
+        refreshTokenHash: refresh.hash,
+        refreshTokenPlain: refresh.token,
+      });
+    }
   } catch {
     // The RPC is transactional: an error rolls back ownership, license,
     // refresh stash, and audit state together.
@@ -56,6 +66,12 @@ export async function POST(req: NextRequest) {
   }
   if (approval.result === "invalid") {
     return NextResponse.json({ error: "invalid_grant" }, { status: 409 });
+  }
+  if (approval.result === "collision") {
+    return NextResponse.json(
+      { error: "refresh_token_proposal_conflict" },
+      { status: 409 },
+    );
   }
   if (approval.result === "conflict") {
     return NextResponse.json(
