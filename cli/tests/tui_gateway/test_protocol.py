@@ -159,6 +159,125 @@ def test_event_ring_clears_only_terminal_complete(server):
         server._sessions.pop("live", None)
 
 
+def test_terminal_replay_ring_clears_only_after_wire_delivery(server, monkeypatch):
+    class _Transport:
+        def __init__(self, accepted):
+            self.accepted = accepted
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame)
+            return self.accepted
+
+    rejected = _Transport(False)
+    accepted = _Transport(True)
+    monkeypatch.setattr(server, "_stdio_transport", rejected)
+    session = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "transport": rejected,
+        "transports": [rejected],
+    }
+    server._sessions["live"] = session
+    try:
+        server._emit("message.start", "live", {"message_id": "m1"})
+        assert not server._emit(
+            "message.complete",
+            "live",
+            {"message_id": "m1", "status": "complete", "text": "done"},
+        )
+        assert [event["type"] for event in session["events"]] == [
+            "message.start",
+            "message.complete",
+        ]
+
+        session["transports"] = [accepted]
+        session["transport"] = accepted
+        assert server._emit(
+            "message.complete",
+            "live",
+            {"message_id": "m1", "status": "complete", "text": "done"},
+        )
+        assert list(session["events"]) == []
+    finally:
+        server._sessions.pop("live", None)
+
+
+def test_terminal_replay_ignores_unrelated_fallback_when_all_session_peers_reject(
+    server, monkeypatch
+):
+    class _Transport:
+        def __init__(self, accepted):
+            self.accepted = accepted
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame)
+            return self.accepted
+
+    rejected_peer = _Transport(False)
+    unrelated_fallback = _Transport(True)
+    monkeypatch.setattr(server, "current_transport", lambda: unrelated_fallback)
+    monkeypatch.setattr(server, "_stdio_transport", unrelated_fallback)
+    session = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "transport": rejected_peer,
+        "transports": [rejected_peer],
+    }
+    server._sessions["live"] = session
+    try:
+        assert not server._emit(
+            "message.complete",
+            "live",
+            {"message_id": "m1", "status": "complete", "text": "done"},
+        )
+        assert [event["type"] for event in session["events"]] == [
+            "message.complete"
+        ]
+        assert session["transports"] == []
+        assert len(rejected_peer.frames) == 1
+        assert unrelated_fallback.frames == []
+    finally:
+        server._sessions.pop("live", None)
+
+
+def test_terminal_replay_clears_when_one_peer_accepts_and_prunes_failed_peer(server):
+    class _Transport:
+        def __init__(self, accepted):
+            self.accepted = accepted
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame)
+            return self.accepted
+
+    failed = _Transport(False)
+    accepted = _Transport(True)
+    session = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "transport": accepted,
+        "transports": [failed, accepted],
+    }
+    server._sessions["live"] = session
+    try:
+        server._emit("message.start", "live", {"message_id": "m1"})
+        assert server._emit(
+            "message.complete",
+            "live",
+            {"message_id": "m1", "status": "complete", "text": "done"},
+        )
+        assert list(session["events"]) == []
+        assert session["transports"] == [accepted]
+        assert failed.frames and accepted.frames
+    finally:
+        server._sessions.pop("live", None)
+
+
 # ── Blocking prompt round-trip ───────────────────────────────────────
 
 

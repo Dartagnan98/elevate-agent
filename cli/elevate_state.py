@@ -274,6 +274,8 @@ CREATE TABLE IF NOT EXISTS prompt_receipts (
     policy_revision INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     owner_id TEXT,
+    terminal_message_id TEXT,
+    terminal_payload_json TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     PRIMARY KEY (session_id, client_message_id)
@@ -2379,6 +2381,17 @@ class SessionDB:
             receipt[decoded_key] = (
                 decoded_policy if isinstance(decoded_policy, dict) else None
             )
+        raw_terminal_payload = receipt.pop("terminal_payload_json", None)
+        if raw_terminal_payload is None:
+            receipt["terminal_payload"] = None
+        else:
+            try:
+                terminal_payload = json.loads(raw_terminal_payload)
+            except (json.JSONDecodeError, TypeError):
+                terminal_payload = None
+            receipt["terminal_payload"] = (
+                terminal_payload if isinstance(terminal_payload, dict) else None
+            )
         return receipt
 
     @staticmethod
@@ -3720,6 +3733,210 @@ class SessionDB:
 
         return bool(self._execute_write(_do))
 
+    def terminalize_prompt_receipt_with_assistant(
+        self,
+        session_id: str,
+        client_message_id: str,
+        *,
+        owner_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+        status: str,
+        terminal_payload: Dict[str, Any],
+        reclaim_owner_id: Optional[str] = None,
+    ) -> bool:
+        """Atomically commit one claimed prompt's terminal assistant outcome.
+
+        The receipt CAS, final assistant row, finish reason, and replay payload
+        are one SQLite transaction.  A response-loss retry by the same owner is
+        idempotent only when every terminal field is identical.  Conflicting
+        identities or outcomes raise without changing either table.
+
+        ``reclaim_owner_id`` is reserved for fail-closed recovery of a stale
+        ``running`` receipt.  It transfers that exact old claim to ``owner_id``
+        while terminalizing it; it never makes a pending receipt executable.
+        """
+        receipt_to_wire_status = {
+            "complete": "complete",
+            "deferred": "pending",
+            "error": "error",
+            "interrupted": "interrupted",
+            "waiting_input": "needs_input",
+        }
+        if status not in receipt_to_wire_status:
+            raise ValueError(f"invalid prompt receipt status: {status}")
+        if not session_id or not client_message_id or not owner_id:
+            raise ValueError("session, prompt, and owner ids are required")
+        if not assistant_message_id or assistant_message_id == client_message_id:
+            raise ValueError("a distinct assistant message id is required")
+        if not isinstance(assistant_content, str):
+            raise TypeError("assistant_content must be a string")
+        if not isinstance(terminal_payload, dict):
+            raise TypeError("terminal_payload must be a dictionary")
+
+        expected_wire_status = receipt_to_wire_status[status]
+        if terminal_payload.get("message_id") != assistant_message_id:
+            raise ValueError("terminal payload message_id does not match assistant")
+        if terminal_payload.get("status") != expected_wire_status:
+            raise ValueError("terminal payload status does not match receipt status")
+        if terminal_payload.get("text") != assistant_content:
+            raise ValueError("terminal payload text does not match assistant content")
+        try:
+            terminal_payload_json = json.dumps(
+                terminal_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("terminal_payload must be finite JSON") from exc
+
+        stored_content = self._encode_content(assistant_content)
+        now = time.time()
+
+        def _do(conn):
+            receipt = conn.execute(
+                "SELECT status, owner_id, assistant_message_id, "
+                "terminal_message_id, terminal_payload_json "
+                "FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+            if receipt is None:
+                return False
+
+            alias = conn.execute(
+                "SELECT client_message_id FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id <> ? "
+                "AND (assistant_message_id = ? OR terminal_message_id = ?) "
+                "LIMIT 1",
+                (
+                    session_id,
+                    client_message_id,
+                    assistant_message_id,
+                    assistant_message_id,
+                ),
+            ).fetchone()
+            if alias is not None:
+                raise ValueError(
+                    "assistant_message_id belongs to a different prompt receipt"
+                )
+
+            assistant_rows = conn.execute(
+                "SELECT id, role, content, finish_reason FROM messages "
+                "WHERE session_id = ? AND client_message_id = ? ORDER BY id",
+                (session_id, assistant_message_id),
+            ).fetchall()
+            if len(assistant_rows) > 1:
+                raise ValueError("assistant_message_id has duplicate durable rows")
+            if assistant_rows:
+                assistant_row = assistant_rows[0]
+                if assistant_row["role"] != "assistant":
+                    raise ValueError(
+                        "assistant_message_id belongs to a different outcome"
+                    )
+                if assistant_row["content"] != stored_content:
+                    prior_content = self._decode_content(assistant_row["content"])
+                    prior_is_empty = prior_content is None or (
+                        isinstance(prior_content, str)
+                        and (
+                            not prior_content.strip()
+                            or prior_content.strip() == "(empty)"
+                        )
+                    )
+                    # The gateway synthesizes truthful non-success copy when a
+                    # producer returns an empty final row.  Permit that exact
+                    # same-id placeholder to be filled only for terminal
+                    # failure/pending/needs-input outcomes; successful
+                    # completion and every non-empty content conflict remain
+                    # immutable.
+                    replaceable_empty_status = status in {
+                        "error",
+                        "deferred",
+                        "waiting_input",
+                    }
+                    if not replaceable_empty_status or not prior_is_empty:
+                        raise ValueError(
+                            "assistant_message_id belongs to a different outcome"
+                        )
+
+            if receipt["status"] in receipt_to_wire_status:
+                if (
+                    receipt["status"] != status
+                    or receipt["owner_id"] != owner_id
+                    or receipt["terminal_message_id"] != assistant_message_id
+                    or receipt["terminal_payload_json"] != terminal_payload_json
+                    or len(assistant_rows) != 1
+                    or assistant_rows[0]["content"] != stored_content
+                    or assistant_rows[0]["finish_reason"] != expected_wire_status
+                ):
+                    return False
+                return True
+
+            if receipt["status"] != "running":
+                return False
+            current_owner = receipt["owner_id"]
+            owner_matches = current_owner == owner_id
+            reclaim_matches = (
+                reclaim_owner_id is not None
+                and current_owner == reclaim_owner_id
+            )
+            if not owner_matches and not reclaim_matches:
+                return False
+
+            cursor = conn.execute(
+                "UPDATE prompt_receipts SET status = ?, owner_id = ?, "
+                "terminal_message_id = ?, terminal_payload_json = ?, "
+                "updated_at = ? "
+                "WHERE session_id = ? AND client_message_id = ? "
+                "AND status = 'running' AND owner_id IS ?",
+                (
+                    status,
+                    owner_id,
+                    assistant_message_id,
+                    terminal_payload_json,
+                    now,
+                    session_id,
+                    client_message_id,
+                    current_owner,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+
+            if assistant_rows:
+                conn.execute(
+                    "UPDATE messages SET content = ?, finish_reason = ? WHERE id = ?",
+                    (
+                        stored_content,
+                        expected_wire_status,
+                        assistant_rows[0]["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO messages "
+                    "(session_id, role, content, timestamp, finish_reason, "
+                    "client_message_id) "
+                    "VALUES (?, 'assistant', ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        stored_content,
+                        now,
+                        expected_wire_status,
+                        assistant_message_id,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE sessions SET message_count = message_count + 1 "
+                    "WHERE id = ?",
+                    (session_id,),
+                )
+            return True
+
+        return bool(self._execute_write(_do))
+
     def interrupt_prompt_receipt_with_assistant(
         self,
         session_id: str,
@@ -4141,13 +4358,43 @@ class SessionDB:
         except (KeyError, TypeError, IndexError):
             return int(row[0])
 
+    def _sqlite_has_atomic_terminal_receipt(
+        self, session_ids: List[str]
+    ) -> bool:
+        """Return whether SQLite owns terminal assistant truth for a lineage.
+
+        Atomic prompt terminalization intentionally commits to the local
+        receipt and message row in one SQLite transaction. The legacy PG
+        shadow has no equivalent joined write, so an equal-length PG transcript
+        can still contain the pre-terminal content or finish reason. Once one
+        of these receipts exists, message readers must stay on authoritative
+        SQLite rather than trusting row-count parity.
+        """
+        normalized = [session_id for session_id in session_ids if session_id]
+        if not normalized:
+            return False
+        placeholders = ",".join("?" for _ in normalized)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM prompt_receipts "
+                f"WHERE session_id IN ({placeholders}) "
+                "AND terminal_message_id IS NOT NULL "
+                "AND terminal_payload_json IS NOT NULL LIMIT 1",
+                tuple(normalized),
+            ).fetchone()
+        return row is not None
+
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by insertion order.
 
         PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1; SQLite fallback on
-        empty/error/short so production stays safe during cutover soak.
+        empty/error/short so production stays safe during cutover soak. A
+        session with an atomic terminal receipt remains SQLite-authoritative
+        because the legacy PG shadow cannot mirror that joined write.
         """
-        if _read_from_pg():
+        if _read_from_pg() and not self._sqlite_has_atomic_terminal_receipt(
+            [session_id]
+        ):
             try:
                 from elevate_cli.data.chat_sessions import get_messages as _pg_get_messages
                 rows = _pg_get_messages(session_id)
@@ -4474,7 +4721,11 @@ class SessionDB:
             session_ids = self._session_lineage_root_to_tip(session_id)
 
         rows = None
-        if _read_from_pg():
+        # See get_messages(): the atomic receipt + assistant join is a SQLite
+        # truth boundary, including when PG happens to have the same row count.
+        if _read_from_pg() and not self._sqlite_has_atomic_terminal_receipt(
+            session_ids
+        ):
             try:
                 from elevate_cli.data.chat_sessions import get_messages_for_sessions as _pg_get_messages_for_sessions
 

@@ -575,6 +575,9 @@ _PENDING_WORK_WARNING = (
 )
 _NEEDS_INPUT_MESSAGE = "I need more information before I can continue."
 _NEEDS_INPUT_WARNING = "This turn is waiting for your input, not complete."
+_INTERRUPTED_BEFORE_RESPONSE_MESSAGE = (
+    "Operation interrupted before a model response was produced."
+)
 
 
 def _normalize_empty_terminal_history(
@@ -608,6 +611,42 @@ def _normalize_empty_terminal_history(
     return normalized
 
 
+def _normalize_empty_interrupted_history(
+    messages: list, assistant_message_id: str
+) -> list:
+    """Give an empty interrupted turn one canonical durable assistant row."""
+    normalized = list(messages)
+    for index in range(len(normalized) - 1, -1, -1):
+        message = normalized[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        is_empty = content is None or content == [] or (
+            isinstance(content, str)
+            and (not content.strip() or content.strip() == "(empty)")
+        )
+        is_current_assistant = (
+            message.get("client_message_id") == assistant_message_id
+        )
+        if message.get("tool_calls") or not is_empty or not is_current_assistant:
+            break
+        replacement = dict(message)
+        replacement["content"] = _INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+        replacement["finish_reason"] = "interrupted"
+        replacement["client_message_id"] = assistant_message_id
+        normalized[index] = replacement
+        return normalized
+    normalized.append(
+        {
+            "role": "assistant",
+            "content": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+            "finish_reason": "interrupted",
+            "client_message_id": assistant_message_id,
+        }
+    )
+    return normalized
+
+
 def _stamp_terminal_history_status(
     messages: list, status: str, assistant_message_id: str
 ) -> list:
@@ -630,19 +669,26 @@ def _agent_terminal_payload(result: Any, **extra: Any) -> dict:
     succeeded = agent_result_succeeded(result)
     needs_input = agent_result_needs_input(result)
     pending = agent_result_pending(result)
+    interrupted = bool(
+        isinstance(result, dict) and result.get("interrupted")
+    )
     text = (
         str(result.get("final_response") or result.get("error") or "")
         if isinstance(result, dict)
         else str(result or "")
     )
-    if needs_input and not text.strip():
+    if interrupted and not text.strip():
+        text = _INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+    elif needs_input and not text.strip():
         text = _NEEDS_INPUT_MESSAGE
     elif pending and not text.strip():
         text = _PENDING_WORK_MESSAGE
     payload = {
         **extra,
         "status": (
-            "needs_input"
+            "interrupted"
+            if interrupted
+            else "needs_input"
             if needs_input
             else "pending"
             if pending
@@ -652,14 +698,14 @@ def _agent_terminal_payload(result: Any, **extra: Any) -> dict:
         ),
         "text": text,
     }
-    if needs_input:
+    if needs_input and not interrupted:
         payload["warning"] = _NEEDS_INPUT_WARNING
-    elif pending:
+    elif pending and not interrupted:
         payload["warning"] = _PENDING_WORK_WARNING
         obligations = result.get("pending_tool_obligations")
         if isinstance(obligations, list):
             payload["pending_tool_obligations"] = obligations
-    elif not succeeded:
+    elif not succeeded and not interrupted:
         payload["error"] = agent_result_error(result)
         if not payload["text"]:
             payload["text"] = payload["error"]
@@ -1419,11 +1465,6 @@ def write_json(obj: dict, *, buffer_on_delivery_only: bool = False) -> bool:
         def _append() -> None:
             sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
             _ring_append(ring, params, event_type)
-            # Once a turn TRULY completes the server transcript holds
-            # everything visible from it; drop the ring so a later resume
-            # does not replay already-committed messages and tool cards.
-            if event_type == "message.complete" and not _event_is_followup(params):
-                ring.clear()
 
         if lock is not None:
             with lock:
@@ -1431,10 +1472,32 @@ def write_json(obj: dict, *, buffer_on_delivery_only: bool = False) -> bool:
         else:
             _append()
 
+    def _clear_delivered_terminal_replay() -> None:
+        if sess is None:
+            return
+        params = obj.get("params") or {}
+        event_type = params.get("type") if isinstance(params, dict) else None
+        if event_type != "message.complete" or _event_is_followup(params):
+            return
+        ring = sess.get("events")
+        if ring is None:
+            return
+        lock = sess.get("events_lock")
+        if lock is None:
+            ring.clear()
+        else:
+            with lock:
+                ring.clear()
+
     def _finish_delivery(delivered: object) -> bool:
         accepted = bool(delivered)
         if accepted and buffer_on_delivery_only:
             _buffer_event_for_resume()
+        # A durable terminal frame stays replayable until at least one wire
+        # transport accepts it.  Clearing before delivery turned a broken
+        # socket into a permanently missed completion on reconnect.
+        if accepted:
+            _clear_delivered_terminal_replay()
         return accepted
 
     if obj.get("method") == "event":
@@ -1462,8 +1525,11 @@ def write_json(obj: dict, *, buffer_on_delivery_only: bool = False) -> bool:
                             pass
                 if delivered:
                     return _finish_delivery(True)
-                # Every attached peer is gone — fall through to the
-                # context/stdio transport like a session-less frame.
+                # An explicit attached-peer set is the delivery authority for
+                # this session.  If every peer rejects, an unrelated request
+                # context or healthy stdio transport must not turn that into a
+                # false acknowledgement (and clear durable terminal replay).
+                return _finish_delivery(False)
             elif (t := sess.get("transport")) is not None:
                 return _finish_delivery(t.write(obj))
 
@@ -3338,13 +3404,46 @@ def _reset_session_agent(
 
 
 def _reset_tui_context_overflow_session(sid: str, session: dict, db) -> None:
-    """Clear oversized replay state while preserving terminal idempotency."""
+    """Clear oversized context without orphaning the terminal receipt.
+
+    The just-committed terminal assistant is the bounded durable reset marker:
+    it remains visible after a cold reopen and keeps the receipt's terminal
+    message pointer valid. The oversized user/tool history is discarded, and
+    the replacement live actor still starts with an empty in-memory history.
+    """
     session_key = str(session.get("session_key") or "")
     if not session_key:
         raise ValueError("cannot reset context overflow without a session key")
+    client_message_id = str(session.get("correlation_id") or "")
+    if not client_message_id:
+        raise ValueError("cannot reset context overflow without a prompt id")
+    receipt = db.get_prompt_receipt(session_key, client_message_id)
+    if not isinstance(receipt, dict):
+        raise ValueError("cannot reset context overflow without a prompt receipt")
+    terminal_payload = receipt.get("terminal_payload")
+    terminal_message_id = str(receipt.get("terminal_message_id") or "")
+    if not isinstance(terminal_payload, dict) or not terminal_message_id:
+        raise ValueError("context overflow receipt is not durably terminal")
+    if terminal_payload.get("message_id") != terminal_message_id:
+        raise ValueError("context overflow terminal message id is inconsistent")
+    terminal_text = terminal_payload.get("text")
+    if not isinstance(terminal_text, str):
+        raise ValueError("context overflow terminal text is invalid")
+    terminal_status = str(terminal_payload.get("status") or "")
+    if receipt.get("status") != _receipt_status_for_terminal_payload(
+        terminal_payload
+    ):
+        raise ValueError("context overflow terminal status is inconsistent")
     db.replace_messages(
         session_key,
-        [],
+        [
+            {
+                "role": "assistant",
+                "content": terminal_text,
+                "finish_reason": terminal_status,
+                "client_message_id": terminal_message_id,
+            }
+        ],
         preserve_prompt_receipts=True,
     )
     _reset_session_agent(sid, session, allow_running=True)
@@ -5811,6 +5910,280 @@ _POLICY_RECEIPT_INTERRUPTED_MESSAGE = (
     "This saved request could not be resumed because it has no valid secure "
     "execution policy. Nothing was run. Please resend the request."
 )
+_STALE_RUNNING_RECEIPT_MESSAGE = (
+    "Elevate found a previous turn that started but never saved a verified "
+    "terminal receipt. It will not run that request again automatically. "
+    "Review the conversation and resend only if you still want the work done."
+)
+_OUTCOME_UNKNOWN_MESSAGE = (
+    "The agent finished executing, but Elevate could not safely confirm the "
+    "saved terminal outcome. The request will not be run again automatically. "
+    "Reopen the conversation to reconcile it before deciding whether to resend."
+)
+_PROMPT_RECEIPT_STATUS_BY_WIRE_STATUS = {
+    "complete": "complete",
+    "pending": "deferred",
+    "error": "error",
+    "interrupted": "interrupted",
+    "needs_input": "waiting_input",
+}
+
+
+def _receipt_status_for_terminal_payload(payload: dict) -> str:
+    wire_status = str(payload.get("status") or "")
+    receipt_status = _PROMPT_RECEIPT_STATUS_BY_WIRE_STATUS.get(wire_status)
+    if receipt_status is None:
+        raise ValueError(f"invalid terminal payload status: {wire_status}")
+    return receipt_status
+
+
+def _project_terminal_assistant_history(
+    session: dict,
+    *,
+    assistant_message_id: str,
+    assistant_content: str,
+    finish_reason: str,
+    history_lock_held: bool = False,
+) -> None:
+    """Project only an already-durable terminal assistant into live history."""
+
+    def _apply() -> None:
+        current_version = int(session.get("history_version", 0))
+        projected = list(session.get("history") or [])
+
+        exact_indexes = [
+            index
+            for index, message in enumerate(projected)
+            if isinstance(message, dict)
+            and message.get("client_message_id") == assistant_message_id
+        ]
+        if len(exact_indexes) > 1:
+            raise ValueError("terminal assistant is duplicated in live history")
+        if exact_indexes:
+            index = exact_indexes[0]
+            current = projected[index]
+            if (
+                current.get("role") != "assistant"
+                or current.get("content") != assistant_content
+            ):
+                raise ValueError("terminal assistant conflicts with live history")
+            replacement = dict(current)
+            replacement["finish_reason"] = finish_reason
+            projected[index] = replacement
+        else:
+            unstamped_index = None
+            for index in range(len(projected) - 1, -1, -1):
+                current = projected[index]
+                if not isinstance(current, dict) or current.get("role") != "assistant":
+                    continue
+                if (
+                    not current.get("client_message_id")
+                    and current.get("content") == assistant_content
+                ):
+                    unstamped_index = index
+                break
+            if unstamped_index is None:
+                projected.append(
+                    {
+                        "role": "assistant",
+                        "content": assistant_content,
+                        "finish_reason": finish_reason,
+                        "client_message_id": assistant_message_id,
+                    }
+                )
+            else:
+                replacement = dict(projected[unstamped_index])
+                replacement["client_message_id"] = assistant_message_id
+                replacement["finish_reason"] = finish_reason
+                projected[unstamped_index] = replacement
+        session["history"] = projected
+        session["history_version"] = current_version + 1
+
+    history_lock = session.get("history_lock")
+    if history_lock_held or history_lock is None:
+        _apply()
+    else:
+        with history_lock:
+            _apply()
+
+
+def _commit_prompt_terminal_outcome(
+    db,
+    session: dict,
+    *,
+    session_key: str,
+    client_message_id: str,
+    owner_id: str,
+    assistant_message_id: str,
+    terminal_payload: dict,
+    reclaim_owner_id: Optional[str] = None,
+    history_lock_held: bool = False,
+) -> bool:
+    """Commit receipt + assistant first, then update the in-memory projection."""
+    terminalize = getattr(
+        db,
+        "terminalize_prompt_receipt_with_assistant",
+        None,
+    )
+    if not callable(terminalize):
+        raise RuntimeError("atomic prompt terminalizer is unavailable")
+    receipt_status = _receipt_status_for_terminal_payload(terminal_payload)
+    assistant_content = terminal_payload.get("text")
+    if not isinstance(assistant_content, str):
+        raise ValueError("terminal payload text must be a string")
+    committed = bool(
+        terminalize(
+            session_key,
+            client_message_id,
+            owner_id=owner_id,
+            assistant_message_id=assistant_message_id,
+            assistant_content=assistant_content,
+            status=receipt_status,
+            terminal_payload=terminal_payload,
+            reclaim_owner_id=reclaim_owner_id,
+        )
+    )
+    if not committed:
+        return False
+    try:
+        _project_terminal_assistant_history(
+            session,
+            assistant_message_id=assistant_message_id,
+            assistant_content=assistant_content,
+            finish_reason=str(terminal_payload.get("status") or "error"),
+            history_lock_held=history_lock_held,
+        )
+    except Exception:
+        # The durable join above is the terminal truth boundary. A conflicting
+        # or broken live projection must never turn a committed outcome into an
+        # outcome_unknown/busy latch or permit a rerun. Repair from SQLite when
+        # possible; reconnect remains safe if this best-effort repair also fails.
+        logger.exception(
+            "durable prompt terminalized but live history projection failed "
+            "session=%s message=%s",
+            session_key,
+            client_message_id,
+        )
+        try:
+            persisted_history = db.get_messages_as_conversation(session_key)
+            if not isinstance(persisted_history, list):
+                raise TypeError("durable transcript is not a list")
+
+            def _rehydrate() -> None:
+                session["history"] = persisted_history
+                session["history_version"] = int(
+                    session.get("history_version", 0)
+                ) + 1
+
+            history_lock = session.get("history_lock")
+            if history_lock_held or history_lock is None:
+                _rehydrate()
+            else:
+                with history_lock:
+                    _rehydrate()
+        except Exception:
+            logger.exception(
+                "durable prompt terminalized but history rehydration failed "
+                "session=%s message=%s",
+                session_key,
+                client_message_id,
+            )
+    return True
+
+
+def _emit_prompt_outcome_unknown(
+    sid: str,
+    client_message_id: str,
+    assistant_message_id: str,
+) -> None:
+    _emit(
+        "error",
+        sid,
+        {
+            "code": "outcome_unknown",
+            "failure_code": "prompt_terminalization_outcome_unknown",
+            "message": _OUTCOME_UNKNOWN_MESSAGE,
+            "outcome_unknown": True,
+            "correlation_id": client_message_id,
+            "user_message_id": client_message_id,
+            "message_id": assistant_message_id,
+        },
+    )
+
+
+def _terminalize_stale_running_prompt(
+    db,
+    sid: str,
+    session: dict,
+    session_key: str,
+    receipt: dict,
+    *,
+    history_lock_held: bool = False,
+) -> bool:
+    """Fail closed after a dead running owner; never re-execute its prompt."""
+    client_message_id = str(receipt.get("client_message_id") or "")
+    stale_owner_id = str(receipt.get("owner_id") or "")
+    if (
+        receipt.get("status") != "running"
+        or not client_message_id
+        or not stale_owner_id
+    ):
+        return False
+    recovery_message_id = "recovery." + uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"elevate:stale-running:{session_key}:{client_message_id}",
+    ).hex
+    terminal_payload = {
+        "text": _STALE_RUNNING_RECEIPT_MESSAGE,
+        "status": "interrupted",
+        "message_id": recovery_message_id,
+        "correlation_id": client_message_id,
+        "user_message_id": client_message_id,
+        "completed": False,
+        "outcome_unknown": True,
+        "failure_code": "stale_running_prompt_outcome_unknown",
+        "warning": "Resend only after reviewing what may already have happened.",
+    }
+    try:
+        committed = _commit_prompt_terminal_outcome(
+            db,
+            session,
+            session_key=session_key,
+            client_message_id=client_message_id,
+            owner_id=_PROMPT_EXECUTION_OWNER,
+            assistant_message_id=recovery_message_id,
+            terminal_payload=terminal_payload,
+            reclaim_owner_id=stale_owner_id,
+            history_lock_held=history_lock_held,
+        )
+    except Exception:
+        logger.exception(
+            "stale running prompt fail-closed terminalization failed "
+            "session=%s message=%s",
+            session_key,
+            client_message_id,
+        )
+        return False
+    if not committed:
+        logger.info(
+            "stale running prompt terminalization lost CAS "
+            "session=%s message=%s",
+            session_key,
+            client_message_id,
+        )
+        return False
+    session.pop("prompt_outcome_unknown", None)
+    _emit(
+        "message.start",
+        sid,
+        {
+            "message_id": recovery_message_id,
+            "user_message_id": client_message_id,
+            "correlation_id": client_message_id,
+        },
+    )
+    _emit("message.complete", sid, terminal_payload)
+    return True
 
 
 def _prompt_owner_alive(
@@ -6054,9 +6427,16 @@ def _recover_pending_prompt(sid: str, session: dict) -> bool:
     if not isinstance(receipt, dict):
         return False
     receipt_claim_key = (session_key, str(receipt.get("client_message_id") or ""))
-    if receipt.get("status") == "running" and _prompt_owner_alive(
-        receipt.get("owner_id"), receipt_claim_key
-    ):
+    if receipt.get("status") == "running":
+        if _prompt_owner_alive(receipt.get("owner_id"), receipt_claim_key):
+            return False
+        _terminalize_stale_running_prompt(
+            db,
+            sid,
+            session,
+            session_key,
+            receipt,
+        )
         return False
     try:
         recovered_policy = _execution_policy_from_receipt(receipt)
@@ -6537,16 +6917,17 @@ def _make_async_delegate_sink(
     return _sink
 
 
-def _mark_session_idle(session: dict) -> None:
+def _mark_session_idle(session: dict, *, clear_replay: bool = True) -> None:
     """Release the dashboard running latch once the visible turn is complete."""
-    events_lock = session.get("events_lock")
-    events = session.get("events")
-    if events is not None:
-        if events_lock is None:
-            events.clear()
-        else:
-            with events_lock:
+    if clear_replay:
+        events_lock = session.get("events_lock")
+        events = session.get("events")
+        if events is not None:
+            if events_lock is None:
                 events.clear()
+            else:
+                with events_lock:
+                    events.clear()
     lock = session.get("history_lock")
     if lock is None:
         session["running"] = False
@@ -6675,7 +7056,6 @@ def _(rid, params: dict) -> dict:
     session_key = str(session.get("session_key") or sid)
     claim_key = (session_key, turn_ids["user"])
     receipt_inserted = False
-    reclaim_owner_id = None
     with session["history_lock"]:
         # `_sess` can return immediately before a reset claims this actor. The
         # reset claims the same history lock before setting registry_resetting,
@@ -6688,6 +7068,43 @@ def _(rid, params: dict) -> dict:
             or _sessions.get(sid) is not session
         ):
             return _err(rid, 5032, "session context changed; retry the prompt")
+        unknown_outcome = session.get("prompt_outcome_unknown")
+        if session.get("running") and isinstance(unknown_outcome, dict):
+            unknown_user_id = str(
+                unknown_outcome.get("client_message_id") or ""
+            )
+            unknown_assistant_id = str(
+                unknown_outcome.get("assistant_message_id") or ""
+            )
+            try:
+                _emit_prompt_outcome_unknown(
+                    sid,
+                    unknown_user_id,
+                    unknown_assistant_id,
+                )
+            except Exception:
+                logger.exception(
+                    "prompt outcome_unknown duplicate projection failed "
+                    "session=%s message=%s",
+                    session_key,
+                    unknown_user_id,
+                )
+            if unknown_user_id == turn_ids["user"]:
+                return _ok(
+                    rid,
+                    {
+                        "status": "duplicate",
+                        "duplicate": True,
+                        "started": False,
+                        "terminal_status": "error",
+                        "outcome_unknown": True,
+                        "durable_terminal": False,
+                        "correlation_id": unknown_user_id,
+                        "user_message_id": unknown_user_id,
+                        "message_id": unknown_assistant_id,
+                    },
+                )
+            return _err(rid, 4095, _OUTCOME_UNKNOWN_MESSAGE)
         last_ack = session.get("last_prompt_ack")
         if (
             isinstance(last_ack, dict)
@@ -6802,42 +7219,65 @@ def _(rid, params: dict) -> dict:
                 "interrupted",
                 "waiting_input",
             }:
-                return _ok(
-                    rid,
-                    {
-                        "status": "duplicate",
-                        "duplicate": True,
-                        "started": False,
-                        "terminal_status": (
-                            "pending"
-                            if receipt_status == "deferred"
-                            else "needs_input"
-                            if receipt_status == "waiting_input"
-                            else receipt_status
-                        ),
-                        "correlation_id": turn_ids["user"],
-                        "user_message_id": turn_ids["user"],
-                        "message_id": turn_ids["assistant"],
-                    },
+                terminal_payload = receipt.get("terminal_payload")
+                terminal_message_id = str(
+                    receipt.get("terminal_message_id")
+                    or receipt.get("assistant_message_id")
+                    or turn_ids["assistant"]
                 )
-            if receipt_status == "running" and _prompt_owner_alive(
-                receipt_owner, claim_key
-            ):
+                duplicate_result = {
+                    "status": "duplicate",
+                    "duplicate": True,
+                    "started": False,
+                    "terminal_status": (
+                        "pending"
+                        if receipt_status == "deferred"
+                        else "needs_input"
+                        if receipt_status == "waiting_input"
+                        else receipt_status
+                    ),
+                    "correlation_id": turn_ids["user"],
+                    "user_message_id": turn_ids["user"],
+                    "message_id": terminal_message_id,
+                }
+                if isinstance(terminal_payload, dict):
+                    duplicate_result["terminal_payload"] = terminal_payload
                 return _ok(
                     rid,
-                    {
-                        "status": "streaming",
-                        "duplicate": True,
-                        "started": False,
-                        "correlation_id": turn_ids["user"],
-                        "user_message_id": turn_ids["user"],
-                        "message_id": turn_ids["assistant"],
-                    },
+                    duplicate_result,
+                )
+            if receipt_status == "running":
+                if _prompt_owner_alive(receipt_owner, claim_key):
+                    return _ok(
+                        rid,
+                        {
+                            "status": "streaming",
+                            "duplicate": True,
+                            "started": False,
+                            "correlation_id": turn_ids["user"],
+                            "user_message_id": turn_ids["user"],
+                            "message_id": turn_ids["assistant"],
+                        },
+                    )
+                interrupted = _terminalize_stale_running_prompt(
+                    db,
+                    sid,
+                    session,
+                    session_key,
+                    receipt,
+                    history_lock_held=True,
+                )
+                return _err(
+                    rid,
+                    4094,
+                    (
+                        _STALE_RUNNING_RECEIPT_MESSAGE
+                        if interrupted
+                        else _OUTCOME_UNKNOWN_MESSAGE
+                    ),
                 )
             if receipt_status not in {"pending", "running"}:
                 return _err(rid, 5009, f"invalid prompt receipt status: {receipt_status}")
-            if receipt_status == "running":
-                reclaim_owner_id = str(receipt_owner or "") or None
 
             try:
                 receipt_execution_policy = _execution_policy_from_receipt(receipt)
@@ -6929,7 +7369,9 @@ def _(rid, params: dict) -> dict:
         claimed = False
         receipt_terminal_status = "error"
         session_tokens = []
-        terminal_frame_pending = False
+        terminalized = False
+        terminalization_failed = False
+        session_released = False
         turn_started_at = None
         turn_usage_before = None
         turn_usage_after = None
@@ -6937,22 +7379,89 @@ def _(rid, params: dict) -> dict:
         turn_usage_result = None
         turn_usage_error_type = ""
         reset_context_after_turn = False
+        context_reset_warning = None
+
+        def _finalize_terminal(payload: dict) -> bool:
+            nonlocal receipt_terminal_status
+            nonlocal session_released
+            nonlocal terminalization_failed
+            nonlocal terminalized
+
+            terminal_payload = dict(payload)
+            assistant_message_id = str(
+                terminal_payload.get("message_id") or turn_ids["assistant"]
+            )
+            terminal_payload["message_id"] = assistant_message_id
+            receipt_terminal_status = str(
+                terminal_payload.get("status") or "error"
+            )
+            try:
+                committed = _commit_prompt_terminal_outcome(
+                    db,
+                    session,
+                    session_key=session_key,
+                    client_message_id=receipt_user_id,
+                    owner_id=_PROMPT_EXECUTION_OWNER,
+                    assistant_message_id=assistant_message_id,
+                    terminal_payload=terminal_payload,
+                )
+            except Exception:
+                logger.exception(
+                    "atomic prompt terminalization failed session=%s message=%s",
+                    session_key,
+                    receipt_user_id,
+                )
+                committed = False
+            if not committed:
+                terminalization_failed = True
+                receipt_terminal_status = "outcome_unknown"
+                session["prompt_outcome_unknown"] = {
+                    "client_message_id": receipt_user_id,
+                    "assistant_message_id": assistant_message_id,
+                    "message": _OUTCOME_UNKNOWN_MESSAGE,
+                }
+                try:
+                    _emit_prompt_outcome_unknown(
+                        sid,
+                        receipt_user_id,
+                        assistant_message_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "prompt outcome_unknown projection failed "
+                        "session=%s message=%s",
+                        session_key,
+                        receipt_user_id,
+                    )
+                return False
+
+            terminalized = True
+            session.pop("prompt_outcome_unknown", None)
+            _emit("message.complete", sid, terminal_payload)
+            if not reset_context_after_turn:
+                _mark_session_idle(session, clear_replay=False)
+                session_released = True
+            return True
+
         try:
             claimed = db.claim_prompt_receipt(
                 session_key,
                 receipt_user_id,
                 owner_id=_PROMPT_EXECUTION_OWNER,
-                reclaim_owner_id=reclaim_owner_id,
             )
             if not claimed:
                 return
+            # The durable receipt is now running under this owner.  Start the
+            # turn clock before any post-claim setup can raise so every claimed
+            # failure can be terminalized and accounted for without subtracting
+            # from an uninitialized timestamp.
+            turn_started_at = time.monotonic()
             from tools.approval import set_current_execution_policy
 
             policy_token = set_current_execution_policy(
                 receipt_execution_policy,
                 policy_revision=receipt_policy_revision,
             )
-            turn_started_at = time.monotonic()
             # Server-initiated wake turns have no optimistic user bubble. Emit
             # their stored marker only after this worker owns the durable claim.
             if (
@@ -6972,7 +7481,6 @@ def _(rid, params: dict) -> dict:
                     "user_message_id": receipt_user_id,
                 },
             )
-            terminal_frame_pending = True
             wait_err = _wait_agent(session, rid)
             if wait_err:
                 error = wait_err.get("error") if isinstance(wait_err, dict) else None
@@ -6981,7 +7489,12 @@ def _(rid, params: dict) -> dict:
                     if isinstance(error, dict)
                     else "agent initialization failed"
                 )
-                _emit("error", sid, {"message": message})
+                _finalize_terminal(
+                    _agent_terminal_payload(
+                        {"completed": False, "error": message},
+                        message_id=receipt_assistant_id,
+                    )
+                )
                 return
             try:
                 _ensure_tui_tool_profile(sid, session, _select_tui_tool_profile(text))
@@ -7111,13 +7624,14 @@ def _(rid, params: dict) -> dict:
                     context_length=ctx_len,
                 )
                 if ctx.blocked:
-                    _emit(
-                        "error",
-                        sid,
-                        {
-                            "message": "\n".join(ctx.warnings)
-                            or "Context injection refused."
-                        },
+                    blocked_message = (
+                        "\n".join(ctx.warnings) or "Context injection refused."
+                    )
+                    _finalize_terminal(
+                        _agent_terminal_payload(
+                            {"completed": False, "error": blocked_message},
+                            message_id=turn_ids["assistant"],
+                        )
                     )
                     return
                 prompt = ctx.message
@@ -7202,7 +7716,13 @@ def _(rid, params: dict) -> dict:
                         if not agent_result_succeeded(result)
                         else "complete"
                     )
-                    if status in {"needs_input", "pending"} and (
+                    result_messages = result.get("messages")
+                    empty_interrupted = status == "interrupted" and (
+                        not isinstance(raw, str) or not raw.strip()
+                    )
+                    if empty_interrupted:
+                        raw = _INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+                    elif status in {"needs_input", "pending"} and (
                         not isinstance(raw, str) or not raw.strip()
                     ):
                         raw = (
@@ -7210,7 +7730,6 @@ def _(rid, params: dict) -> dict:
                             if status == "needs_input"
                             else _PENDING_WORK_MESSAGE
                         )
-                    result_messages = result.get("messages")
                     empty_terminal = status not in {
                         "interrupted",
                         "needs_input",
@@ -7228,26 +7747,17 @@ def _(rid, params: dict) -> dict:
                                 result_messages, turn_ids["assistant"]
                             )
                     if isinstance(result_messages, list):
-                        if status in {"needs_input", "pending"}:
+                        if empty_interrupted:
+                            result_messages = _normalize_empty_interrupted_history(
+                                result_messages,
+                                turn_ids["assistant"],
+                            )
+                        elif status in {"needs_input", "pending"}:
                             result_messages = _stamp_terminal_history_status(
                                 result_messages,
                                 status,
                                 turn_ids["assistant"],
                             )
-                            if hasattr(db, "update_message_finish_reason"):
-                                try:
-                                    db.update_message_finish_reason(
-                                        session_key,
-                                        turn_ids["assistant"],
-                                        status,
-                                    )
-                                except Exception:
-                                    logger.exception(
-                                        "terminal history status persistence failed "
-                                        "session=%s message=%s",
-                                        session_key,
-                                        turn_ids["assistant"],
-                                    )
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
                             if current_version == current_history_version:
@@ -7267,12 +7777,13 @@ def _(rid, params: dict) -> dict:
                                 print(
                                     f"[tui_gateway] prompt.submit: history_version mismatch "
                                     f"(expected={current_history_version} current={current_version}) — "
-                                    f"agent output NOT written to session history",
+                                    f"candidate history NOT merged into live history",
                                     file=sys.stderr,
                                 )
                                 status_note = (
-                                    "History changed during this turn — the response above is visible "
-                                    "but was not saved to session history."
+                                    "History changed during this turn. The terminal response was "
+                                    "saved atomically, but the rest of the candidate history was "
+                                    "not merged into the live session."
                                 )
                     lr = result.get("last_reasoning")
                     if isinstance(lr, str) and lr.strip():
@@ -7285,8 +7796,8 @@ def _(rid, params: dict) -> dict:
 
                 if isinstance(result, dict) and agent_result_context_overflow(result):
                     reset_context_after_turn = True
-                    raw = (raw or "") + (
-                        "\n\nSession auto-reset: this conversation exceeded the model "
+                    context_reset_warning = (
+                        "Session auto-reset: this conversation exceeded the model "
                         "context and could not be recovered safely. Your next "
                         "message will start with a clean conversation."
                     )
@@ -7318,6 +7829,15 @@ def _(rid, params: dict) -> dict:
                     payload["reasoning"] = last_reasoning
                 if status_note:
                     payload["warning"] = status_note
+                if context_reset_warning:
+                    payload["warning"] = " ".join(
+                        part
+                        for part in (
+                            payload.get("warning"),
+                            context_reset_warning,
+                        )
+                        if part
+                    )
                 if status == "needs_input":
                     payload["warning"] = " ".join(
                         part
@@ -7352,15 +7872,13 @@ def _(rid, params: dict) -> dict:
                     turn_latency_ms = int(
                         max(0.0, time.monotonic() - turn_started_at) * 1000
                     )
-                    # A context-overflow turn must keep ownership until its
-                    # replacement actor has claimed the reset fence. Releasing
-                    # running here would admit a new prompt before the finally
-                    # block resets context, allowing that new turn's agent to
-                    # be replaced underneath it.
-                    if not reset_context_after_turn:
-                        _mark_session_idle(session)
-                _emit("message.complete", sid, payload)
-                terminal_frame_pending = has_followup
+                    if not _finalize_terminal(payload):
+                        break
+                else:
+                    # This closes only an intermediate visual round. The
+                    # accepted prompt receipt remains running and is committed
+                    # against the final re-minted assistant id below.
+                    _emit("message.complete", sid, payload)
                 if followup_rounds > 0 and not has_followup:
                     _record_backend_event(
                         "experience.recovered",
@@ -7439,13 +7957,14 @@ def _(rid, params: dict) -> dict:
                         "continuation": True,
                     },
                 )
-                terminal_frame_pending = True
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool
             # calls / reasoning already stream separately and would be
             # noisy to read aloud.
             if (
+                terminalized
+                and
                 status == "complete"
                 and isinstance(raw, str)
                 and raw.strip()
@@ -7480,8 +7999,7 @@ def _(rid, params: dict) -> dict:
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
-            if terminal_frame_pending:
-                receipt_terminal_status = "error"
+            if claimed and not terminalized and not terminalization_failed:
                 error_text = str(e) or type(e).__name__
                 try:
                     turn_usage_after = _get_usage(session.get("agent"))
@@ -7490,16 +8008,13 @@ def _(rid, params: dict) -> dict:
                 turn_latency_ms = int(
                     max(0.0, time.monotonic() - turn_started_at) * 1000
                 )
-                _emit(
-                    "message.complete",
-                    sid,
+                _finalize_terminal(
                     _agent_terminal_payload(
                         {"completed": False, "error": error_text},
                         message_id=turn_ids["assistant"],
-                    ),
+                    )
                 )
-                terminal_frame_pending = False
-            elif receipt_terminal_status == "error":
+            elif not terminalization_failed:
                 _emit("error", sid, {"message": str(e)})
         finally:
             if claimed and turn_started_at is not None:
@@ -7525,37 +8040,7 @@ def _(rid, params: dict) -> dict:
             except Exception:
                 pass
             _clear_session_context(session_tokens)
-            if claimed:
-                try:
-                    if not db.finish_prompt_receipt(
-                        session_key,
-                        receipt_user_id,
-                        owner_id=_PROMPT_EXECUTION_OWNER,
-                        # Receipt ``pending`` means not-yet-executed and is
-                        # restart-recoverable. Use a distinct terminal state
-                        # for a turn that intentionally ended with async work,
-                        # otherwise a restart would rerun the original prompt.
-                        status=(
-                            "deferred"
-                            if receipt_terminal_status == "pending"
-                            else "waiting_input"
-                            if receipt_terminal_status == "needs_input"
-                            else receipt_terminal_status
-                        ),
-                    ):
-                        logger.error(
-                            "prompt receipt terminalization lost ownership "
-                            "session=%s message=%s",
-                            session_key,
-                            receipt_user_id,
-                        )
-                except Exception:
-                    logger.exception(
-                        "prompt receipt terminalization failed session=%s message=%s",
-                        session_key,
-                        receipt_user_id,
-                    )
-            if reset_context_after_turn:
+            if reset_context_after_turn and terminalized:
                 try:
                     _reset_tui_context_overflow_session(sid, session, db)
                 except Exception:
@@ -7565,17 +8050,28 @@ def _(rid, params: dict) -> dict:
                     )
             with _prompt_claims_lock:
                 _active_prompt_claims.pop(claim_key, None)
-            # Turn over — drop any running-tool snapshot so a later resume
-            # doesn't rebuild stale cards (e.g. a tool that errored out without
-            # a tool.complete frame).  This is idempotent because final visible
-            # turns release the latch before post-response work such as title
-            # generation, avoiding "answer is done but chat is still running"
-            # on dashboard reattach.
-            _mark_session_idle(session)
+            if terminalized and not session_released:
+                # message.complete was projected only after the durable join.
+                # Its replay ring is cleared by write_json only when delivery
+                # succeeds; do not erase a terminal frame a disconnected client
+                # still needs.
+                _mark_session_idle(session, clear_replay=False)
+            elif not claimed:
+                # A lost claim never executed the agent and remains governed by
+                # the durable receipt owner, so this local actor can be released.
+                _mark_session_idle(session)
+            # A claimed turn whose terminal commit failed deliberately stays
+            # busy/fail-closed. Removing the process claim makes a later cold
+            # restart classify the stale running receipt as outcome_unknown;
+            # it must never execute the agent again automatically.
             if claimed and turn_started_at is not None:
                 _record_tui_turn_usage(
                     session_id=session_key,
-                    message_id=receipt_assistant_id,
+                    message_id=(
+                        str(turn_ids.get("assistant") or receipt_assistant_id)
+                        if terminalized
+                        else receipt_assistant_id
+                    ),
                     status=receipt_terminal_status,
                     usage_before=turn_usage_before,
                     usage_after=turn_usage_after,

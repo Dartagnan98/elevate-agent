@@ -5720,6 +5720,48 @@ class TestRunConversation:
         memory_manager.sync_all.assert_not_called()
         memory_manager.queue_prefetch_all.assert_not_called()
 
+    def test_pre_interrupt_returns_canonical_stamped_assistant_without_api_call(
+        self, agent
+    ):
+        self._setup_agent(agent)
+        persisted = {}
+
+        def _capture_persisted(messages, _history):
+            agent._ensure_client_message_ids(messages)
+            persisted["messages"] = [dict(message) for message in messages]
+
+        agent.interrupt()
+        with (
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=_capture_persisted,
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent._set_interrupt"),
+        ):
+            result = agent.run_conversation(
+                "hello",
+                user_message_id="user-pre-interrupt",
+                assistant_message_id="assistant-pre-interrupt",
+            )
+
+        expected = run_agent.INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+        assert result["interrupted"] is True
+        assert result["completed"] is False
+        assert result["api_calls"] == 0
+        assert result["final_response"] == expected
+        assert result["messages"][-1] == {
+            "role": "assistant",
+            "content": expected,
+            "finish_reason": "interrupted",
+            "client_message_id": "assistant-pre-interrupt",
+        }
+        assert persisted["messages"][-1] == result["messages"][-1]
+        assert agent._interrupt_requested is False
+        agent.client.chat.completions.create.assert_not_called()
+
     def test_terminal_provider_exception_is_failed_and_skips_success_hooks(self, agent):
         self._setup_agent(agent)
         agent.max_iterations = 2
@@ -6993,23 +7035,84 @@ class TestRunConversation:
         """Normal truncation (partial real content) triggers continuation."""
         self._setup_agent(agent)
         first = _mock_response(content="Part 1 ", finish_reason="length")
-        second = _mock_response(content="Part 2", finish_reason="stop")
+        second = _mock_response(
+            content="Part 2",
+            finish_reason="stop",
+            reasoning="continued carefully",
+        )
         agent.client.chat.completions.create.side_effect = [first, second]
+        persisted = {}
+
+        def _capture_persisted(messages, _history):
+            # Exercise the real gateway-id stamping boundary even though this
+            # unit test does not create a SessionDB.
+            agent._ensure_client_message_ids(messages)
+            persisted["messages"] = [dict(message) for message in messages]
 
         with (
-            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_persist_session", side_effect=_capture_persisted),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            result = agent.run_conversation("hello")
+            result = agent.run_conversation(
+                "hello",
+                assistant_message_id="assistant-length-final",
+            )
 
         assert result["completed"] is True
         assert result["api_calls"] == 2
         assert result["final_response"] == "Part 1 Part 2"
+        assert result["messages"][-1]["content"] == "Part 1 Part 2"
+        assert result["messages"][-1]["reasoning"] == "continued carefully"
+        assert (
+            result["messages"][-1]["client_message_id"]
+            == "assistant-length-final"
+        )
+        assert persisted["messages"][-1]["content"] == "Part 1 Part 2"
+        assert (
+            persisted["messages"][-1]["client_message_id"]
+            == "assistant-length-final"
+        )
 
         second_call_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
         assert second_call_messages[-1]["role"] == "user"
         assert "truncated by the output length limit" in second_call_messages[-1]["content"]
+
+    def test_gateway_final_response_and_stamped_row_share_sanitized_text(self, agent):
+        """Gateway payload and durable row use one safe user-facing string."""
+        self._setup_agent(agent)
+        response = _mock_response(
+            content="<think>private</think>Ready\ud800",
+            finish_reason="stop",
+            reasoning="structured reasoning",
+        )
+        agent.client.chat.completions.create.return_value = response
+        persisted = {}
+
+        def _capture_persisted(messages, _history):
+            agent._ensure_client_message_ids(messages)
+            persisted["messages"] = [dict(message) for message in messages]
+
+        with (
+            patch.object(agent, "_persist_session", side_effect=_capture_persisted),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "hello",
+                assistant_message_id="assistant-safe-final",
+            )
+
+        expected = "Ready\ufffd"
+        assert result["final_response"] == expected
+        assert result["messages"][-1]["content"] == expected
+        assert result["messages"][-1]["reasoning"] == "structured reasoning"
+        assert result["messages"][-1]["finish_reason"] == "stop"
+        assert (
+            result["messages"][-1]["client_message_id"]
+            == "assistant-safe-final"
+        )
+        assert persisted["messages"][-1] == result["messages"][-1]
 
     def test_ollama_glm_stop_after_tools_without_terminal_boundary_requests_continuation(self, agent):
         """Ollama-hosted GLM responses can misreport truncated output as stop."""

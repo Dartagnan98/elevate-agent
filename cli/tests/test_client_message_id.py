@@ -619,6 +619,489 @@ class TestPromptReceipt:
             reclaim_owner_id="old-owner",
         ) is False
 
+    def test_atomic_terminalizer_commits_receipt_payload_and_existing_assistant(
+        self, db
+    ):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        db.append_message(
+            "s1",
+            "assistant",
+            content="Done",
+            finish_reason="stop",
+            client_message_id="assistant-1",
+        )
+        payload = {
+            "message_id": "assistant-1",
+            "status": "complete",
+            "text": "Done",
+            "usage": {"output_tokens": 3},
+        }
+
+        assert db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="owner-a",
+            assistant_message_id="assistant-1",
+            assistant_content="Done",
+            status="complete",
+            terminal_payload=payload,
+        )
+
+        receipt = db.get_prompt_receipt("s1", "user-1")
+        assert receipt["status"] == "complete"
+        assert receipt["terminal_message_id"] == "assistant-1"
+        assert receipt["terminal_payload"] == payload
+        messages = db.get_messages_as_conversation("s1")
+        assert [message["client_message_id"] for message in messages] == [
+            "user-1",
+            "assistant-1",
+        ]
+        assert messages[-1]["finish_reason"] == "complete"
+
+    def test_atomic_terminalizer_inserts_missing_assistant_once_and_is_idempotent(
+        self, db
+    ):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        payload = {
+            "message_id": "assistant-1",
+            "status": "needs_input",
+            "text": "Which province?",
+        }
+
+        for _attempt in range(2):
+            assert db.terminalize_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="owner-a",
+                assistant_message_id="assistant-1",
+                assistant_content="Which province?",
+                status="waiting_input",
+                terminal_payload=payload,
+            )
+
+        assert db.get_session("s1")["message_count"] == 2
+        assert len(db.get_messages("s1")) == 2
+        assert db.get_prompt_receipt("s1", "user-1")["status"] == "waiting_input"
+
+        db._conn.execute(
+            "UPDATE messages SET content = 'tampered' "
+            "WHERE session_id = 's1' AND client_message_id = 'assistant-1'"
+        )
+        with pytest.raises(ValueError, match="different outcome"):
+            db.terminalize_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="owner-a",
+                assistant_message_id="assistant-1",
+                assistant_content="Which province?",
+                status="waiting_input",
+                terminal_payload=payload,
+            )
+
+    @pytest.mark.parametrize(
+        ("receipt_status", "wire_status", "prior_content", "terminal_text"),
+        [
+            (
+                "deferred",
+                "pending",
+                "",
+                "Background work is still running.",
+            ),
+            (
+                "waiting_input",
+                "needs_input",
+                "(empty)",
+                "Please provide the missing province.",
+            ),
+        ],
+    )
+    def test_atomic_terminalizer_fills_only_empty_non_success_placeholder(
+        self,
+        db,
+        receipt_status,
+        wire_status,
+        prior_content,
+        terminal_text,
+    ):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        db.append_message(
+            "s1",
+            "assistant",
+            content=prior_content,
+            finish_reason="stop",
+            client_message_id="assistant-1",
+        )
+        payload = {
+            "message_id": "assistant-1",
+            "status": wire_status,
+            "text": terminal_text,
+        }
+
+        assert db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="owner-a",
+            assistant_message_id="assistant-1",
+            assistant_content=terminal_text,
+            status=receipt_status,
+            terminal_payload=payload,
+        )
+
+        receipt = db.get_prompt_receipt("s1", "user-1")
+        assert receipt["status"] == receipt_status
+        assert receipt["terminal_payload"] == payload
+        assistant = db.get_messages_as_conversation("s1")[-1]
+        assert assistant["content"] == terminal_text
+        assert assistant["finish_reason"] == wire_status
+
+    @pytest.mark.parametrize(
+        ("receipt_status", "wire_status"),
+        [
+            ("deferred", "pending"),
+            ("waiting_input", "needs_input"),
+        ],
+    )
+    def test_atomic_terminalizer_rejects_nonempty_non_success_conflict(
+        self, db, receipt_status, wire_status
+    ):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        db.append_message(
+            "s1",
+            "assistant",
+            content="Different durable outcome",
+            finish_reason="stop",
+            client_message_id="assistant-1",
+        )
+        payload = {
+            "message_id": "assistant-1",
+            "status": wire_status,
+            "text": "Canonical terminal outcome",
+        }
+
+        with pytest.raises(ValueError, match="different outcome"):
+            db.terminalize_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="owner-a",
+                assistant_message_id="assistant-1",
+                assistant_content="Canonical terminal outcome",
+                status=receipt_status,
+                terminal_payload=payload,
+            )
+
+        assert db.get_prompt_receipt("s1", "user-1")["status"] == "running"
+        assistant = db.get_messages_as_conversation("s1")[-1]
+        assert assistant["content"] == "Different durable outcome"
+        assert assistant["finish_reason"] == "stop"
+
+    def test_atomic_terminalizer_does_not_fill_empty_success_placeholder(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        db.append_message(
+            "s1",
+            "assistant",
+            content="",
+            finish_reason="stop",
+            client_message_id="assistant-1",
+        )
+        payload = {
+            "message_id": "assistant-1",
+            "status": "complete",
+            "text": "Done",
+        }
+
+        with pytest.raises(ValueError, match="different outcome"):
+            db.terminalize_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="owner-a",
+                assistant_message_id="assistant-1",
+                assistant_content="Done",
+                status="complete",
+                terminal_payload=payload,
+            )
+
+        assert db.get_prompt_receipt("s1", "user-1")["status"] == "running"
+        assert db.get_messages_as_conversation("s1")[-1]["content"] == ""
+
+    def test_atomic_terminal_receipt_forces_sqlite_when_equal_length_pg_is_stale(
+        self, db, monkeypatch
+    ):
+        import elevate_state
+
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        db.append_message(
+            "s1",
+            "assistant",
+            content="",
+            finish_reason="stop",
+            client_message_id="assistant-1",
+        )
+        stale_pg_rows = [
+            dict(row)
+            for row in db._conn.execute(
+                "SELECT * FROM messages WHERE session_id = 's1' ORDER BY id"
+            ).fetchall()
+        ]
+        payload = {
+            "message_id": "assistant-1",
+            "status": "error",
+            "text": "Provider failed",
+        }
+        assert db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="owner-a",
+            assistant_message_id="assistant-1",
+            assistant_content="Provider failed",
+            status="error",
+            terminal_payload=payload,
+        )
+        assert len(stale_pg_rows) == db._sqlite_message_count("s1")
+
+        calls = {"messages": 0, "conversation": 0}
+
+        def _stale_messages(_session_id):
+            calls["messages"] += 1
+            return [dict(row) for row in stale_pg_rows]
+
+        def _stale_conversation(_session_ids):
+            calls["conversation"] += 1
+            return [dict(row) for row in stale_pg_rows]
+
+        monkeypatch.setattr(elevate_state, "_read_from_pg", lambda: True)
+        monkeypatch.setattr(
+            "elevate_cli.data.chat_sessions.get_messages",
+            _stale_messages,
+        )
+        monkeypatch.setattr(
+            "elevate_cli.data.chat_sessions.get_messages_for_sessions",
+            _stale_conversation,
+        )
+
+        raw_assistant = db.get_messages("s1")[-1]
+        conversation_assistant = db.get_messages_as_conversation("s1")[-1]
+        assert raw_assistant["content"] == "Provider failed"
+        assert raw_assistant["finish_reason"] == "error"
+        assert conversation_assistant == {
+            "role": "assistant",
+            "content": "Provider failed",
+            "client_message_id": "assistant-1",
+            "finish_reason": "error",
+        }
+        assert calls == {"messages": 0, "conversation": 0}
+
+    def test_atomic_terminalizer_rolls_back_receipt_when_assistant_insert_fails(
+        self, db
+    ):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        db._conn.execute(
+            "CREATE TRIGGER fail_atomic_terminal_assistant "
+            "BEFORE INSERT ON messages "
+            "WHEN NEW.client_message_id = 'assistant-1' "
+            "BEGIN SELECT RAISE(ABORT, 'injected terminal write failure'); END"
+        )
+        payload = {
+            "message_id": "assistant-1",
+            "status": "error",
+            "text": "Failed",
+        }
+
+        with pytest.raises(sqlite3.IntegrityError, match="injected terminal"):
+            db.terminalize_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="owner-a",
+                assistant_message_id="assistant-1",
+                assistant_content="Failed",
+                status="error",
+                terminal_payload=payload,
+            )
+
+        receipt = db.get_prompt_receipt("s1", "user-1")
+        assert receipt["status"] == "running"
+        assert receipt["terminal_message_id"] is None
+        assert receipt["terminal_payload"] is None
+        assert [row["role"] for row in db.get_messages("s1")] == ["user"]
+
+    def test_atomic_terminalizer_cas_and_conflict_fail_without_partial_write(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        payload = {
+            "message_id": "assistant-1",
+            "status": "complete",
+            "text": "Done",
+        }
+
+        assert not db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="owner-b",
+            assistant_message_id="assistant-1",
+            assistant_content="Done",
+            status="complete",
+            terminal_payload=payload,
+        )
+        assert len(db.get_messages("s1")) == 1
+        assert db.get_prompt_receipt("s1", "user-1")["status"] == "running"
+
+        assert db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="owner-a",
+            assistant_message_id="assistant-1",
+            assistant_content="Done",
+            status="complete",
+            terminal_payload=payload,
+        )
+        conflicting = {**payload, "usage": {"output_tokens": 99}}
+        assert not db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="owner-a",
+            assistant_message_id="assistant-1",
+            assistant_content="Done",
+            status="complete",
+            terminal_payload=conflicting,
+        )
+        assert db.get_prompt_receipt("s1", "user-1")["terminal_payload"] == payload
+
+    def test_atomic_terminalizer_has_one_winner_across_connections(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a")
+        connections = [SessionDB(db_path=db.db_path), SessionDB(db_path=db.db_path)]
+        barrier = threading.Barrier(3)
+        results = []
+        errors = []
+
+        def _terminalize(connection, suffix):
+            payload = {
+                "message_id": f"assistant-{suffix}",
+                "status": "complete",
+                "text": f"Done {suffix}",
+            }
+            try:
+                barrier.wait(timeout=5)
+                results.append(
+                    connection.terminalize_prompt_receipt_with_assistant(
+                        "s1",
+                        "user-1",
+                        owner_id="owner-a",
+                        assistant_message_id=payload["message_id"],
+                        assistant_content=payload["text"],
+                        status="complete",
+                        terminal_payload=payload,
+                    )
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        workers = [
+            threading.Thread(target=_terminalize, args=(connection, suffix))
+            for connection, suffix in zip(connections, ("a", "b"))
+        ]
+        try:
+            for worker in workers:
+                worker.start()
+            barrier.wait(timeout=5)
+            for worker in workers:
+                worker.join(timeout=10)
+            assert all(not worker.is_alive() for worker in workers)
+            assert errors == []
+            assert sorted(results) == [False, True]
+            receipt = db.get_prompt_receipt("s1", "user-1")
+            assert receipt["terminal_message_id"] in {"assistant-a", "assistant-b"}
+            assert len(db.get_messages("s1")) == 2
+        finally:
+            for connection in connections:
+                connection.close()
+
+    def test_atomic_terminalizer_reclaims_only_exact_stale_running_owner(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="dead-owner")
+        payload = {
+            "message_id": "recovery-1",
+            "status": "interrupted",
+            "text": "Outcome unknown",
+        }
+
+        assert not db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="recovery-owner",
+            assistant_message_id="recovery-1",
+            assistant_content="Outcome unknown",
+            status="interrupted",
+            terminal_payload=payload,
+            reclaim_owner_id="wrong-owner",
+        )
+        assert db.terminalize_prompt_receipt_with_assistant(
+            "s1",
+            "user-1",
+            owner_id="recovery-owner",
+            assistant_message_id="recovery-1",
+            assistant_content="Outcome unknown",
+            status="interrupted",
+            terminal_payload=payload,
+            reclaim_owner_id="dead-owner",
+        )
+        receipt = db.get_prompt_receipt("s1", "user-1")
+        assert receipt["owner_id"] == "recovery-owner"
+        assert receipt["status"] == "interrupted"
+
+    def test_prompt_receipt_schema_reconciles_terminal_columns_on_legacy_db(
+        self, tmp_path
+    ):
+        path = tmp_path / "legacy-state.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE prompt_receipts (
+                session_id TEXT NOT NULL,
+                client_message_id TEXT NOT NULL,
+                assistant_message_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                accepted_policy_json TEXT,
+                effective_policy_json TEXT,
+                policy_revision INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                owner_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (session_id, client_message_id)
+            );
+            """
+        )
+        conn.close()
+
+        upgraded = SessionDB(db_path=path)
+        try:
+            columns = {
+                row["name"]
+                for row in upgraded._conn.execute(
+                    "PRAGMA table_info(prompt_receipts)"
+                ).fetchall()
+            }
+            assert {"terminal_message_id", "terminal_payload_json"} <= columns
+        finally:
+            upgraded.close()
+
 
 class TestPromptReceiptLifecycle:
     def test_clear_removes_receipts_and_allows_same_id_again(self, db):

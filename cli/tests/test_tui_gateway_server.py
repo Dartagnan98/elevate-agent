@@ -467,6 +467,23 @@ def test_background_terminal_payload_marks_clarification_needs_input():
     }
 
 
+def test_background_terminal_payload_keeps_empty_interrupt_interrupted():
+    payload = server._agent_terminal_payload(
+        {
+            "completed": False,
+            "final_response": None,
+            "interrupted": True,
+        },
+        task_id="bg-interrupted",
+    )
+
+    assert payload == {
+        "task_id": "bg-interrupted",
+        "status": "interrupted",
+        "text": server._INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+    }
+
+
 def test_tui_session_context_is_explicit_and_session_keyed():
     from gateway.session_context import get_session_env
 
@@ -968,6 +985,47 @@ class _PromptReceiptDB:
         if row["status"] != "running" or row["owner_id"] != owner_id:
             return False
         row["status"] = status
+        return True
+
+    def terminalize_prompt_receipt_with_assistant(
+        self,
+        session_id,
+        client_message_id,
+        *,
+        owner_id,
+        assistant_message_id,
+        assistant_content,
+        status,
+        terminal_payload,
+        reclaim_owner_id=None,
+    ):
+        row = self.rows[(session_id, client_message_id)]
+        if row["status"] in {
+            "complete",
+            "deferred",
+            "error",
+            "interrupted",
+            "waiting_input",
+        }:
+            return (
+                row["status"] == status
+                and row["owner_id"] == owner_id
+                and row.get("terminal_message_id") == assistant_message_id
+                and row.get("terminal_payload") == terminal_payload
+            )
+        if row["status"] != "running" or not (
+            row["owner_id"] == owner_id
+            or (
+                reclaim_owner_id is not None
+                and row["owner_id"] == reclaim_owner_id
+            )
+        ):
+            return False
+        row["status"] = status
+        row["owner_id"] = owner_id
+        row["terminal_message_id"] = assistant_message_id
+        row["terminal_payload"] = dict(terminal_payload)
+        row["assistant_content"] = assistant_content
         return True
 
     def update_message_finish_reason(
@@ -2310,13 +2368,12 @@ def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
         assert recorded[0]["message_id"] == payload["message_id"]
         assert recorded[0]["agent_result"]["status"] == "error"
         assert db.rows[("session-key", "user-empty")]["status"] == "error"
-        assert server._sessions["sid"]["history"] == [
-            {
-                "role": "assistant",
-                "content": server._EMPTY_MODEL_FAILURE,
-                "finish_reason": "error",
-            }
-        ]
+        assert server._sessions["sid"]["history"][-1] == {
+            "role": "assistant",
+            "content": server._EMPTY_MODEL_FAILURE,
+            "finish_reason": "error",
+            "client_message_id": payload["message_id"],
+        }
     finally:
         server._sessions.pop("sid", None)
 
@@ -2468,9 +2525,10 @@ def test_prompt_submit_needs_input_releases_turn_and_is_durable(monkeypatch):
         assert row["status"] == "waiting_input"
         assert server._sessions["sid"]["running"] is False
         assert server._sessions["sid"]["history"][-1]["finish_reason"] == "needs_input"
-        assert db.finish_reason_updates == [
-            ("session-key", complete[0][2]["message_id"], "needs_input")
-        ]
+        # Finish reason and receipt status now commit through the single atomic
+        # terminalizer rather than a separate best-effort message update.
+        assert db.finish_reason_updates == []
+        assert row["terminal_payload"] == complete[0][2]
 
         duplicate = server.handle_request(
             {
@@ -2533,7 +2591,7 @@ def test_history_resume_preserves_clarification_as_needs_input():
     ]
 
 
-def test_context_overflow_reset_clears_replay_but_preserves_terminal_receipt(
+def test_context_overflow_reset_keeps_bounded_terminal_row_and_receipt(
     monkeypatch, tmp_path
 ):
     from elevate_state import SessionDB
@@ -2542,12 +2600,6 @@ def test_context_overflow_reset_clears_replay_but_preserves_terminal_receipt(
     session_key = "tui-overflow-session"
     db.create_session(session_key, source="tui")
     db.append_message(session_key, "user", content="x" * 10_000)
-    db.append_message(
-        session_key,
-        "assistant",
-        content="maximum context length exceeded",
-        finish_reason="error",
-    )
     db.prepare_prompt_receipt(
         session_key,
         "continue",
@@ -2558,20 +2610,38 @@ def test_context_overflow_reset_clears_replay_but_preserves_terminal_receipt(
     assert db.claim_prompt_receipt(
         session_key, "user-overflow", owner_id="owner"
     )
-    assert db.finish_prompt_receipt(
+    terminal_payload = {
+        "text": "maximum context length exceeded",
+        "status": "error",
+        "message_id": "assistant-overflow",
+        "correlation_id": "user-overflow",
+        "user_message_id": "user-overflow",
+    }
+    assert db.terminalize_prompt_receipt_with_assistant(
         session_key,
         "user-overflow",
         owner_id="owner",
+        assistant_message_id="assistant-overflow",
+        assistant_content="maximum context length exceeded",
         status="error",
+        terminal_payload=terminal_payload,
     )
 
     session = _session(session_key=session_key, history=[{"role": "user", "content": "old"}])
+    session["correlation_id"] = "user-overflow"
     reset = MagicMock()
     monkeypatch.setattr(server, "_reset_session_agent", reset)
 
     server._reset_tui_context_overflow_session("sid", session, db)
 
-    assert db.get_messages_as_conversation(session_key) == []
+    assert db.get_messages_as_conversation(session_key) == [
+        {
+            "role": "assistant",
+            "content": "maximum context length exceeded",
+            "finish_reason": "error",
+            "client_message_id": "assistant-overflow",
+        }
+    ]
     duplicate = db.prepare_prompt_receipt(
         session_key,
         "continue",
@@ -2581,6 +2651,8 @@ def test_context_overflow_reset_clears_replay_but_preserves_terminal_receipt(
     )
     assert duplicate["inserted"] is False
     assert duplicate["status"] == "error"
+    assert duplicate["terminal_message_id"] == "assistant-overflow"
+    assert duplicate["terminal_payload"] == terminal_payload
     reset.assert_called_once_with("sid", session, allow_running=True)
     db.close()
 
@@ -3044,7 +3116,10 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
         assert calls["policies"][0].mode.value == "plan"
         assert calls["policies"][0].accepted_turn_id == "user-receipt-1"
         assert calls["policy_revisions"] == [0]
-        assert len(db.get_messages("session-key")) == 1
+        assert len(db.get_messages("session-key")) == 2
+        terminal = db.get_prompt_receipt("session-key", "user-receipt-1")
+        assert terminal["status"] == "error"
+        assert terminal["terminal_payload"]["status"] == "error"
         assert db.get_recoverable_prompt_receipt("session-key") is None
     finally:
         approval.clear_session("session-key")
@@ -3185,12 +3260,22 @@ def test_recovery_interrupts_and_persists_unsafe_policy_receipt(
         assert receipt["status"] == "interrupted"
         assert db.get_recoverable_prompt_receipt("session-key") is None
         transcript = db.get_messages_as_conversation("session-key")
+        terminal_assistant_id = (
+            transcript[-1]["client_message_id"]
+            if variant == "policyless_running"
+            else "unsafe-assistant"
+        )
         assert [(message["role"], message["client_message_id"]) for message in transcript] == [
             ("user", "unsafe-user"),
-            ("assistant", "unsafe-assistant"),
+            ("assistant", terminal_assistant_id),
         ]
         assert transcript[-1]["finish_reason"] == "interrupted"
-        assert "Please resend" in transcript[-1]["content"]
+        if variant == "policyless_running":
+            assert terminal_assistant_id.startswith("recovery.")
+            assert "will not run" in transcript[-1]["content"]
+            assert receipt["terminal_payload"]["outcome_unknown"] is True
+        else:
+            assert "Please resend" in transcript[-1]["content"]
         assert session["history"] == transcript
 
         complete = [payload for event, _sid, payload in emitted if event == "message.complete"]
@@ -3199,7 +3284,11 @@ def test_recovery_interrupts_and_persists_unsafe_policy_receipt(
         assert complete[0]["completed"] is False
         assert complete[0]["correlation_id"] == "unsafe-user"
         assert complete[0]["user_message_id"] == "unsafe-user"
-        assert "Please resend" in complete[0]["text"]
+        if variant == "policyless_running":
+            assert "will not run" in complete[0]["text"]
+            assert complete[0]["outcome_unknown"] is True
+        else:
+            assert "Please resend" in complete[0]["text"]
     finally:
         server._sessions.pop("sid", None)
         db.close()
@@ -3427,19 +3516,21 @@ def test_prompt_submit_concurrent_duplicates_execute_once(monkeypatch, tmp_path)
         db.close()
 
 
-def test_prompt_submit_terminalization_failure_can_be_recovered(monkeypatch, tmp_path):
+def test_prompt_submit_terminalization_failure_never_reruns_and_fails_closed(
+    monkeypatch, tmp_path
+):
     from elevate_state import SessionDB
 
     db = SessionDB(db_path=tmp_path / "state.db")
     db.create_session("session-key", source="tui")
-    calls = {"finishes": 0, "runs": 0}
-    real_finish = db.finish_prompt_receipt
+    calls = {"terminalizations": 0, "runs": 0}
+    real_terminalize = db.terminalize_prompt_receipt_with_assistant
 
-    def _finish_once_fails(*args, **kwargs):
-        calls["finishes"] += 1
-        if calls["finishes"] == 1:
+    def _terminalize_once_fails(*args, **kwargs):
+        calls["terminalizations"] += 1
+        if calls["terminalizations"] == 1:
             return False
-        return real_finish(*args, **kwargs)
+        return real_terminalize(*args, **kwargs)
 
     class _Agent:
         def run_conversation(self, prompt, conversation_history=None, **kwargs):
@@ -3463,12 +3554,13 @@ def test_prompt_submit_terminalization_failure_can_be_recovered(monkeypatch, tmp
         def start(self):
             self._target()
 
-    db.finish_prompt_receipt = _finish_once_fails
+    db.terminalize_prompt_receipt_with_assistant = _terminalize_once_fails
     server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_ensure_tui_tool_profile", lambda *args: None)
-    monkeypatch.setattr(server, "_emit", lambda *args: None)
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
     monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
     monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
     request = {
@@ -3484,16 +3576,43 @@ def test_prompt_submit_terminalization_failure_can_be_recovered(monkeypatch, tmp
         assert first["result"]["status"] == "streaming"
         assert db.get_recoverable_prompt_receipt("session-key")["status"] == "running"
         assert ("session-key", "user-terminalize-1") not in server._active_prompt_claims
+        assert server._sessions["sid"]["running"] is True
+        unknown = [args for args in emitted if args[0] == "error"]
+        assert len(unknown) == 1
+        assert unknown[0][2]["code"] == "outcome_unknown"
 
         retry = server.handle_request({"id": "rpc-2", **request})
+        assert retry["result"]["status"] == "duplicate"
+        assert retry["result"]["duplicate"] is True
+        assert retry["result"]["started"] is False
+        assert retry["result"]["terminal_status"] == "error"
+        assert retry["result"]["outcome_unknown"] is True
+        assert retry["result"]["durable_terminal"] is False
+        assert len([args for args in emitted if args[0] == "error"]) == 2
+        assert calls == {"terminalizations": 1, "runs": 1}
 
-        assert retry["result"]["status"] == "streaming"
-        assert retry["result"]["recovered"] is True
+        # A cold restart may reconcile the stale running receipt, but it must
+        # terminalize outcome-unknown instead of invoking the agent again.
+        server._sessions.pop("sid", None)
+        server._active_prompt_claims.clear()
+        monkeypatch.setattr(
+            server,
+            "_PROMPT_EXECUTION_OWNER",
+            f"{os.getpid()}:restarted-after-terminal-loss",
+        )
+        restarted = _session(
+            agent=_Agent(),
+            history=db.get_messages_as_conversation("session-key"),
+        )
+        server._sessions["sid"] = restarted
+        assert server._recover_pending_prompt("sid", restarted) is False
+
         terminal_retry = server.handle_request({"id": "rpc-3", **request})
         assert terminal_retry["result"]["status"] == "duplicate"
-        assert terminal_retry["result"]["terminal_status"] == "complete"
-        assert calls == {"finishes": 2, "runs": 2}
-        assert len(db.get_messages("session-key")) == 1
+        assert terminal_retry["result"]["terminal_status"] == "interrupted"
+        assert terminal_retry["result"]["terminal_payload"]["outcome_unknown"] is True
+        assert calls == {"terminalizations": 2, "runs": 1}
+        assert len(db.get_messages("session-key")) == 2
         assert db.get_recoverable_prompt_receipt("session-key") is None
     finally:
         server._sessions.pop("sid", None)
@@ -3982,8 +4101,13 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
         )
         assert resp.get("result"), f"got error: {resp.get('error')}"
 
-        # History should NOT contain the agent's output (version mismatch)
-        assert server._sessions["sid"]["history"] == []
+        # The full candidate history was not merged, but the atomically saved
+        # terminal assistant is projected from durable truth.
+        assert server._sessions["sid"]["history"][-1]["content"] == "agent reply"
+        assert (
+            server._sessions["sid"]["history"][-1]["finish_reason"]
+            == "complete"
+        )
 
         # message.complete must carry a 'warning' so the UI / operator
         # knows the output was not persisted.
@@ -4043,10 +4167,13 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         assert resp.get("result")
 
         # History was written
-        assert server._sessions["sid"]["history"] == [
-            {"role": "assistant", "content": "reply"}
-        ]
-        assert server._sessions["sid"]["history_version"] == 1
+        history = server._sessions["sid"]["history"]
+        assert len(history) == 1
+        assert history[0]["role"] == "assistant"
+        assert history[0]["content"] == "reply"
+        assert history[0]["finish_reason"] == "complete"
+        assert history[0]["client_message_id"]
+        assert server._sessions["sid"]["history_version"] >= 1
 
         # No warning should be attached
         complete_calls = [a for a in emits if a[0] == "message.complete"]

@@ -70,6 +70,9 @@ EMPTY_RESPONSE_FAILURE_MESSAGE = (
     "The model returned no response after multiple retries, so this turn "
     "did not complete. Please retry."
 )
+INTERRUPTED_BEFORE_RESPONSE_MESSAGE = (
+    "Operation interrupted before a model response was produced."
+)
 
 
 def _drop_trailing_empty_response_scaffolding(messages: list) -> bool:
@@ -14395,6 +14398,11 @@ class AIAgent:
             result_messages: Optional[List[Dict[str, Any]]] = None,
             compression_exhausted: bool = False,
         ) -> Dict[str, Any]:
+            # Keep the returned terminal text and the durable assistant row on
+            # one UTF-8-safe canonical value.  Otherwise a provider-supplied
+            # lone surrogate can be sanitized later in message persistence
+            # while the gateway terminal payload still carries the raw value.
+            text = _sanitize_surrogates(self._strip_think_blocks(text)).strip()
             active_tool_failure = _active_tool_failure_summary()
             if active_tool_failure:
                 partial = True
@@ -18292,8 +18300,13 @@ class AIAgent:
                         truncated_response_prefix = ""
                         length_continue_retries = 0
                     
-                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
-                    final_response = self._strip_think_blocks(final_response).strip()
+                    # Establish one UTF-8-safe user-facing value.  This exact
+                    # string is returned to the gateway and stored on the final
+                    # assistant row below, while structured reasoning metadata
+                    # remains available separately on ``final_msg``.
+                    final_response = _sanitize_surrogates(
+                        self._strip_think_blocks(final_response)
+                    ).strip()
                     active_tool_failure = _active_tool_failure_summary()
                     active_tool_pending = _active_tool_pending_summary()
                     if active_tool_failure:
@@ -18316,19 +18329,29 @@ class AIAgent:
                         final_response = action_obligation_failure
                     elif action_obligation_needs_input:
                         final_response = action_obligation_needs_input
+
+                    # Policy/tool summaries can replace the model text after
+                    # the first canonicalization pass.  Sanitize that final
+                    # authoritative value as well before sharing it with both
+                    # the result and the durable row.
+                    final_response = _sanitize_surrogates(final_response)
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
+                    # A length continuation is assembled from multiple provider
+                    # responses, whereas ``assistant_message`` contains only the
+                    # last fragment.  Persist the same authoritative text the
+                    # user receives so the gateway-supplied assistant id cannot
+                    # conflict with atomic terminalization.  Replacing content
+                    # only preserves reasoning, token, and finish metadata from
+                    # the normalized provider message.
+                    final_msg["content"] = final_response
                     if active_tool_failure:
-                        final_msg["content"] = final_response
                         final_msg["finish_reason"] = "error"
                     elif active_tool_pending:
-                        final_msg["content"] = final_response
                         final_msg["finish_reason"] = "incomplete"
                     elif action_obligation_failure:
-                        final_msg["content"] = final_response
                         final_msg["finish_reason"] = "error"
                     elif action_obligation_needs_input:
-                        final_msg["content"] = final_response
                         final_msg["finish_reason"] = "needs_input"
 
                     # Private retry scaffolding is provider-only context. A
@@ -18534,6 +18557,14 @@ class AIAgent:
         active_tool_pending = _active_tool_pending_summary()
         if active_tool_pending:
             partial = True
+        # An interrupt can be present before the first provider call.  Preserve
+        # that truthful terminal state with a visible, durable assistant row;
+        # returning ``None`` here leaves the gateway unable to atomically bind
+        # the interrupted receipt to its assistant message.
+        if interrupted and (
+            not isinstance(final_response, str) or not final_response.strip()
+        ):
+            final_response = INTERRUPTED_BEFORE_RESPONSE_MESSAGE
         if (
             action_obligation
             and not action_obligation_satisfied
