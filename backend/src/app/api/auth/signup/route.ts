@@ -6,8 +6,14 @@ import {
   createUser,
   effectiveAccess,
   findUserByEmail,
+  replaySignupLicenseV2,
+  signupWithLicenseV2,
 } from "@/lib/store";
-import { signAccessToken, generateRefreshToken } from "@/lib/jwt";
+import {
+  signAccessToken,
+  generateRefreshToken,
+  hashRefreshToken,
+} from "@/lib/jwt";
 import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 import {
   createEntitlementEnvelope,
@@ -15,6 +21,12 @@ import {
 } from "@/lib/entitlement-assertion";
 
 export const runtime = "nodejs";
+
+function isCanonical32ByteBase64Url(value: string): boolean {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  const decoded = Buffer.from(value, "base64url");
+  return decoded.length === 32 && decoded.toString("base64url") === value;
+}
 
 // Open self-serve account creation from the desktop app.
 //
@@ -32,6 +44,7 @@ const Body = z.object({
   first_name: z.string().trim().min(1).max(100).optional(),
   last_name: z.string().trim().min(1).max(100).optional(),
   device_label: z.string().optional(),
+  initial_refresh_token: z.string().refine(isCanonical32ByteBase64Url).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -42,7 +55,7 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { password, device_label } = parsed.data;
+  const { password, device_label, initial_refresh_token } = parsed.data;
   const email = parsed.data.email.toLowerCase().trim();
 
   // Throttle account creation per IP to blunt abuse / scripted signups.
@@ -52,6 +65,113 @@ export async function POST(req: NextRequest) {
     { key: `signup:email:${email}`, max: 3, windowSeconds: 3600 },
   ]);
   if (limited) return tooManyRequests(limited.retryAfter);
+
+  if (initial_refresh_token !== undefined) {
+    // The signer must be usable before the atomic user/license mutation. Any
+    // failure after that transaction is recoverable because the caller owns B.
+    const entitlementSigner = tryLoadEntitlementSigner();
+    if (!entitlementSigner) {
+      return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+    }
+
+    const proposedHash = hashRefreshToken(initial_refresh_token);
+    const passwordHash = await bcrypt.hash(password, 12);
+    let issuance:
+      | {
+          result: "created" | "replay";
+          license_id: string;
+          user: {
+            id: string;
+            email: string;
+            tier: "pro" | "builder";
+            status: "active" | "trialing";
+          };
+        }
+      | { result: "collision" | "invalid" | "inactive" };
+
+    try {
+      const created = await signupWithLicenseV2({
+        email,
+        passwordHash,
+        firstName: parsed.data.first_name ?? null,
+        lastName: parsed.data.last_name ?? null,
+        refreshTokenHash: proposedHash,
+        deviceLabel: device_label || null,
+      });
+
+      if (created.result === "created") {
+        issuance = created;
+      } else if (created.result === "collision") {
+        issuance = { result: "collision" };
+      } else {
+        // Existing email is never implicitly treated as login. The raw
+        // password is verified in the route, then the replay-only RPC locks
+        // the account and requires this exact stored-hash snapshot plus a
+        // current signup-sourced B. It cannot create either row.
+        const existing = await findUserByEmail(email);
+        if (
+          !existing ||
+          !existing.password_hash ||
+          !(await bcrypt.compare(password, existing.password_hash))
+        ) {
+          issuance = { result: "invalid" };
+        } else {
+          issuance = await replaySignupLicenseV2({
+            userId: existing.id,
+            expectedPasswordHash: existing.password_hash,
+            refreshTokenHash: proposedHash,
+          });
+        }
+      }
+    } catch {
+      return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+    }
+
+    if (issuance.result === "collision") {
+      return NextResponse.json(
+        { error: "initial refresh token unavailable" },
+        { status: 409 },
+      );
+    }
+    if (issuance.result === "invalid" || issuance.result === "inactive") {
+      return NextResponse.json(
+        { error: "an account with this email already exists — sign in instead" },
+        { status: 409 },
+      );
+    }
+    if (issuance.result !== "created" && issuance.result !== "replay") {
+      return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+    }
+
+    try {
+      const access_info = await effectiveAccess(issuance.user.id);
+      const access = await signAccessToken({
+        sub: issuance.user.id,
+        email: issuance.user.email,
+        tier: access_info.tier,
+        license_id: issuance.license_id,
+      });
+      const envelope = createEntitlementEnvelope(
+        {
+          access_token: access,
+          refresh_token: initial_refresh_token,
+          sub: issuance.user.id,
+          license_id: issuance.license_id,
+          email: issuance.user.email,
+          tier: access_info.tier,
+          entitlements: access_info.entitlements,
+        },
+        entitlementSigner,
+      );
+      return NextResponse.json({
+        created: true,
+        ...envelope,
+        orgs: access_info.orgs,
+      });
+    } catch {
+      return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+    }
+  }
 
   const existing = await findUserByEmail(email);
   if (existing) {

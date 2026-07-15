@@ -83,6 +83,7 @@ type LicenseRow = {
   previous_refresh_token_hash: string | null;
   previous_refresh_attempt_hash: string | null;
   refresh_family_expires_at: string;
+  initial_issuance_kind: "signup" | null;
   revoked: boolean;
   last_used_at: string | null;
   created_at: string;
@@ -240,6 +241,7 @@ let nextRpcAfterHook: {
   name: string;
   run: () => void | Promise<void>;
 } | null = null;
+let nextInitialIssuanceBeforeInsertHook: (() => void) | null = null;
 let nextDeviceGrantDecisionBarrier: {
   parties: number;
   arrived: number;
@@ -287,6 +289,11 @@ export type AtomicMembershipFailureStage =
 let nextAtomicMembershipFailure: AtomicMembershipFailureStage | null = null;
 export type AtomicRefreshV2FailureStage = "after_rotation";
 let nextAtomicRefreshV2Failure: AtomicRefreshV2FailureStage | null = null;
+export type AtomicInitialIssuanceFailureStage =
+  | "login_after_license_insert"
+  | "signup_after_user_insert"
+  | "signup_after_license_insert";
+let nextAtomicInitialIssuanceFailure: AtomicInitialIssuanceFailureStage | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -323,6 +330,7 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextRpcBarrier = null;
   nextRpcGate = null;
   nextRpcAfterHook = null;
+  nextInitialIssuanceBeforeInsertHook = null;
   nextDeviceGrantDecisionBarrier = null;
   nextAtomicDeviceApprovalFailure = null;
   nextAtomicDeviceV2Failure = null;
@@ -331,6 +339,7 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextMembershipOperationBarrier = null;
   nextAtomicMembershipFailure = null;
   nextAtomicRefreshV2Failure = null;
+  nextAtomicInitialIssuanceFailure = null;
   return activeDb;
 }
 
@@ -378,6 +387,10 @@ export function afterNextSupabaseRpc(
   run: () => void | Promise<void>,
 ): void {
   nextRpcAfterHook = { name, run };
+}
+
+export function beforeNextInitialIssuanceInsert(run: () => void): void {
+  nextInitialIssuanceBeforeInsertHook = run;
 }
 
 export function barrierNextDeviceGrantDecisions(parties = 2): void {
@@ -430,6 +443,12 @@ export function failNextAtomicMembership(stage: AtomicMembershipFailureStage): v
 
 export function failNextAtomicRefreshV2(stage: AtomicRefreshV2FailureStage): void {
   nextAtomicRefreshV2Failure = stage;
+}
+
+export function failNextAtomicInitialIssuance(
+  stage: AtomicInitialIssuanceFailureStage,
+): void {
+  nextAtomicInitialIssuanceFailure = stage;
 }
 
 export function failNextSupabasePatch(
@@ -668,6 +687,8 @@ function insertRows(table: string, body: unknown): unknown {
         refresh_family_expires_at:
           (row.refresh_family_expires_at as string | undefined) ??
           refreshFamilyExpiry(createdAt),
+        initial_issuance_kind:
+          (row.initial_issuance_kind as "signup" | null | undefined) ?? null,
         device_label: (row.device_label as string | null) ?? null,
         revoked: false,
         last_used_at: null,
@@ -1162,6 +1183,237 @@ function atomicLicenseRefreshV2(body: unknown): Response {
   });
 }
 
+function initialIssuanceCandidate(refreshTokenHash: string): LicenseRow | null {
+  return (
+    activeDb.licenses.find(
+      (candidate) => candidate.previous_refresh_token_hash === refreshTokenHash,
+    ) ??
+    activeDb.licenses.find(
+      (candidate) => candidate.refresh_token_hash === refreshTokenHash,
+    ) ??
+    null
+  );
+}
+
+function runInitialIssuanceBeforeInsertHook(): void {
+  if (!nextInitialIssuanceBeforeInsertHook) return;
+  const hook = nextInitialIssuanceBeforeInsertHook;
+  nextInitialIssuanceBeforeInsertHook = null;
+  hook();
+}
+
+function atomicIssueExistingUserLicenseV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const userId = String(input.p_user_id || "");
+  const expectedPasswordHash = String(input.p_expected_password_hash || "");
+  const refreshTokenHash = String(input.p_refresh_token_hash || "");
+  if (
+    !userId ||
+    expectedPasswordHash.length < 50 ||
+    expectedPasswordHash.length > 100 ||
+    !/^[0-9a-f]{64}$/.test(refreshTokenHash)
+  ) {
+    return okJson({ message: "invalid initial issuance material" }, 400);
+  }
+
+  const candidate = initialIssuanceCandidate(refreshTokenHash);
+  const user = activeDb.users.find((row) => row.id === userId);
+  if (!user || user.password_hash !== expectedPasswordHash) {
+    return okJson({ result: "invalid" });
+  }
+  if (!["active", "trialing"].includes(user.status)) {
+    return okJson({ result: "inactive" });
+  }
+
+  if (candidate) {
+    const familyExpiry = Date.parse(candidate.refresh_family_expires_at);
+    if (
+      candidate.previous_refresh_token_hash === refreshTokenHash ||
+      candidate.refresh_token_hash !== refreshTokenHash ||
+      candidate.user_id !== user.id ||
+      candidate.revoked ||
+      !Number.isFinite(familyExpiry) ||
+      familyExpiry <= Date.now()
+    ) {
+      return okJson({ result: "collision" });
+    }
+    return okJson({
+      result: "replay",
+      license_id: candidate.id,
+      user_id: user.id,
+      email: user.email,
+    });
+  }
+
+  runInitialIssuanceBeforeInsertHook();
+  if (initialIssuanceCandidate(refreshTokenHash)) {
+    return okJson({ result: "collision" });
+  }
+
+  const createdAt = new Date().toISOString();
+  const license: LicenseRow = {
+    id: `license-${nextLicenseId}`,
+    user_id: user.id,
+    device_label: (input.p_device_label as string | null | undefined) ?? null,
+    refresh_token_hash: refreshTokenHash,
+    previous_refresh_token_hash: null,
+    previous_refresh_attempt_hash: null,
+    refresh_family_expires_at: refreshFamilyExpiry(createdAt),
+    initial_issuance_kind: null,
+    revoked: false,
+    last_used_at: null,
+    created_at: createdAt,
+  };
+  if (nextAtomicInitialIssuanceFailure === "login_after_license_insert") {
+    nextAtomicInitialIssuanceFailure = null;
+    return okJson({ message: "injected initial login failure after license insert" }, 500);
+  }
+
+  nextLicenseId += 1;
+  activeDb.licenses.push(license);
+  return okJson({
+    result: "issued",
+    license_id: license.id,
+    user_id: user.id,
+    email: user.email,
+  });
+}
+
+function atomicSignupWithLicenseV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const email = String(input.p_email || "");
+  const passwordHash = String(input.p_password_hash || "");
+  const refreshTokenHash = String(input.p_refresh_token_hash || "");
+  if (
+    !email ||
+    email !== email.trim().toLowerCase() ||
+    passwordHash.length < 50 ||
+    passwordHash.length > 100 ||
+    !/^[0-9a-f]{64}$/.test(refreshTokenHash)
+  ) {
+    return okJson({ message: "invalid signup issuance material" }, 400);
+  }
+
+  if (activeDb.users.some((candidate) => candidate.email === email)) {
+    return okJson({ result: "email_conflict" });
+  }
+  if (initialIssuanceCandidate(refreshTokenHash)) {
+    return okJson({ result: "collision" });
+  }
+
+  runInitialIssuanceBeforeInsertHook();
+  if (initialIssuanceCandidate(refreshTokenHash)) {
+    return okJson({ result: "collision" });
+  }
+
+  const now = new Date().toISOString();
+  const user: UserRow = {
+    id: `user-${nextUserId}`,
+    email,
+    password_hash: passwordHash,
+    stripe_customer: null,
+    tier: "pro",
+    status: "active",
+    current_period_end: null,
+    entitlements: [],
+    blocked_entitlements: [],
+    role: "user",
+    is_developer: false,
+    first_name: (input.p_first_name as string | null | undefined) ?? null,
+    last_name: (input.p_last_name as string | null | undefined) ?? null,
+    created_at: now,
+    updated_at: now,
+  };
+  if (nextAtomicInitialIssuanceFailure === "signup_after_user_insert") {
+    nextAtomicInitialIssuanceFailure = null;
+    return okJson({ message: "injected signup failure after user insert" }, 500);
+  }
+
+  const license: LicenseRow = {
+    id: `license-${nextLicenseId}`,
+    user_id: user.id,
+    device_label: (input.p_device_label as string | null | undefined) ?? null,
+    refresh_token_hash: refreshTokenHash,
+    previous_refresh_token_hash: null,
+    previous_refresh_attempt_hash: null,
+    refresh_family_expires_at: refreshFamilyExpiry(now),
+    initial_issuance_kind: "signup",
+    revoked: false,
+    last_used_at: null,
+    created_at: now,
+  };
+  if (nextAtomicInitialIssuanceFailure === "signup_after_license_insert") {
+    nextAtomicInitialIssuanceFailure = null;
+    return okJson({ message: "injected signup failure after license insert" }, 500);
+  }
+
+  nextUserId += 1;
+  nextLicenseId += 1;
+  activeDb.users.push(user);
+  activeDb.licenses.push(license);
+  return okJson({
+    result: "created",
+    license_id: license.id,
+    user: {
+      id: user.id,
+      email: user.email,
+      tier: user.tier,
+      status: user.status,
+    },
+  });
+}
+
+function atomicReplaySignupLicenseV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const userId = String(input.p_user_id || "");
+  const expectedPasswordHash = String(input.p_expected_password_hash || "");
+  const refreshTokenHash = String(input.p_refresh_token_hash || "");
+  if (
+    !userId ||
+    expectedPasswordHash.length < 50 ||
+    expectedPasswordHash.length > 100 ||
+    !/^[0-9a-f]{64}$/.test(refreshTokenHash)
+  ) {
+    return okJson({ message: "invalid signup replay material" }, 400);
+  }
+
+  const candidate = initialIssuanceCandidate(refreshTokenHash);
+  const familyExpiry = candidate
+    ? Date.parse(candidate.refresh_family_expires_at)
+    : Number.NaN;
+  if (
+    !candidate ||
+    candidate.previous_refresh_token_hash === refreshTokenHash ||
+    candidate.previous_refresh_token_hash !== null ||
+    candidate.refresh_token_hash !== refreshTokenHash ||
+    candidate.user_id !== userId ||
+    candidate.initial_issuance_kind !== "signup" ||
+    candidate.revoked ||
+    !Number.isFinite(familyExpiry) ||
+    familyExpiry <= Date.now()
+  ) {
+    return okJson({ result: "invalid" });
+  }
+
+  const user = activeDb.users.find((row) => row.id === userId);
+  if (!user || user.password_hash !== expectedPasswordHash) {
+    return okJson({ result: "invalid" });
+  }
+  if (!["active", "trialing"].includes(user.status)) {
+    return okJson({ result: "inactive" });
+  }
+  return okJson({
+    result: "replay",
+    license_id: candidate.id,
+    user: {
+      id: user.id,
+      email: user.email,
+      tier: user.tier,
+      status: user.status,
+    },
+  });
+}
+
 function atomicDeviceApproval(body: unknown): Response {
   const input = (body || {}) as Record<string, unknown>;
   const grantId = String(input.p_grant_id || "");
@@ -1223,6 +1475,7 @@ function atomicDeviceApproval(body: unknown): Response {
     previous_refresh_token_hash: null,
     previous_refresh_attempt_hash: null,
     refresh_family_expires_at: refreshFamilyExpiry(new Date(now).toISOString()),
+    initial_issuance_kind: null,
     device_label: grant.device_label ?? "linked-device",
     revoked: false,
     last_used_at: null,
@@ -1345,6 +1598,7 @@ function atomicDeviceApprovalV2(body: unknown): Response {
     previous_refresh_token_hash: null,
     previous_refresh_attempt_hash: null,
     refresh_family_expires_at: refreshFamilyExpiry(now),
+    initial_issuance_kind: null,
     device_label: grant.device_label ?? "linked-device",
     revoked: false,
     last_used_at: null,
@@ -1846,6 +2100,7 @@ function atomicInvitationAccept(body: unknown): Response {
     previous_refresh_token_hash: null,
     previous_refresh_attempt_hash: null,
     refresh_family_expires_at: refreshFamilyExpiry(acceptedAt),
+    initial_issuance_kind: null,
     device_label: "invite-accept",
     revoked: false,
     last_used_at: null,
@@ -2031,6 +2286,7 @@ function atomicLoginCodeRedeem(body: unknown): Response {
     previous_refresh_token_hash: null,
     previous_refresh_attempt_hash: null,
     refresh_family_expires_at: refreshFamilyExpiry(licenseCreatedAt),
+    initial_issuance_kind: null,
     device_label: (input.p_device_label as string | null | undefined) || null,
     revoked: false,
     last_used_at: null,
@@ -2141,6 +2397,33 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
 
   if (url.pathname.includes("/rpc/check_rate_limit")) {
     return okJson({ allowed: true, remaining: 100, retry_after: 0 });
+  }
+
+  if (url.pathname.includes("/rpc/issue_existing_user_license_v2")) {
+    activeDb.calls.push({ table: "issue_existing_user_license_v2", method, body });
+    await waitForNamedRpcGate("issue_existing_user_license_v2");
+    await waitForNamedRpcBarrier("issue_existing_user_license_v2");
+    const response = atomicIssueExistingUserLicenseV2(body);
+    await runAfterNamedRpcHook("issue_existing_user_license_v2");
+    return response;
+  }
+
+  if (url.pathname.includes("/rpc/signup_with_license_v2")) {
+    activeDb.calls.push({ table: "signup_with_license_v2", method, body });
+    await waitForNamedRpcGate("signup_with_license_v2");
+    await waitForNamedRpcBarrier("signup_with_license_v2");
+    const response = atomicSignupWithLicenseV2(body);
+    await runAfterNamedRpcHook("signup_with_license_v2");
+    return response;
+  }
+
+  if (url.pathname.includes("/rpc/replay_signup_license_v2")) {
+    activeDb.calls.push({ table: "replay_signup_license_v2", method, body });
+    await waitForNamedRpcGate("replay_signup_license_v2");
+    await waitForNamedRpcBarrier("replay_signup_license_v2");
+    const response = atomicReplaySignupLicenseV2(body);
+    await runAfterNamedRpcHook("replay_signup_license_v2");
+    return response;
   }
 
   if (url.pathname.includes("/rpc/rotate_license_refresh_v2")) {
@@ -2339,6 +2622,7 @@ export function seedLicense(values: Partial<LicenseRow> & { user_id: string }): 
     previous_refresh_attempt_hash: values.previous_refresh_attempt_hash ?? null,
     refresh_family_expires_at:
       values.refresh_family_expires_at || refreshFamilyExpiry(createdAt),
+    initial_issuance_kind: values.initial_issuance_kind ?? null,
     revoked: values.revoked ?? false,
     last_used_at: values.last_used_at ?? null,
     created_at: createdAt,

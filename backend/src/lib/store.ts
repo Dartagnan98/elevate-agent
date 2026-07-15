@@ -39,6 +39,7 @@ export type StoreLicense = {
   previous_refresh_token_hash: string | null;
   previous_refresh_attempt_hash: string | null;
   refresh_family_expires_at: string;
+  initial_issuance_kind: "signup" | null;
   revoked: boolean;
   last_used_at: string | null;
   created_at: string;
@@ -150,6 +151,154 @@ export async function createLicense(
     .single();
   if (error) throw error;
   return data as StoreLicense;
+}
+
+export type IssueExistingUserLicenseV2Result =
+  | {
+      result: "issued" | "replay";
+      license_id: string;
+      user_id: string;
+      email: string;
+    }
+  | { result: "invalid" | "inactive" | "collision" };
+
+export async function issueExistingUserLicenseV2(input: {
+  userId: string;
+  expectedPasswordHash: string;
+  refreshTokenHash: string;
+  deviceLabel?: string | null;
+}): Promise<IssueExistingUserLicenseV2Result> {
+  const { data, error } = await supabase().rpc("issue_existing_user_license_v2", {
+    p_user_id: input.userId,
+    p_expected_password_hash: input.expectedPasswordHash,
+    p_refresh_token_hash: input.refreshTokenHash,
+    p_device_label: input.deviceLabel ?? null,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid initial login issuance result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "issued" || value.result === "replay") {
+    if (
+      typeof value.license_id !== "string" ||
+      value.user_id !== input.userId ||
+      typeof value.email !== "string"
+    ) {
+      throw new Error("invalid initial login issuance result");
+    }
+    return {
+      result: value.result,
+      license_id: value.license_id,
+      user_id: input.userId,
+      email: value.email,
+    };
+  }
+  if (["invalid", "inactive", "collision"].includes(String(value.result))) {
+    return {
+      result: value.result as "invalid" | "inactive" | "collision",
+    };
+  }
+  throw new Error("invalid initial login issuance result");
+}
+
+type InitialSignupUser = {
+  id: string;
+  email: string;
+  tier: StoreUser["tier"];
+  status: "active" | "trialing";
+};
+
+function parseInitialSignupUser(value: unknown): InitialSignupUser {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid initial signup issuance result");
+  }
+  const user = value as Record<string, unknown>;
+  if (
+    typeof user.id !== "string" ||
+    typeof user.email !== "string" ||
+    !["pro", "builder"].includes(String(user.tier)) ||
+    !["active", "trialing"].includes(String(user.status))
+  ) {
+    throw new Error("invalid initial signup issuance result");
+  }
+  return {
+    id: user.id,
+    email: user.email,
+    tier: user.tier as StoreUser["tier"],
+    status: user.status as "active" | "trialing",
+  };
+}
+
+export type SignupWithLicenseV2Result =
+  | { result: "created"; license_id: string; user: InitialSignupUser }
+  | { result: "email_conflict" | "collision" };
+
+export async function signupWithLicenseV2(input: {
+  email: string;
+  passwordHash: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  refreshTokenHash: string;
+  deviceLabel?: string | null;
+}): Promise<SignupWithLicenseV2Result> {
+  const { data, error } = await supabase().rpc("signup_with_license_v2", {
+    p_email: input.email,
+    p_password_hash: input.passwordHash,
+    p_first_name: input.firstName ?? null,
+    p_last_name: input.lastName ?? null,
+    p_refresh_token_hash: input.refreshTokenHash,
+    p_device_label: input.deviceLabel ?? null,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid initial signup issuance result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "created" && typeof value.license_id === "string") {
+    return {
+      result: "created",
+      license_id: value.license_id,
+      user: parseInitialSignupUser(value.user),
+    };
+  }
+  if (value.result === "email_conflict" || value.result === "collision") {
+    return { result: value.result };
+  }
+  throw new Error("invalid initial signup issuance result");
+}
+
+export type ReplaySignupLicenseV2Result =
+  | { result: "replay"; license_id: string; user: InitialSignupUser }
+  | { result: "invalid" | "inactive" };
+
+export async function replaySignupLicenseV2(input: {
+  userId: string;
+  expectedPasswordHash: string;
+  refreshTokenHash: string;
+}): Promise<ReplaySignupLicenseV2Result> {
+  const { data, error } = await supabase().rpc("replay_signup_license_v2", {
+    p_user_id: input.userId,
+    p_expected_password_hash: input.expectedPasswordHash,
+    p_refresh_token_hash: input.refreshTokenHash,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid signup replay result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "replay" && typeof value.license_id === "string") {
+    const user = parseInitialSignupUser(value.user);
+    if (user.id !== input.userId) throw new Error("invalid signup replay result");
+    return { result: "replay", license_id: value.license_id, user };
+  }
+  if (value.result === "invalid" || value.result === "inactive") {
+    return { result: value.result };
+  }
+  throw new Error("invalid signup replay result");
 }
 
 export async function findLicenseByRefreshHash(
