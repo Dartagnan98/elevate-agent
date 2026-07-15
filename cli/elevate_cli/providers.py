@@ -20,10 +20,12 @@ Other modules import from this file.  No parallel registries.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
-from utils import base_url_host_matches, base_url_hostname
+from utils import base_url_hostname
 
 logger = logging.getLogger(__name__)
 
@@ -536,7 +538,26 @@ def determine_api_mode(provider: str, base_url: str = "") -> str:
             return "anthropic_messages"
         if hostname == "api.openai.com":
             return "codex_responses"
-        if hostname.startswith("bedrock-runtime.") and base_url_host_matches(base_url, "amazonaws.com"):
+        try:
+            parsed = urlsplit(base_url)
+            port = parsed.port
+        except ValueError:
+            parsed = None
+            port = None
+        if (
+            parsed is not None
+            and parsed.scheme.lower() == "https"
+            and parsed.username is None
+            and parsed.password is None
+            and port is None
+            and parsed.path in {"", "/"}
+            and not parsed.query
+            and not parsed.fragment
+            and re.fullmatch(
+                r"bedrock-runtime(?:-fips)?\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?",
+                hostname,
+            )
+        ):
             return "bedrock_converse"
 
     return "chat_completions"

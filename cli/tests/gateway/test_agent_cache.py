@@ -79,6 +79,38 @@ class TestAgentConfigSignature:
         sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt2, ["elevate-telegram"], "")
         assert sig1 != sig2
 
+    @pytest.mark.parametrize(
+        ("field", "old_value", "new_value"),
+        [
+            ("bedrock_timeout_provider", "bedrock", "realtor-bedrock"),
+            ("request_timeout_seconds", 120.0, 45.0),
+            ("stale_timeout_seconds", 150.0, 60.0),
+        ],
+    )
+    def test_bedrock_timeout_receipt_change_different_signature(
+        self, field, old_value, new_value
+    ):
+        """A cached gateway agent may not outlive its timeout receipt."""
+        from gateway.run import GatewayRunner
+
+        runtime = {
+            "api_key": "aws-sdk",
+            "base_url": "https://bedrock-runtime.ca-central-1.amazonaws.com",
+            "provider": "bedrock",
+            "api_mode": "bedrock_converse",
+            field: old_value,
+        }
+        changed = dict(runtime, **{field: new_value})
+
+        old_sig = GatewayRunner._agent_config_signature(
+            "amazon.nova-pro-v1:0", runtime, ["elevate-telegram"], ""
+        )
+        new_sig = GatewayRunner._agent_config_signature(
+            "amazon.nova-pro-v1:0", changed, ["elevate-telegram"], ""
+        )
+
+        assert old_sig != new_sig
+
     def test_toolset_change_different_signature(self):
         from gateway.run import GatewayRunner
 
@@ -176,6 +208,37 @@ class TestAgentCacheLifecycle:
 
         with runner._agent_cache_lock:
             assert session_key not in runner._agent_cache
+
+    def test_evict_releases_clients_and_memory_connections(self):
+        """Discarded /model agents release clients without hard session teardown."""
+        runner = _make_runner()
+        session_key = "telegram:model-switch"
+
+        class _DiscardedAgent:
+            def __init__(self):
+                self.clients_released = False
+                self.memory_closed = False
+                self.hard_closed = False
+
+            def release_clients(self):
+                self.clients_released = True
+
+            def close_memory_connections(self):
+                self.memory_closed = True
+
+            def close(self):
+                self.hard_closed = True
+
+        agent = _DiscardedAgent()
+        with runner._agent_cache_lock:
+            runner._agent_cache[session_key] = (agent, "switched-sig")
+
+        runner._evict_cached_agent(session_key)
+
+        assert session_key not in runner._agent_cache
+        assert agent.clients_released is True
+        assert agent.memory_closed is True
+        assert agent.hard_closed is False
 
     def test_evict_does_not_affect_other_sessions(self):
         """Evicting one session leaves other sessions cached."""
@@ -941,6 +1004,24 @@ class TestAgentCacheIdleResume:
 
         # Post-release: client reference is dropped (memory freed).
         assert agent.client is None
+
+    def test_release_clients_closes_anthropic_sdk_client(self):
+        """Soft eviction also releases the separate Anthropic SDK pool."""
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model="anthropic/claude-sonnet-4", api_key="test",
+            base_url="https://openrouter.ai/api/v1", provider="openrouter",
+            max_iterations=5, quiet_mode=True,
+            skip_context_files=True, skip_memory=True,
+        )
+        anthropic_client = MagicMock()
+        agent._anthropic_client = anthropic_client
+
+        agent.release_clients()
+
+        anthropic_client.close.assert_called_once_with()
+        assert agent._anthropic_client is None
 
     def test_close_vs_release_full_teardown_difference(self, monkeypatch):
         """close() tears down task state; release_clients() does not.

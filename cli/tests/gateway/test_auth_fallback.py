@@ -23,9 +23,11 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
         monkeypatch.setattr("gateway.run._elevate_home", tmp_path)
 
         call_count = {"n": 0}
+        calls = []
 
         def _mock_resolve(**kwargs):
             call_count["n"] += 1
+            calls.append(dict(kwargs))
             requested = kwargs.get("requested", "")
             if requested and "codex" in str(requested).lower():
                 raise AuthError("Codex token refresh failed with status 401")
@@ -50,8 +52,44 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
 
         assert result["provider"] == "openrouter"
         assert result["api_key"] == "fallback-key"
+        assert result["model"] == "meta-llama/llama-4-maverick"
+        assert calls[-1]["target_model"] == "meta-llama/llama-4-maverick"
         # Should have been called at least twice (primary + fallback)
         assert call_count["n"] >= 2
+
+    def test_primary_resolution_uses_configured_gateway_model(self, monkeypatch):
+        calls = []
+
+        monkeypatch.setattr(
+            "gateway.run._resolve_gateway_model",
+            lambda config=None: "amazon.nova-pro-v1:0",
+        )
+
+        def _mock_resolve(**kwargs):
+            calls.append(dict(kwargs))
+            return {
+                "api_key": "aws-sdk",
+                "base_url": "https://bedrock-runtime.ca-central-1.amazonaws.com",
+                "provider": "bedrock",
+                "api_mode": "bedrock_converse",
+                "model": kwargs.get("target_model"),
+            }
+
+        with patch(
+            "elevate_cli.runtime_provider.resolve_runtime_provider",
+            side_effect=_mock_resolve,
+        ):
+            from gateway.run import _resolve_runtime_agent_kwargs
+
+            result = _resolve_runtime_agent_kwargs()
+
+        assert calls == [
+            {
+                "requested": None,
+                "target_model": "amazon.nova-pro-v1:0",
+            }
+        ]
+        assert result["model"] == "amazon.nova-pro-v1:0"
 
     def test_auth_error_no_fallback_raises(self, tmp_path, monkeypatch):
         """When primary fails and no fallback configured, RuntimeError is raised."""

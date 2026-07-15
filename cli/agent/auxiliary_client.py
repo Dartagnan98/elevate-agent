@@ -42,7 +42,9 @@ Payment / credit exhaustion fallback:
 
 import json
 import logging
+import math
 import os
+import re
 import threading
 import time
 from pathlib import Path  # noqa: F401 — used by test mocks
@@ -167,6 +169,10 @@ _PROVIDER_ALIASES = {
     "tokenhub": "tencent-tokenhub",
     "tencent-cloud": "tencent-tokenhub",
     "tencentmaas": "tencent-tokenhub",
+    "aws": "bedrock",
+    "aws-bedrock": "bedrock",
+    "amazon-bedrock": "bedrock",
+    "amazon": "bedrock",
 }
 
 
@@ -624,54 +630,6 @@ def _pool_runtime_base_url(entry: Any, fallback: str = "") -> str:
 # calls to the Codex Responses API so callers don't need any changes.
 
 
-def _convert_content_for_responses(content: Any) -> Any:
-    """Convert chat.completions content to Responses API format.
-
-    chat.completions uses:
-      {"type": "text", "text": "..."}
-      {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
-
-    Responses API uses:
-      {"type": "input_text", "text": "..."}
-      {"type": "input_image", "image_url": "data:image/png;base64,..."}
-
-    If content is a plain string, it's returned as-is (the Responses API
-    accepts strings directly for text-only messages).
-    """
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content) if content else ""
-
-    converted: List[Dict[str, Any]] = []
-    for part in content:
-        if not isinstance(part, dict):
-            continue
-        ptype = part.get("type", "")
-        if ptype == "text":
-            converted.append({"type": "input_text", "text": part.get("text", "")})
-        elif ptype == "image_url":
-            # chat.completions nests the URL: {"image_url": {"url": "..."}}
-            image_data = part.get("image_url", {})
-            url = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data)
-            entry: Dict[str, Any] = {"type": "input_image", "image_url": url}
-            # Preserve detail if specified
-            detail = image_data.get("detail") if isinstance(image_data, dict) else None
-            if detail:
-                entry["detail"] = detail
-            converted.append(entry)
-        elif ptype in {"input_text", "input_image"}:
-            # Already in Responses format — pass through
-            converted.append(part)
-        else:
-            # Unknown content type — try to preserve as text
-            text = part.get("text", "")
-            if text:
-                converted.append({"type": "input_text", "text": text})
-
-    return converted or ""
-
-
 class _CodexCompletionsAdapter:
     """Drop-in shim that accepts chat.completions.create() kwargs and
     routes them through the Codex Responses streaming API."""
@@ -685,20 +643,25 @@ class _CodexCompletionsAdapter:
         model = kwargs.get("model", self._model)
 
         # Separate system/instructions from conversation messages.
-        # Convert chat.completions multimodal content blocks to Responses
-        # API format (input_text / input_image instead of text / image_url).
+        # Use the same canonical converter as the main Codex transport.  In
+        # addition to multimodal content, it preserves Responses reasoning and
+        # message items and translates assistant tool calls plus their tool
+        # results into matched function_call/function_call_output items.  A
+        # hand-written message-only projection here used to emit role="tool"
+        # and silently drop the assistant function call, which made auxiliary
+        # memory/compression turns invalid after any tool use.
+        from agent.codex_responses_adapter import (
+            _chat_messages_to_responses_input,
+            _responses_tools,
+        )
+
         instructions = "You are a helpful assistant."
-        input_msgs: List[Dict[str, Any]] = []
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content") or ""
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
-            else:
-                input_msgs.append({
-                    "role": role,
-                    "content": _convert_content_for_responses(content),
-                })
+        input_msgs = _chat_messages_to_responses_input(messages)
 
         resp_kwargs: Dict[str, Any] = {
             "model": model,
@@ -742,8 +705,8 @@ class _CodexCompletionsAdapter:
                     effort = reasoning_cfg.get("effort") or "medium"
                     # Codex backend rejects "minimal"; clamp to "low" to
                     # match the main-agent Codex transport behavior.
-                    if effort == "minimal":
-                        effort = "low"
+                    if isinstance(effort, str) and effort in {"minimal", "xhigh"}:
+                        effort = {"minimal": "low", "xhigh": "high"}[effort]
                     resp_kwargs["reasoning"] = {
                         "effort": effort,
                         "summary": "auto",
@@ -768,20 +731,103 @@ class _CodexCompletionsAdapter:
                     "Auxiliary client: failed to sanitize tool schemas for "
                     "Codex/xAI Responses path: %s", exc,
                 )
-            converted = []
-            for t in tools:
-                fn = t.get("function", {}) if isinstance(t, dict) else {}
-                name = fn.get("name")
-                if not name:
+            converted = _responses_tools(tools) or []
+            strict_by_name: Dict[str, bool] = {}
+            for tool in tools:
+                fn = tool.get("function", {}) if isinstance(tool, dict) else {}
+                name = fn.get("name") if isinstance(fn, dict) else None
+                if not isinstance(name, str) or not name.strip():
                     continue
-                converted.append({
-                    "type": "function",
-                    "name": name,
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                })
+                raw_strict = fn.get("strict", tool.get("strict"))
+                if raw_strict is not None and not isinstance(raw_strict, bool):
+                    raise ValueError(
+                        f"Codex auxiliary tool {name!r} strict must be a boolean"
+                    )
+                if isinstance(raw_strict, bool):
+                    strict_by_name[name] = raw_strict
+            for converted_tool in converted:
+                name = converted_tool.get("name")
+                if name in strict_by_name:
+                    converted_tool["strict"] = strict_by_name[name]
             if converted:
                 resp_kwargs["tools"] = converted
+                tool_names = {tool["name"] for tool in converted}
+                raw_choice = kwargs.get("tool_choice")
+                selected_name: Optional[str] = None
+                if raw_choice is None:
+                    responses_choice: Any = "auto"
+                elif isinstance(raw_choice, str):
+                    choice_text = raw_choice.strip()
+                    if choice_text in {"auto", "required", "none"}:
+                        responses_choice = choice_text
+                    elif choice_text:
+                        selected_name = choice_text
+                        responses_choice = {"type": "function", "name": selected_name}
+                    else:
+                        raise ValueError("Codex auxiliary tool_choice cannot be empty")
+                elif isinstance(raw_choice, dict):
+                    choice_type = str(raw_choice.get("type") or "").strip().lower()
+                    if choice_type in {"auto", "required", "none"}:
+                        responses_choice = choice_type
+                    elif choice_type == "function":
+                        fn_choice = raw_choice.get("function")
+                        if isinstance(fn_choice, dict):
+                            selected_name = str(fn_choice.get("name") or "").strip()
+                        if not selected_name:
+                            selected_name = str(raw_choice.get("name") or "").strip()
+                        if not selected_name:
+                            raise ValueError(
+                                "Codex auxiliary function tool_choice is missing a name"
+                            )
+                        responses_choice = {"type": "function", "name": selected_name}
+                    else:
+                        raise ValueError(
+                            f"Unsupported Codex auxiliary tool_choice: {raw_choice!r}"
+                        )
+                else:
+                    raise ValueError(
+                        f"Unsupported Codex auxiliary tool_choice: {raw_choice!r}"
+                    )
+                if selected_name is not None and selected_name not in tool_names:
+                    raise ValueError(
+                        f"Codex auxiliary tool_choice selected unknown tool {selected_name!r}"
+                    )
+                resp_kwargs["tool_choice"] = responses_choice
+
+                parallel_tool_calls = kwargs.get("parallel_tool_calls", True)
+                if not isinstance(parallel_tool_calls, bool):
+                    raise ValueError(
+                        "Codex auxiliary parallel_tool_calls must be a boolean"
+                    )
+                resp_kwargs["parallel_tool_calls"] = parallel_tool_calls
+            else:
+                raw_choice = kwargs.get("tool_choice")
+                requires_tool = raw_choice == "required"
+                if isinstance(raw_choice, str):
+                    requires_tool = raw_choice.strip() not in {"", "auto", "none"}
+                if isinstance(raw_choice, dict):
+                    requires_tool = str(raw_choice.get("type") or "").lower() in {
+                        "required",
+                        "function",
+                    }
+                if requires_tool:
+                    raise ValueError(
+                        "Codex auxiliary required tool_choice needs at least one valid tool"
+                    )
+        else:
+            raw_choice = kwargs.get("tool_choice")
+            requires_tool = False
+            if isinstance(raw_choice, str):
+                requires_tool = raw_choice.strip() not in {"", "auto", "none"}
+            elif isinstance(raw_choice, dict):
+                requires_tool = str(raw_choice.get("type") or "").lower() in {
+                    "required",
+                    "function",
+                }
+            if requires_tool:
+                raise ValueError(
+                    "Codex auxiliary required tool_choice needs at least one valid tool"
+                )
 
         # Stream and collect the response
         text_parts: List[str] = []
@@ -1175,10 +1221,21 @@ class AsyncCodexAuxiliaryClient:
 class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
-    def __init__(self, real_client: Any, model: str, is_oauth: bool = False):
+    def __init__(
+        self,
+        real_client: Any,
+        model: str,
+        is_oauth: bool = False,
+        base_url: str = "",
+        bedrock_guardrail_config: Optional[Dict[str, Any]] = None,
+        is_bedrock: bool = False,
+    ):
         self._client = real_client
         self._model = model
         self._is_oauth = is_oauth
+        self._base_url = str(base_url or "")
+        self._bedrock_guardrail_config = bedrock_guardrail_config
+        self._is_bedrock = bool(is_bedrock)
 
     def create(self, **kwargs) -> Any:
         from agent.anthropic_adapter import build_anthropic_kwargs
@@ -1188,6 +1245,13 @@ class _AnthropicCompletionsAdapter:
         model = kwargs.get("model", self._model)
         tools = kwargs.get("tools")
         tool_choice = kwargs.get("tool_choice")
+        parallel_tool_calls = kwargs.get("parallel_tool_calls")
+        if parallel_tool_calls is not None and not isinstance(
+            parallel_tool_calls, bool
+        ):
+            raise ValueError(
+                "Anthropic auxiliary parallel_tool_calls must be a boolean"
+            )
         # ZAI's Anthropic-compatible endpoint rejects max_tokens on vision
         # models (glm-4v-flash etc.) with error code 1210.  When the caller
         # signals this by setting _skip_zai_max_tokens in kwargs, omit it.
@@ -1197,16 +1261,84 @@ class _AnthropicCompletionsAdapter:
         else:
             max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 2000
         temperature = kwargs.get("temperature")
+        request_timeout = kwargs.get("timeout")
+        if request_timeout is None:
+            request_timeout = 30.0
+        if isinstance(request_timeout, bool):
+            raise ValueError("Anthropic auxiliary timeout must be a positive number")
+        try:
+            request_timeout = float(request_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Anthropic auxiliary timeout must be a positive number"
+            ) from exc
+        if not math.isfinite(request_timeout) or request_timeout <= 0:
+            raise ValueError("Anthropic auxiliary timeout must be a positive number")
 
-        normalized_tool_choice = None
-        if isinstance(tool_choice, str):
-            normalized_tool_choice = tool_choice
+        available_tool_names = set()
+        if isinstance(tools, list):
+            for tool in tools:
+                function = tool.get("function") if isinstance(tool, dict) else None
+                name = function.get("name") if isinstance(function, dict) else None
+                if isinstance(name, str) and name.strip():
+                    available_tool_names.add(name.strip())
+
+        normalized_tool_choice: Optional[str] = None
+        selected_tool_name: Optional[str] = None
+        if tool_choice is None:
+            pass
+        elif isinstance(tool_choice, str):
+            choice_text = tool_choice.strip()
+            if choice_text in {"auto", "required", "none"}:
+                normalized_tool_choice = choice_text
+            elif choice_text:
+                normalized_tool_choice = choice_text
+                selected_tool_name = choice_text
+            else:
+                raise ValueError("Anthropic auxiliary tool_choice cannot be empty")
         elif isinstance(tool_choice, dict):
-            choice_type = str(tool_choice.get("type", "")).lower()
-            if choice_type == "function":
-                normalized_tool_choice = tool_choice.get("function", {}).get("name")
+            choice_type = str(tool_choice.get("type") or "").strip().lower()
+            if choice_type in {"function", "tool"}:
+                function = tool_choice.get("function")
+                if isinstance(function, dict):
+                    selected_tool_name = str(function.get("name") or "").strip()
+                if not selected_tool_name:
+                    selected_tool_name = str(tool_choice.get("name") or "").strip()
+                if not selected_tool_name:
+                    raise ValueError(
+                        "Anthropic auxiliary function tool_choice is missing a name"
+                    )
+                normalized_tool_choice = selected_tool_name
             elif choice_type in {"auto", "required", "none"}:
                 normalized_tool_choice = choice_type
+            else:
+                raise ValueError(
+                    f"Unsupported Anthropic auxiliary tool_choice: {tool_choice!r}"
+                )
+        else:
+            raise ValueError(
+                f"Unsupported Anthropic auxiliary tool_choice: {tool_choice!r}"
+            )
+
+        if selected_tool_name and selected_tool_name not in available_tool_names:
+            raise ValueError(
+                "Anthropic auxiliary tool_choice selected unknown tool "
+                f"{selected_tool_name!r}"
+            )
+        if normalized_tool_choice == "required" and not available_tool_names:
+            raise ValueError(
+                "Anthropic auxiliary required tool_choice needs at least one valid tool"
+            )
+
+        builder_tool_choice = normalized_tool_choice
+        if (
+            self._is_oauth
+            and selected_tool_name
+            and not selected_tool_name.startswith("mcp_")
+        ):
+            # build_anthropic_kwargs prefixes OAuth tool definitions to match
+            # Claude Code's convention; keep a selected choice aligned.
+            builder_tool_choice = f"mcp_{selected_tool_name}"
 
         anthropic_kwargs = build_anthropic_kwargs(
             model=model,
@@ -1214,9 +1346,24 @@ class _AnthropicCompletionsAdapter:
             tools=tools,
             max_tokens=max_tokens,
             reasoning_config=None,
-            tool_choice=normalized_tool_choice,
+            tool_choice=builder_tool_choice,
             is_oauth=self._is_oauth,
+            preserve_dots=self._is_bedrock,
+            base_url=self._base_url,
         )
+        if (
+            parallel_tool_calls is False
+            and normalized_tool_choice != "none"
+            and anthropic_kwargs.get("tools")
+        ):
+            anthropic_tool_choice = anthropic_kwargs.get("tool_choice")
+            if not isinstance(anthropic_tool_choice, dict):
+                raise ValueError(
+                    "Anthropic auxiliary cannot enforce parallel_tool_calls=False"
+                )
+            anthropic_tool_choice = dict(anthropic_tool_choice)
+            anthropic_tool_choice["disable_parallel_tool_use"] = True
+            anthropic_kwargs["tool_choice"] = anthropic_tool_choice
         # Opus 4.7+ rejects any non-default temperature/top_p/top_k; only set
         # temperature for models that still accept it. build_anthropic_kwargs
         # additionally strips these keys as a safety net — keep both layers.
@@ -1224,6 +1371,23 @@ class _AnthropicCompletionsAdapter:
             from agent.anthropic_adapter import _forbids_sampling_params
             if not _forbids_sampling_params(model):
                 anthropic_kwargs["temperature"] = temperature
+
+        # The task deadline must reach the SDK request itself.  The Bedrock
+        # Anthropic client is intentionally shared and has a generous
+        # client-level default, so wrapping this blocking call in another
+        # timeout would leave an orphan worker.  A request-level SDK timeout
+        # gives httpx the exact bounded deadline instead.
+        anthropic_kwargs["timeout"] = request_timeout
+
+        if self._bedrock_guardrail_config:
+            from agent.bedrock_adapter import build_invoke_model_guardrail_headers
+
+            guardrail_headers = build_invoke_model_guardrail_headers(
+                self._bedrock_guardrail_config
+            )
+            extra_headers = dict(anthropic_kwargs.get("extra_headers") or {})
+            extra_headers.update(guardrail_headers)
+            anthropic_kwargs["extra_headers"] = extra_headers
 
         response = self._client.messages.create(**anthropic_kwargs)
         _transport = get_transport("anthropic_messages")
@@ -1271,9 +1435,25 @@ class _AnthropicChatShim:
 class AnthropicAuxiliaryClient:
     """OpenAI-client-compatible wrapper over a native Anthropic client."""
 
-    def __init__(self, real_client: Any, model: str, api_key: str, base_url: str, is_oauth: bool = False):
+    def __init__(
+        self,
+        real_client: Any,
+        model: str,
+        api_key: str,
+        base_url: str,
+        is_oauth: bool = False,
+        bedrock_guardrail_config: Optional[Dict[str, Any]] = None,
+        is_bedrock: bool = False,
+    ):
         self._real_client = real_client
-        adapter = _AnthropicCompletionsAdapter(real_client, model, is_oauth=is_oauth)
+        adapter = _AnthropicCompletionsAdapter(
+            real_client,
+            model,
+            is_oauth=is_oauth,
+            base_url=base_url,
+            bedrock_guardrail_config=bedrock_guardrail_config,
+            is_bedrock=is_bedrock,
+        )
         self.chat = _AnthropicChatShim(adapter)
         self.api_key = api_key
         self.base_url = base_url
@@ -1308,6 +1488,157 @@ class AsyncAnthropicAuxiliaryClient:
         # See AsyncCodexAuxiliaryClient: mirror _real_client so cache
         # eviction on a poisoned underlying client also drops this entry.
         self._real_client = sync_wrapper._real_client
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    def close(self):
+        """Close the owned sync Anthropic transport exactly once."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        close_fn = getattr(self._real_client, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+
+class _BedrockConverseCompletionsAdapter:
+    """OpenAI-client-compatible adapter over Bedrock's native Converse API."""
+
+    def __init__(
+        self,
+        model: str,
+        region: str,
+        guardrail_config: Optional[Dict[str, Any]] = None,
+        endpoint_url: Optional[str] = None,
+    ):
+        self._model = model
+        self._region = region
+        self._guardrail_config = guardrail_config
+        self._endpoint_url = str(endpoint_url or "").strip() or None
+
+    def create(self, **kwargs) -> Any:
+        from agent.bedrock_adapter import (
+            _get_bedrock_runtime_client,
+            build_converse_kwargs,
+            invalidate_runtime_client,
+            is_stale_connection_error,
+            normalize_converse_response,
+            prepare_converse_guardrail_config,
+        )
+
+        model = kwargs.get("model", self._model)
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is None:
+            max_tokens = kwargs.get("max_completion_tokens")
+        if max_tokens is None:
+            max_tokens = 2000
+
+        stop_sequences = kwargs.get("stop")
+        if isinstance(stop_sequences, str):
+            stop_sequences = [stop_sequences]
+
+        timeout = kwargs.get("timeout")
+        if timeout is None:
+            timeout = 30.0
+        # Resolve from the timeout-aware Bedrock cache on every request.  The
+        # wrapper never pins a poisoned boto3 client after exact-policy
+        # invalidation, and botocore itself owns the bounded connect/read
+        # deadline without an anonymous worker thread.
+        get_client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if self._endpoint_url:
+            get_client_kwargs["endpoint_url"] = self._endpoint_url
+        client = _get_bedrock_runtime_client(self._region, **get_client_kwargs)
+        guardrail_config = prepare_converse_guardrail_config(
+            self._guardrail_config,
+            streaming=False,
+        )
+
+        converse_kwargs = build_converse_kwargs(
+            model=model,
+            messages=kwargs.get("messages", []),
+            tools=kwargs.get("tools"),
+            max_tokens=max_tokens,
+            temperature=kwargs.get("temperature"),
+            top_p=kwargs.get("top_p"),
+            stop_sequences=stop_sequences,
+            guardrail_config=guardrail_config,
+            tool_choice=kwargs.get("tool_choice"),
+            parallel_tool_calls=kwargs.get("parallel_tool_calls"),
+        )
+        try:
+            response = client.converse(**converse_kwargs)
+        except Exception as exc:
+            if is_stale_connection_error(exc):
+                invalidate_kwargs: Dict[str, Any] = {
+                    "timeout": timeout,
+                    "expected_client": client,
+                }
+                if self._endpoint_url:
+                    invalidate_kwargs["endpoint_url"] = self._endpoint_url
+                invalidate_runtime_client(self._region, **invalidate_kwargs)
+            raise
+        return normalize_converse_response(response)
+
+
+class _BedrockConverseChatShim:
+    def __init__(self, adapter: _BedrockConverseCompletionsAdapter):
+        self.completions = adapter
+
+
+class BedrockConverseAuxiliaryClient:
+    """Auxiliary client for non-Claude Bedrock models using Converse."""
+
+    def __init__(
+        self,
+        model: str,
+        region: str,
+        guardrail_config: Optional[Dict[str, Any]] = None,
+        endpoint_url: Optional[str] = None,
+    ):
+        self._region = region
+        self._endpoint_url = str(endpoint_url or "").strip() or None
+        adapter = _BedrockConverseCompletionsAdapter(
+            model,
+            region,
+            guardrail_config=guardrail_config,
+            endpoint_url=self._endpoint_url,
+        )
+        self.chat = _BedrockConverseChatShim(adapter)
+        self.api_key = "aws-sdk"
+        self.base_url = (
+            self._endpoint_url
+            or f"https://bedrock-runtime.{region}.amazonaws.com"
+        )
+        # This wrapper deliberately has no close() method.  The boto3 runtime
+        # client is owned by bedrock_adapter's region cache and can be shared
+        # with a concurrent main-agent turn.  Generic auxiliary-cache eviction
+        # must therefore never close it out from under another caller.  Stale
+        # connections are evicted by the request adapter above; process exit
+        # owns final socket cleanup.
+
+
+class _AsyncBedrockConverseCompletionsAdapter:
+    def __init__(self, sync_adapter: _BedrockConverseCompletionsAdapter):
+        self._sync = sync_adapter
+
+    async def create(self, **kwargs) -> Any:
+        import asyncio
+        return await asyncio.to_thread(self._sync.create, **kwargs)
+
+
+class _AsyncBedrockConverseChatShim:
+    def __init__(self, adapter: _AsyncBedrockConverseCompletionsAdapter):
+        self.completions = adapter
+
+
+class AsyncBedrockConverseAuxiliaryClient:
+    def __init__(self, sync_wrapper: "BedrockConverseAuxiliaryClient"):
+        sync_adapter = sync_wrapper.chat.completions
+        async_adapter = _AsyncBedrockConverseCompletionsAdapter(sync_adapter)
+        self.chat = _AsyncBedrockConverseChatShim(async_adapter)
+        self.api_key = sync_wrapper.api_key
+        self.base_url = sync_wrapper.base_url
 
 
 def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
@@ -2322,7 +2653,140 @@ _AUTO_PROVIDER_LABELS = {
     "_resolve_api_key_provider": "api-key",
 }
 
-_MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
+_MAIN_RUNTIME_FIELDS = (
+    "provider",
+    "model",
+    "base_url",
+    "api_key",
+    "api_mode",
+    "auth_mode",
+    "region",
+    "guardrail_config",
+)
+
+
+def _normalize_guardrail_config(
+    value: Any,
+    *,
+    allow_disabled_options: bool = False,
+) -> Optional[Dict[str, str]]:
+    """Compatibility wrapper around the shared strict Bedrock policy parser."""
+    from agent.bedrock_adapter import normalize_bedrock_guardrail_config
+
+    return normalize_bedrock_guardrail_config(
+        value,
+        allow_disabled_options=allow_disabled_options,
+    )
+
+
+def _trusted_bedrock_runtime_endpoint(base_url: Any) -> Tuple[str, str]:
+    """Return ``(canonical_origin, region)`` for an exact AWS Runtime URL.
+
+    This classifier intentionally accepts only the HTTPS service origin.  It
+    rejects credentials, ports, paths, query strings, fragments, and hostname
+    lookalikes so a custom OpenAI endpoint can never inherit AWS credentials by
+    merely containing a Bedrock-looking substring.
+    """
+    if not isinstance(base_url, str) or not base_url.strip():
+        return "", ""
+    candidate = base_url.strip()
+    try:
+        parsed = urlparse(candidate)
+        if parsed.scheme.lower() != "https":
+            return "", ""
+        if parsed.username is not None or parsed.password is not None:
+            return "", ""
+        if parsed.port is not None:
+            return "", ""
+        if parsed.path not in {"", "/"} or parsed.params:
+            return "", ""
+        if parsed.query or parsed.fragment:
+            return "", ""
+        hostname = (parsed.hostname or "").lower()
+    except ValueError:
+        return "", ""
+    match = re.fullmatch(
+        r"bedrock-runtime(-fips)?\.([a-z0-9-]+)\.amazonaws\.com(\.cn)?",
+        hostname,
+    )
+    if not match:
+        return "", ""
+    fips_suffix = "-fips" if match.group(1) else ""
+    region = match.group(2)
+    partition_suffix = ".cn" if match.group(3) else ""
+    return (
+        f"https://bedrock-runtime{fips_suffix}.{region}.amazonaws.com"
+        f"{partition_suffix}",
+        region,
+    )
+
+
+def _bedrock_endpoint_from_environment() -> Tuple[str, str]:
+    """Resolve the advertised direct-Bedrock endpoint override strictly."""
+    raw_endpoint = os.getenv("BEDROCK_BASE_URL", "").strip()
+    if not raw_endpoint:
+        return "", ""
+    endpoint, region = _trusted_bedrock_runtime_endpoint(raw_endpoint)
+    if not endpoint:
+        raise ValueError(
+            "BEDROCK_BASE_URL must be an exact HTTPS AWS Runtime origin"
+        )
+    return endpoint, region
+
+
+def _bedrock_region_from_runtime_base_url(base_url: Any) -> str:
+    """Extract a region from a standard Bedrock Runtime endpoint."""
+    _, region = _trusted_bedrock_runtime_endpoint(base_url)
+    return region
+
+
+def _bedrock_fips_endpoint_from_runtime(
+    runtime: Dict[str, Any],
+    region: str,
+) -> str:
+    """Return the explicit FIPS origin owned by this Bedrock runtime."""
+    endpoint, endpoint_region = _trusted_bedrock_runtime_endpoint(
+        runtime.get("base_url")
+    )
+    if (
+        endpoint
+        and endpoint_region == str(region or "").strip().lower()
+        and base_url_hostname(endpoint).startswith("bedrock-runtime-fips.")
+    ):
+        return endpoint
+    return ""
+
+
+def _runtime_is_effective_bedrock(runtime: Dict[str, Any]) -> bool:
+    """Return whether a normalized live runtime is actually AWS Bedrock."""
+    api_mode = str(runtime.get("api_mode") or "").strip().lower()
+    return (
+        str(runtime.get("provider") or "").strip().lower() == "bedrock"
+        or api_mode == "bedrock_converse"
+        or bool(_bedrock_region_from_runtime_base_url(runtime.get("base_url")))
+    )
+
+
+def _default_bedrock_auxiliary_model(region: str) -> Optional[str]:
+    """Return a safe regional inference-profile default for Bedrock.
+
+    Newer Claude models generally reject bare foundation-model IDs for
+    on-demand throughput.  Use the curated Haiku profile from the model
+    registry with the geography implied by the active AWS region.  Unknown
+    partitions fail closed instead of guessing a profile that may not exist.
+    """
+    normalized_region = str(region or "").strip().lower()
+    if normalized_region.startswith("us-") and not normalized_region.startswith(
+        "us-gov-"
+    ):
+        profile = "us"
+    elif normalized_region.startswith("eu-"):
+        profile = "eu"
+    elif normalized_region.startswith("ap-"):
+        profile = "apac"
+    else:
+        return None
+    return f"{profile}.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2339,6 +2803,15 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
     normalized: Dict[str, Any] = {}
     for field in _MAIN_RUNTIME_FIELDS:
         value = main_runtime.get(field)
+        if field == "guardrail_config":
+            if field not in main_runtime:
+                continue
+            guardrail = _normalize_guardrail_config(value)
+            # Presence is policy: None/{} means this live runtime explicitly
+            # disabled guardrails.  Preserve it so a later config-file value
+            # cannot silently re-enable a guardrail for auxiliary requests.
+            normalized[field] = guardrail
+            continue
         # Preserve a callable api_key (Entra ID bearer provider) unchanged.
         if field == "api_key" and callable(value) and not isinstance(value, str):
             normalized[field] = value
@@ -2349,6 +2822,314 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
     if isinstance(provider, str):
         normalized["provider"] = provider.lower()
     return normalized
+
+
+def _configured_main_bedrock_runtime(
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Recover a trusted Bedrock runtime saved under ``model`` config.
+
+    Some auxiliary callers do not have an ``AIAgent`` receipt to pass as
+    ``main_runtime``.  They still inherit the configured main provider/model,
+    so they must also inherit its exact Bedrock endpoint.  Otherwise a saved
+    FIPS origin silently degrades to the SDK's standard regional endpoint.
+
+    This is deliberately a last-resort config fallback.  Explicit/live
+    runtime identity and ``BEDROCK_BASE_URL`` retain higher priority at the
+    call sites below.  Only a strict AWS Runtime origin is accepted, so AWS
+    credentials can never be redirected to a lookalike host.
+    """
+    from elevate_cli.config import load_config
+
+    config = load_config()
+    model_config = config.get("model") if isinstance(config, dict) else None
+    if not isinstance(model_config, dict):
+        return {}
+
+    configured_provider = str(
+        model_config.get("provider") or ""
+    ).strip().lower()
+    configured_api_mode = str(
+        model_config.get("api_mode") or ""
+    ).strip().lower()
+    configured_base_url = str(
+        model_config.get("base_url") or ""
+    ).strip()
+    if not configured_base_url:
+        return {}
+
+    endpoint, endpoint_region = _trusted_bedrock_runtime_endpoint(
+        configured_base_url
+    )
+    configured_as_bedrock = (
+        configured_provider == "bedrock"
+        or configured_provider == "custom"
+        or configured_provider.startswith("custom:")
+        or configured_api_mode == "bedrock_converse"
+    )
+    if not endpoint:
+        if (
+            configured_provider == "bedrock"
+            or configured_api_mode == "bedrock_converse"
+        ):
+            raise ValueError(
+                "Configured Bedrock model.base_url must be an exact HTTPS "
+                "AWS Runtime origin"
+            )
+        return {}
+    if not configured_as_bedrock:
+        return {}
+
+    configured_model = str(
+        model
+        or model_config.get("default")
+        or model_config.get("model")
+        or ""
+    ).strip()
+    runtime: Dict[str, Any] = {
+        "provider": "bedrock",
+        "base_url": endpoint,
+        "api_key": "aws-sdk",
+        "region": endpoint_region,
+    }
+    if configured_model:
+        runtime["model"] = configured_model
+    if configured_api_mode:
+        runtime["api_mode"] = configured_api_mode
+
+    bedrock_config = config.get("bedrock") if isinstance(config, dict) else None
+    if bedrock_config is not None and not isinstance(bedrock_config, dict):
+        raise ValueError("Bedrock configuration must be a mapping")
+    if isinstance(bedrock_config, dict) and "guardrail" in bedrock_config:
+        raw_guardrail = bedrock_config.get("guardrail")
+        if raw_guardrail is not None and not isinstance(raw_guardrail, dict):
+            raise ValueError("Bedrock guardrail configuration must be a mapping")
+        runtime["guardrail_config"] = _normalize_guardrail_config(
+            raw_guardrail,
+            allow_disabled_options=True,
+        )
+    return runtime
+
+
+def _resolve_bedrock_auxiliary_policy(
+    main_runtime: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, Optional[Dict[str, str]]]:
+    """Resolve Bedrock region and guardrail with main-runtime parity."""
+    from agent.bedrock_adapter import resolve_bedrock_region
+    from elevate_cli.config import load_config
+
+    runtime = _normalize_main_runtime(main_runtime)
+    config = load_config()
+    raw_bedrock_config = config.get("bedrock") if isinstance(config, dict) else None
+    if raw_bedrock_config is None:
+        bedrock_config = {}
+    elif not isinstance(raw_bedrock_config, dict):
+        raise ValueError("Bedrock configuration must be a mapping")
+    else:
+        bedrock_config = raw_bedrock_config
+
+    runtime_url_region = _bedrock_region_from_runtime_base_url(runtime.get("base_url"))
+    runtime_is_bedrock = _runtime_is_effective_bedrock(runtime)
+
+    region = ""
+    if runtime_is_bedrock:
+        # A trusted explicit AWS endpoint owns its region (and may require
+        # FIPS); do not let stale config/runtime metadata redirect it.
+        region = runtime_url_region or str(runtime.get("region") or "").strip()
+    if not region:
+        region = str(bedrock_config.get("region") or "").strip()
+    if not region:
+        region = resolve_bedrock_region()
+
+    if runtime_is_bedrock and "guardrail_config" in runtime:
+        guardrail = runtime["guardrail_config"]
+    else:
+        guardrail = None
+        raw_guardrail = bedrock_config.get("guardrail")
+        if raw_guardrail is not None and not isinstance(raw_guardrail, dict):
+            raise ValueError("Bedrock guardrail configuration must be a mapping")
+        if raw_guardrail:
+            # Config defaults may carry trace/stream values before an identity
+            # is enabled. Alias normalization still validates every provided
+            # field and fails closed for partial/conflicting/unknown policy.
+            guardrail = _normalize_guardrail_config(
+                raw_guardrail,
+                allow_disabled_options=True,
+            )
+    return region, guardrail
+
+
+def _build_bedrock_auxiliary_client(
+    model: Optional[str],
+    *,
+    async_mode: bool = False,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    explicit_endpoint: Optional[str] = None,
+    is_vision: bool = False,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Build the native, model-aware Bedrock auxiliary transport.
+
+    ``explicit_endpoint`` is accepted only after exact AWS-origin
+    classification.  A FIPS origin is propagated into the actual SDK client;
+    standard origins continue to use the SDK's regional endpoint resolution.
+    """
+    from agent.bedrock_adapter import (
+        has_aws_credentials,
+        is_anthropic_bedrock_model,
+    )
+
+    runtime = _normalize_main_runtime(main_runtime)
+    endpoint = ""
+    endpoint_region = ""
+    if explicit_endpoint:
+        endpoint, endpoint_region = _trusted_bedrock_runtime_endpoint(
+            explicit_endpoint
+        )
+        if not endpoint:
+            raise ValueError("Bedrock base URL must be an exact AWS runtime endpoint")
+        # A non-Bedrock main runtime must not smuggle unrelated Bedrock policy
+        # into an explicitly selected custom endpoint. Config.yaml remains the
+        # policy source in that case.
+        if not _runtime_is_effective_bedrock(runtime):
+            runtime.pop("region", None)
+            runtime.pop("guardrail_config", None)
+        runtime.update(
+            {
+                "provider": "bedrock",
+                "base_url": endpoint,
+                "region": endpoint_region,
+            }
+        )
+    else:
+        endpoint, endpoint_region = _trusted_bedrock_runtime_endpoint(
+            runtime.get("base_url")
+        )
+        if (
+            _runtime_is_effective_bedrock(runtime)
+            and str(runtime.get("base_url") or "").strip()
+            and not endpoint
+        ):
+            raise ValueError(
+                "Bedrock base URL must be an exact AWS runtime endpoint"
+            )
+        if not endpoint:
+            env_endpoint, env_region = _bedrock_endpoint_from_environment()
+            if env_endpoint:
+                if not _runtime_is_effective_bedrock(runtime):
+                    runtime.pop("region", None)
+                    runtime.pop("guardrail_config", None)
+                endpoint = env_endpoint
+                endpoint_region = env_region
+                runtime.update(
+                    {
+                        "provider": "bedrock",
+                        "base_url": endpoint,
+                        "region": endpoint_region,
+                    }
+                )
+        if not endpoint and not runtime:
+            configured_runtime = _configured_main_bedrock_runtime(model)
+            configured_endpoint, configured_region = (
+                _trusted_bedrock_runtime_endpoint(
+                    configured_runtime.get("base_url")
+                )
+            )
+            if configured_endpoint:
+                runtime = configured_runtime
+                endpoint = configured_endpoint
+                endpoint_region = configured_region
+
+    # Validate endpoint policy before checking credentials. A malformed
+    # BEDROCK_BASE_URL is a configuration error and must not be hidden merely
+    # because this process has not authenticated with AWS yet.
+    if not has_aws_credentials():
+        logger.debug(
+            "resolve_provider_client: bedrock requested but no AWS credentials found"
+        )
+        return None, None
+
+    region, guardrail_config = _resolve_bedrock_auxiliary_policy(runtime)
+    fips_endpoint = _bedrock_fips_endpoint_from_runtime(runtime, region)
+    runtime_model = ""
+    if _runtime_is_effective_bedrock(runtime):
+        runtime_model = str(runtime.get("model") or "").strip()
+    requested_model = str(model or "").strip() or runtime_model
+    if not requested_model:
+        requested_model = _default_bedrock_auxiliary_model(region) or ""
+    if not requested_model:
+        logger.warning(
+            "resolve_provider_client: Bedrock has no explicit model and "
+            "region %r has no safe default inference profile",
+            region,
+        )
+        return None, None
+
+    final_model = _normalize_resolved_model(requested_model, "bedrock")
+    if is_anthropic_bedrock_model(final_model):
+        try:
+            from agent.anthropic_adapter import build_anthropic_bedrock_client
+
+            if fips_endpoint:
+                real_client = build_anthropic_bedrock_client(
+                    region,
+                    base_url=fips_endpoint,
+                )
+            else:
+                real_client = build_anthropic_bedrock_client(region)
+        except ImportError as exc:
+            logger.warning(
+                "resolve_provider_client: cannot create Bedrock client: %s", exc
+            )
+            return None, None
+        client: Any = AnthropicAuxiliaryClient(
+            real_client,
+            final_model,
+            api_key="aws-sdk",
+            base_url=(
+                fips_endpoint
+                or endpoint
+                or f"https://bedrock-runtime.{region}.amazonaws.com"
+            ),
+            bedrock_guardrail_config=guardrail_config,
+            is_bedrock=True,
+        )
+    else:
+        client = BedrockConverseAuxiliaryClient(
+            final_model,
+            region,
+            guardrail_config=guardrail_config,
+            endpoint_url=fips_endpoint or None,
+        )
+
+    logger.debug(
+        "resolve_provider_client: bedrock (%s, %s%s)",
+        final_model,
+        region,
+        ", fips" if fips_endpoint else "",
+    )
+    return (
+        _to_async_client(client, final_model, is_vision=is_vision)
+        if async_mode
+        else (client, final_model)
+    )
+
+
+def _freeze_cache_value(value: Any) -> Any:
+    """Convert nested runtime policy values into deterministic hashable keys."""
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_cache_value(item))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_cache_value(item) for item in value)
+    if callable(value) and not isinstance(value, str):
+        return ("callable", id(value))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
 
 
 def _get_provider_chain() -> List[tuple]:
@@ -2649,13 +3430,7 @@ def _evict_cached_clients(provider: str) -> None:
         for key in stale_keys:
             client = _client_cache.get(key, (None, None, None))[0]
             if client is not None:
-                _force_close_async_httpx(client)
-                try:
-                    close_fn = getattr(client, "close", None)
-                    if callable(close_fn):
-                        close_fn()
-                except Exception:
-                    pass
+                _close_cached_client_resources(client)
             _client_cache.pop(key, None)
 
 
@@ -2678,6 +3453,18 @@ def _evict_cached_client_instance(target: Any) -> bool:
     """
     if target is None:
         return False
+    target_real = getattr(target, "_real_client", None)
+    target_identities = [target]
+    if target_real is not None:
+        target_identities.append(target_real)
+
+    def _shares_poisoned_identity(cached: Any) -> bool:
+        cached_real = getattr(cached, "_real_client", None)
+        for identity in target_identities:
+            if cached is identity or cached_real is identity:
+                return True
+        return False
+
     evicted = False
     with _client_cache_lock:
         for key in list(_client_cache.keys()):
@@ -2687,8 +3474,7 @@ def _evict_cached_client_instance(target: Any) -> bool:
             cached = entry[0]
             if cached is None:
                 continue
-            real = getattr(cached, "_real_client", None)
-            if cached is target or real is target:
+            if _shares_poisoned_identity(cached):
                 del _client_cache[key]
                 evicted = True
     return evicted
@@ -2808,6 +3594,7 @@ def _retry_same_provider_sync(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             async_mode=False,
+            main_runtime=main_runtime,
         )
     else:
         retry_client, retry_model = _get_cached_client(
@@ -2850,6 +3637,7 @@ async def _retry_same_provider_async(
     resolved_base_url: Optional[str],
     resolved_api_key: Optional[str],
     resolved_api_mode: Optional[str],
+    main_runtime: Optional[Dict[str, Any]],
     final_model: Optional[str],
     messages: list,
     temperature: Optional[float],
@@ -2865,6 +3653,7 @@ async def _retry_same_provider_async(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             async_mode=True,
+            main_runtime=main_runtime,
         )
     else:
         retry_client, retry_model = _get_cached_client(
@@ -2874,6 +3663,7 @@ async def _retry_same_provider_async(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
     if retry_client is None:
         raise RuntimeError(
@@ -2998,6 +3788,7 @@ def _try_main_agent_model_fallback(
     failed_provider: str,
     task: str = None,
     reason: str = "error",
+    main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Last-resort fallback to the user's main agent provider + model.
 
@@ -3012,8 +3803,13 @@ def _try_main_agent_model_fallback(
     Returns:
         (client, model, provider_label) or (None, None, "") if no fallback.
     """
-    main_provider = (_read_main_provider() or "").strip()
-    main_model = (_read_main_model() or "").strip()
+    runtime = _normalize_main_runtime(main_runtime)
+    if runtime:
+        main_provider = str(runtime.get("provider") or "").strip()
+        main_model = str(runtime.get("model") or "").strip()
+    else:
+        main_provider = (_read_main_provider() or "").strip()
+        main_model = (_read_main_model() or "").strip()
     if not main_provider or not main_model or main_provider.lower() in {"auto", ""}:
         return None, None, ""
 
@@ -3028,6 +3824,7 @@ def _try_main_agent_model_fallback(
     try:
         client, resolved_model = resolve_provider_client(
             provider=main_provider, model=main_model,
+            main_runtime=runtime or None,
         )
     except Exception:
         client, resolved_model = None, None
@@ -3081,17 +3878,18 @@ def _try_configured_fallback_chain(
         label = f"fallback_chain[{i}]({fb_provider})"
 
         try:
-            fb_client = _resolve_single_provider(
+            fb_client, resolved_fb_model = _resolve_single_provider(
                 fb_provider, fb_model, fb_base_url, fb_api_key)
         except Exception:
-            fb_client = None
+            fb_client, resolved_fb_model = None, None
 
         if fb_client is not None:
+            effective_fb_model = resolved_fb_model or fb_model
             logger.info(
                 "Auxiliary %s: %s on %s — configured fallback to %s (%s)",
-                task, reason, failed_provider, label, fb_model or "default",
+                task, reason, failed_provider, label, effective_fb_model or "default",
             )
-            return fb_client, fb_model, label
+            return fb_client, effective_fb_model, label
         tried.append(label)
 
     if tried:
@@ -3107,7 +3905,7 @@ def _resolve_single_provider(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> Optional[Any]:
+) -> Tuple[Optional[Any], Optional[str]]:
     """Resolve a single provider entry from fallback_chain to an OpenAI client.
 
     Uses the existing provider resolution infrastructure where possible.
@@ -3116,10 +3914,10 @@ def _resolve_single_provider(
     client, resolved_model = resolve_provider_client(
         provider=provider,
         model=model,
-        base_url=base_url,
-        api_key=api_key,
+        explicit_base_url=base_url,
+        explicit_api_key=api_key,
     )
-    return client
+    return client, resolved_model
 
 def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Optional[OpenAI], Optional[str]]:
     """Full auto-detection chain.
@@ -3196,6 +3994,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
                 explicit_base_url=explicit_base_url,
                 explicit_api_key=explicit_api_key,
                 api_mode=runtime_api_mode or None,
+                main_runtime=runtime,
             )
             if client is not None:
                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
@@ -3250,6 +4049,8 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
         return AsyncCodexAuxiliaryClient(sync_client), model
     if isinstance(sync_client, AnthropicAuxiliaryClient):
         return AsyncAnthropicAuxiliaryClient(sync_client), model
+    if isinstance(sync_client, BedrockConverseAuxiliaryClient):
+        return AsyncBedrockConverseAuxiliaryClient(sync_client), model
     try:
         from agent.gemini_native_adapter import GeminiNativeClient, AsyncGeminiNativeClient
 
@@ -3718,7 +4519,33 @@ def resolve_provider_client(
 
     # ── Custom endpoint (OPENAI_BASE_URL + OPENAI_API_KEY) ───────────
     if provider == "custom":
+        runtime_override = _normalize_main_runtime(main_runtime)
+        runtime_bedrock_endpoint, _ = _trusted_bedrock_runtime_endpoint(
+            runtime_override.get("base_url")
+        )
+        if runtime_bedrock_endpoint and not explicit_base_url:
+            return _build_bedrock_auxiliary_client(
+                model,
+                async_mode=async_mode,
+                main_runtime=runtime_override,
+                explicit_endpoint=runtime_bedrock_endpoint,
+                is_vision=is_vision,
+            )
         if explicit_base_url:
+            bedrock_endpoint, _ = _trusted_bedrock_runtime_endpoint(
+                explicit_base_url
+            )
+            if bedrock_endpoint:
+                # Exact AWS Runtime origins are not OpenAI-compatible. Route
+                # them through AWS SDK auth and the model-aware native
+                # Claude/Converse split before any /v1 rewrite occurs.
+                return _build_bedrock_auxiliary_client(
+                    model,
+                    async_mode=async_mode,
+                    main_runtime=main_runtime,
+                    explicit_endpoint=bedrock_endpoint,
+                    is_vision=is_vision,
+                )
             custom_base = _to_openai_base_url(explicit_base_url).strip()
             custom_key = (
                 (explicit_api_key or "").strip()
@@ -3798,6 +4625,21 @@ def resolve_provider_client(
             custom_entry = _get_named_custom_provider(provider)
         if custom_entry:
             custom_base = custom_entry.get("base_url", "").strip()
+            bedrock_endpoint, _ = _trusted_bedrock_runtime_endpoint(custom_base)
+            if bedrock_endpoint:
+                requested_bedrock_model = (
+                    model
+                    or custom_entry.get("model")
+                    or (main_runtime.get("model") if main_runtime else None)
+                    or _read_main_model()
+                )
+                return _build_bedrock_auxiliary_client(
+                    requested_bedrock_model,
+                    async_mode=async_mode,
+                    main_runtime=main_runtime,
+                    explicit_endpoint=bedrock_endpoint,
+                    is_vision=is_vision,
+                )
             custom_key = custom_entry.get("api_key", "").strip()
             custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
             if not custom_key and custom_key_env:
@@ -4077,37 +4919,29 @@ def resolve_provider_client(
         return None, None
 
     elif pconfig.auth_type == "aws_sdk":
-        # AWS SDK providers (Bedrock) — use the Anthropic Bedrock client via
-        # boto3's credential chain (IAM roles, SSO, env vars, instance metadata).
+        # AWS SDK providers (Bedrock), including a trusted explicit FIPS URL,
+        # use the same model-aware native builder as custom endpoint aliases.
+        explicit_bedrock_endpoint = ""
+        if explicit_base_url:
+            explicit_bedrock_endpoint, _ = _trusted_bedrock_runtime_endpoint(
+                explicit_base_url
+            )
+            if not explicit_bedrock_endpoint:
+                raise ValueError(
+                    "Bedrock base URL must be an exact AWS runtime endpoint"
+                )
         try:
-            from agent.bedrock_adapter import has_aws_credentials, resolve_bedrock_region
-            from agent.anthropic_adapter import build_anthropic_bedrock_client
+            return _build_bedrock_auxiliary_client(
+                model,
+                async_mode=async_mode,
+                main_runtime=main_runtime,
+                explicit_endpoint=explicit_bedrock_endpoint or None,
+                is_vision=is_vision,
+            )
         except ImportError:
             logger.warning("resolve_provider_client: bedrock requested but "
-                           "boto3 or anthropic SDK not installed")
+                           "boto3 support is not installed")
             return None, None
-
-        if not has_aws_credentials():
-            logger.debug("resolve_provider_client: bedrock requested but "
-                         "no AWS credentials found")
-            return None, None
-
-        region = resolve_bedrock_region()
-        default_model = "anthropic.claude-haiku-4-5-20251001-v1:0"
-        final_model = _normalize_resolved_model(model or default_model, provider)
-        try:
-            real_client = build_anthropic_bedrock_client(region)
-        except ImportError as exc:
-            logger.warning("resolve_provider_client: cannot create Bedrock "
-                           "client: %s", exc)
-            return None, None
-        client = AnthropicAuxiliaryClient(
-            real_client, final_model, api_key="aws-sdk",
-            base_url=f"https://bedrock-runtime.{region}.amazonaws.com",
-        )
-        logger.debug("resolve_provider_client: bedrock (%s, %s)", final_model, region)
-        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                else (client, final_model))
 
     elif pconfig.auth_type in {"oauth_device_code", "oauth_external"}:
         # OAuth providers — route through their specific try functions
@@ -4249,6 +5083,7 @@ def resolve_vision_provider_client(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     async_mode: bool = False,
+    main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Resolve the client actually used for vision tasks.
 
@@ -4294,6 +5129,7 @@ def resolve_vision_provider_client(
             explicit_base_url=resolved_base_url,
             explicit_api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             return provider_for_base_override, None, None
@@ -4311,8 +5147,9 @@ def resolve_vision_provider_client(
         #   2. OpenRouter  (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
         #   4. Stop
-        main_provider = _read_main_provider()
-        main_model = _read_main_model()
+        runtime = _normalize_main_runtime(main_runtime)
+        main_provider = str(runtime.get("provider") or _read_main_provider() or "")
+        main_model = str(runtime.get("model") or _read_main_model() or "")
         if main_provider and main_provider not in {"auto", ""}:
             vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
             if main_provider == "nous":
@@ -4342,6 +5179,7 @@ def resolve_vision_provider_client(
                 rpc_client, rpc_model = resolve_provider_client(
                     main_provider, vision_model,
                     api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
                     is_vision=True)
                 if rpc_client is not None:
                     logger.info(
@@ -4384,6 +5222,7 @@ def resolve_vision_provider_client(
                 base_url=_zai_url,
                 api_key=resolved_api_key or None,
                 api_mode="chat_completions",
+                main_runtime=main_runtime,
                 is_vision=True,
             )
             if client is not None:
@@ -4391,6 +5230,7 @@ def resolve_vision_provider_client(
         # Fallback: try without explicit base_url (old behavior)
         client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                                  api_mode=resolved_api_mode,
+                                                 main_runtime=main_runtime,
                                                  is_vision=True)
         if client is None:
             return requested, None, None
@@ -4398,6 +5238,7 @@ def resolve_vision_provider_client(
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                              api_mode=resolved_api_mode,
+                                             main_runtime=main_runtime,
                                              is_vision=True)
     if client is None:
         return requested, None, None
@@ -4448,7 +5289,7 @@ def auxiliary_max_tokens_param(value: int) -> dict:
 # Every auxiliary LLM consumer should use these instead of manually
 # constructing clients and calling .chat.completions.create().
 
-# Client cache: (provider, async_mode, base_url, api_key, api_mode, runtime_key) -> (client, default_model, loop)
+# Client cache includes normalized model plus runtime/Bedrock policy identity.
 # NOTE: loop identity is NOT part of the key.  On async cache hits we check
 # whether the cached loop is the *current* loop; if not, the stale entry is
 # replaced in-place.  This bounds cache growth to one entry per unique
@@ -4462,6 +5303,7 @@ _CLIENT_CACHE_MAX_SIZE = 64  # safety belt — evict oldest when exceeded
 def _client_cache_key(
     provider: str,
     *,
+    model: Optional[str] = None,
     async_mode: bool,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -4470,22 +5312,92 @@ def _client_cache_key(
     is_vision: bool = False,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
-    runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    normalized_provider = _normalize_aux_provider(provider)
+    if normalized_provider == "auto":
+        effective_provider = _normalize_aux_provider(
+            runtime.get("provider") or _read_main_provider()
+        )
+        model_for_key = model or runtime.get("model") or _read_main_model()
+    else:
+        effective_provider = normalized_provider
+        model_for_key = model
+    normalized_model = str(
+        _normalize_resolved_model(model_for_key, effective_provider) or ""
+    ).strip()
+    runtime_key = tuple(
+        (field, _freeze_cache_value(runtime.get(field, "")))
+        for field in _MAIN_RUNTIME_FIELDS
+    ) if runtime else ()
+    bedrock_policy_key: tuple = ()
+    bedrock_endpoint_candidate = base_url or runtime.get("base_url")
+    bedrock_endpoint, endpoint_region = _trusted_bedrock_runtime_endpoint(
+        bedrock_endpoint_candidate
+    )
+    if (
+        effective_provider == "bedrock"
+        and str(bedrock_endpoint_candidate or "").strip()
+        and not bedrock_endpoint
+    ):
+        raise ValueError(
+            "Bedrock base URL must be an exact HTTPS AWS Runtime origin"
+        )
+    if effective_provider == "bedrock" and not bedrock_endpoint:
+        bedrock_endpoint, endpoint_region = _bedrock_endpoint_from_environment()
+    if not bedrock_endpoint and effective_provider not in {
+        "",
+        "auto",
+        "custom",
+        "bedrock",
+    }:
+        try:
+            from elevate_cli.runtime_provider import _get_named_custom_provider
+
+            named_entry = _get_named_custom_provider(effective_provider)
+            if named_entry:
+                bedrock_endpoint, endpoint_region = (
+                    _trusted_bedrock_runtime_endpoint(named_entry.get("base_url"))
+                )
+        except ImportError:
+            pass
+    if effective_provider == "bedrock" or bedrock_endpoint:
+        bedrock_runtime = dict(runtime)
+        if bedrock_endpoint:
+            if not _runtime_is_effective_bedrock(bedrock_runtime):
+                bedrock_runtime.pop("region", None)
+                bedrock_runtime.pop("guardrail_config", None)
+            bedrock_runtime.update(
+                {
+                    "provider": "bedrock",
+                    "base_url": bedrock_endpoint,
+                    "region": endpoint_region,
+                }
+            )
+        region, guardrail = _resolve_bedrock_auxiliary_policy(bedrock_runtime)
+        bedrock_policy_key = (
+            region,
+            bedrock_endpoint,
+            _freeze_cache_value(guardrail or {}),
+        )
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
-    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, pool_hint)
+    return (
+        provider,
+        normalized_model,
+        async_mode,
+        base_url or "",
+        api_key or "",
+        api_mode or "",
+        runtime_key,
+        bedrock_policy_key,
+        is_vision,
+        pool_hint,
+    )
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
     with _client_cache_lock:
         old_entry = _client_cache.get(cache_key)
         if old_entry is not None and old_entry[0] is not client:
-            _force_close_async_httpx(old_entry[0])
-            try:
-                close_fn = getattr(old_entry[0], "close", None)
-                if callable(close_fn):
-                    close_fn()
-            except Exception:
-                pass
+            _close_cached_client_resources(old_entry[0])
         _client_cache[cache_key] = (client, default_model, bound_loop)
 
 
@@ -4522,6 +5434,7 @@ def _refresh_nous_auxiliary_client(
 
     cache_key = _client_cache_key(
         cache_provider,
+        model=final_model,
         async_mode=async_mode,
         base_url=base_url,
         api_key=api_key,
@@ -4586,30 +5499,31 @@ def _force_close_async_httpx(client: Any) -> None:
         pass
 
 
+def _close_cached_client_resources(client: Any) -> None:
+    """Close one cached wrapper without scheduling an async close on a dead loop."""
+    import inspect
+
+    _force_close_async_httpx(client)
+    try:
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn) and not inspect.iscoroutinefunction(close_fn):
+            close_fn()
+    except Exception:
+        pass
+
+
 def shutdown_cached_clients() -> None:
     """Close all cached clients (sync and async) to prevent event-loop errors.
 
     Call this during CLI shutdown, *before* the event loop is closed, to
     avoid ``AsyncHttpxClientWrapper.__del__`` raising on a dead loop.
     """
-    import inspect
-
     with _client_cache_lock:
         for key, entry in list(_client_cache.items()):
             client = entry[0]
             if client is None:
                 continue
-            # Mark any async httpx transport as closed first (prevents __del__
-            # from scheduling aclose() on a dead event loop).
-            _force_close_async_httpx(client)
-            # Sync clients: close the httpx connection pool cleanly.
-            # Async clients: skip — we already neutered __del__ above.
-            try:
-                close_fn = getattr(client, "close", None)
-                if close_fn and not inspect.iscoroutinefunction(close_fn):
-                    close_fn()
-            except Exception:
-                pass
+            _close_cached_client_resources(client)
         _client_cache.clear()
 
 
@@ -4626,7 +5540,7 @@ def cleanup_stale_async_clients() -> None:
         for key, entry in _client_cache.items():
             client, _default, cached_loop = entry
             if cached_loop is not None and cached_loop.is_closed():
-                _force_close_async_httpx(client)
+                _close_cached_client_resources(client)
                 stale_keys.append(key)
         for key in stale_keys:
             del _client_cache[key]
@@ -4705,13 +5619,27 @@ def _get_cached_client(
         except RuntimeError:
             pass
     runtime = _normalize_main_runtime(main_runtime)
+    normalized_provider = _normalize_aux_provider(provider)
+    effective_provider = normalized_provider
+    if normalized_provider == "auto":
+        effective_provider = _normalize_aux_provider(_read_main_provider())
+    if (
+        not runtime
+        and not base_url
+        and effective_provider == "bedrock"
+        and not os.getenv("BEDROCK_BASE_URL", "").strip()
+    ):
+        runtime = _normalize_main_runtime(
+            _configured_main_bedrock_runtime(model)
+        )
     cache_key = _client_cache_key(
         provider,
+        model=model,
         async_mode=async_mode,
         base_url=base_url,
         api_key=api_key,
         api_mode=api_mode,
-        main_runtime=main_runtime,
+        main_runtime=runtime,
         is_vision=is_vision,
     )
     with _client_cache_lock:
@@ -4730,7 +5658,7 @@ def _get_cached_client(
                     effective = _compat_model(cached_client, model, cached_default)
                     return cached_client, effective
                 # Stale — evict and fall through to create a new client.
-                _force_close_async_httpx(cached_client)
+                _close_cached_client_resources(cached_client)
                 del _client_cache[cache_key]
             else:
                 effective = _compat_model(cached_client, model, cached_default)
@@ -4756,7 +5684,7 @@ def _get_cached_client(
                 # the oldest entries (FIFO — dict preserves insertion order).
                 while len(_client_cache) >= _CLIENT_CACHE_MAX_SIZE:
                     evict_key, evict_entry = next(iter(_client_cache.items()))
-                    _force_close_async_httpx(evict_entry[0])
+                    _close_cached_client_resources(evict_entry[0])
                     del _client_cache[evict_key]
                 _client_cache[cache_key] = (client, default_model, bound_loop)
             else:
@@ -5036,6 +5964,13 @@ def _build_call_kwargs(
 
     # Provider-specific extra_body
     merged_extra = dict(extra_body or {})
+    # These are first-class request controls, not provider-extension body
+    # fields.  Keeping them inside extra_body made specialized auxiliary
+    # adapters (Codex Responses, Anthropic Messages, Bedrock Converse) miss
+    # the caller's required/none/serial-tool contract entirely.
+    for request_control in ("tool_choice", "parallel_tool_calls"):
+        if request_control in merged_extra:
+            kwargs[request_control] = merged_extra.pop(request_control)
     if provider == "nous" or (
         auxiliary_is_nous and not _beta_auxiliary_policy_active()
     ):
@@ -5305,6 +6240,7 @@ def call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=False,
+            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -5315,6 +6251,7 @@ def call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=False,
+                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -5541,9 +6478,23 @@ def call_llm(
         # When the provider returns a 429 rate-limit (not billing), fall
         # back to an alternative provider instead of exhausting retries
         # against the same rate-limited endpoint.
+        connection_error = _is_connection_error(first_err)
+        # Evict before any successful fallback can return.  Eviction is
+        # exact-instance/leaf based, so unrelated fresh replacements survive
+        # while sync and async wrappers sharing the poisoned transport are
+        # removed together.
+        if connection_error:
+            try:
+                _evict_cached_client_instance(client)
+            except Exception:
+                logger.debug(
+                    "Auxiliary: cache eviction after connection error failed",
+                    exc_info=True,
+                )
+
         should_fallback = (
             _is_payment_error(first_err)
-            or _is_connection_error(first_err)
+            or connection_error
             or _is_rate_limit_error(first_err)
         )
         # Respect explicit provider choice for transient errors (auth, request
@@ -5555,7 +6506,7 @@ def call_llm(
         is_auto = resolved_provider in {"auto", "", None}
         # Capacity errors bypass the explicit-provider gate: the provider
         # literally cannot serve this request regardless of user intent.
-        is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
+        is_capacity_error = _is_payment_error(first_err) or connection_error
         if should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
@@ -5588,7 +6539,11 @@ def call_llm(
                     task, resolved_provider or "auto", reason=reason)
                 if fb_client is None:
                     fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
-                        resolved_provider, task, reason=reason)
+                        resolved_provider,
+                        task,
+                        reason=reason,
+                        main_runtime=main_runtime,
+                    )
 
             if fb_client is not None:
                 fb_kwargs = _build_call_kwargs(
@@ -5607,17 +6562,6 @@ def call_llm(
                 "(fallback_chain + main agent model). Raising original error.",
                 task or "call", reason, resolved_provider,
             )
-        # Connection/timeout errors leave the cached client poisoned (closed
-        # httpx transport, half-read stream, dead async loop).  Drop it from
-        # the cache regardless of whether we found a fallback above so the
-        # next auxiliary call rebuilds a fresh client instead of reusing the
-        # dead one.  See issue #23432.
-        if _is_connection_error(first_err):
-            try:
-                _evict_cached_client_instance(client)
-            except Exception:
-                logger.debug("Auxiliary: cache eviction after connection error failed",
-                             exc_info=True)
         raise
 
 
@@ -5686,6 +6630,7 @@ async def async_call_llm(
     model: str = None,
     base_url: str = None,
     api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
     messages: list,
     temperature: float = None,
     max_tokens: int = None,
@@ -5744,6 +6689,7 @@ async def async_call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=True,
+            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -5754,6 +6700,7 @@ async def async_call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=True,
+                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -5769,6 +6716,7 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -5781,7 +6729,11 @@ async def async_call_llm(
             if not resolved_base_url:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
-                client, final_model = _get_cached_client("auto", async_mode=True)
+                client, final_model = _get_cached_client(
+                    "auto",
+                    async_mode=True,
+                    main_runtime=main_runtime,
+                )
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
@@ -5871,6 +6823,7 @@ async def async_call_llm(
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
+                main_runtime=main_runtime,
                 is_vision=(task == "vision"),
             )
             if refreshed_client is not None:
@@ -5897,6 +6850,7 @@ async def async_call_llm(
                     resolved_base_url=resolved_base_url,
                     resolved_api_key=resolved_api_key,
                     resolved_api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
                     final_model=final_model,
                     messages=messages,
                     temperature=temperature,
@@ -5930,6 +6884,7 @@ async def async_call_llm(
                     resolved_base_url=resolved_base_url,
                     resolved_api_key=resolved_api_key,
                     resolved_api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
                     final_model=final_model,
                     messages=messages,
                     temperature=temperature,
@@ -5940,16 +6895,28 @@ async def async_call_llm(
                 )
 
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
+        connection_error = _is_connection_error(first_err)
+        # Mirror sync: remove the poisoned wrapper and every cached sibling
+        # sharing its leaf before a successful fallback can return early.
+        if connection_error:
+            try:
+                _evict_cached_client_instance(client)
+            except Exception:
+                logger.debug(
+                    "Auxiliary (async): cache eviction after connection error failed",
+                    exc_info=True,
+                )
+
         should_fallback = (
             _is_payment_error(first_err)
-            or _is_connection_error(first_err)
+            or connection_error
             or _is_rate_limit_error(first_err)
         )
         # Capacity errors (payment/quota/connection) bypass the explicit-provider
         # gate — the provider cannot serve the request regardless of user intent.
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
-        is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
+        is_capacity_error = _is_payment_error(first_err) or connection_error
         if should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
@@ -5977,7 +6944,11 @@ async def async_call_llm(
                     task, resolved_provider or "auto", reason=reason)
                 if fb_client is None:
                     fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
-                        resolved_provider, task, reason=reason)
+                        resolved_provider,
+                        task,
+                        reason=reason,
+                        main_runtime=main_runtime,
+                    )
 
             if fb_client is not None:
                 fb_kwargs = _build_call_kwargs(
@@ -6000,12 +6971,4 @@ async def async_call_llm(
                 "(fallback_chain + main agent model). Raising original error.",
                 task or "call", reason, resolved_provider,
             )
-        # Mirror the sync path: drop poisoned clients on connection/timeout
-        # so the next aux call rebuilds.  See issue #23432.
-        if _is_connection_error(first_err):
-            try:
-                _evict_cached_client_instance(client)
-            except Exception:
-                logger.debug("Auxiliary (async): cache eviction after connection error failed",
-                             exc_info=True)
         raise

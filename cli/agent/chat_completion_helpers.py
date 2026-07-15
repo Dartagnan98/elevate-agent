@@ -64,6 +64,20 @@ from utils import base_url_host_matches, base_url_hostname
 logger = logging.getLogger(__name__)
 
 
+def _effective_request_timeout(agent) -> Optional[float]:
+    resolver = getattr(agent, "_effective_provider_request_timeout", None)
+    if callable(resolver):
+        return resolver()
+    return get_provider_request_timeout(agent.provider, agent.model)
+
+
+def _effective_stale_timeout(agent) -> Optional[float]:
+    resolver = getattr(agent, "_effective_provider_stale_timeout", None)
+    if callable(resolver):
+        return resolver()
+    return get_provider_stale_timeout(agent.provider, agent.model)
+
+
 def _ra():
     """Lazy ``run_agent`` reference.
 
@@ -93,6 +107,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
     result = {"response": None, "error": None}
     request_client_holder = {"client": None}
     request_client_lock = threading.Lock()
+    bedrock_request_holder = {
+        "client": None,
+        "region": "",
+        "endpoint_url": None,
+        "timeout": None,
+    }
 
     def _set_request_client(client):
         with request_client_lock:
@@ -109,6 +129,28 @@ def interruptible_api_call(agent, api_kwargs: dict):
         request_client = _take_request_client()
         if request_client is not None:
             agent._close_request_openai_client(request_client, reason=reason)
+
+    def _close_bedrock_request(*, invalidate: bool) -> None:
+        client = bedrock_request_holder.get("client")
+        if client is None:
+            return
+        bedrock_request_holder["client"] = None
+        try:
+            client.close()
+        except Exception:
+            pass
+        if invalidate:
+            try:
+                from agent.bedrock_adapter import invalidate_runtime_client
+
+                invalidate_runtime_client(
+                    bedrock_request_holder["region"],
+                    timeout=bedrock_request_holder["timeout"],
+                    endpoint_url=bedrock_request_holder["endpoint_url"],
+                    expected_client=client,
+                )
+            except Exception:
+                pass
 
     def _call():
         try:
@@ -136,17 +178,46 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     invalidate_runtime_client,
                     is_stale_connection_error,
                     normalize_converse_response,
+                    prepare_converse_guardrail_config,
                 )
                 region = api_kwargs.pop("__bedrock_region__", "us-east-1")
+                endpoint_url = api_kwargs.pop("__bedrock_endpoint_url__", None)
+                request_timeout = api_kwargs.pop("__bedrock_timeout__", None)
                 api_kwargs.pop("__bedrock_converse__", None)
-                client = _get_bedrock_runtime_client(region)
+                guardrail = prepare_converse_guardrail_config(
+                    api_kwargs.get("guardrailConfig"),
+                    streaming=False,
+                )
+                if guardrail:
+                    api_kwargs["guardrailConfig"] = guardrail
+                else:
+                    api_kwargs.pop("guardrailConfig", None)
+                client = _get_bedrock_runtime_client(
+                    region,
+                    timeout=request_timeout,
+                    endpoint_url=endpoint_url,
+                    exclusive=True,
+                )
+                bedrock_request_holder.update(
+                    {
+                        "client": client,
+                        "region": region,
+                        "endpoint_url": endpoint_url,
+                        "timeout": request_timeout,
+                    }
+                )
                 try:
                     raw_response = client.converse(**api_kwargs)
                 except Exception as _bedrock_exc:
                     # Evict the cached client on stale-connection failures
                     # so the outer retry loop builds a fresh client/pool.
                     if is_stale_connection_error(_bedrock_exc):
-                        invalidate_runtime_client(region)
+                        invalidate_runtime_client(
+                            region,
+                            timeout=request_timeout,
+                            endpoint_url=endpoint_url,
+                            expected_client=client,
+                        )
                     raise
                 result["response"] = normalize_converse_response(raw_response)
             else:
@@ -161,6 +232,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             result["error"] = e
         finally:
             _close_request_client_once("request_complete")
+            _close_bedrock_request(invalidate=False)
 
     # ── Stale-call timeout (mirrors streaming stale detector) ────────
     # Non-streaming calls return nothing until the full response is
@@ -207,7 +279,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 f"Aborting call."
             )
             try:
-                if agent.api_mode == "anthropic_messages":
+                if agent.api_mode == "bedrock_converse":
+                    _close_bedrock_request(invalidate=True)
+                elif agent.api_mode == "anthropic_messages":
                     agent._anthropic_client.close()
                     agent._rebuild_anthropic_client()
                 else:
@@ -231,7 +305,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # token generation without poisoning the shared client used to
             # seed future retries.
             try:
-                if agent.api_mode == "anthropic_messages":
+                if agent.api_mode == "bedrock_converse":
+                    _close_bedrock_request(invalidate=True)
+                elif agent.api_mode == "anthropic_messages":
                     agent._anthropic_client.close()
                     agent._rebuild_anthropic_client()
                 else:
@@ -284,6 +360,8 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             max_tokens=agent.max_tokens or 4096,
             region=region,
             guardrail_config=guardrail,
+            endpoint_url=getattr(agent, "_bedrock_endpoint_url", "") or None,
+            request_timeout=_effective_request_timeout(agent),
         )
 
     if agent.api_mode == "codex_responses":
@@ -760,11 +838,37 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     # raw_codex=True because the main agent needs direct responses.stream()
     # access for Codex providers.
     try:
-        from agent.auxiliary_client import resolve_provider_client
         # Pass base_url and api_key from fallback config so custom
         # endpoints (e.g. Ollama Cloud) resolve correctly instead of
         # falling through to OpenRouter defaults.
         fb_base_url_hint = (fb.get("base_url") or "").strip() or None
+        from elevate_cli.runtime_provider import (
+            _bedrock_region_from_url,
+            _get_named_custom_provider,
+            is_bedrock_provider_alias,
+        )
+
+        named_fallback = _get_named_custom_provider(fb_provider)
+        if not fb_base_url_hint:
+            if named_fallback:
+                fb_base_url_hint = str(
+                    named_fallback.get("base_url") or ""
+                ).strip() or None
+        if _bedrock_region_from_url(fb_base_url_hint) or (
+            is_bedrock_provider_alias(fb_provider) and named_fallback is None
+        ):
+            bedrock_fallback = dict(fb)
+            if fb_base_url_hint:
+                bedrock_fallback["base_url"] = fb_base_url_hint
+            bedrock_fallback["_bedrock_policy_provider"] = str(
+                (named_fallback or {}).get("provider_key") or fb_provider
+            ).strip()
+            return agent._activate_bedrock_fallback(
+                bedrock_fallback,
+                fb_model,
+            )
+
+        from agent.auxiliary_client import resolve_provider_client
         fb_api_key_hint = (fb.get("api_key") or "").strip() or None
         if not fb_api_key_hint:
             # key_env and api_key_env are both documented aliases (see
@@ -821,10 +925,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             # provider-specific exceptions like Copilot gpt-5-mini on
             # chat completions.
             fb_api_mode = "codex_responses"
-        elif fb_provider == "bedrock" or (
-            base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
-            and base_url_host_matches(fb_base_url, "amazonaws.com")
-        ):
+        elif fb_provider == "bedrock" or _bedrock_region_from_url(fb_base_url):
             fb_api_mode = "bedrock_converse"
 
         old_model = agent.model
@@ -840,6 +941,12 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
+        agent._bedrock_region = None
+        agent._bedrock_endpoint_url = ""
+        agent._bedrock_guardrail_config = None
+        agent._bedrock_timeout_provider = ""
+        agent._bedrock_request_timeout = None
+        agent._bedrock_stale_timeout = None
 
         # Honor per-provider / per-model request_timeout_seconds for the
         # fallback target (same knob the primary client uses).  None = use
@@ -1270,6 +1377,45 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         result = {"response": None, "error": None}
         first_delta_fired = {"done": False}
         deltas_were_sent = {"yes": False}
+        callback_buffer: list[tuple[str, str]] = []
+        last_bedrock_event_time = {"t": time.time()}
+        bedrock_attempt_active = {"yes": True}
+        bedrock_request = {
+            "client": None,
+            "stream": None,
+            "region": "",
+            "endpoint_url": None,
+            "timeout": None,
+        }
+
+        def _close_bedrock_stream(*, invalidate: bool) -> None:
+            client = bedrock_request.get("client")
+            event_stream = bedrock_request.get("stream")
+            bedrock_request["stream"] = None
+            bedrock_request["client"] = None
+            if event_stream is not None:
+                try:
+                    event_stream.close()
+                except Exception:
+                    pass
+            if client is None:
+                return
+            try:
+                client.close()
+            except Exception:
+                pass
+            if invalidate:
+                try:
+                    from agent.bedrock_adapter import invalidate_runtime_client
+
+                    invalidate_runtime_client(
+                        bedrock_request["region"],
+                        timeout=bedrock_request["timeout"],
+                        endpoint_url=bedrock_request["endpoint_url"],
+                        expected_client=client,
+                    )
+                except Exception:
+                    pass
 
         def _fire_first():
             if not first_delta_fired["done"] and on_first_delta:
@@ -1280,53 +1426,167 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     pass
 
         def _bedrock_call():
+            client = None
+            region = ""
+            endpoint_url = None
+            request_timeout = None
+            stale_detector = None
+            stale_invalidator = None
             try:
                 from agent.bedrock_adapter import (
                     _get_bedrock_runtime_client,
                     invalidate_runtime_client,
                     is_stale_connection_error,
+                    prepare_converse_guardrail_config,
                     stream_converse_with_callbacks,
                 )
+                stale_detector = is_stale_connection_error
+                stale_invalidator = invalidate_runtime_client
                 region = api_kwargs.pop("__bedrock_region__", "us-east-1")
+                endpoint_url = api_kwargs.pop("__bedrock_endpoint_url__", None)
+                request_timeout = api_kwargs.pop("__bedrock_timeout__", None)
                 api_kwargs.pop("__bedrock_converse__", None)
-                client = _get_bedrock_runtime_client(region)
-                try:
-                    raw_response = client.converse_stream(**api_kwargs)
-                except Exception as _bedrock_exc:
-                    # Evict the cached client on stale-connection failures
-                    # so the outer retry loop builds a fresh client/pool.
-                    if is_stale_connection_error(_bedrock_exc):
-                        invalidate_runtime_client(region)
-                    raise
+                guardrail = prepare_converse_guardrail_config(
+                    api_kwargs.get("guardrailConfig"),
+                    streaming=True,
+                )
+                if guardrail:
+                    api_kwargs["guardrailConfig"] = guardrail
+                else:
+                    api_kwargs.pop("guardrailConfig", None)
+                client = _get_bedrock_runtime_client(
+                    region,
+                    timeout=request_timeout,
+                    endpoint_url=endpoint_url,
+                    exclusive=True,
+                )
+                bedrock_request.update(
+                    {
+                        "client": client,
+                        "region": region,
+                        "endpoint_url": endpoint_url,
+                        "timeout": request_timeout,
+                    }
+                )
+                last_bedrock_event_time["t"] = time.time()
+                raw_response = client.converse_stream(**api_kwargs)
+                if isinstance(raw_response, dict):
+                    bedrock_request["stream"] = raw_response.get("stream")
+
+                def _on_event(_event):
+                    last_bedrock_event_time["t"] = time.time()
+                    agent._touch_activity("receiving Bedrock stream event")
 
                 def _on_text(text):
-                    _fire_first()
-                    agent._fire_stream_delta(text)
-                    deltas_were_sent["yes"] = True
+                    last_bedrock_event_time["t"] = time.time()
+                    agent._touch_activity("receiving Bedrock stream")
+                    callback_buffer.append(("text", text))
 
                 def _on_tool(name):
-                    _fire_first()
-                    agent._fire_tool_gen_started(name)
+                    last_bedrock_event_time["t"] = time.time()
+                    agent._touch_activity("receiving Bedrock tool request")
+                    if isinstance(name, str) and name.strip():
+                        callback_buffer.append(("tool", name.strip()))
 
                 def _on_reasoning(text):
-                    _fire_first()
-                    agent._fire_reasoning_delta(text)
+                    last_bedrock_event_time["t"] = time.time()
+                    agent._touch_activity("receiving Bedrock reasoning stream")
+                    callback_buffer.append(("reasoning", text))
 
-                result["response"] = stream_converse_with_callbacks(
+                response = stream_converse_with_callbacks(
                     raw_response,
                     on_text_delta=_on_text if agent._has_stream_consumers() else None,
                     on_tool_start=_on_tool,
                     on_reasoning_delta=_on_reasoning if agent.reasoning_callback or agent.stream_delta_callback else None,
+                    on_event=_on_event,
                     on_interrupt_check=lambda: agent._interrupt_requested,
                 )
+                if agent._interrupt_requested:
+                    raise InterruptedError(
+                        "Agent interrupted before Bedrock stream completion"
+                    )
+                normalized = agent._get_transport().normalize_response(response)
+                callbacks_accepted = normalized.finish_reason in {
+                    "stop",
+                    "tool_calls",
+                    "length",
+                }
+                accepted_tool_names = {
+                    call.name for call in (normalized.tool_calls or [])
+                }
+                if not bedrock_attempt_active["yes"]:
+                    raise InterruptedError(
+                        "Bedrock stream attempt was superseded"
+                    )
+                if callbacks_accepted:
+                    for callback_kind, callback_value in callback_buffer:
+                        if (
+                            callback_kind == "tool"
+                            and callback_value not in accepted_tool_names
+                        ):
+                            continue
+                        _fire_first()
+                        if callback_kind == "text":
+                            agent._fire_stream_delta(callback_value)
+                            deltas_were_sent["yes"] = True
+                        elif callback_kind == "reasoning":
+                            agent._fire_reasoning_delta(callback_value)
+                        else:
+                            agent._fire_tool_gen_started(callback_value)
+                elif callback_buffer:
+                    try:
+                        response._elevate_stream_output_withheld = True
+                    except Exception:
+                        pass
+                callback_buffer.clear()
+                result["response"] = response
             except Exception as e:
+                if (
+                    client is not None
+                    and stale_detector is not None
+                    and stale_detector(e)
+                    and stale_invalidator is not None
+                ):
+                    try:
+                        stale_invalidator(
+                            region,
+                            timeout=request_timeout,
+                            endpoint_url=endpoint_url,
+                            expected_client=client,
+                        )
+                    except Exception:
+                        pass
+                callback_buffer.clear()
                 result["error"] = e
+            finally:
+                _close_bedrock_stream(invalidate=False)
 
         t = threading.Thread(target=_bedrock_call, daemon=True)
         t.start()
+        configured_stale_timeout = _effective_stale_timeout(agent)
+        configured_request_timeout = _effective_request_timeout(agent)
+        bedrock_stale_timeout = (
+            configured_stale_timeout
+            if configured_stale_timeout is not None
+            else configured_request_timeout
+            if configured_request_timeout is not None
+            else float(os.getenv("ELEVATE_STREAM_STALE_TIMEOUT", 180.0))
+        )
         while t.is_alive():
             t.join(timeout=0.3)
+            stale_elapsed = time.time() - last_bedrock_event_time["t"]
+            if stale_elapsed > bedrock_stale_timeout:
+                bedrock_attempt_active["yes"] = False
+                _close_bedrock_stream(invalidate=True)
+                callback_buffer.clear()
+                raise TimeoutError(
+                    "Bedrock streaming API call timed out after "
+                    f"{stale_elapsed:.1f}s with no provider events "
+                    f"(threshold: {bedrock_stale_timeout:.1f}s)"
+                )
             if agent._interrupt_requested:
+                bedrock_attempt_active["yes"] = False
+                _close_bedrock_stream(invalidate=True)
                 raise InterruptedError("Agent interrupted during Bedrock API call")
         if result["error"] is not None:
             raise result["error"]
@@ -1670,7 +1930,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
         # Use the Anthropic SDK's streaming context manager
-        with agent._anthropic_client.messages.stream(**api_kwargs) as stream:
+        request_kwargs = agent._apply_bedrock_guardrail_headers(api_kwargs)
+        with agent._anthropic_client.messages.stream(**request_kwargs) as stream:
             # The Anthropic SDK exposes the raw httpx response on
             # ``stream.response``.  Snapshot diagnostic headers
             # immediately so they survive a stream that dies before the
@@ -1984,7 +2245,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             _close_request_client_once("stream_request_complete")
 
     # Provider-configured stale timeout takes priority over env default.
-    _cfg_stale = get_provider_stale_timeout(agent.provider, agent.model)
+    _cfg_stale = _effective_stale_timeout(agent)
     if _cfg_stale is not None:
         _stream_stale_timeout_base = _cfg_stale
     else:

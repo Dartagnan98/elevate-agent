@@ -3111,6 +3111,7 @@ class ElevateCLI:
                 requested=self.requested_provider,
                 explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
+                target_model=self.model,
             )
         except Exception as exc:
             _primary_exc = exc
@@ -3126,7 +3127,10 @@ class ElevateCLI:
                     if not _fb_provider or not _fb_model:
                         continue
                     try:
-                        runtime = resolve_runtime_provider(requested=_fb_provider)
+                        runtime = resolve_runtime_provider(
+                            requested=_fb_provider,
+                            target_model=_fb_model,
+                        )
                         logger.warning(
                             "Primary provider auth failed (%s). Falling through to fallback: %s/%s",
                             _primary_exc, _fb_provider, _fb_model,
@@ -3180,6 +3184,12 @@ class ElevateCLI:
             or resolved_api_mode != self.api_mode
             or resolved_acp_command != self.acp_command
             or resolved_acp_args != self.acp_args
+            or runtime.get("bedrock_timeout_provider")
+            != getattr(self, "_bedrock_timeout_provider", None)
+            or runtime.get("request_timeout_seconds")
+            != getattr(self, "_provider_request_timeout", None)
+            or runtime.get("stale_timeout_seconds")
+            != getattr(self, "_provider_stale_timeout", None)
         )
         self.provider = resolved_provider
         self.api_mode = resolved_api_mode
@@ -3187,6 +3197,9 @@ class ElevateCLI:
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self._bedrock_timeout_provider = runtime.get("bedrock_timeout_provider")
+        self._provider_request_timeout = runtime.get("request_timeout_seconds")
+        self._provider_stale_timeout = runtime.get("stale_timeout_seconds")
         self.api_key = api_key
         self.base_url = base_url
 
@@ -3222,10 +3235,34 @@ class ElevateCLI:
         # AIAgent/OpenAI client holds auth at init time, so rebuild if key,
         # routing, or the effective model changed.
         if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
-            self.agent = None
-            self._active_agent_route_signature = None
+            self._discard_agent_for_rebuild()
 
         return True
+
+    def _discard_agent_for_rebuild(self) -> None:
+        """Drop a superseded agent without tearing down session tool state."""
+        old_agent = getattr(self, "agent", None)
+        self.agent = None
+        self._active_agent_route_signature = None
+        if old_agent is None:
+            return
+
+        # A route/config rebuild continues the same CLI session.  Release the
+        # replaced model clients and memory-provider connections, but preserve
+        # terminals, browser state, and background processes owned by the
+        # session (``close()`` would destroy those resources).
+        try:
+            old_agent.release_clients()
+        except Exception:
+            pass
+        try:
+            old_agent.close_memory_connections()
+        except Exception:
+            pass
+
+        global _active_agent_ref
+        if _active_agent_ref is old_agent:
+            _active_agent_ref = None
 
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
         """Build the effective model/runtime config for a single user turn.
@@ -3245,6 +3282,15 @@ class ElevateCLI:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "bedrock_timeout_provider": getattr(
+                self, "_bedrock_timeout_provider", None
+            ),
+            "request_timeout_seconds": getattr(
+                self, "_provider_request_timeout", None
+            ),
+            "stale_timeout_seconds": getattr(
+                self, "_provider_stale_timeout", None
+            ),
         }
         route = {
             "model": self.model,
@@ -3256,6 +3302,9 @@ class ElevateCLI:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                runtime["bedrock_timeout_provider"],
+                runtime["request_timeout_seconds"],
+                runtime["stale_timeout_seconds"],
             ),
         }
 
@@ -3357,6 +3406,15 @@ class ElevateCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "bedrock_timeout_provider": getattr(
+                    self, "_bedrock_timeout_provider", None
+                ),
+                "request_timeout_seconds": getattr(
+                    self, "_provider_request_timeout", None
+                ),
+                "stale_timeout_seconds": getattr(
+                    self, "_provider_stale_timeout", None
+                ),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -3368,6 +3426,9 @@ class ElevateCLI:
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
+                bedrock_timeout_provider=runtime.get("bedrock_timeout_provider"),
+                request_timeout_seconds=runtime.get("request_timeout_seconds"),
+                stale_timeout_seconds=runtime.get("stale_timeout_seconds"),
                 max_iterations=self.max_turns,
                 enabled_toolsets=self.enabled_toolsets,
                 verbose_logging=self.verbose,
@@ -3415,6 +3476,9 @@ class ElevateCLI:
                 runtime.get("api_mode"),
                 runtime.get("command"),
                 tuple(runtime.get("args") or ()),
+                runtime.get("bedrock_timeout_provider"),
+                runtime.get("request_timeout_seconds"),
+                runtime.get("stale_timeout_seconds"),
             )
 
             if self._pending_title and self._session_db:
@@ -5572,7 +5636,7 @@ class ElevateCLI:
             
             if personality_name in ("none", "default", "neutral"):
                 self.system_prompt = ""
-                self.agent = None  # Force re-init
+                self._discard_agent_for_rebuild()
                 if save_config_value("agent.system_prompt", ""):
                     print("(^_^)b Personality cleared (saved to config)")
                 else:
@@ -5580,7 +5644,7 @@ class ElevateCLI:
                 print("  No personality overlay — using base agent behavior.")
             elif personality_name in self.personalities:
                 self.system_prompt = self._resolve_personality_prompt(self.personalities[personality_name])
-                self.agent = None  # Force re-init
+                self._discard_agent_for_rebuild()
                 if save_config_value("agent.system_prompt", self.system_prompt):
                     print(f"(^_^)b Personality set to '{personality_name}' (saved to config)")
                 else:
@@ -7100,7 +7164,7 @@ class ElevateCLI:
             return
 
         self.reasoning_config = parsed
-        self.agent = None  # Force agent re-init with new reasoning config
+        self._discard_agent_for_rebuild()
 
         if save_config_value("agent.reasoning_effort", arg):
             _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
@@ -7144,7 +7208,7 @@ class ElevateCLI:
             _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
             return
 
-        self.agent = None  # Force agent re-init with new service-tier config
+        self._discard_agent_for_rebuild()
         if save_config_value("agent.service_tier", saved_value):
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
         else:
@@ -8510,7 +8574,7 @@ class ElevateCLI:
 
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
-            self.agent = None
+            self._discard_agent_for_rebuild()
 
         # Initialize agent if needed
         if self.agent is None:
@@ -11255,7 +11319,7 @@ def main(
                     )
                 turn_route = cli._resolve_turn_agent_config(effective_query)
                 if turn_route["signature"] != cli._active_agent_route_signature:
-                    cli.agent = None
+                    cli._discard_agent_for_rebuild()
                 if cli._init_agent(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],

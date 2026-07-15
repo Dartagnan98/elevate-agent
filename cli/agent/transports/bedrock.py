@@ -45,6 +45,8 @@ class BedrockTransport(ProviderTransport):
             temperature: float | None
             guardrail_config: dict | None — Bedrock guardrails
             region: str — AWS region (default 'us-east-1')
+            endpoint_url: str | None — validated explicit FIPS runtime origin
+            request_timeout: float | None — botocore connect/read timeout
         """
         from agent.bedrock_adapter import build_converse_kwargs
 
@@ -62,6 +64,12 @@ class BedrockTransport(ProviderTransport):
         # Sentinel keys for dispatch — agent pops these before the boto3 call
         kwargs["__bedrock_converse__"] = True
         kwargs["__bedrock_region__"] = region
+        endpoint_url = params.get("endpoint_url")
+        if endpoint_url:
+            kwargs["__bedrock_endpoint_url__"] = endpoint_url
+        request_timeout = params.get("request_timeout")
+        if request_timeout is not None:
+            kwargs["__bedrock_timeout__"] = request_timeout
         return kwargs
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:

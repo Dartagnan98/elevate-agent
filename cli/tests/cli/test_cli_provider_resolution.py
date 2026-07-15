@@ -172,6 +172,74 @@ def test_runtime_resolution_failure_is_not_sticky(monkeypatch):
     assert shell.agent is not None
 
 
+def test_cli_stores_complete_bedrock_turn_route_signature(monkeypatch):
+    """A stable Bedrock receipt must reuse the same CLI agent next turn."""
+    cli = _import_cli()
+
+    runtime = {
+        "provider": "bedrock",
+        "api_mode": "bedrock_converse",
+        "base_url": "https://bedrock-runtime-fips.ca-central-1.amazonaws.com",
+        "api_key": "aws-sdk",
+        "source": "config",
+        "bedrock_timeout_provider": "realtor-bedrock",
+        "request_timeout_seconds": 47.0,
+        "stale_timeout_seconds": 61.0,
+    }
+    resolution_calls = []
+
+    class _DummyAgent:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    def _resolve_runtime(**kwargs):
+        resolution_calls.append(dict(kwargs))
+        return dict(runtime)
+
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider",
+        _resolve_runtime,
+    )
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.format_runtime_provider_error",
+        lambda exc: str(exc),
+    )
+    monkeypatch.setattr(cli, "AIAgent", _DummyAgent)
+
+    shell = cli.ElevateCLI(
+        model="amazon.nova-pro-v1:0", compact=True, max_turns=1
+    )
+    assert shell._init_agent() is True
+
+    turn_route = shell._resolve_turn_agent_config("next")
+    assert shell._active_agent_route_signature == turn_route["signature"]
+    assert shell.agent.kwargs["bedrock_timeout_provider"] == "realtor-bedrock"
+    assert shell.agent.kwargs["request_timeout_seconds"] == 47.0
+    assert shell.agent.kwargs["stale_timeout_seconds"] == 61.0
+    assert resolution_calls[-1]["target_model"] == "amazon.nova-pro-v1:0"
+
+
+def test_cli_rebuild_discard_releases_clients_without_hard_close():
+    cli = _import_cli()
+    shell = cli.ElevateCLI(model="gpt-5", compact=True, max_turns=1)
+    old_agent = types.SimpleNamespace()
+    old_agent.release_clients = lambda: setattr(old_agent, "released", True)
+    old_agent.close_memory_connections = lambda: setattr(
+        old_agent, "memory_closed", True
+    )
+    old_agent.close = lambda: setattr(old_agent, "hard_closed", True)
+    shell.agent = old_agent
+    shell._active_agent_route_signature = ("old",)
+
+    shell._discard_agent_for_rebuild()
+
+    assert shell.agent is None
+    assert shell._active_agent_route_signature is None
+    assert old_agent.released is True
+    assert old_agent.memory_closed is True
+    assert not hasattr(old_agent, "hard_closed")
+
+
 def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     cli = _import_cli()
 
@@ -212,6 +280,42 @@ def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
 
     assert result["model"] == "gpt-5"
     assert result["runtime"]["provider"] == "openrouter"
+
+
+def test_cli_fallback_resolution_uses_fallback_model(monkeypatch):
+    cli = _import_cli()
+    calls = []
+
+    def _runtime_resolve(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise AuthError("primary expired")
+        return {
+            "provider": "bedrock",
+            "api_mode": "bedrock_converse",
+            "base_url": "https://bedrock-runtime.us-west-2.amazonaws.com",
+            "api_key": "aws-sdk",
+            "source": "aws-sdk-default-chain",
+            "model": kwargs["target_model"],
+        }
+
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider",
+        _runtime_resolve,
+    )
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.format_runtime_provider_error",
+        lambda exc: str(exc),
+    )
+    shell = cli.ElevateCLI(model="gpt-5", compact=True, max_turns=1)
+    shell._fallback_model = [
+        {"provider": "bedrock", "model": "amazon.nova-pro-v1:0"}
+    ]
+
+    assert shell._ensure_runtime_credentials() is True
+    assert calls[0]["target_model"] == "gpt-5"
+    assert calls[1]["target_model"] == "amazon.nova-pro-v1:0"
+    assert shell.model == "amazon.nova-pro-v1:0"
 
 
 def test_cli_prefers_config_provider_over_stale_env_override(monkeypatch):

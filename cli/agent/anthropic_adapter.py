@@ -759,7 +759,11 @@ def build_anthropic_client(
     return _anthropic_sdk.Anthropic(**kwargs)
 
 
-def build_anthropic_bedrock_client(region: str):
+def build_anthropic_bedrock_client(
+    region: str,
+    base_url: Optional[str] = None,
+    timeout: Optional[float] = None,
+):
     """Create an AnthropicBedrock client for Bedrock Claude models.
 
     Uses the Anthropic SDK's native Bedrock adapter, which provides full
@@ -786,14 +790,32 @@ def build_anthropic_bedrock_client(region: str):
             "anthropic.AnthropicBedrock not available. "
             "Upgrade with: pip install 'anthropic>=0.39.0'"
         )
+    from agent.bedrock_adapter import (
+        _normalize_runtime_timeout,
+        normalize_bedrock_runtime_endpoint,
+    )
     from httpx import Timeout
 
-    return _anthropic_sdk.AnthropicBedrock(
-        aws_region=region,
-        timeout=Timeout(timeout=900.0, connect=10.0),
-        max_retries=0,  # Elevate's loop owns retry policy
-        default_headers={"anthropic-beta": ",".join([*_COMMON_BETAS, _CONTEXT_1M_BETA])},
-    )
+    normalized_timeout = _normalize_runtime_timeout(timeout)
+    request_timeout = normalized_timeout if normalized_timeout is not None else 900.0
+    client_kwargs = {
+        "aws_region": region,
+        "timeout": Timeout(
+            timeout=request_timeout,
+            connect=min(10.0, request_timeout),
+        ),
+        "max_retries": 0,  # Elevate's loop owns retry policy
+        "default_headers": {
+            "anthropic-beta": ",".join([*_COMMON_BETAS, _CONTEXT_1M_BETA])
+        },
+    }
+    if base_url:
+        client_kwargs["base_url"] = normalize_bedrock_runtime_endpoint(
+            base_url,
+            region,
+        )
+
+    return _anthropic_sdk.AnthropicBedrock(**client_kwargs)
 
 
 def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:

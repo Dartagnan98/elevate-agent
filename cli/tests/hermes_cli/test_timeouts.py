@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import textwrap
 
+import pytest
+
 from elevate_cli.timeouts import (
     get_provider_request_timeout,
     get_provider_stale_timeout,
+    resolve_provider_timeout_policy,
 )
 
 
@@ -91,6 +94,65 @@ def test_missing_timeout_returns_none(monkeypatch, tmp_path):
     assert get_provider_request_timeout("missing-provider", "claude-opus-4.6") is None
 
 
+def test_named_endpoint_policy_survives_native_provider_canonicalization(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    endpoint = "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+    _write_config(
+        tmp_path,
+        f"""\
+        providers:
+          gov-bedrock:
+            base_url: {endpoint}
+            request_timeout_seconds: 0.25
+            stale_timeout_seconds: 0.5
+          bedrock:
+            request_timeout_seconds: 30
+            stale_timeout_seconds: 60
+        """,
+    )
+
+    policy = resolve_provider_timeout_policy(
+        "bedrock",
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        base_url=endpoint,
+        fallback_provider_id="bedrock",
+    )
+
+    assert policy == {
+        "request_timeout": 0.25,
+        "request_provider": "gov-bedrock",
+        "stale_timeout": 0.5,
+        "stale_provider": "gov-bedrock",
+        "policy_provider": "gov-bedrock",
+    }
+
+
+def test_conflicting_endpoint_timeout_policies_fail_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    endpoint = "https://bedrock-runtime.us-east-1.amazonaws.com"
+    _write_config(
+        tmp_path,
+        f"""\
+        providers:
+          first:
+            base_url: {endpoint}
+            request_timeout_seconds: 1
+          second:
+            base_url: {endpoint}
+            request_timeout_seconds: 2
+        """,
+    )
+
+    with pytest.raises(ValueError, match="Conflicting timeout policies"):
+        resolve_provider_timeout_policy(
+            "bedrock",
+            "amazon.nova-pro-v1:0",
+            base_url=endpoint,
+            fallback_provider_id="bedrock",
+        )
 def test_invalid_timeout_values_return_none(monkeypatch, tmp_path):
     monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
     _write_config(
@@ -104,12 +166,24 @@ def test_invalid_timeout_values_return_none(monkeypatch, tmp_path):
                 timeout_seconds: -5
           ollama-local:
             request_timeout_seconds: -1
+          nan-provider:
+            request_timeout_seconds: .nan
+          inf-provider:
+            request_timeout_seconds: .inf
+          true-provider:
+            request_timeout_seconds: true
+          false-provider:
+            request_timeout_seconds: false
         """,
     )
 
     assert get_provider_request_timeout("anthropic", "claude-opus-4.6") is None
     assert get_provider_request_timeout("anthropic", "claude-sonnet-4.5") is None
     assert get_provider_request_timeout("ollama-local") is None
+    assert get_provider_request_timeout("nan-provider") is None
+    assert get_provider_request_timeout("inf-provider") is None
+    assert get_provider_request_timeout("true-provider") is None
+    assert get_provider_request_timeout("false-provider") is None
 
 
 def test_invalid_stale_timeout_values_return_none(monkeypatch, tmp_path):
@@ -123,17 +197,27 @@ def test_invalid_stale_timeout_values_return_none(monkeypatch, tmp_path):
             models:
               gpt-5.4:
                 stale_timeout_seconds: -1
+              gpt-5.5:
+                stale_timeout_seconds: .nan
+              gpt-5.6:
+                stale_timeout_seconds: .inf
+              gpt-5.7:
+                stale_timeout_seconds: true
+              gpt-5.8:
+                stale_timeout_seconds: false
         """,
     )
 
     assert get_provider_stale_timeout("openai-codex", "gpt-5.4") is None
     assert get_provider_stale_timeout("openai-codex", "gpt-5.5") is None
+    assert get_provider_stale_timeout("openai-codex", "gpt-5.6") is None
+    assert get_provider_stale_timeout("openai-codex", "gpt-5.7") is None
+    assert get_provider_stale_timeout("openai-codex", "gpt-5.8") is None
 
 
 def test_anthropic_adapter_honors_timeout_kwarg():
     """build_anthropic_client(timeout=X) overrides the 900s default read timeout."""
-    pytest = __import__("pytest")
-    anthropic = pytest.importorskip("anthropic")  # skip if optional SDK missing
+    pytest.importorskip("anthropic")  # skip if optional SDK missing
     from agent.anthropic_adapter import build_anthropic_client
 
     c_default = build_anthropic_client("sk-ant-dummy", None)

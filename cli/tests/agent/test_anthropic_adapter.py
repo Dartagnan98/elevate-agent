@@ -1479,11 +1479,17 @@ class TestNormalizeResponse:
 
     def test_stop_reason_mapping(self):
         block = SimpleNamespace(type="text", text="x")
+        tool_block = SimpleNamespace(
+            type="tool_use",
+            id="tc-map",
+            name="search",
+            input={"query": "mapping"},
+        )
         nr1 = get_transport("anthropic_messages").normalize_response(
             self._make_response([block], "end_turn")
         )
         nr2 = get_transport("anthropic_messages").normalize_response(
-            self._make_response([block], "tool_use")
+            self._make_response([tool_block], "tool_use")
         )
         nr3 = get_transport("anthropic_messages").normalize_response(
             self._make_response([block], "max_tokens")

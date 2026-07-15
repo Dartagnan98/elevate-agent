@@ -203,6 +203,196 @@ class TestRuntimeProvider:
         assert result["provider"] == "bedrock"
         assert result["api_mode"] == "bedrock_converse"
 
+    def test_target_nova_overrides_configured_claude_transport(self):
+        """A mid-session Claude -> Nova switch must select Converse."""
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        with patch("elevate_cli.runtime_provider.resolve_provider", return_value="bedrock"), \
+             patch(
+                 "elevate_cli.runtime_provider._get_model_config",
+                 return_value={
+                     "provider": "bedrock",
+                     "default": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                 },
+             ), \
+             patch("elevate_cli.runtime_provider.load_config", return_value={"bedrock": {}}):
+            result = resolve_runtime_provider(
+                requested="bedrock",
+                target_model="amazon.nova-pro-v1:0",
+            )
+
+        assert result["api_mode"] == "bedrock_converse"
+        assert "bedrock_anthropic" not in result
+        assert result["model"] == "amazon.nova-pro-v1:0"
+
+    def test_target_claude_overrides_configured_nova_transport(self):
+        """A mid-session Nova -> Claude switch must select AnthropicBedrock."""
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        with patch("elevate_cli.runtime_provider.resolve_provider", return_value="bedrock"), \
+             patch(
+                 "elevate_cli.runtime_provider._get_model_config",
+                 return_value={
+                     "provider": "bedrock",
+                     "default": "amazon.nova-pro-v1:0",
+                 },
+             ), \
+             patch("elevate_cli.runtime_provider.load_config", return_value={"bedrock": {}}):
+            result = resolve_runtime_provider(
+                requested="bedrock",
+                target_model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            )
+
+        assert result["api_mode"] == "anthropic_messages"
+        assert result["bedrock_anthropic"] is True
+        assert result["model"] == (
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        )
+
+    def test_fips_runtime_url_selects_bedrock_converse(self):
+        """AWS Bedrock FIPS endpoints use the same native Converse transport."""
+        from elevate_cli.runtime_provider import _detect_api_mode_for_url
+
+        assert _detect_api_mode_for_url(
+            "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+        ) == "bedrock_converse"
+        assert _detect_api_mode_for_url(
+            "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com.evil.test"
+        ) is None
+
+    def test_bare_custom_bedrock_url_resolves_native_runtime_and_policy(self):
+        """A trusted Bedrock URL must not fall into generic custom routing."""
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        config = {
+            "bedrock": {
+                "region": "eu-west-1",
+                "guardrail": {
+                    "guardrail_identifier": "gr-custom",
+                    "guardrail_version": "3",
+                },
+            }
+        }
+        with patch(
+            "elevate_cli.runtime_provider.resolve_provider",
+            return_value="bedrock",
+        ), patch(
+            "elevate_cli.runtime_provider._get_model_config",
+            return_value={"provider": "custom", "default": "amazon.nova-lite-v1:0"},
+        ), patch(
+            "elevate_cli.runtime_provider.load_config",
+            return_value=config,
+        ):
+            result = resolve_runtime_provider(
+                requested="custom",
+                explicit_base_url=(
+                    "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+                ),
+                target_model=(
+                    "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                ),
+            )
+
+        assert result["provider"] == "bedrock"
+        assert result["api_mode"] == "anthropic_messages"
+        assert result["api_key"] == "aws-sdk"
+        assert result["region"] == "us-gov-west-1"
+        assert result["base_url"] == (
+            "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+        )
+        assert result["guardrail_config"] == {
+            "guardrailIdentifier": "gr-custom",
+            "guardrailVersion": "3",
+        }
+
+    @pytest.mark.parametrize(
+        ("config", "error"),
+        [
+            ({"bedrock": []}, "Bedrock configuration must be a mapping"),
+            (
+                {"bedrock": {"guardrail": ""}},
+                "Bedrock guardrail configuration must be a mapping",
+            ),
+            (
+                {
+                    "bedrock": {
+                        "guardrail": {"guardrail_identifier": "gr-partial"}
+                    }
+                },
+                "requires both an identifier and version",
+            ),
+            (
+                {
+                    "bedrock": {
+                        "guardrail": {
+                            "guardrail_identifier": "gr-a",
+                            "guardrailIdentifier": "gr-b",
+                            "guardrail_version": "1",
+                        }
+                    }
+                },
+                "Conflicting Bedrock guardrail configuration values",
+            ),
+            (
+                {
+                    "bedrock": {
+                        "guardrail": {
+                            "guardrail_identifier": "gr-a",
+                            "guardrail_version": "1",
+                            "unknown_policy": True,
+                        }
+                    }
+                },
+                "Unsupported Bedrock guardrail configuration fields",
+            ),
+            (
+                {
+                    "bedrock": {
+                        "guardrail": {
+                            "guardrail_identifier": "gr-a",
+                            "guardrail_version": "1",
+                            "trace": "verbose",
+                        }
+                    }
+                },
+                "Bedrock guardrail trace",
+            ),
+            (
+                {
+                    "bedrock": {
+                        "guardrail": {
+                            "guardrail_identifier": "gr-a",
+                            "guardrail_version": "1",
+                            "streamProcessingMode": "eventual",
+                        }
+                    }
+                },
+                "Bedrock guardrail streamProcessingMode",
+            ),
+        ],
+    )
+    def test_bedrock_runtime_policy_malformed_values_fail_closed(
+        self,
+        config,
+        error,
+    ):
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        with patch(
+            "elevate_cli.runtime_provider.resolve_provider",
+            return_value="bedrock",
+        ), patch(
+            "elevate_cli.runtime_provider._get_model_config",
+            return_value={
+                "provider": "bedrock",
+                "default": "amazon.nova-lite-v1:0",
+            },
+        ), patch(
+            "elevate_cli.runtime_provider.load_config",
+            return_value=config,
+        ), pytest.raises(ValueError, match=error):
+            resolve_runtime_provider(requested="bedrock")
+
 
 # ---------------------------------------------------------------------------
 # providers.py integration
@@ -588,3 +778,329 @@ class TestAuxiliaryClientBedrockResolution:
             _, model = resolve_provider_client("bedrock", None)
 
         assert "haiku" in model.lower()
+
+
+class TestBedrockRuntimeClientPolicy:
+    """AWS clients must receive exact endpoint and timeout policy."""
+
+    def test_fips_endpoint_is_passed_to_boto_and_cache_isolated(self):
+        from agent import bedrock_adapter
+
+        fips_client = MagicMock(name="fips")
+        standard_client = MagicMock(name="standard")
+        boto3 = MagicMock()
+        boto3.client.side_effect = [fips_client, standard_client]
+        bedrock_adapter.reset_client_cache()
+
+        with patch.object(bedrock_adapter, "_require_boto3", return_value=boto3):
+            first = bedrock_adapter._get_bedrock_runtime_client(
+                "us-gov-west-1",
+                endpoint_url=(
+                    "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+                ),
+            )
+            repeated = bedrock_adapter._get_bedrock_runtime_client(
+                "us-gov-west-1",
+                endpoint_url=(
+                    "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/"
+                ),
+            )
+            standard = bedrock_adapter._get_bedrock_runtime_client(
+                "us-gov-west-1"
+            )
+
+        assert first is repeated is fips_client
+        assert standard is standard_client
+        assert boto3.client.call_args_list[0].kwargs == {
+            "region_name": "us-gov-west-1",
+            "endpoint_url": (
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+            ),
+        }
+        assert boto3.client.call_args_list[1].kwargs == {
+            "region_name": "us-gov-west-1"
+        }
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://bedrock-runtime.us-east-1.amazonaws.com",
+            "https://user@bedrock-runtime.us-east-1.amazonaws.com",
+            "https://bedrock-runtime.us-east-1.amazonaws.com:443",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/v1",
+            "https://bedrock-runtime.us-east-1.amazonaws.com?x=1",
+            "https://bedrock-runtime.us-east-1.amazonaws.com.evil.test",
+        ],
+    )
+    def test_untrusted_endpoint_shapes_fail_closed(self, endpoint):
+        from agent.bedrock_adapter import normalize_bedrock_runtime_endpoint
+
+        with pytest.raises(ValueError, match="exact HTTPS AWS Runtime origin"):
+            normalize_bedrock_runtime_endpoint(endpoint, "us-east-1")
+
+    def test_endpoint_region_mismatch_fails_closed(self):
+        from agent.bedrock_adapter import normalize_bedrock_runtime_endpoint
+
+        with pytest.raises(ValueError, match="region does not match"):
+            normalize_bedrock_runtime_endpoint(
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+                "us-gov-east-1",
+            )
+
+    def test_timeout_and_endpoint_are_exact_invalidation_identity(self):
+        from agent import bedrock_adapter
+
+        endpoint = "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+        client = MagicMock()
+        boto3 = MagicMock()
+        boto3.client.return_value = client
+        bedrock_adapter.reset_client_cache()
+        with patch.object(bedrock_adapter, "_require_boto3", return_value=boto3):
+            bedrock_adapter._get_bedrock_runtime_client(
+                "us-gov-west-1",
+                timeout=0.25,
+                endpoint_url=endpoint,
+            )
+
+        assert bedrock_adapter.invalidate_runtime_client(
+            "us-gov-west-1",
+            timeout=0.25,
+            endpoint_url=endpoint,
+            expected_client=client,
+        ) is True
+        assert bedrock_adapter.invalidate_runtime_client(
+            "us-gov-west-1",
+            timeout=0.25,
+            endpoint_url=endpoint,
+            expected_client=client,
+        ) is False
+
+
+class TestBedrockBinaryImageConversion:
+    def test_image_data_url_decodes_to_raw_bytes(self):
+        from agent.bedrock_adapter import _convert_content_to_converse
+
+        blocks = _convert_content_to_converse(
+            [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw=="},
+                }
+            ]
+        )
+
+        assert blocks == [
+            {
+                "image": {
+                    "format": "png",
+                    "source": {"bytes": b"\x89PNG"},
+                }
+            }
+        ]
+
+    def test_invalid_image_base64_fails_closed(self):
+        from agent.bedrock_adapter import _convert_content_to_converse
+
+        with pytest.raises(ValueError, match="invalid base64"):
+            _convert_content_to_converse(
+                [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,not-valid***"
+                        },
+                    }
+                ]
+            )
+
+    def test_every_stream_event_emits_activity_callback(self):
+        from agent.bedrock_adapter import stream_converse_with_callbacks
+
+        on_event = MagicMock()
+        response = stream_converse_with_callbacks(
+            {
+                "stream": [
+                    {"messageStart": {"role": "assistant"}},
+                    {"metadata": {"usage": {"inputTokens": 1}}},
+                    {"messageStop": {"stopReason": "end_turn"}},
+                ]
+            },
+            on_event=on_event,
+        )
+
+        assert on_event.call_count == 3
+        assert response.choices[0].finish_reason == "stop"
+
+
+class TestAnthropicBedrockClientPolicy:
+    def test_fips_and_timeout_reach_anthropic_bedrock_sdk(self):
+        from agent import anthropic_adapter
+
+        sdk = MagicMock()
+        with patch.object(anthropic_adapter, "_get_anthropic_sdk", return_value=sdk):
+            anthropic_adapter.build_anthropic_bedrock_client(
+                "us-gov-west-1",
+                base_url=(
+                    "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+                ),
+                timeout=0.25,
+            )
+
+        kwargs = sdk.AnthropicBedrock.call_args.kwargs
+        assert kwargs["aws_region"] == "us-gov-west-1"
+        assert kwargs["base_url"] == (
+            "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+        )
+        assert kwargs["timeout"].read == 0.25
+        assert kwargs["timeout"].connect == 0.25
+
+
+class TestBedrockTransportPolicySentinels:
+    def test_transport_preserves_endpoint_and_timeout_for_dispatch(self):
+        from agent.transports.bedrock import BedrockTransport
+
+        kwargs = BedrockTransport().build_kwargs(
+            model="amazon.nova-lite-v1:0",
+            messages=[{"role": "user", "content": "hi"}],
+            region="us-gov-west-1",
+            endpoint_url=(
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+            ),
+            request_timeout=0.25,
+        )
+
+        assert kwargs["__bedrock_endpoint_url__"].startswith(
+            "https://bedrock-runtime-fips."
+        )
+        assert kwargs["__bedrock_timeout__"] == 0.25
+
+
+class TestBedrockRuntimeEndpointIngress:
+    FIPS = "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+
+    def test_env_fips_overrides_onboarding_standard_model_url(self, monkeypatch):
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        config = {
+            "model": {
+                "provider": "bedrock",
+                "default": "amazon.nova-lite-v1:0",
+                "base_url": (
+                    "https://bedrock-runtime.us-east-1.amazonaws.com"
+                ),
+            },
+            "bedrock": {"region": "us-east-1"},
+        }
+        monkeypatch.setenv("BEDROCK_BASE_URL", self.FIPS)
+        with (
+            patch(
+                "elevate_cli.runtime_provider.resolve_provider",
+                return_value="bedrock",
+            ),
+            patch(
+                "elevate_cli.runtime_provider._get_model_config",
+                return_value=config["model"],
+            ),
+            patch(
+                "elevate_cli.runtime_provider.load_config",
+                return_value=config,
+            ),
+        ):
+            runtime = resolve_runtime_provider(
+                requested="bedrock",
+                target_model="amazon.nova-lite-v1:0",
+            )
+
+        assert runtime["base_url"] == self.FIPS
+        assert runtime["region"] == "us-gov-west-1"
+        assert runtime["api_mode"] == "bedrock_converse"
+
+    def test_named_custom_fips_resolves_native_before_custom_pool(self):
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        config = {
+            "model": {"default": "amazon.nova-lite-v1:0"},
+            "bedrock": {"region": "us-east-1"},
+            "providers": {
+                "gov-bedrock": {
+                    "base_url": self.FIPS,
+                    "default_model": "amazon.nova-lite-v1:0",
+                    "request_timeout_seconds": 0.25,
+                    "stale_timeout_seconds": 0.5,
+                }
+            },
+        }
+        with (
+            patch(
+                "elevate_cli.runtime_provider.resolve_provider",
+                return_value="bedrock",
+            ),
+            patch(
+                "elevate_cli.runtime_provider._get_model_config",
+                return_value=config["model"],
+            ),
+            patch(
+                "elevate_cli.runtime_provider.load_config",
+                return_value=config,
+            ),
+            patch(
+                "elevate_cli.runtime_provider._try_resolve_from_custom_pool"
+            ) as custom_pool,
+        ):
+            runtime = resolve_runtime_provider(
+                requested="custom:gov-bedrock",
+            )
+
+        custom_pool.assert_not_called()
+        assert runtime["provider"] == "bedrock"
+        assert runtime["base_url"] == self.FIPS
+        assert runtime["region"] == "us-gov-west-1"
+        assert runtime["bedrock_timeout_provider"] == "gov-bedrock"
+        assert runtime["model"] == "amazon.nova-lite-v1:0"
+        assert runtime["request_timeout_seconds"] == 0.25
+        assert runtime["request_timeout_provider"] == "gov-bedrock"
+        assert runtime["stale_timeout_seconds"] == 0.5
+        assert runtime["stale_timeout_provider"] == "gov-bedrock"
+
+    def test_alias_to_custom_config_fips_resolves_native(self):
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        config = {
+            "model": {
+                "provider": "ollama",
+                "default": "amazon.nova-lite-v1:0",
+                "base_url": self.FIPS,
+            },
+            "bedrock": {},
+        }
+        with (
+            patch(
+                "elevate_cli.runtime_provider.resolve_provider",
+                return_value="bedrock",
+            ),
+            patch(
+                "elevate_cli.runtime_provider._get_model_config",
+                return_value=config["model"],
+            ),
+            patch(
+                "elevate_cli.runtime_provider.load_config",
+                return_value=config,
+            ),
+        ):
+            runtime = resolve_runtime_provider(requested="ollama")
+
+        assert runtime["provider"] == "bedrock"
+        assert runtime["base_url"] == self.FIPS
+
+    def test_provider_mode_detector_accepts_fips_but_not_untrusted_shapes(self):
+        from elevate_cli.providers import determine_api_mode
+
+        assert determine_api_mode("custom", self.FIPS) == "bedrock_converse"
+        assert determine_api_mode(
+            "custom",
+            f"{self.FIPS}/v1",
+        ) == "chat_completions"
+        assert determine_api_mode(
+            "custom",
+            self.FIPS.replace("https://", "http://"),
+        ) == "chat_completions"

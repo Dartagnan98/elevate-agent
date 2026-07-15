@@ -27,12 +27,17 @@ the same Converse API integration in TypeScript via ``@aws-sdk/client-bedrock``.
 Requires: ``boto3`` (optional dependency — only needed when using the Bedrock provider).
 """
 
+import base64
+import binascii
 import json
 import logging
+import math
 import os
 import re
+import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +59,9 @@ except Exception:
 # This keeps startup fast for users who don't use Bedrock.
 # ---------------------------------------------------------------------------
 
-_bedrock_runtime_client_cache: Dict[str, Any] = {}
+_bedrock_runtime_client_cache: Dict[Any, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
+_bedrock_runtime_client_cache_lock = threading.Lock()
 
 
 def _require_boto3():
@@ -71,17 +77,148 @@ def _require_boto3():
         )
 
 
-def _get_bedrock_runtime_client(region: str):
-    """Get or create a cached ``bedrock-runtime`` client for the given region.
+def _normalize_runtime_timeout(timeout: Optional[float]) -> Optional[float]:
+    """Normalize one botocore connect/read timeout policy."""
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool):
+        raise ValueError("Bedrock timeout must be a positive number")
+    try:
+        normalized = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Bedrock timeout must be a positive number") from exc
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError("Bedrock timeout must be a positive number")
+    return normalized
+
+
+_BEDROCK_RUNTIME_ENDPOINT_RE = re.compile(
+    r"^bedrock-runtime(?:-fips)?\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?$"
+)
+
+
+def normalize_bedrock_runtime_endpoint(endpoint_url: Any, region: str) -> str:
+    """Validate and canonicalize an explicit AWS Bedrock Runtime endpoint.
+
+    Bedrock clients use the default AWS credential chain.  Passing an arbitrary
+    ``endpoint_url`` would therefore be a credential-exfiltration primitive, so
+    only exact HTTPS AWS Runtime origins are accepted and the hostname's region
+    must agree with the client region.
+    """
+    raw_endpoint = str(endpoint_url or "").strip()
+    normalized_region = str(region or "").strip()
+    if not raw_endpoint:
+        raise ValueError("Bedrock endpoint URL cannot be empty")
+    if not normalized_region:
+        raise ValueError("Bedrock endpoint region cannot be empty")
+
+    try:
+        parsed = urlsplit(raw_endpoint)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Bedrock endpoint URL is malformed") from exc
+    hostname = (parsed.hostname or "").lower()
+    match = _BEDROCK_RUNTIME_ENDPOINT_RE.fullmatch(hostname)
+    if (
+        parsed.scheme.lower() != "https"
+        or not match
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "Bedrock endpoint URL must be an exact HTTPS AWS Runtime origin"
+        )
+    if match.group(1) != normalized_region:
+        raise ValueError(
+            "Bedrock endpoint region does not match the configured AWS region"
+        )
+    return f"https://{hostname}"
+
+
+def _runtime_client_cache_key(
+    region: str,
+    timeout: Optional[float],
+    endpoint_url: Optional[str] = None,
+) -> Any:
+    """Key clients by exact region, timeout, and explicit endpoint policy."""
+    normalized_timeout = _normalize_runtime_timeout(timeout)
+    normalized_endpoint = (
+        normalize_bedrock_runtime_endpoint(endpoint_url, region)
+        if endpoint_url
+        else None
+    )
+    if normalized_timeout is None and normalized_endpoint is None:
+        return region
+    if normalized_endpoint is None:
+        return (region, normalized_timeout)
+    return (region, normalized_timeout, normalized_endpoint)
+
+
+def _create_bedrock_runtime_client(
+    region: str,
+    timeout: Optional[float] = None,
+    endpoint_url: Optional[str] = None,
+):
+    """Create one validated ``bedrock-runtime`` client."""
+    boto3 = _require_boto3()
+    client_kwargs: Dict[str, Any] = {"region_name": region}
+    normalized_timeout = _normalize_runtime_timeout(timeout)
+    normalized_endpoint = (
+        normalize_bedrock_runtime_endpoint(endpoint_url, region)
+        if endpoint_url
+        else None
+    )
+    if normalized_endpoint is not None:
+        client_kwargs["endpoint_url"] = normalized_endpoint
+    if normalized_timeout is not None:
+        from botocore.config import Config
+
+        client_kwargs["config"] = Config(
+            connect_timeout=normalized_timeout,
+            read_timeout=normalized_timeout,
+            retries={"total_max_attempts": 1},
+        )
+    return boto3.client("bedrock-runtime", **client_kwargs)
+
+
+def _get_bedrock_runtime_client(
+    region: str,
+    timeout: Optional[float] = None,
+    endpoint_url: Optional[str] = None,
+    *,
+    exclusive: bool = False,
+):
+    """Get or create a ``bedrock-runtime`` client for the given policy.
 
     Uses the default AWS credential chain (env vars → profile → instance role).
+    Clients are cached by exact region, timeout, and explicit endpoint policy.
+    Timeout-bearing clients disable botocore retries so configured deadlines
+    remain bounded.  Explicit endpoints are restricted to trusted AWS Runtime
+    origins before boto3 can receive credentials.  Main turn calls request an
+    exclusive client so timeout/interrupt cancellation cannot close a client
+    concurrently used by another session; auxiliary calls retain caching.
     """
-    if region not in _bedrock_runtime_client_cache:
-        boto3 = _require_boto3()
-        _bedrock_runtime_client_cache[region] = boto3.client(
-            "bedrock-runtime", region_name=region,
+    if exclusive:
+        return _create_bedrock_runtime_client(
+            region,
+            timeout=timeout,
+            endpoint_url=endpoint_url,
         )
-    return _bedrock_runtime_client_cache[region]
+    cache_key = _runtime_client_cache_key(region, timeout, endpoint_url)
+    with _bedrock_runtime_client_cache_lock:
+        if cache_key not in _bedrock_runtime_client_cache:
+            _bedrock_runtime_client_cache[cache_key] = (
+                _create_bedrock_runtime_client(
+                    region,
+                    timeout=timeout,
+                    endpoint_url=endpoint_url,
+                )
+            )
+        return _bedrock_runtime_client_cache[cache_key]
 
 
 def _get_bedrock_control_client(region: str):
@@ -96,24 +233,189 @@ def _get_bedrock_control_client(region: str):
 
 def reset_client_cache():
     """Clear cached boto3 clients. Used in tests and profile switches."""
-    _bedrock_runtime_client_cache.clear()
+    with _bedrock_runtime_client_cache_lock:
+        _bedrock_runtime_client_cache.clear()
     _bedrock_control_client_cache.clear()
 
 
-def invalidate_runtime_client(region: str) -> bool:
+def invalidate_runtime_client(
+    region: str,
+    timeout: Optional[float] = None,
+    *,
+    endpoint_url: Optional[str] = None,
+    expected_client: Any = None,
+) -> bool:
     """Evict the cached ``bedrock-runtime`` client for a single region.
 
-    Per-region counterpart to :func:`reset_client_cache`. Used by the converse
-    call wrappers to discard clients whose underlying HTTP connection has
-    gone stale, so the next call allocates a fresh client (with a fresh
-    connection pool) instead of reusing a dead socket.
+    With ``timeout`` or an explicit endpoint, only the exact policy is removed.
+    With neither, every policy for the region is removed for legacy callers.
+    When ``expected_client`` is supplied, eviction is compare-and-pop:
+    a late failure from an old request cannot evict a fresh replacement that
+    another request already installed under the same cache key.
 
-    Returns True if a cached entry was evicted, False if the region was not
-    cached.
+    Returns True if at least one cached entry was evicted.
     """
-    existed = region in _bedrock_runtime_client_cache
-    _bedrock_runtime_client_cache.pop(region, None)
-    return existed
+    if timeout is not None or endpoint_url:
+        key = _runtime_client_cache_key(region, timeout, endpoint_url)
+        with _bedrock_runtime_client_cache_lock:
+            current = _bedrock_runtime_client_cache.get(key)
+            if current is None:
+                return False
+            if expected_client is not None and current is not expected_client:
+                return False
+            _bedrock_runtime_client_cache.pop(key, None)
+            return True
+
+    with _bedrock_runtime_client_cache_lock:
+        stale_keys = [
+            key
+            for key, cached_client in _bedrock_runtime_client_cache.items()
+            if key == region or (isinstance(key, tuple) and key and key[0] == region)
+            if expected_client is None or cached_client is expected_client
+        ]
+        for key in stale_keys:
+            _bedrock_runtime_client_cache.pop(key, None)
+        return bool(stale_keys)
+
+
+_GUARDRAIL_TRACE_VALUES = {"enabled", "disabled", "enabled_full"}
+_GUARDRAIL_STREAM_MODES = {"sync", "async"}
+_BEDROCK_GUARDRAIL_FIELDS = {
+    "guardrail_identifier",
+    "guardrailIdentifier",
+    "guardrail_version",
+    "guardrailVersion",
+    "stream_processing_mode",
+    "streamProcessingMode",
+    "trace",
+}
+
+
+def _guardrail_alias_value(
+    value: Dict[str, Any],
+    snake_name: str,
+    camel_name: str,
+) -> str:
+    """Read one snake/camel alias and reject conflicting policy values."""
+    candidates = {
+        str(value.get(name) or "").strip()
+        for name in (snake_name, camel_name)
+        if name in value and str(value.get(name) or "").strip()
+    }
+    if len(candidates) > 1:
+        raise ValueError(
+            "Conflicting Bedrock guardrail configuration values for "
+            f"{snake_name} and {camel_name}"
+        )
+    return next(iter(candidates), "")
+
+
+def normalize_bedrock_guardrail_config(
+    value: Any,
+    *,
+    allow_disabled_options: bool = False,
+) -> Optional[Dict[str, str]]:
+    """Normalize one strict guardrail policy for every Bedrock surface.
+
+    Both config-file snake_case and AWS SDK camelCase spellings are accepted.
+    Unknown fields, conflicting aliases, partial identity, and invalid option
+    values fail closed instead of silently weakening the configured policy.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Bedrock guardrail configuration must be a mapping")
+    if not value:
+        return None
+    unknown_fields = set(value) - _BEDROCK_GUARDRAIL_FIELDS
+    if unknown_fields:
+        raise ValueError(
+            "Unsupported Bedrock guardrail configuration fields: "
+            + ", ".join(sorted(str(field) for field in unknown_fields))
+        )
+
+    identifier = _guardrail_alias_value(
+        value, "guardrail_identifier", "guardrailIdentifier"
+    )
+    version = _guardrail_alias_value(
+        value, "guardrail_version", "guardrailVersion"
+    )
+    if not identifier and not version:
+        if allow_disabled_options:
+            disabled_policy = True
+        else:
+            raise ValueError(
+                "Bedrock guardrail configuration requires both an identifier and version"
+            )
+    else:
+        disabled_policy = False
+    if bool(identifier) != bool(version):
+        raise ValueError(
+            "Bedrock guardrail configuration requires both an identifier and version"
+        )
+
+    normalized: Dict[str, str] = {
+        "guardrailIdentifier": identifier,
+        "guardrailVersion": version,
+    }
+    stream_mode = _guardrail_alias_value(
+        value, "stream_processing_mode", "streamProcessingMode"
+    ).lower()
+    if stream_mode:
+        if stream_mode not in _GUARDRAIL_STREAM_MODES:
+            raise ValueError(
+                "Bedrock guardrail streamProcessingMode must be 'sync' or 'async'"
+            )
+        normalized["streamProcessingMode"] = stream_mode
+    trace = str(value.get("trace") or "").strip().lower()
+    if trace:
+        if trace not in _GUARDRAIL_TRACE_VALUES:
+            raise ValueError(
+                "Bedrock guardrail trace must be enabled, disabled, or enabled_full"
+            )
+        normalized["trace"] = trace
+    return None if disabled_policy else normalized
+
+
+def prepare_converse_guardrail_config(
+    guardrail_config: Optional[Dict[str, Any]],
+    *,
+    streaming: bool,
+) -> Optional[Dict[str, str]]:
+    """Validate guardrail policy and shape it for Converse or ConverseStream.
+
+    ``streamProcessingMode`` exists only on ConverseStream's input shape.
+    Keeping it on a non-streaming ``client.converse`` request causes local
+    botocore parameter validation to fail before Bedrock can enforce the
+    guardrail, so non-streaming callers deliberately omit that stream-only
+    field while retaining identifier, version, and trace.
+    """
+    normalized = normalize_bedrock_guardrail_config(guardrail_config)
+    if normalized is None:
+        return None
+    if not streaming:
+        normalized.pop("streamProcessingMode", None)
+    return normalized
+
+
+def build_invoke_model_guardrail_headers(
+    guardrail_config: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Translate a Bedrock guardrail policy to InvokeModel request headers."""
+    normalized = prepare_converse_guardrail_config(
+        guardrail_config,
+        streaming=False,
+    )
+    if not normalized:
+        return {}
+    headers = {
+        "X-Amzn-Bedrock-GuardrailIdentifier": normalized["guardrailIdentifier"],
+        "X-Amzn-Bedrock-GuardrailVersion": normalized["guardrailVersion"],
+    }
+    if normalized.get("trace"):
+        # InvokeModel uses the uppercase enum; Converse uses lowercase.
+        headers["X-Amzn-Bedrock-Trace"] = normalized["trace"].upper()
+    return headers
 
 
 # ---------------------------------------------------------------------------
@@ -393,10 +695,29 @@ def is_anthropic_bedrock_model(model_id: str) -> bool:
       - ``us.anthropic.claude-*`` (US inference profiles)
       - ``global.anthropic.claude-*`` (global inference profiles)
       - ``eu.anthropic.claude-*`` (EU inference profiles)
+      - ``apac.anthropic.claude-*`` (Asia Pacific inference profiles)
+      - Recognizable ``foundation-model/`` and ``inference-profile/`` ARNs
+
+    Application inference-profile ARNs contain an opaque profile ID rather
+    than the underlying foundation model.  They intentionally return False
+    and use Converse, which is the only protocol we can select truthfully
+    without a control-plane lookup.
     """
-    model_lower = model_id.lower()
+    model_lower = str(model_id or "").strip().lower()
+    if model_lower.startswith("arn:"):
+        arn_parts = model_lower.split(":", 5)
+        if len(arn_parts) != 6:
+            return False
+        resource = arn_parts[5]
+        for resource_prefix in ("foundation-model/", "inference-profile/"):
+            if resource.startswith(resource_prefix):
+                model_lower = resource[len(resource_prefix):]
+                break
+        else:
+            return False
+
     # Strip regional prefix if present
-    for prefix in ("us.", "global.", "eu.", "ap.", "jp."):
+    for prefix in ("us.", "global.", "eu.", "ap.", "apac.", "jp."):
         if model_lower.startswith(prefix):
             model_lower = model_lower[len(prefix):]
             break
@@ -438,6 +759,22 @@ def convert_tools_to_converse(tools: List[Dict]) -> List[Dict]:
     return result
 
 
+def _decode_image_data_url(url: str) -> bytes:
+    """Decode one base64 image data URL to the raw bytes botocore expects."""
+    header, separator, encoded = str(url or "").partition(",")
+    header_lower = header.lower()
+    if (
+        not separator
+        or not header_lower.startswith("data:image/")
+        or ";base64" not in header_lower
+    ):
+        raise ValueError("Bedrock image input must be a base64 image data URL")
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Bedrock image data URL contains invalid base64") from exc
+
+
 def _convert_content_to_converse(content) -> List[Dict]:
     """Convert OpenAI message content (string or list) to Converse content blocks.
 
@@ -476,10 +813,21 @@ def _convert_content_to_converse(content) -> List[Dict]:
                         mime_part = header[5:].split(";")[0]
                         if mime_part:
                             media_type = mime_part
+                    image_format = (
+                        media_type.split("/")[-1]
+                        if "/" in media_type
+                        else "jpeg"
+                    ).lower()
+                    if image_format == "jpg":
+                        image_format = "jpeg"
+                    if image_format not in {"jpeg", "png", "gif", "webp"}:
+                        raise ValueError(
+                            f"Unsupported Bedrock image format: {image_format!r}"
+                        )
                     blocks.append({
                         "image": {
-                            "format": media_type.split("/")[-1] if "/" in media_type else "jpeg",
-                            "source": {"bytes": data},
+                            "format": image_format,
+                            "source": {"bytes": _decode_image_data_url(url)},
                         }
                     })
                 else:
@@ -751,6 +1099,7 @@ def stream_converse_with_callbacks(
     on_text_delta=None,
     on_tool_start=None,
     on_reasoning_delta=None,
+    on_event=None,
     on_interrupt_check=None,
 ) -> SimpleNamespace:
     """Process a Bedrock ConverseStream event stream with real-time callbacks.
@@ -769,6 +1118,9 @@ def stream_converse_with_callbacks(
         on_reasoning_delta: Called with reasoning/thinking text chunks.
             Bedrock surfaces thinking via ``reasoning`` content block deltas
             on supported models (Claude 4.6+).
+        on_event: Called for every provider event, including messageStart,
+            metadata, and non-content keep-alive/progress events.  This is the
+            authoritative activity signal for stale-stream detection.
         on_interrupt_check: Called on each event. Should return True if the
             agent has been interrupted and streaming should stop.
 
@@ -790,6 +1142,8 @@ def stream_converse_with_callbacks(
     invalid_event_order = False
 
     for event in event_stream.get("stream", []):
+        if on_event:
+            on_event(event)
         # Check for interrupt
         if on_interrupt_check and on_interrupt_check():
             break
@@ -937,6 +1291,8 @@ def build_converse_kwargs(
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
+    tool_choice: Any = None,
+    parallel_tool_calls: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Build kwargs for ``bedrock-runtime.converse()`` or ``converse_stream()``.
 
@@ -964,7 +1320,41 @@ def build_converse_kwargs(
     if stop_sequences:
         kwargs["inferenceConfig"]["stopSequences"] = stop_sequences
 
-    if tools:
+    if parallel_tool_calls is not None and not isinstance(parallel_tool_calls, bool):
+        raise ValueError("Bedrock parallel_tool_calls must be a boolean")
+
+    normalized_tool_choice: Optional[str] = None
+    selected_tool_name: Optional[str] = None
+    if tool_choice is None:
+        normalized_tool_choice = None
+    elif isinstance(tool_choice, str):
+        choice_text = tool_choice.strip()
+        if choice_text in {"auto", "required", "none"}:
+            normalized_tool_choice = choice_text
+        elif choice_text:
+            normalized_tool_choice = "function"
+            selected_tool_name = choice_text
+        else:
+            raise ValueError("Bedrock tool_choice cannot be empty")
+    elif isinstance(tool_choice, dict):
+        choice_type = str(tool_choice.get("type") or "").strip().lower()
+        if choice_type in {"auto", "required", "none"}:
+            normalized_tool_choice = choice_type
+        elif choice_type in {"function", "tool"}:
+            fn = tool_choice.get("function")
+            if isinstance(fn, dict):
+                selected_tool_name = str(fn.get("name") or "").strip()
+            if not selected_tool_name:
+                selected_tool_name = str(tool_choice.get("name") or "").strip()
+            if not selected_tool_name:
+                raise ValueError("Bedrock function tool_choice is missing a tool name")
+            normalized_tool_choice = "function"
+        else:
+            raise ValueError(f"Unsupported Bedrock tool_choice: {tool_choice!r}")
+    else:
+        raise ValueError(f"Unsupported Bedrock tool_choice: {tool_choice!r}")
+
+    if tools and normalized_tool_choice != "none":
         converse_tools = convert_tools_to_converse(tools)
         if converse_tools:
             # Some Bedrock models don't support tool/function calling (e.g.
@@ -974,11 +1364,38 @@ def build_converse_kwargs(
             # Ref: PR #7920 feedback from @ptlally, pattern from PR #4346.
             if _model_supports_tool_use(model):
                 kwargs["toolConfig"] = {"tools": converse_tools}
+                available_names = {
+                    item.get("toolSpec", {}).get("name")
+                    for item in converse_tools
+                    if isinstance(item, dict)
+                }
+                if normalized_tool_choice == "auto":
+                    kwargs["toolConfig"]["toolChoice"] = {"auto": {}}
+                elif normalized_tool_choice == "required":
+                    kwargs["toolConfig"]["toolChoice"] = {"any": {}}
+                elif normalized_tool_choice == "function":
+                    if selected_tool_name not in available_names:
+                        raise ValueError(
+                            f"Bedrock tool_choice selected unknown tool {selected_tool_name!r}"
+                        )
+                    kwargs["toolConfig"]["toolChoice"] = {
+                        "tool": {"name": selected_tool_name}
+                    }
+                if parallel_tool_calls is False:
+                    raise ValueError(
+                        "Bedrock Converse cannot guarantee parallel_tool_calls=False"
+                    )
             else:
+                if normalized_tool_choice in {"required", "function"}:
+                    raise ValueError(
+                        f"Bedrock model {model!r} cannot satisfy required tool_choice"
+                    )
                 logger.warning(
                     "Model %s does not support tool calling — tools stripped. "
                     "The agent will operate in text-only mode.", model
                 )
+    elif normalized_tool_choice in {"required", "function"}:
+        raise ValueError("Bedrock tool_choice requires at least one valid tool")
 
     if guardrail_config:
         kwargs["guardrailConfig"] = guardrail_config
@@ -996,12 +1413,22 @@ def call_converse(
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
+    timeout: Optional[float] = None,
+    endpoint_url: Optional[str] = None,
 ) -> SimpleNamespace:
     """Call Bedrock Converse API (non-streaming) and return an OpenAI-compatible response.
 
     This is the primary entry point for the agent loop when using the Bedrock provider.
     """
-    client = _get_bedrock_runtime_client(region)
+    client = _get_bedrock_runtime_client(
+        region,
+        timeout=timeout,
+        endpoint_url=endpoint_url,
+    )
+    non_stream_guardrail = prepare_converse_guardrail_config(
+        guardrail_config,
+        streaming=False,
+    )
     kwargs = build_converse_kwargs(
         model=model,
         messages=messages,
@@ -1010,7 +1437,7 @@ def call_converse(
         temperature=temperature,
         top_p=top_p,
         stop_sequences=stop_sequences,
-        guardrail_config=guardrail_config,
+        guardrail_config=non_stream_guardrail,
     )
 
     try:
@@ -1022,7 +1449,12 @@ def call_converse(
                 "%s — evicting cached client so the next call reconnects.",
                 region, model, type(exc).__name__,
             )
-            invalidate_runtime_client(region)
+            invalidate_runtime_client(
+                region,
+                timeout=timeout,
+                endpoint_url=endpoint_url,
+                expected_client=client,
+            )
         raise
     return normalize_converse_response(response)
 
@@ -1037,13 +1469,23 @@ def call_converse_stream(
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
+    timeout: Optional[float] = None,
+    endpoint_url: Optional[str] = None,
 ) -> SimpleNamespace:
     """Call Bedrock ConverseStream API and return an OpenAI-compatible response.
 
     Consumes the full stream and returns the assembled response. For true
     streaming with delta callbacks, use ``iter_converse_stream()`` instead.
     """
-    client = _get_bedrock_runtime_client(region)
+    client = _get_bedrock_runtime_client(
+        region,
+        timeout=timeout,
+        endpoint_url=endpoint_url,
+    )
+    stream_guardrail = prepare_converse_guardrail_config(
+        guardrail_config,
+        streaming=True,
+    )
     kwargs = build_converse_kwargs(
         model=model,
         messages=messages,
@@ -1052,11 +1494,16 @@ def call_converse_stream(
         temperature=temperature,
         top_p=top_p,
         stop_sequences=stop_sequences,
-        guardrail_config=guardrail_config,
+        guardrail_config=stream_guardrail,
     )
 
     try:
         response = client.converse_stream(**kwargs)
+        # Event-stream failures surface while iterating, often well after the
+        # HTTP request itself succeeded.  Keep normalization inside the same
+        # stale-client boundary so a mid-stream reset evicts the exact client
+        # that produced it and never becomes a partial successful response.
+        return normalize_converse_stream_events(response)
     except Exception as exc:
         if is_stale_connection_error(exc):
             logger.warning(
@@ -1064,9 +1511,13 @@ def call_converse_stream(
                 "model=%s): %s — evicting cached client so the next call reconnects.",
                 region, model, type(exc).__name__,
             )
-            invalidate_runtime_client(region)
+            invalidate_runtime_client(
+                region,
+                timeout=timeout,
+                endpoint_url=endpoint_url,
+                expected_client=client,
+            )
         raise
-    return normalize_converse_stream_events(response)
 
 
 # ---------------------------------------------------------------------------

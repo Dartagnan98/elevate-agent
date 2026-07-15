@@ -2619,11 +2619,14 @@ def _normalize_custom_provider_entry(
         "defaultModel": "default_model",
         "contextLength": "context_length",
         "rateLimitDelay": "rate_limit_delay",
+        "requestTimeoutSeconds": "request_timeout_seconds",
+        "staleTimeoutSeconds": "stale_timeout_seconds",
     }
     _KNOWN_KEYS = {
         "name", "api", "url", "base_url", "api_key", "key_env",
         "api_mode", "transport", "model", "default_model", "models",
-        "context_length", "rate_limit_delay",
+        "context_length", "rate_limit_delay", "request_timeout_seconds",
+        "stale_timeout_seconds",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -2713,6 +2716,13 @@ def _normalize_custom_provider_entry(
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
+
+    from elevate_cli.timeouts import _coerce_timeout
+
+    for timeout_key in ("request_timeout_seconds", "stale_timeout_seconds"):
+        timeout = _coerce_timeout(entry.get(timeout_key))
+        if timeout is not None:
+            normalized[timeout_key] = timeout
 
     return normalized
 

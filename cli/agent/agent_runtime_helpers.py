@@ -700,6 +700,26 @@ def try_recover_primary_transport(
     if provider_lower in {"nous", "nous-research"}:
         return False
 
+    primary_runtime = getattr(agent, "_primary_runtime", {}) or {}
+    if str(primary_runtime.get("provider") or "").strip().lower() == "bedrock":
+        restore_bedrock = getattr(agent, "_restore_bedrock_primary_runtime", None)
+        if not callable(restore_bedrock):
+            return False
+        try:
+            if not restore_bedrock(primary_runtime):
+                return False
+            wait_time = min(3 + retry_count, 8)
+            agent._vprint(
+                f"{agent.log_prefix}🔁 Transient {error_type} on bedrock — "
+                f"rebuilt native runtime, waiting {wait_time}s before one last primary attempt.",
+                force=True,
+            )
+            time.sleep(wait_time)
+            return True
+        except Exception as exc:
+            logging.warning("Bedrock primary transport recovery failed: %s", exc)
+            return False
+
     try:
         # Close existing client to release stale connections
         if getattr(agent, "client", None) is not None:
@@ -866,6 +886,14 @@ def restore_primary_runtime(agent) -> bool:
         return False  # primary still in rate-limit cooldown, stay on fallback
 
     rt = agent._primary_runtime
+    if str(rt.get("provider") or "").strip().lower() == "bedrock":
+        restore_bedrock = getattr(agent, "_restore_bedrock_primary_runtime", None)
+        if not callable(restore_bedrock):
+            logging.warning(
+                "Failed to restore primary runtime: native Bedrock restore is unavailable"
+            )
+            return False
+        return bool(restore_bedrock(rt))
     try:
         # ── Core runtime state ──
         agent.model = rt["model"]
@@ -883,6 +911,12 @@ def restore_primary_runtime(agent) -> bool:
             "use_native_cache_layout",
             agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
         )
+        agent._bedrock_region = None
+        agent._bedrock_endpoint_url = ""
+        agent._bedrock_guardrail_config = None
+        agent._bedrock_timeout_provider = ""
+        agent._bedrock_request_timeout = None
+        agent._bedrock_stale_timeout = None
 
         # ── Rebuild client for the primary provider ──
         if agent.api_mode == "anthropic_messages":
@@ -1332,6 +1366,37 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         _ra()._apply_beta_agent_switch(agent, beta_runtime)
         return
 
+    from elevate_cli.runtime_provider import (
+        _bedrock_region_from_url,
+        _get_named_custom_provider,
+        is_bedrock_provider_alias,
+        resolve_runtime_provider,
+    )
+
+    provider_norm = str(new_provider or "").strip().lower()
+    named_provider = _get_named_custom_provider(provider_norm)
+    bedrock_base_url = str(base_url or "").strip()
+    if not bedrock_base_url and named_provider:
+        bedrock_base_url = str(named_provider.get("base_url") or "").strip()
+    if _bedrock_region_from_url(bedrock_base_url) or (
+        is_bedrock_provider_alias(provider_norm) and named_provider is None
+    ):
+        if not bedrock_base_url:
+            runtime = resolve_runtime_provider(
+                requested=provider_norm,
+                target_model=new_model,
+            )
+            bedrock_base_url = str(runtime.get("base_url") or "").strip()
+        policy_provider = str(
+            (named_provider or {}).get("provider_key") or provider_norm
+        ).strip()
+        agent._switch_model_to_bedrock(
+            new_model,
+            base_url=bedrock_base_url,
+            policy_provider=policy_provider,
+        )
+        return
+
     from elevate_cli.providers import determine_api_mode
 
     # ── Determine api_mode if not provided ──
@@ -1413,6 +1478,13 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             reason="switch_model",
             shared=True,
         )
+
+    agent._bedrock_region = None
+    agent._bedrock_endpoint_url = ""
+    agent._bedrock_guardrail_config = None
+    agent._bedrock_timeout_provider = ""
+    agent._bedrock_request_timeout = None
+    agent._bedrock_stale_timeout = None
 
     # ── Re-evaluate prompt caching ──
     agent._use_prompt_caching, agent._use_native_cache_layout = (

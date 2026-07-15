@@ -482,6 +482,88 @@ class TestDelegateTask(unittest.TestCase):
         parent.tool_progress_callback.assert_not_called()
 
 
+class TestDelegatedBedrockTimeoutReceipt(unittest.TestCase):
+    """Bedrock timeout receipts stay bound to their resolved runtime identity."""
+
+    @staticmethod
+    def _bedrock_parent():
+        parent = _make_mock_parent(depth=0)
+        parent.provider = "bedrock"
+        parent.model = "anthropic.claude-sonnet-4-20250514-v1:0"
+        parent.base_url = "https://bedrock-runtime.us-west-2.amazonaws.com"
+        parent.api_mode = "bedrock_converse"
+        parent.acp_command = None
+        parent.acp_args = []
+        parent._bedrock_timeout_provider = "anthropic"
+        parent._bedrock_request_timeout = 180.0
+        parent._bedrock_stale_timeout = 240.0
+        return parent
+
+    @patch("elevate_cli.beta_provider_policy.beta_provider_policy_active", return_value=False)
+    @patch("run_agent.AIAgent")
+    def test_unchanged_runtime_inherits_parent_receipt(self, MockAgent, _mock_beta):
+        parent = self._bedrock_parent()
+        MockAgent.return_value = _make_mock_child()
+
+        _build_child_agent(
+            task_index=0,
+            goal="Use the same Bedrock runtime",
+            context=None,
+            toolsets=None,
+            model=None,
+            max_iterations=10,
+            task_count=1,
+            parent_agent=parent,
+        )
+
+        kwargs = MockAgent.call_args.kwargs
+        self.assertEqual(kwargs["bedrock_timeout_provider"], "anthropic")
+        self.assertEqual(kwargs["request_timeout_seconds"], 180.0)
+        self.assertEqual(kwargs["stale_timeout_seconds"], 240.0)
+
+    @patch("elevate_cli.beta_provider_policy.beta_provider_policy_active", return_value=False)
+    @patch("run_agent.AIAgent")
+    def test_changed_runtime_does_not_inherit_parent_receipt(
+        self, MockAgent, _mock_beta
+    ):
+        parent = self._bedrock_parent()
+        MockAgent.return_value = _make_mock_child()
+        changed_runtimes = {
+            "model": {
+                "model": "amazon.nova-pro-v1:0",
+            },
+            "provider": {
+                "model": None,
+                "override_provider": "openrouter",
+                "override_base_url": "https://openrouter.ai/api/v1",
+            },
+            "base_url": {
+                "model": None,
+                "override_provider": "bedrock",
+                "override_base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+            },
+        }
+
+        for field, overrides in changed_runtimes.items():
+            with self.subTest(field=field):
+                MockAgent.reset_mock()
+                _build_child_agent(
+                    task_index=0,
+                    goal="Use a different runtime",
+                    context=None,
+                    toolsets=None,
+                    max_iterations=10,
+                    task_count=1,
+                    parent_agent=parent,
+                    **overrides,
+                )
+
+                kwargs = MockAgent.call_args.kwargs
+                self.assertIsNone(kwargs["bedrock_timeout_provider"])
+                self.assertIsNone(kwargs["request_timeout_seconds"])
+                self.assertIsNone(kwargs["stale_timeout_seconds"])
+
+
 class TestInstalledAgentParity(unittest.TestCase):
     @patch("gateway.agent_lanes.agent_lane_prompt", return_value="ADMIN PERSONA")
     @patch("elevate_cli.agent_hub.get_agent_def")
@@ -1362,6 +1444,29 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["provider"])
 
     @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
+    def test_bedrock_resolution_preserves_timeout_receipt(self, mock_resolve):
+        mock_resolve.return_value = {
+            "provider": "bedrock",
+            "model": "amazon.nova-pro-v1:0",
+            "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "api_key": "bedrock-token",
+            "api_mode": "bedrock_converse",
+            "bedrock_timeout_provider": "amazon",
+            "request_timeout_seconds": 90.0,
+            "stale_timeout_seconds": 150.0,
+        }
+        parent = _make_mock_parent(depth=0)
+
+        creds = _resolve_delegation_credentials(
+            {"model": "amazon.nova-pro-v1:0", "provider": "bedrock"},
+            parent,
+        )
+
+        self.assertEqual(creds["bedrock_timeout_provider"], "amazon")
+        self.assertEqual(creds["request_timeout_seconds"], 90.0)
+        self.assertEqual(creds["stale_timeout_seconds"], 150.0)
+
+    @patch("elevate_cli.runtime_provider.resolve_runtime_provider")
     def test_named_custom_provider_preserves_provider_name(self, mock_resolve):
         """Named custom provider (e.g. crof.ai) resolves to 'custom' at runtime level
         but the subagent must retain the original provider identity so that
@@ -1481,6 +1586,50 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], "https://openrouter.ai/api/v1")
             self.assertEqual(kwargs["api_key"], "sk-or-delegation-key")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("elevate_cli.beta_provider_policy.beta_provider_policy_active", return_value=False)
+    def test_target_bedrock_receipt_reaches_child_agent(
+        self, _mock_beta, mock_creds, mock_cfg
+    ):
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "amazon.nova-pro-v1:0",
+            "provider": "bedrock",
+        }
+        mock_creds.return_value = {
+            "model": "amazon.nova-pro-v1:0",
+            "provider": "bedrock",
+            "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "api_key": "target-bedrock-token",
+            "api_mode": "bedrock_converse",
+            "bedrock_timeout_provider": "amazon",
+            "request_timeout_seconds": 90.0,
+            "stale_timeout_seconds": 150.0,
+        }
+        parent = TestDelegatedBedrockTimeoutReceipt._bedrock_parent()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Use target Bedrock runtime", parent_agent=parent)
+
+        kwargs = MockAgent.call_args.kwargs
+        self.assertEqual(kwargs["model"], "amazon.nova-pro-v1:0")
+        self.assertEqual(
+            kwargs["base_url"],
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+        )
+        self.assertEqual(kwargs["bedrock_timeout_provider"], "amazon")
+        self.assertEqual(kwargs["request_timeout_seconds"], 90.0)
+        self.assertEqual(kwargs["stale_timeout_seconds"], 150.0)
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

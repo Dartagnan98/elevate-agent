@@ -39,6 +39,7 @@ import time
 import threading
 from types import SimpleNamespace
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
@@ -52,8 +53,10 @@ from elevate_constants import get_elevate_home
 # User-managed env files should override stale shell exports on restart.
 from elevate_cli.env_loader import load_elevate_dotenv
 from elevate_cli.timeouts import (
+    _coerce_timeout,
     get_provider_request_timeout,
     get_provider_stale_timeout,
+    resolve_provider_timeout_policy,
 )
 
 _elevate_home = get_elevate_home()
@@ -86,6 +89,49 @@ GUIDANCE_RESERVED_FINISH_REASONS = frozenset(
         "guidance_reserved_soft",
     }
 )
+
+_BEDROCK_RUNTIME_HOST_RE = re.compile(
+    r"^bedrock-runtime(?:-fips)?\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?$"
+)
+
+
+def _bedrock_region_from_base_url(base_url: Any) -> str:
+    """Return the region encoded in an exact trusted Bedrock Runtime origin."""
+    try:
+        parsed = urlsplit(str(base_url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").lower()
+    match = _BEDROCK_RUNTIME_HOST_RE.fullmatch(hostname)
+    if (
+        parsed.scheme.lower() != "https"
+        or not match
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return match.group(1)
+
+
+def _is_bedrock_runtime_base_url(base_url: Any) -> bool:
+    return bool(_bedrock_region_from_base_url(base_url))
+
+
+def _bedrock_fips_endpoint_from_base_url(base_url: Any) -> str:
+    """Return the canonical explicit FIPS origin, or an empty string."""
+    region = _bedrock_region_from_base_url(base_url)
+    if not region:
+        return ""
+    parsed = urlsplit(str(base_url or "").strip())
+    hostname = (parsed.hostname or "").lower()
+    if not hostname.startswith("bedrock-runtime-fips."):
+        return ""
+    return f"https://{hostname}"
 
 
 def _drop_trailing_empty_response_scaffolding(messages: list) -> bool:
@@ -381,27 +427,48 @@ class _ToolBatchDurabilityError(RuntimeError):
 
 
 class _ProviderAttempt:
-    """Exact, lock-linearized publication capability for one provider call."""
+    """Exact, lock-linearized lifecycle capability for one provider call."""
 
-    __slots__ = ("_lock", "_revoked", "_reason")
+    __slots__ = ("_lock", "_dispatch_lock", "_revoked", "_reason")
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._dispatch_lock = threading.Lock()
         self._revoked = False
         self._reason = ""
 
     def revoke(self, reason: str) -> None:
-        # Holding this lock across callbacks means either the callback
-        # linearized before revocation or it is suppressed.  There is no
-        # check-then-call gap for a late raw worker to escape through.
-        with self._lock:
-            self._revoked = True
-            self._reason = str(reason or "provider attempt revoked")
+        # Never wait behind a blocking SDK call. If the dispatch lock is free,
+        # taking it linearizes revocation before any later native dispatch. If
+        # it is already held, dispatch won and the caller can immediately close
+        # the exact claimed client/stream while the raw SDK worker drains.
+        owns_dispatch_lock = self._dispatch_lock.acquire(blocking=False)
+        try:
+            with self._lock:
+                self._revoked = True
+                self._reason = str(reason or "provider attempt revoked")
+        finally:
+            if owns_dispatch_lock:
+                self._dispatch_lock.release()
 
     def call_if_active(self, callback: callable, *args, **kwargs):
         with self._lock:
             if self._revoked:
                 return False, None
+            return True, callback(*args, **kwargs)
+
+    def dispatch_if_active(self, callback: callable, *args, **kwargs):
+        """Invoke one native SDK operation only if revocation has not won.
+
+        The separate dispatch lock stays held across the callback, eliminating
+        the check/call scheduler gap. ``revoke`` never blocks on this lock: an
+        unavailable lock means dispatch already linearized, so cancellation
+        marks the attempt revoked and closes its exact transport immediately.
+        """
+        with self._dispatch_lock:
+            with self._lock:
+                if self._revoked:
+                    return False, None
             return True, callback(*args, **kwargs)
 
     def is_revoked(self) -> bool:
@@ -2891,6 +2958,15 @@ def _resolve_beta_agent_construction(values: Dict[str, Any]) -> Optional[Dict[st
             "Realtor Beta requires the Codex Responses transport.",
             "beta_api_mode_not_allowed",
         )
+    if (
+        values.get("bedrock_timeout_provider") not in (None, "")
+        or values.get("request_timeout_seconds") is not None
+        or values.get("stale_timeout_seconds") is not None
+    ):
+        reject(
+            "Realtor Beta does not allow alternate-provider timeout policy state.",
+            "beta_alternate_client_not_allowed",
+        )
     if any(values.get(key) for key in ("acp_command", "command", "acp_args", "args")):
         reject(
             "Realtor Beta does not allow an external model process.",
@@ -3247,6 +3323,11 @@ def _apply_beta_agent_switch(agent: Any, runtime: Dict[str, Any]) -> None:
         agent._anthropic_base_url = ""
         agent._is_anthropic_oauth = False
         agent._bedrock_region = None
+        agent._bedrock_endpoint_url = ""
+        agent._bedrock_guardrail_config = None
+        agent._bedrock_timeout_provider = ""
+        agent._bedrock_request_timeout = None
+        agent._bedrock_stale_timeout = None
         agent.acp_command = None
         agent.acp_args = []
         if hasattr(agent, "_transport_cache"):
@@ -3256,7 +3337,8 @@ def _apply_beta_agent_switch(agent: Any, runtime: Dict[str, Any]) -> None:
         agent._config_context_length = None
 
         if compressor is not None:
-            compressor.update_model(
+            agent._update_context_engine_runtime(
+                compressor,
                 model=new_model,
                 context_length=new_context_length,
                 base_url=new_base_url,
@@ -3350,6 +3432,9 @@ class AIAgent:
         api_key: str = None,
         provider: str = None,
         api_mode: str = None,
+        bedrock_timeout_provider: str = None,
+        request_timeout_seconds: float = None,
+        stale_timeout_seconds: float = None,
         acp_command: str = None,
         acp_args: list[str] | None = None,
         command: str = None,
@@ -3464,6 +3549,9 @@ class AIAgent:
                 "base_url": base_url,
                 "api_key": api_key,
                 "api_mode": api_mode,
+                "bedrock_timeout_provider": bedrock_timeout_provider,
+                "request_timeout_seconds": request_timeout_seconds,
+                "stale_timeout_seconds": stale_timeout_seconds,
                 "acp_command": acp_command,
                 "acp_args": acp_args,
                 "command": command,
@@ -3487,6 +3575,9 @@ class AIAgent:
             api_key = _beta_runtime["api_key"]
             api_mode = _beta_runtime["api_mode"]
             request_overrides = _beta_runtime["request_overrides"]
+            bedrock_timeout_provider = None
+            request_timeout_seconds = None
+            stale_timeout_seconds = None
             acp_command = command = None
             acp_args = args = []
             fallback_model = credential_pool = None
@@ -3556,6 +3647,23 @@ class AIAgent:
         self.base_url = base_url or ""
         provider_name = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
         self.provider = provider_name or ""
+        self._bedrock_timeout_provider = str(
+            bedrock_timeout_provider or provider_name or ""
+        ).strip()
+        self._bedrock_request_timeout = (
+            _coerce_timeout(request_timeout_seconds)
+            if request_timeout_seconds is not None
+            else None
+        )
+        self._bedrock_stale_timeout = (
+            _coerce_timeout(stale_timeout_seconds)
+            if stale_timeout_seconds is not None
+            else None
+        )
+        if request_timeout_seconds is not None and self._bedrock_request_timeout is None:
+            raise ValueError("Provider request timeout must be a finite positive number")
+        if stale_timeout_seconds is not None and self._bedrock_stale_timeout is None:
+            raise ValueError("Provider stale timeout must be a finite positive number")
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
         if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
@@ -3581,13 +3689,20 @@ class AIAgent:
             # use a URL convention ending in /anthropic. Auto-detect these so the
             # Anthropic Messages API adapter is used instead of chat completions.
             self.api_mode = "anthropic_messages"
-        elif self.provider == "bedrock" or (
-            self._base_url_hostname.startswith("bedrock-runtime.")
-            and base_url_host_matches(self._base_url_lower, "amazonaws.com")
+        elif self.provider == "bedrock" or _is_bedrock_runtime_base_url(
+            self.base_url
         ):
-            # AWS Bedrock — auto-detect from provider name or base URL
-            # (bedrock-runtime.<region>.amazonaws.com).
-            self.api_mode = "bedrock_converse"
+            # AWS Bedrock has two native transports. Claude models use the
+            # AnthropicBedrock Messages client; Nova/Llama/DeepSeek and opaque
+            # application inference-profile ARNs use Converse.
+            from agent.bedrock_adapter import is_anthropic_bedrock_model
+
+            self.provider = "bedrock"
+            self.api_mode = (
+                "anthropic_messages"
+                if is_anthropic_bedrock_model(self.model)
+                else "bedrock_converse"
+            )
         else:
             self.api_mode = "chat_completions"
 
@@ -3882,12 +3997,61 @@ class AIAgent:
         # access for Codex Responses API streaming.
         self._anthropic_client = None
         self._is_anthropic_oauth = False
+        self._bedrock_guardrail_config = None
 
         # Resolve per-provider / per-model request timeout once up front so
         # every client construction path below (Anthropic native, OpenAI-wire,
         # router-based implicit auth) can apply it consistently.  Bedrock
         # Claude uses its own timeout path and is not covered here.
+        _bedrock_endpoint = _is_bedrock_runtime_base_url(self.base_url)
+        if self.provider == "bedrock" or _bedrock_endpoint or (
+            not self.provider and self.api_mode == "bedrock_converse"
+        ):
+            # Any exact AWS Bedrock runtime endpoint is a Bedrock runtime even
+            # when an older resolver labelled it custom. Canonicalize before
+            # policy loading so region, guardrails, and live auxiliary routing
+            # cannot be bypassed by a provider alias. The model determines the
+            # native transport on every entry path.
+            from agent.bedrock_adapter import is_anthropic_bedrock_model
+
+            self.provider = "bedrock"
+            expected_bedrock_mode = (
+                "anthropic_messages"
+                if is_anthropic_bedrock_model(self.model)
+                else "bedrock_converse"
+            )
+            if self.api_mode != expected_bedrock_mode:
+                self.api_mode = expected_bedrock_mode
+                if hasattr(self, "_transport_cache"):
+                    self._transport_cache.clear()
         _provider_timeout = get_provider_request_timeout(self.provider, self.model)
+
+        if self.provider == "bedrock":
+            # Startup must use the same validated identity as model switches,
+            # fallback activation, and primary restoration. In particular, a
+            # direct ``provider=bedrock`` constructor may not have a base URL;
+            # in that case the configured Bedrock region still controls the
+            # AWS client and the durable primary-runtime snapshot.
+            _bedrock_identity = self._configured_bedrock_identity(
+                model=self.model,
+                base_url=self.base_url,
+                policy_provider=self._bedrock_timeout_provider,
+                request_timeout=self._bedrock_request_timeout,
+                stale_timeout=self._bedrock_stale_timeout,
+            )
+            self._bedrock_region = _bedrock_identity["region"]
+            self._bedrock_endpoint_url = _bedrock_identity["endpoint_url"]
+            self._bedrock_guardrail_config = copy.deepcopy(
+                _bedrock_identity["guardrail_config"]
+            )
+            self._bedrock_timeout_provider = _bedrock_identity["timeout_provider"]
+            self._bedrock_request_timeout = _bedrock_identity["request_timeout"]
+            self._bedrock_stale_timeout = _bedrock_identity["stale_timeout"]
+            _provider_timeout = self._bedrock_request_timeout
+            if not self.base_url:
+                self.base_url = (
+                    f"https://bedrock-runtime.{self._bedrock_region}.amazonaws.com"
+                )
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
@@ -3896,12 +4060,19 @@ class AIAgent:
             _is_bedrock_anthropic = self.provider == "bedrock"
             if _is_bedrock_anthropic:
                 from agent.anthropic_adapter import build_anthropic_bedrock_client
-                _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
-                _br_region = _region_match.group(1) if _region_match else "us-east-1"
+                _br_region = self._bedrock_region
                 self._bedrock_region = _br_region
-                self._anthropic_client = build_anthropic_bedrock_client(_br_region)
+                _bedrock_builder_kwargs: Dict[str, Any] = {}
+                if self._bedrock_endpoint_url:
+                    _bedrock_builder_kwargs["base_url"] = self._bedrock_endpoint_url
+                if _provider_timeout is not None:
+                    _bedrock_builder_kwargs["timeout"] = _provider_timeout
+                self._anthropic_client = build_anthropic_bedrock_client(
+                    _br_region,
+                    **_bedrock_builder_kwargs,
+                )
                 self._anthropic_api_key = "aws-sdk"
-                self._anthropic_base_url = base_url
+                self._anthropic_base_url = self.base_url
                 self._is_anthropic_oauth = False
                 self.api_key = "aws-sdk"
                 self.client = None
@@ -3936,25 +4107,8 @@ class AIAgent:
                         print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
         elif self.api_mode == "bedrock_converse":
             # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
-            # Region is extracted from the base_url or defaults to us-east-1.
-            _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
-            self._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
-            # Guardrail config — read from config.yaml at init time.
-            self._bedrock_guardrail_config = None
-            try:
-                from elevate_cli.config import load_config as _load_br_cfg
-                _gr = _load_br_cfg().get("bedrock", {}).get("guardrail", {})
-                if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
-                    self._bedrock_guardrail_config = {
-                        "guardrailIdentifier": _gr["guardrail_identifier"],
-                        "guardrailVersion": _gr["guardrail_version"],
-                    }
-                    if _gr.get("stream_processing_mode"):
-                        self._bedrock_guardrail_config["streamProcessingMode"] = _gr["stream_processing_mode"]
-                    if _gr.get("trace"):
-                        self._bedrock_guardrail_config["trace"] = _gr["trace"]
-            except Exception:
-                pass
+            # Region was resolved above from the trusted endpoint, config, or
+            # AWS SDK environment/default chain, in that order.
             self.client = None
             self._client_kwargs = {}
             if not self.quiet_mode:
@@ -4827,12 +4981,169 @@ class AIAgent:
         self._compression_warning = None
         self._check_compression_model_feasibility()
 
-        # Snapshot primary runtime for per-turn restoration.  When fallback
-        # activates during a turn, the next turn restores these values so the
-        # preferred model gets a fresh attempt each time.  Uses a single dict
-        # so new state fields are easy to add without N individual attributes.
-        _cc = self.context_compressor
-        self._primary_runtime = {
+        # Snapshot primary runtime for per-turn restoration.  Bedrock identity
+        # includes the transport kind and policy so restoring a fallback can
+        # never silently become OpenAI-wire or lose configured guardrails.
+        self._primary_runtime = self._build_primary_runtime_snapshot()
+
+    @staticmethod
+    def _bedrock_client_kind_for_model(model: str) -> str:
+        from agent.bedrock_adapter import is_anthropic_bedrock_model
+
+        return (
+            "anthropic_bedrock"
+            if is_anthropic_bedrock_model(model)
+            else "converse"
+        )
+
+    def _configured_bedrock_identity(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        policy_provider: str = "",
+        request_timeout: Optional[float] = None,
+        stale_timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Resolve validated Bedrock transport, region, guardrails, and bounds."""
+        if base_url and not _is_bedrock_runtime_base_url(base_url):
+            raise ValueError("Bedrock base URL must be an AWS runtime endpoint")
+        from agent.bedrock_adapter import (
+            normalize_bedrock_guardrail_config,
+            prepare_converse_guardrail_config,
+            resolve_bedrock_region,
+        )
+        from elevate_cli.config import load_config as _load_br_cfg
+
+        config = _load_br_cfg()
+        bedrock_cfg = config.get("bedrock") if isinstance(config, dict) else None
+        if bedrock_cfg is not None and not isinstance(bedrock_cfg, dict):
+            raise ValueError("Bedrock configuration must be a mapping")
+        bedrock_cfg = bedrock_cfg or {}
+        raw_guardrail = bedrock_cfg.get("guardrail")
+        if raw_guardrail is not None and not isinstance(raw_guardrail, dict):
+            raise ValueError("Bedrock guardrail configuration must be a mapping")
+        guardrail_config = normalize_bedrock_guardrail_config(
+            raw_guardrail,
+            allow_disabled_options=True,
+        )
+        if guardrail_config is not None:
+            guardrail_config = prepare_converse_guardrail_config(
+                guardrail_config,
+                streaming=True,
+            )
+        region = (
+            _bedrock_region_from_base_url(base_url)
+            or str(bedrock_cfg.get("region") or "").strip()
+            or resolve_bedrock_region()
+        )
+        endpoint_url = _bedrock_fips_endpoint_from_base_url(base_url)
+        timeout_policy = resolve_provider_timeout_policy(
+            policy_provider or "bedrock",
+            model,
+            base_url=base_url,
+            fallback_provider_id="bedrock",
+            config=config,
+        )
+        resolved_request_timeout = (
+            _coerce_timeout(request_timeout)
+            if request_timeout is not None
+            else timeout_policy["request_timeout"]
+        )
+        resolved_stale_timeout = (
+            _coerce_timeout(stale_timeout)
+            if stale_timeout is not None
+            else timeout_policy["stale_timeout"]
+        )
+        if request_timeout is not None and resolved_request_timeout is None:
+            raise ValueError("Bedrock request timeout must be a finite positive number")
+        if stale_timeout is not None and resolved_stale_timeout is None:
+            raise ValueError("Bedrock stale timeout must be a finite positive number")
+        resolved_policy_provider = str(
+            timeout_policy.get("request_provider")
+            or timeout_policy.get("stale_provider")
+            or timeout_policy.get("policy_provider")
+            or policy_provider
+            or "bedrock"
+        ).strip()
+        return {
+            "client_kind": self._bedrock_client_kind_for_model(model),
+            "region": region,
+            "endpoint_url": endpoint_url,
+            "guardrail_config": copy.deepcopy(guardrail_config),
+            "timeout_provider": resolved_policy_provider,
+            "request_timeout": resolved_request_timeout,
+            "stale_timeout": resolved_stale_timeout,
+        }
+
+    @staticmethod
+    def _stage_bedrock_client(
+        client_kind: str,
+        region: str,
+        *,
+        endpoint_url: str = "",
+        timeout: Optional[float] = None,
+    ) -> Any:
+        if client_kind == "converse":
+            return None
+        if client_kind != "anthropic_bedrock":
+            raise ValueError(f"Unsupported Bedrock client kind: {client_kind!r}")
+        from agent.anthropic_adapter import build_anthropic_bedrock_client
+
+        builder_kwargs: Dict[str, Any] = {}
+        if endpoint_url:
+            builder_kwargs["base_url"] = endpoint_url
+        if timeout is not None:
+            builder_kwargs["timeout"] = timeout
+        return build_anthropic_bedrock_client(region, **builder_kwargs)
+
+    @staticmethod
+    def _update_context_engine_runtime(
+        context_engine: Any,
+        *,
+        model: str,
+        context_length: int,
+        base_url: str,
+        api_key: Any,
+        provider: str,
+        api_mode: str,
+    ) -> None:
+        """Update built-in and documented plugin engines compatibly.
+
+        ``api_mode`` is a ContextCompressor extension, not part of the public
+        ContextEngine plugin contract. Pass it only when the implementation
+        explicitly accepts it (or accepts arbitrary keyword arguments).
+        """
+        import inspect
+
+        update_model = context_engine.update_model
+        accepts_api_mode = False
+        try:
+            parameters = inspect.signature(update_model).parameters.values()
+            accepts_api_mode = any(
+                parameter.name == "api_mode"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            # Opaque plugin callables fall back to the documented base
+            # signature rather than risking an unsupported keyword.
+            pass
+        kwargs = {
+            "model": model,
+            "context_length": context_length,
+            "base_url": base_url,
+            "api_key": api_key,
+            "provider": provider,
+        }
+        if accepts_api_mode:
+            kwargs["api_mode"] = api_mode
+        update_model(**kwargs)
+
+    def _build_primary_runtime_snapshot(self) -> Dict[str, Any]:
+        """Capture the exact restorable primary runtime without AWS secrets."""
+        cc = getattr(self, "context_compressor", None)
+        runtime = {
             "model": self.model,
             "provider": self.provider,
             "base_url": self.base_url,
@@ -4841,22 +5152,60 @@ class AIAgent:
             "client_kwargs": dict(self._client_kwargs),
             "use_prompt_caching": self._use_prompt_caching,
             "use_native_cache_layout": self._use_native_cache_layout,
-            # Context engine state that _try_activate_fallback() overwrites.
-            # Use getattr for model/base_url/api_key/provider since plugin
-            # engines may not have these (they're ContextCompressor-specific).
-            "compressor_model": getattr(_cc, "model", self.model),
-            "compressor_base_url": getattr(_cc, "base_url", self.base_url),
-            "compressor_api_key": getattr(_cc, "api_key", ""),
-            "compressor_provider": getattr(_cc, "provider", self.provider),
-            "compressor_context_length": _cc.context_length,
-            "compressor_threshold_tokens": _cc.threshold_tokens,
+            "compressor_model": getattr(cc, "model", self.model),
+            "compressor_base_url": getattr(cc, "base_url", self.base_url),
+            "compressor_api_key": getattr(cc, "api_key", ""),
+            "compressor_provider": getattr(cc, "provider", self.provider),
+            "compressor_context_length": getattr(cc, "context_length", 0),
+            "compressor_threshold_tokens": getattr(cc, "threshold_tokens", 0),
         }
         if self.api_mode == "anthropic_messages":
-            self._primary_runtime.update({
-                "anthropic_api_key": self._anthropic_api_key,
-                "anthropic_base_url": self._anthropic_base_url,
-                "is_anthropic_oauth": self._is_anthropic_oauth,
-            })
+            runtime.update(
+                {
+                    "anthropic_api_key": self._anthropic_api_key,
+                    "anthropic_base_url": self._anthropic_base_url,
+                    "is_anthropic_oauth": self._is_anthropic_oauth,
+                }
+            )
+        if self.provider == "bedrock":
+            client_kind = (
+                "anthropic_bedrock"
+                if self.api_mode == "anthropic_messages"
+                else "converse"
+            )
+            runtime.update(
+                {
+                    "bedrock_client_kind": client_kind,
+                    "bedrock_region": getattr(self, "_bedrock_region", "")
+                    or _bedrock_region_from_base_url(self.base_url)
+                    or "us-east-1",
+                    "bedrock_endpoint_url": getattr(
+                        self,
+                        "_bedrock_endpoint_url",
+                        "",
+                    )
+                    or _bedrock_fips_endpoint_from_base_url(self.base_url),
+                    "bedrock_guardrail_config": copy.deepcopy(
+                        getattr(self, "_bedrock_guardrail_config", None)
+                    ),
+                    "bedrock_timeout_provider": getattr(
+                        self,
+                        "_bedrock_timeout_provider",
+                        "bedrock",
+                    ),
+                    "bedrock_request_timeout": getattr(
+                        self,
+                        "_bedrock_request_timeout",
+                        None,
+                    ),
+                    "bedrock_stale_timeout": getattr(
+                        self,
+                        "_bedrock_stale_timeout",
+                        None,
+                    ),
+                }
+            )
+        return runtime
 
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
@@ -4896,6 +5245,161 @@ class AIAgent:
         # Context engine reset (works for both built-in compressor and plugins)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.on_session_reset()
+
+    def _switch_model_to_bedrock(
+        self,
+        new_model: str,
+        *,
+        base_url: str = "",
+        policy_provider: str = "",
+    ) -> None:
+        """Transactionally install a model-aware Bedrock primary runtime."""
+        if base_url and not _is_bedrock_runtime_base_url(base_url):
+            raise ValueError("Bedrock base URL must be an AWS runtime endpoint")
+        identity = self._configured_bedrock_identity(
+            model=new_model,
+            base_url=base_url,
+            policy_provider=policy_provider,
+        )
+        client_kind = identity["client_kind"]
+        region = identity["region"]
+        resolved_base_url = (
+            str(base_url or "").strip().rstrip("/")
+            or f"https://bedrock-runtime.{region}.amazonaws.com"
+        )
+        resolved_api_mode = (
+            "anthropic_messages"
+            if client_kind == "anthropic_bedrock"
+            else "bedrock_converse"
+        )
+        staged_anthropic_client = self._stage_bedrock_client(
+            client_kind,
+            region,
+            endpoint_url=identity["endpoint_url"],
+            timeout=identity["request_timeout"],
+        )
+        agent_snapshot = dict(self.__dict__)
+        compressor = getattr(self, "context_compressor", None)
+        compressor_snapshot = (
+            dict(compressor.__dict__)
+            if compressor is not None and hasattr(compressor, "__dict__")
+            else None
+        )
+        old_client = getattr(self, "client", None)
+        old_anthropic_client = getattr(self, "_anthropic_client", None)
+        old_model = self.model
+        old_provider = self.provider
+
+        try:
+            use_prompt_caching, use_native_cache_layout = (
+                self._anthropic_prompt_cache_policy(
+                    provider="bedrock",
+                    base_url=resolved_base_url,
+                    api_mode=resolved_api_mode,
+                    model=new_model,
+                )
+            )
+            new_context_length = None
+            if compressor is not None:
+                from agent.model_metadata import get_model_context_length
+
+                new_context_length = get_model_context_length(
+                    new_model,
+                    base_url=resolved_base_url,
+                    api_key="aws-sdk",
+                    provider="bedrock",
+                    config_context_length=getattr(
+                        self, "_config_context_length", None
+                    ),
+                )
+
+            self.model = new_model
+            self.provider = "bedrock"
+            self.base_url = resolved_base_url
+            self.api_mode = resolved_api_mode
+            self.api_key = "aws-sdk"
+            self.client = None
+            self._client_kwargs = {}
+            self._bedrock_region = region
+            self._bedrock_endpoint_url = identity["endpoint_url"]
+            self._bedrock_guardrail_config = copy.deepcopy(
+                identity["guardrail_config"]
+            )
+            self._bedrock_timeout_provider = identity["timeout_provider"]
+            self._bedrock_request_timeout = identity["request_timeout"]
+            self._bedrock_stale_timeout = identity["stale_timeout"]
+            self._anthropic_client = staged_anthropic_client
+            if client_kind == "anthropic_bedrock":
+                self._anthropic_api_key = "aws-sdk"
+                self._anthropic_base_url = resolved_base_url
+                self._is_anthropic_oauth = False
+            else:
+                self._anthropic_api_key = ""
+                self._anthropic_base_url = ""
+                self._is_anthropic_oauth = False
+            if hasattr(self, "_transport_cache"):
+                self._transport_cache.clear()
+            self._use_prompt_caching = use_prompt_caching
+            self._use_native_cache_layout = use_native_cache_layout
+
+            if compressor is not None:
+                self._update_context_engine_runtime(
+                    compressor,
+                    model=new_model,
+                    context_length=new_context_length,
+                    base_url=resolved_base_url,
+                    api_key="aws-sdk",
+                    provider="bedrock",
+                    api_mode=resolved_api_mode,
+                )
+
+            self._cached_system_prompt = None
+            self._primary_runtime = self._build_primary_runtime_snapshot()
+            self._fallback_activated = False
+            self._fallback_index = 0
+            old_norm = (old_provider or "").strip().lower()
+            fallback_chain = list(getattr(self, "_fallback_chain", []) or [])
+            fallback_chain = [
+                entry
+                for entry in fallback_chain
+                if (entry.get("provider") or "").strip().lower()
+                not in {old_norm, "bedrock"}
+            ]
+            self._fallback_chain = fallback_chain
+            self._fallback_model = fallback_chain[0] if fallback_chain else None
+        except Exception:
+            self.__dict__.clear()
+            self.__dict__.update(agent_snapshot)
+            if compressor_snapshot is not None:
+                compressor.__dict__.clear()
+                compressor.__dict__.update(compressor_snapshot)
+            if (
+                staged_anthropic_client is not None
+                and staged_anthropic_client is not old_anthropic_client
+            ):
+                try:
+                    staged_anthropic_client.close()
+                except Exception:
+                    pass
+            raise
+
+        for replaced_client in (old_client, old_anthropic_client):
+            if replaced_client is None or replaced_client is staged_anthropic_client:
+                continue
+            try:
+                close = getattr(replaced_client, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+
+        logging.info(
+            "Model switched in-place: %s (%s) -> %s (bedrock/%s)",
+            old_model,
+            old_provider,
+            new_model,
+            client_kind,
+        )
     
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Switch the model/provider in-place for a live agent.
@@ -4924,6 +5428,34 @@ class AIAgent:
             return
 
         from elevate_cli.providers import determine_api_mode
+        from elevate_cli.runtime_provider import (
+            _get_named_custom_provider,
+            is_bedrock_provider_alias,
+            resolve_runtime_provider,
+        )
+
+        provider_norm = str(new_provider or "").strip().lower()
+        named_provider = _get_named_custom_provider(provider_norm)
+        bedrock_base_url = str(base_url or "").strip()
+        if not bedrock_base_url and named_provider:
+            bedrock_base_url = str(named_provider.get("base_url") or "").strip()
+        if _is_bedrock_runtime_base_url(bedrock_base_url) or (
+            is_bedrock_provider_alias(provider_norm) and named_provider is None
+        ):
+            if not bedrock_base_url:
+                runtime = resolve_runtime_provider(
+                    requested=provider_norm,
+                    target_model=new_model,
+                )
+                bedrock_base_url = str(runtime.get("base_url") or "").strip()
+            self._switch_model_to_bedrock(
+                new_model,
+                base_url=bedrock_base_url,
+                policy_provider=str(
+                    (named_provider or {}).get("provider_key") or provider_norm
+                ).strip(),
+            )
+            return
 
         # ── Determine api_mode if not provided ──
         if not api_mode:
@@ -4944,6 +5476,8 @@ class AIAgent:
 
         old_model = self.model
         old_provider = self.provider
+        old_runtime_client = getattr(self, "client", None)
+        old_anthropic_client = getattr(self, "_anthropic_client", None)
 
         # ── Swap core runtime fields ──
         self.model = new_model
@@ -4993,6 +5527,17 @@ class AIAgent:
                 reason="switch_model",
                 shared=True,
             )
+            self._anthropic_client = None
+            self._anthropic_api_key = ""
+            self._anthropic_base_url = ""
+            self._is_anthropic_oauth = False
+
+        self._bedrock_region = None
+        self._bedrock_endpoint_url = ""
+        self._bedrock_guardrail_config = None
+        self._bedrock_timeout_provider = ""
+        self._bedrock_request_timeout = None
+        self._bedrock_stale_timeout = None
 
         # ── Re-evaluate prompt caching ──
         self._use_prompt_caching, self._use_native_cache_layout = (
@@ -5014,7 +5559,8 @@ class AIAgent:
                 provider=self.provider,
                 config_context_length=getattr(self, "_config_context_length", None),
             )
-            self.context_compressor.update_model(
+            self._update_context_engine_runtime(
+                self.context_compressor,
                 model=self.model,
                 context_length=new_context_length,
                 base_url=self.base_url,
@@ -5027,29 +5573,7 @@ class AIAgent:
         self._cached_system_prompt = None
 
         # ── Update _primary_runtime so the change persists across turns ──
-        _cc = self.context_compressor if hasattr(self, "context_compressor") and self.context_compressor else None
-        self._primary_runtime = {
-            "model": self.model,
-            "provider": self.provider,
-            "base_url": self.base_url,
-            "api_mode": self.api_mode,
-            "api_key": getattr(self, "api_key", ""),
-            "client_kwargs": dict(self._client_kwargs),
-            "use_prompt_caching": self._use_prompt_caching,
-            "use_native_cache_layout": self._use_native_cache_layout,
-            "compressor_model": getattr(_cc, "model", self.model) if _cc else self.model,
-            "compressor_base_url": getattr(_cc, "base_url", self.base_url) if _cc else self.base_url,
-            "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",
-            "compressor_provider": getattr(_cc, "provider", self.provider) if _cc else self.provider,
-            "compressor_context_length": _cc.context_length if _cc else 0,
-            "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
-        }
-        if api_mode == "anthropic_messages":
-            self._primary_runtime.update({
-                "anthropic_api_key": self._anthropic_api_key,
-                "anthropic_base_url": self._anthropic_base_url,
-                "is_anthropic_oauth": self._is_anthropic_oauth,
-            })
+        self._primary_runtime = self._build_primary_runtime_snapshot()
 
         # ── Reset fallback state ──
         self._fallback_activated = False
@@ -5077,6 +5601,17 @@ class AIAgent:
             "Model switched in-place: %s (%s) -> %s (%s)",
             old_model, old_provider, new_model, new_provider,
         )
+        for replaced_client in (old_runtime_client, old_anthropic_client):
+            if replaced_client is None or replaced_client is getattr(
+                self, "client", None
+            ) or replaced_client is getattr(self, "_anthropic_client", None):
+                continue
+            try:
+                close = getattr(replaced_client, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
 
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
@@ -5357,15 +5892,31 @@ class AIAgent:
         except Exception as exc:
             logger.warning("on_session_end hook failed: %s", exc)
 
-    def _current_main_runtime(self) -> Dict[str, str]:
+    def _current_main_runtime(self) -> Dict[str, Any]:
         """Return the live main runtime for session-scoped auxiliary routing."""
-        return {
+        provider = getattr(self, "provider", "") or ""
+        runtime = {
             "model": getattr(self, "model", "") or "",
-            "provider": getattr(self, "provider", "") or "",
+            "provider": provider,
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
         }
+        if provider == "bedrock":
+            guardrail_config = getattr(
+                self,
+                "_bedrock_guardrail_config",
+                None,
+            )
+            if isinstance(guardrail_config, dict):
+                guardrail_config = copy.deepcopy(guardrail_config)
+            runtime.update(
+                {
+                    "region": getattr(self, "_bedrock_region", "") or "",
+                    "guardrail_config": guardrail_config,
+                }
+            )
+        return runtime
 
     def _check_compression_model_feasibility(self) -> None:
         """Warn at session start if the auxiliary compression model's context
@@ -5521,6 +6072,16 @@ class AIAgent:
             )
         return hostname == "api.openai.com"
 
+    def _effective_provider_request_timeout(self) -> Optional[float]:
+        if self.provider == "bedrock":
+            return getattr(self, "_bedrock_request_timeout", None)
+        return get_provider_request_timeout(self.provider, self.model)
+
+    def _effective_provider_stale_timeout(self) -> Optional[float]:
+        if self.provider == "bedrock":
+            return getattr(self, "_bedrock_stale_timeout", None)
+        return get_provider_stale_timeout(self.provider, self.model)
+
     def _resolved_api_call_timeout(self) -> float:
         """Resolve the effective per-call request timeout in seconds.
 
@@ -5536,7 +6097,7 @@ class AIAgent:
         passed as a per-call ``timeout=`` kwarg, overriding the client-level
         timeout the AIAgent.__init__ path configured.
         """
-        cfg = get_provider_request_timeout(self.provider, self.model)
+        cfg = self._effective_provider_request_timeout()
         if cfg is not None:
             return cfg
         return float(os.getenv("ELEVATE_API_TIMEOUT", 1800.0))
@@ -5555,7 +6116,7 @@ class AIAgent:
         explicitly configured a stale timeout, such as auto-disabling the
         detector for local endpoints.
         """
-        cfg = get_provider_stale_timeout(self.provider, self.model)
+        cfg = self._effective_provider_stale_timeout()
         if cfg is not None:
             return cfg, False
 
@@ -8383,6 +8944,20 @@ class AIAgent:
         except Exception:
             pass
 
+        # Anthropic and AnthropicBedrock use a separate SDK client that is not
+        # stored in ``self.client``.  Close it as part of every soft eviction
+        # so model/provider rebuilds cannot leak http pools.
+        try:
+            anthropic_client = getattr(self, "_anthropic_client", None)
+            if anthropic_client is not None:
+                close = getattr(anthropic_client, "close", None)
+                if callable(close):
+                    close()
+                if getattr(self, "_anthropic_client", None) is anthropic_client:
+                    self._anthropic_client = None
+        except Exception:
+            pass
+
     def close(self) -> None:
         """Release all resources held by this agent instance.
 
@@ -8448,6 +9023,19 @@ class AIAgent:
             if client is not None:
                 self._close_openai_client(client, reason="agent_close", shared=True)
                 self.client = None
+        except Exception:
+            pass
+
+
+        # Anthropic and AnthropicBedrock clients live outside ``self.client``.
+        try:
+            anthropic_client = getattr(self, "_anthropic_client", None)
+            if anthropic_client is not None:
+                close = getattr(anthropic_client, "close", None)
+                if callable(close):
+                    close()
+                if getattr(self, "_anthropic_client", None) is anthropic_client:
+                    self._anthropic_client = None
         except Exception:
             pass
 
@@ -10265,10 +10853,49 @@ class AIAgent:
 
         return False, has_retried_429
 
-    def _anthropic_messages_create(self, api_kwargs: dict):
-        if self.api_mode == "anthropic_messages":
+    def _apply_bedrock_guardrail_headers(self, api_kwargs: dict) -> dict:
+        """Attach validated InvokeModel guardrail headers for Bedrock Claude."""
+        guardrail_config = getattr(self, "_bedrock_guardrail_config", None)
+        if getattr(self, "provider", None) != "bedrock" or not guardrail_config:
+            return api_kwargs
+
+        from agent.bedrock_adapter import build_invoke_model_guardrail_headers
+
+        request_kwargs = dict(api_kwargs)
+        extra_headers = dict(request_kwargs.get("extra_headers") or {})
+        extra_headers.update(
+            build_invoke_model_guardrail_headers(guardrail_config)
+        )
+        request_kwargs["extra_headers"] = extra_headers
+        return request_kwargs
+
+    def _anthropic_messages_create(
+        self,
+        api_kwargs: dict,
+        *,
+        request_client=None,
+        refresh_credentials: bool = True,
+    ):
+        if self.api_mode == "anthropic_messages" and refresh_credentials:
             self._try_refresh_anthropic_client_credentials()
-        return self._anthropic_client.messages.create(**api_kwargs)
+        request_kwargs = self._apply_bedrock_guardrail_headers(api_kwargs)
+        client = (
+            request_client
+            if request_client is not None
+            else self._anthropic_client
+        )
+        attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+        if attempt is None:
+            return client.messages.create(**request_kwargs)
+        active, response = attempt.dispatch_if_active(
+            client.messages.create,
+            **request_kwargs,
+        )
+        if not active:
+            raise _ProviderAttemptRevoked(
+                "Anthropic request was superseded before dispatch"
+            )
+        return response
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt or stale call.
@@ -10281,7 +10908,23 @@ class AIAgent:
         if getattr(self, "provider", None) == "bedrock":
             from agent.anthropic_adapter import build_anthropic_bedrock_client
             region = getattr(self, "_bedrock_region", "us-east-1") or "us-east-1"
-            self._anthropic_client = build_anthropic_bedrock_client(region)
+            builder_kwargs: Dict[str, Any] = {}
+            endpoint_url = str(
+                getattr(self, "_bedrock_endpoint_url", "")
+                or _bedrock_fips_endpoint_from_base_url(
+                    getattr(self, "base_url", "")
+                )
+                or ""
+            )
+            if endpoint_url:
+                builder_kwargs["base_url"] = endpoint_url
+            timeout = self._effective_provider_request_timeout()
+            if timeout is not None:
+                builder_kwargs["timeout"] = timeout
+            self._anthropic_client = build_anthropic_bedrock_client(
+                region,
+                **builder_kwargs,
+            )
         else:
             from agent.anthropic_adapter import build_anthropic_client
             self._anthropic_client = build_anthropic_client(
@@ -10500,8 +11143,84 @@ class AIAgent:
         """
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
+        bedrock_request_holder = {
+            "client": None,
+            "region": "",
+            "endpoint_url": None,
+            "timeout": None,
+        }
+        bedrock_request_lock = threading.RLock()
+        anthropic_request_holder = {"client": None}
+        anthropic_request_lock = threading.RLock()
+
+        def _claim_anthropic_request_client(client):
+            """Bind one exact Anthropic client to this provider attempt."""
+
+            def _store():
+                with anthropic_request_lock:
+                    anthropic_request_holder["client"] = client
+                return client
+
+            attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+            if attempt is None:
+                return _store()
+            active, claimed = attempt.call_if_active(_store)
+            if not active:
+                raise _ProviderAttemptRevoked(
+                    "Anthropic request was superseded before client claim"
+                )
+            return claimed
+
+        def _release_anthropic_request_client(client) -> None:
+            with anthropic_request_lock:
+                if anthropic_request_holder.get("client") is client:
+                    anthropic_request_holder["client"] = None
+
+        def _close_anthropic_request(*, rebuild: bool) -> None:
+            """Close only the exact client claimed by the revoked attempt."""
+            with anthropic_request_lock:
+                client = anthropic_request_holder.get("client")
+                anthropic_request_holder["client"] = None
+            if client is None:
+                return
+            try:
+                client.close()
+            except Exception:
+                pass
+            # A credential refresh or newer retry may already have installed a
+            # different primary client. Never close or replace that newer
+            # identity while draining this revoked raw worker.
+            if rebuild and getattr(self, "_anthropic_client", None) is client:
+                self._rebuild_anthropic_client()
+
+        def _close_bedrock_request(*, invalidate: bool) -> None:
+            with bedrock_request_lock:
+                client = bedrock_request_holder.get("client")
+                region = bedrock_request_holder.get("region")
+                endpoint_url = bedrock_request_holder.get("endpoint_url")
+                timeout = bedrock_request_holder.get("timeout")
+                bedrock_request_holder["client"] = None
+            if client is None:
+                return
+            try:
+                client.close()
+            except Exception:
+                pass
+            if invalidate:
+                try:
+                    from agent.bedrock_adapter import invalidate_runtime_client
+
+                    invalidate_runtime_client(
+                        region,
+                        timeout=timeout,
+                        endpoint_url=endpoint_url,
+                        expected_client=client,
+                    )
+                except Exception:
+                    pass
 
         def _call():
+            anthropic_client = None
             try:
                 if self.api_mode == "codex_responses":
                     request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
@@ -10511,7 +11230,24 @@ class AIAgent:
                         on_first_delta=on_first_delta,
                     )
                 elif self.api_mode == "anthropic_messages":
-                    result["response"] = self._anthropic_messages_create(api_kwargs)
+                    # Claim before credential refresh so the polling frame can
+                    # close the exact in-flight identity if refresh blocks.
+                    # Claim again afterwards because native Anthropic refresh
+                    # may replace the primary client. Revocation is checked
+                    # under the attempt lock before that newer identity can be
+                    # observed or used for dispatch.
+                    anthropic_client = _claim_anthropic_request_client(
+                        self._anthropic_client
+                    )
+                    self._try_refresh_anthropic_client_credentials()
+                    anthropic_client = _claim_anthropic_request_client(
+                        self._anthropic_client
+                    )
+                    result["response"] = self._anthropic_messages_create(
+                        api_kwargs,
+                        request_client=anthropic_client,
+                        refresh_credentials=False,
+                    )
                 elif self.api_mode == "bedrock_converse":
                     # Bedrock uses boto3 directly — no OpenAI client needed.
                     # normalize_converse_response produces an OpenAI-compatible
@@ -10522,17 +11258,86 @@ class AIAgent:
                         invalidate_runtime_client,
                         is_stale_connection_error,
                         normalize_converse_response,
+                        prepare_converse_guardrail_config,
                     )
                     region = api_kwargs.pop("__bedrock_region__", "us-east-1")
+                    endpoint_url = api_kwargs.pop(
+                        "__bedrock_endpoint_url__",
+                        None,
+                    )
+                    request_timeout = api_kwargs.pop("__bedrock_timeout__", None)
                     api_kwargs.pop("__bedrock_converse__", None)
-                    client = _get_bedrock_runtime_client(region)
+                    guardrail = prepare_converse_guardrail_config(
+                        api_kwargs.get("guardrailConfig"),
+                        streaming=False,
+                    )
+                    if guardrail:
+                        api_kwargs["guardrailConfig"] = guardrail
+                    else:
+                        api_kwargs.pop("guardrailConfig", None)
+                    client = _get_bedrock_runtime_client(
+                        region,
+                        timeout=request_timeout,
+                        endpoint_url=endpoint_url,
+                        exclusive=True,
+                    )
+                    attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                    def _claim_client():
+                        with bedrock_request_lock:
+                            bedrock_request_holder.update(
+                                {
+                                    "client": client,
+                                    "region": region,
+                                    "endpoint_url": endpoint_url,
+                                    "timeout": request_timeout,
+                                }
+                            )
+                        return client
+
+                    if attempt is None:
+                        _claim_client()
+                    else:
+                        active, _ = attempt.call_if_active(_claim_client)
+                        if not active:
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
+                            try:
+                                invalidate_runtime_client(
+                                    region,
+                                    timeout=request_timeout,
+                                    endpoint_url=endpoint_url,
+                                    expected_client=client,
+                                )
+                            except Exception:
+                                pass
+                            raise _ProviderAttemptRevoked(
+                                "Bedrock request was superseded before client claim"
+                            )
                     try:
-                        raw_response = client.converse(**api_kwargs)
+                        if attempt is None:
+                            raw_response = client.converse(**api_kwargs)
+                        else:
+                            active, raw_response = attempt.dispatch_if_active(
+                                client.converse,
+                                **api_kwargs,
+                            )
+                            if not active:
+                                _close_bedrock_request(invalidate=True)
+                                raise _ProviderAttemptRevoked(
+                                    "Bedrock request was superseded before dispatch"
+                                )
                     except Exception as _bedrock_exc:
                         # Evict the cached client on stale-connection failures
                         # so the outer retry loop builds a fresh client/pool.
                         if is_stale_connection_error(_bedrock_exc):
-                            invalidate_runtime_client(region)
+                            invalidate_runtime_client(
+                                region,
+                                timeout=request_timeout,
+                                endpoint_url=endpoint_url,
+                                expected_client=client,
+                            )
                         raise
                     result["response"] = normalize_converse_response(raw_response)
                 else:
@@ -10541,9 +11346,12 @@ class AIAgent:
             except Exception as e:
                 result["error"] = e
             finally:
+                if anthropic_client is not None:
+                    _release_anthropic_request_client(anthropic_client)
                 request_client = request_client_holder.get("client")
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="request_complete")
+                _close_bedrock_request(invalidate=False)
 
         # ── Stale-call timeout (mirrors streaming stale detector) ────────
         # Non-streaming calls return nothing until the full response is
@@ -10596,9 +11404,10 @@ class AIAgent:
                     f"Aborting call."
                 )
                 try:
-                    if self.api_mode == "anthropic_messages":
-                        self._anthropic_client.close()
-                        self._rebuild_anthropic_client()
+                    if self.api_mode == "bedrock_converse":
+                        _close_bedrock_request(invalidate=True)
+                    elif self.api_mode == "anthropic_messages":
+                        _close_anthropic_request(rebuild=True)
                     else:
                         rc = request_client_holder.get("client")
                         if rc is not None:
@@ -10621,9 +11430,10 @@ class AIAgent:
                 # token generation without poisoning the shared client used to
                 # seed future retries.
                 try:
-                    if self.api_mode == "anthropic_messages":
-                        self._anthropic_client.close()
-                        self._rebuild_anthropic_client()
+                    if self.api_mode == "bedrock_converse":
+                        _close_bedrock_request(invalidate=True)
+                    elif self.api_mode == "anthropic_messages":
+                        _close_anthropic_request(rebuild=True)
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
@@ -10639,9 +11449,10 @@ class AIAgent:
                 # generation and hand control back to the conversation loop,
                 # which re-issues the call with the steer folded in.
                 try:
-                    if self.api_mode == "anthropic_messages":
-                        self._anthropic_client.close()
-                        self._rebuild_anthropic_client()
+                    if self.api_mode == "bedrock_converse":
+                        _close_bedrock_request(invalidate=True)
+                    elif self.api_mode == "anthropic_messages":
+                        _close_anthropic_request(rebuild=True)
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
@@ -10843,6 +11654,48 @@ class AIAgent:
             first_delta_fired = {"done": False}
             deltas_were_sent = {"yes": False}
             callback_buffer: list[tuple[str, str]] = []
+            last_bedrock_event_time = {"t": time.time()}
+            bedrock_request = {
+                "client": None,
+                "stream": None,
+                "region": "",
+                "endpoint_url": None,
+                "timeout": None,
+            }
+            bedrock_request_lock = threading.RLock()
+
+            def _close_bedrock_stream(*, invalidate: bool) -> None:
+                with bedrock_request_lock:
+                    client = bedrock_request.get("client")
+                    event_stream = bedrock_request.get("stream")
+                    region = bedrock_request.get("region")
+                    endpoint_url = bedrock_request.get("endpoint_url")
+                    timeout = bedrock_request.get("timeout")
+                    bedrock_request["stream"] = None
+                    bedrock_request["client"] = None
+                if event_stream is not None:
+                    try:
+                        event_stream.close()
+                    except Exception:
+                        pass
+                if client is None:
+                    return
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                if invalidate:
+                    try:
+                        from agent.bedrock_adapter import invalidate_runtime_client
+
+                        invalidate_runtime_client(
+                            region,
+                            timeout=timeout,
+                            endpoint_url=endpoint_url,
+                            expected_client=client,
+                        )
+                    except Exception:
+                        pass
 
             def _fire_first():
                 if not first_delta_fired["done"] and on_first_delta:
@@ -10860,33 +11713,129 @@ class AIAgent:
                         attempt.call_if_active(_publish_first)
 
             def _bedrock_call():
+                client = None
+                region = ""
+                endpoint_url = None
+                request_timeout = None
+                stale_detector = None
+                stale_invalidator = None
                 try:
                     from agent.bedrock_adapter import (
                         _get_bedrock_runtime_client,
                         invalidate_runtime_client,
                         is_stale_connection_error,
+                        prepare_converse_guardrail_config,
                         stream_converse_with_callbacks,
                     )
+                    stale_detector = is_stale_connection_error
+                    stale_invalidator = invalidate_runtime_client
                     region = api_kwargs.pop("__bedrock_region__", "us-east-1")
+                    endpoint_url = api_kwargs.pop(
+                        "__bedrock_endpoint_url__",
+                        None,
+                    )
+                    request_timeout = api_kwargs.pop("__bedrock_timeout__", None)
                     api_kwargs.pop("__bedrock_converse__", None)
-                    client = _get_bedrock_runtime_client(region)
-                    try:
+                    guardrail = prepare_converse_guardrail_config(
+                        api_kwargs.get("guardrailConfig"),
+                        streaming=True,
+                    )
+                    if guardrail:
+                        api_kwargs["guardrailConfig"] = guardrail
+                    else:
+                        api_kwargs.pop("guardrailConfig", None)
+                    client = _get_bedrock_runtime_client(
+                        region,
+                        timeout=request_timeout,
+                        endpoint_url=endpoint_url,
+                        exclusive=True,
+                    )
+                    attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                    def _claim_client():
+                        with bedrock_request_lock:
+                            bedrock_request.update(
+                                {
+                                    "client": client,
+                                    "region": region,
+                                    "endpoint_url": endpoint_url,
+                                    "timeout": request_timeout,
+                                }
+                            )
+                        return client
+
+                    if attempt is None:
+                        _claim_client()
+                    else:
+                        active, _ = attempt.call_if_active(_claim_client)
+                        if not active:
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
+                            try:
+                                invalidate_runtime_client(
+                                    region,
+                                    timeout=request_timeout,
+                                    endpoint_url=endpoint_url,
+                                    expected_client=client,
+                                )
+                            except Exception:
+                                pass
+                            raise _ProviderAttemptRevoked(
+                                "Bedrock stream was superseded before client claim"
+                            )
+                    last_bedrock_event_time["t"] = time.time()
+                    if attempt is None:
                         raw_response = client.converse_stream(**api_kwargs)
-                    except Exception as _bedrock_exc:
-                        # Evict the cached client on stale-connection failures
-                        # so the outer retry loop builds a fresh client/pool.
-                        if is_stale_connection_error(_bedrock_exc):
-                            invalidate_runtime_client(region)
-                        raise
+                    else:
+                        active, raw_response = attempt.dispatch_if_active(
+                            client.converse_stream,
+                            **api_kwargs,
+                        )
+                        if not active:
+                            _close_bedrock_stream(invalidate=True)
+                            raise _ProviderAttemptRevoked(
+                                "Bedrock stream was superseded before dispatch"
+                            )
+                    if isinstance(raw_response, dict):
+                        event_stream = raw_response.get("stream")
+                        if event_stream is not None:
+                            def _claim_stream():
+                                with bedrock_request_lock:
+                                    bedrock_request["stream"] = event_stream
+                                return event_stream
+
+                            if attempt is None:
+                                _claim_stream()
+                            else:
+                                active, _ = attempt.call_if_active(_claim_stream)
+                                if not active:
+                                    try:
+                                        event_stream.close()
+                                    except Exception:
+                                        pass
+                                    raise _ProviderAttemptRevoked(
+                                        "Bedrock stream was superseded before stream claim"
+                                    )
+
+                    def _on_event(_event):
+                        last_bedrock_event_time["t"] = time.time()
+                        self._touch_activity("receiving Bedrock stream event")
 
                     def _on_text(text):
+                        last_bedrock_event_time["t"] = time.time()
+                        self._touch_activity("receiving Bedrock stream")
                         callback_buffer.append(("text", text))
 
                     def _on_tool(name):
+                        last_bedrock_event_time["t"] = time.time()
+                        self._touch_activity("receiving Bedrock tool request")
                         if isinstance(name, str) and name.strip():
                             callback_buffer.append(("tool", name.strip()))
 
                     def _on_reasoning(text):
+                        last_bedrock_event_time["t"] = time.time()
+                        self._touch_activity("receiving Bedrock reasoning stream")
                         callback_buffer.append(("reasoning", text))
 
                     response = stream_converse_with_callbacks(
@@ -10894,6 +11843,7 @@ class AIAgent:
                         on_text_delta=_on_text if self._has_stream_consumers() else None,
                         on_tool_start=_on_tool,
                         on_reasoning_delta=_on_reasoning if self.reasoning_callback or self.stream_delta_callback else None,
+                        on_event=_on_event,
                         on_interrupt_check=lambda: self._interrupt_requested,
                     )
                     if self._interrupt_requested:
@@ -10911,6 +11861,11 @@ class AIAgent:
                     accepted_tool_names = {
                         call.name for call in (normalized.tool_calls or [])
                     }
+                    attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                    if attempt is not None and attempt.is_revoked():
+                        raise _ProviderAttemptRevoked(
+                            "Bedrock stream attempt was superseded"
+                        )
                     if callbacks_accepted:
                         for callback_kind, callback_value in callback_buffer:
                             if (
@@ -10934,7 +11889,25 @@ class AIAgent:
                     callback_buffer.clear()
                     result["response"] = response
                 except Exception as e:
+                    if (
+                        client is not None
+                        and stale_detector is not None
+                        and stale_detector(e)
+                        and stale_invalidator is not None
+                    ):
+                        try:
+                            stale_invalidator(
+                                region,
+                                timeout=request_timeout,
+                                endpoint_url=endpoint_url,
+                                expected_client=client,
+                            )
+                        except Exception:
+                            pass
+                    callback_buffer.clear()
                     result["error"] = e
+                finally:
+                    _close_bedrock_stream(invalidate=False)
 
             provider_attempt = _ProviderAttempt()
             t = self._spawn_model_worker(
@@ -10943,13 +11916,43 @@ class AIAgent:
                 model_permit=model_permit,
                 provider_attempt=provider_attempt,
             )
+            configured_stale_timeout = self._effective_provider_stale_timeout()
+            configured_request_timeout = self._effective_provider_request_timeout()
+            bedrock_stale_timeout = (
+                configured_stale_timeout
+                if configured_stale_timeout is not None
+                else configured_request_timeout
+                if configured_request_timeout is not None
+                else float(os.getenv("ELEVATE_STREAM_STALE_TIMEOUT", 180.0))
+            )
+            last_heartbeat = time.time()
             while t.is_alive():
                 t.join(timeout=0.3)
+                now = time.time()
+                if now - last_heartbeat >= 30.0:
+                    last_heartbeat = now
+                    waiting_seconds = int(now - last_bedrock_event_time["t"])
+                    self._touch_activity(
+                        "waiting for Bedrock stream response "
+                        f"({waiting_seconds}s without provider events)"
+                    )
+                stale_elapsed = now - last_bedrock_event_time["t"]
+                if stale_elapsed > bedrock_stale_timeout:
+                    provider_attempt.revoke("Bedrock stream stale timeout")
+                    _close_bedrock_stream(invalidate=True)
+                    callback_buffer.clear()
+                    raise TimeoutError(
+                        "Bedrock streaming API call timed out after "
+                        f"{stale_elapsed:.1f}s with no provider events "
+                        f"(threshold: {bedrock_stale_timeout:.1f}s)"
+                    )
                 if self._interrupt_requested:
                     provider_attempt.revoke("turn interrupted")
+                    _close_bedrock_stream(invalidate=True)
                     raise InterruptedError("Agent interrupted during Bedrock API call")
                 if self._consume_steer_cut_request():
                     provider_attempt.revoke("steer cut")
+                    _close_bedrock_stream(invalidate=True)
                     raise SteerCutInterrupt("Steer cut the in-flight Bedrock API call")
             if result["error"] is not None:
                 raise result["error"]
@@ -10962,6 +11965,91 @@ class AIAgent:
             "buffered_output_present": False,
         }
         request_client_holder = {"client": None}
+        anthropic_request_holder = {
+            "client": None,
+            "manager": None,
+            "stream": None,
+        }
+        anthropic_request_lock = threading.RLock()
+
+        def _claim_anthropic_request_client(client):
+            def _store():
+                with anthropic_request_lock:
+                    anthropic_request_holder["client"] = client
+                return client
+
+            attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+            if attempt is None:
+                return _store()
+            active, claimed = attempt.call_if_active(_store)
+            if not active:
+                raise _ProviderAttemptRevoked(
+                    "Anthropic stream was superseded before client claim"
+                )
+            return claimed
+
+        def _claim_anthropic_stream_resource(kind: str, resource):
+            def _store():
+                with anthropic_request_lock:
+                    anthropic_request_holder[kind] = resource
+                return resource
+
+            attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+            if attempt is None:
+                return _store()
+            active, claimed = attempt.call_if_active(_store)
+            if active:
+                return claimed
+            # The resource was created by this now-revoked attempt but never
+            # became visible to the polling frame. Close it locally.
+            try:
+                resource.close()
+            except Exception:
+                pass
+            raise _ProviderAttemptRevoked(
+                "Anthropic stream was superseded before resource claim"
+            )
+
+        def _forget_anthropic_stream_request() -> None:
+            with anthropic_request_lock:
+                anthropic_request_holder.update(
+                    {"client": None, "manager": None, "stream": None}
+                )
+
+        def _close_anthropic_stream_request(*, rebuild: bool) -> bool:
+            """Close exact raw stream/client resources for this attempt."""
+            with anthropic_request_lock:
+                stream = anthropic_request_holder.get("stream")
+                manager = anthropic_request_holder.get("manager")
+                client = anthropic_request_holder.get("client")
+                anthropic_request_holder.update(
+                    {"client": None, "manager": None, "stream": None}
+                )
+
+            raw_stream_found = stream is not None or manager is not None
+            closed_ids = set()
+            for resource in (stream, manager):
+                if resource is None or id(resource) in closed_ids:
+                    continue
+                closed_ids.add(id(resource))
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                # Do not let a revoked attempt replace a client installed by
+                # credential refresh or by a newer retry.
+                if (
+                    rebuild
+                    and getattr(self, "_anthropic_client", None) is client
+                ):
+                    self._rebuild_anthropic_client()
+            return raw_stream_found
+
         first_delta_fired = {"done": False}
         deltas_were_sent = {"yes": False}  # Track if any deltas were fired (for fallback)
         # Wall-clock timestamp of the last real streaming chunk.  The outer
@@ -11439,7 +12527,7 @@ class AIAgent:
                 _elevate_had_tool_intent=bool(tool_calls_acc),
             )
 
-        def _call_anthropic():
+        def _call_anthropic(request_client):
             """Stream an Anthropic Messages API response.
 
             Returns the native Anthropic Message object from
@@ -11452,7 +12540,26 @@ class AIAgent:
             # Reset stale-stream timer for this attempt
             last_chunk_time["t"] = time.time()
             # Use the Anthropic SDK's streaming context manager
-            with self._anthropic_client.messages.stream(**api_kwargs) as stream:
+            request_kwargs = self._apply_bedrock_guardrail_headers(api_kwargs)
+            # Re-claim immediately before dispatch. If credential refresh was
+            # blocked while the polling frame revoked this attempt, the claim
+            # fails before messages.stream() can touch a rebuilt/newer client.
+            request_client = _claim_anthropic_request_client(request_client)
+            attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+            if attempt is None:
+                manager = request_client.messages.stream(**request_kwargs)
+            else:
+                active, manager = attempt.dispatch_if_active(
+                    request_client.messages.stream,
+                    **request_kwargs,
+                )
+            if attempt is not None and not active:
+                raise _ProviderAttemptRevoked(
+                    "Anthropic stream was superseded before dispatch"
+                )
+            manager = _claim_anthropic_stream_resource("manager", manager)
+            with manager as stream:
+                stream = _claim_anthropic_stream_resource("stream", stream)
                 for event in stream:
                     attempt = _CURRENT_PROVIDER_ATTEMPT.get()
                     if attempt is not None and attempt.is_revoked():
@@ -11502,6 +12609,11 @@ class AIAgent:
                                     )
                                     result["buffered_output_present"] = True
 
+                attempt = _CURRENT_PROVIDER_ATTEMPT.get()
+                if attempt is not None and attempt.is_revoked():
+                    raise _ProviderAttemptRevoked(
+                        "provider stream attempt was superseded"
+                    )
                 if self._interrupt_requested:
                     raise InterruptedError(
                         "Agent interrupted before Anthropic stream completion"
@@ -11552,6 +12664,7 @@ class AIAgent:
             import httpx as _httpx
 
             _max_stream_retries = int(os.getenv("ELEVATE_STREAM_RETRIES", 2))
+            anthropic_client = None
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
@@ -11560,8 +12673,16 @@ class AIAgent:
                         return
                     try:
                         if self.api_mode == "anthropic_messages":
+                            anthropic_client = _claim_anthropic_request_client(
+                                self._anthropic_client
+                            )
                             self._try_refresh_anthropic_client_credentials()
-                            result["response"] = _call_anthropic()
+                            anthropic_client = _claim_anthropic_request_client(
+                                self._anthropic_client
+                            )
+                            result["response"] = _call_anthropic(
+                                anthropic_client
+                            )
                         else:
                             result["response"] = _call_chat_completions()
                         return  # success
@@ -11799,6 +12920,7 @@ class AIAgent:
                         result["error"] = e
                         return
             finally:
+                _forget_anthropic_stream_request()
                 request_client = request_client_holder.get("client")
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
@@ -11871,18 +12993,41 @@ class AIAgent:
                     f"context: ~{_est_ctx:,} tokens). "
                     f"Reconnecting..."
                 )
-                try:
-                    rc = request_client_holder.get("client")
-                    if rc is not None:
-                        self._close_request_openai_client(rc, reason="stale_stream_kill")
-                except Exception:
-                    pass
-                # Rebuild the primary client too — its connection pool
-                # may hold dead sockets from the same provider outage.
-                try:
-                    self._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
-                except Exception:
-                    pass
+                raw_anthropic_stream_closed = False
+                if self.api_mode == "anthropic_messages":
+                    try:
+                        raw_anthropic_stream_closed = (
+                            _close_anthropic_stream_request(rebuild=True)
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        rc = request_client_holder.get("client")
+                        if rc is not None:
+                            self._close_request_openai_client(
+                                rc, reason="stale_stream_kill"
+                            )
+                    except Exception:
+                        pass
+                    # Rebuild the primary client too — its connection pool
+                    # may hold dead sockets from the same provider outage.
+                    try:
+                        self._replace_primary_openai_client(
+                            reason="stale_stream_pool_cleanup"
+                        )
+                    except Exception:
+                        pass
+                if raw_anthropic_stream_closed:
+                    # Anthropic's raw stream owns the worker's transport and
+                    # turn permit. Once close unblocks iteration, wait for the
+                    # exact worker to drain before returning the timeout.
+                    t.join(timeout=2.0)
+                    if t.is_alive():
+                        logger.warning(
+                            "Anthropic stream worker did not quiesce within "
+                            "2s after exact stream closure"
+                        )
                 # Reset the timer so we don't kill repeatedly while
                 # the inner thread processes the closure.
                 last_chunk_time["t"] = time.time()
@@ -11896,16 +13041,20 @@ class AIAgent:
 
             if self._interrupt_requested:
                 provider_attempt.revoke("turn interrupted")
+                raw_anthropic_stream_closed = False
                 try:
                     if self.api_mode == "anthropic_messages":
-                        self._anthropic_client.close()
-                        self._rebuild_anthropic_client()
+                        raw_anthropic_stream_closed = (
+                            _close_anthropic_stream_request(rebuild=True)
+                        )
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
                             self._close_request_openai_client(request_client, reason="stream_interrupt_abort")
                 except Exception:
                     pass
+                if raw_anthropic_stream_closed:
+                    t.join(timeout=2.0)
                 raise InterruptedError("Agent interrupted during streaming API call")
 
             if self._consume_steer_cut_request():
@@ -11914,16 +13063,20 @@ class AIAgent:
                 # conversation loop re-issue the call with the steer applied.
                 # Only reachable pre-"resolving": once answer text streams,
                 # _request_steer_cut_if_thinking never sets the flag.
+                raw_anthropic_stream_closed = False
                 try:
                     if self.api_mode == "anthropic_messages":
-                        self._anthropic_client.close()
-                        self._rebuild_anthropic_client()
+                        raw_anthropic_stream_closed = (
+                            _close_anthropic_stream_request(rebuild=True)
+                        )
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
                             self._close_request_openai_client(request_client, reason="stream_steer_cut_abort")
                 except Exception:
                     pass
+                if raw_anthropic_stream_closed:
+                    t.join(timeout=2.0)
                 raise SteerCutInterrupt("Steer cut the in-flight streaming API call")
         # The worker can observe the interrupt and exit between the final
         # ``is_alive`` check and the body of the polling loop.  Recheck after
@@ -12032,6 +13185,169 @@ class AIAgent:
 
     # ── Provider fallback ──────────────────────────────────────────────────
 
+    def _activate_bedrock_fallback(
+        self,
+        fallback: Dict[str, Any],
+        fallback_model: str,
+    ) -> bool:
+        """Transactionally install a Bedrock fallback from a main-runtime receipt."""
+        from elevate_cli.model_normalize import normalize_model_for_provider
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        fallback_model = normalize_model_for_provider(
+            fallback_model,
+            "bedrock",
+        )
+        policy_provider = str(
+            fallback.get("_bedrock_policy_provider")
+            or fallback.get("provider")
+            or "bedrock"
+        ).strip().lower()
+        explicit_base_url = str(fallback.get("base_url") or "").strip()
+        if explicit_base_url and not _is_bedrock_runtime_base_url(
+            explicit_base_url
+        ):
+            raise ValueError("Bedrock fallback URL must be an AWS runtime endpoint")
+        runtime = resolve_runtime_provider(
+            requested=policy_provider,
+            explicit_base_url=explicit_base_url or None,
+            target_model=fallback_model,
+        )
+        base_url = str(
+            explicit_base_url or runtime.get("base_url") or ""
+        ).strip().rstrip("/")
+        identity = self._configured_bedrock_identity(
+            model=fallback_model,
+            base_url=base_url,
+            policy_provider=str(
+                runtime.get("bedrock_timeout_provider") or policy_provider
+            ).strip(),
+            request_timeout=runtime.get("request_timeout_seconds"),
+            stale_timeout=runtime.get("stale_timeout_seconds"),
+        )
+        client_kind = identity["client_kind"]
+        api_mode = (
+            "anthropic_messages"
+            if client_kind == "anthropic_bedrock"
+            else "bedrock_converse"
+        )
+        staged_anthropic_client = self._stage_bedrock_client(
+            client_kind,
+            identity["region"],
+            endpoint_url=identity["endpoint_url"],
+            timeout=identity["request_timeout"],
+        )
+        agent_snapshot = dict(self.__dict__)
+        compressor = getattr(self, "context_compressor", None)
+        compressor_snapshot = (
+            dict(compressor.__dict__)
+            if compressor is not None and hasattr(compressor, "__dict__")
+            else None
+        )
+        old_client = getattr(self, "client", None)
+        old_anthropic_client = getattr(self, "_anthropic_client", None)
+        old_model = self.model
+
+        try:
+            use_prompt_caching, use_native_cache_layout = (
+                self._anthropic_prompt_cache_policy(
+                    provider="bedrock",
+                    base_url=base_url,
+                    api_mode=api_mode,
+                    model=fallback_model,
+                )
+            )
+            context_length = None
+            if compressor is not None:
+                from agent.model_metadata import get_model_context_length
+
+                context_length = get_model_context_length(
+                    fallback_model,
+                    base_url=base_url,
+                    api_key="aws-sdk",
+                    provider="bedrock",
+                    config_context_length=getattr(
+                        self, "_config_context_length", None
+                    ),
+                )
+
+            self.model = fallback_model
+            self.provider = "bedrock"
+            self.base_url = base_url
+            self.api_mode = api_mode
+            self.api_key = "aws-sdk"
+            self.client = None
+            self._client_kwargs = {}
+            self._bedrock_region = identity["region"]
+            self._bedrock_endpoint_url = identity["endpoint_url"]
+            self._bedrock_guardrail_config = copy.deepcopy(
+                identity["guardrail_config"]
+            )
+            self._bedrock_timeout_provider = identity["timeout_provider"]
+            self._bedrock_request_timeout = identity["request_timeout"]
+            self._bedrock_stale_timeout = identity["stale_timeout"]
+            self._anthropic_client = staged_anthropic_client
+            if client_kind == "anthropic_bedrock":
+                self._anthropic_api_key = "aws-sdk"
+                self._anthropic_base_url = base_url
+            else:
+                self._anthropic_api_key = ""
+                self._anthropic_base_url = ""
+            self._is_anthropic_oauth = False
+            if hasattr(self, "_transport_cache"):
+                self._transport_cache.clear()
+            self._use_prompt_caching = use_prompt_caching
+            self._use_native_cache_layout = use_native_cache_layout
+            self._fallback_activated = True
+
+            if compressor is not None:
+                self._update_context_engine_runtime(
+                    compressor,
+                    model=fallback_model,
+                    context_length=context_length,
+                    base_url=base_url,
+                    api_key="aws-sdk",
+                    provider="bedrock",
+                    api_mode=api_mode,
+                )
+        except Exception:
+            self.__dict__.clear()
+            self.__dict__.update(agent_snapshot)
+            if compressor_snapshot is not None:
+                compressor.__dict__.clear()
+                compressor.__dict__.update(compressor_snapshot)
+            if (
+                staged_anthropic_client is not None
+                and staged_anthropic_client is not old_anthropic_client
+            ):
+                try:
+                    staged_anthropic_client.close()
+                except Exception:
+                    pass
+            raise
+
+        for replaced_client in (old_client, old_anthropic_client):
+            if replaced_client is None or replaced_client is staged_anthropic_client:
+                continue
+            try:
+                close = getattr(replaced_client, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+
+        self._emit_status(
+            "🔄 Primary model failed — switching to fallback: "
+            f"{fallback_model} via bedrock"
+        )
+        logging.info(
+            "Fallback activated: %s → %s (bedrock/%s)",
+            old_model,
+            fallback_model,
+            client_kind,
+        )
+        return True
+
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
         """Switch to the next fallback model/provider in the chain.
 
@@ -12067,6 +13383,32 @@ class AIAgent:
         # raw_codex=True because the main agent needs direct responses.stream()
         # access for Codex providers.
         try:
+            fb_base_url_candidate = str(fb.get("base_url") or "").strip()
+            from elevate_cli.runtime_provider import (
+                _get_named_custom_provider,
+                is_bedrock_provider_alias,
+            )
+
+            named_fallback = _get_named_custom_provider(fb_provider)
+            if not fb_base_url_candidate:
+                if named_fallback:
+                    fb_base_url_candidate = str(
+                        named_fallback.get("base_url") or ""
+                    ).strip()
+            if _is_bedrock_runtime_base_url(fb_base_url_candidate) or (
+                is_bedrock_provider_alias(fb_provider) and named_fallback is None
+            ):
+                bedrock_fallback = dict(fb)
+                if fb_base_url_candidate:
+                    bedrock_fallback["base_url"] = fb_base_url_candidate
+                bedrock_fallback["_bedrock_policy_provider"] = str(
+                    (named_fallback or {}).get("provider_key") or fb_provider
+                ).strip()
+                return self._activate_bedrock_fallback(
+                    bedrock_fallback,
+                    fb_model,
+                )
+
             from agent.auxiliary_client import resolve_provider_client
             # Pass base_url and api_key from fallback config so custom
             # endpoints (e.g. Ollama Cloud) resolve correctly instead of
@@ -12115,9 +13457,8 @@ class AIAgent:
                 # provider-specific exceptions like Copilot gpt-5-mini on
                 # chat completions.
                 fb_api_mode = "codex_responses"
-            elif fb_provider == "bedrock" or (
-                base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
-                and base_url_host_matches(fb_base_url, "amazonaws.com")
+            elif fb_provider == "bedrock" or _is_bedrock_runtime_base_url(
+                fb_base_url
             ):
                 fb_api_mode = "bedrock_converse"
 
@@ -12129,6 +13470,12 @@ class AIAgent:
             if hasattr(self, "_transport_cache"):
                 self._transport_cache.clear()
             self._fallback_activated = True
+            self._bedrock_region = None
+            self._bedrock_endpoint_url = ""
+            self._bedrock_guardrail_config = None
+            self._bedrock_timeout_provider = ""
+            self._bedrock_request_timeout = None
+            self._bedrock_stale_timeout = None
 
             # Honor per-provider / per-model request_timeout_seconds for the
             # fallback target (same knob the primary client uses).  None = use
@@ -12222,6 +13569,190 @@ class AIAgent:
 
     # ── Per-turn primary restoration ─────────────────────────────────────
 
+    def _restore_bedrock_primary_runtime(self, rt: Dict[str, Any]) -> bool:
+        """Restore a Bedrock primary atomically from its durable snapshot."""
+        from agent.bedrock_adapter import (
+            normalize_bedrock_runtime_endpoint,
+            prepare_converse_guardrail_config,
+        )
+
+        client_kind = str(rt.get("bedrock_client_kind") or "").strip()
+        if not client_kind:
+            client_kind = (
+                "anthropic_bedrock"
+                if rt.get("api_mode") == "anthropic_messages"
+                else "converse"
+            )
+        expected_api_mode = (
+            "anthropic_messages"
+            if client_kind == "anthropic_bedrock"
+            else "bedrock_converse"
+        )
+        if rt.get("api_mode") != expected_api_mode:
+            logging.warning(
+                "Failed to restore primary runtime: Bedrock client kind and api_mode disagree"
+            )
+            return False
+        if not _is_bedrock_runtime_base_url(rt.get("base_url")):
+            logging.warning(
+                "Failed to restore primary runtime: Bedrock base URL is not a trusted AWS origin"
+            )
+            return False
+        region = str(
+            rt.get("bedrock_region")
+            or _bedrock_region_from_base_url(rt.get("base_url"))
+            or ""
+        ).strip()
+        if not region:
+            logging.warning(
+                "Failed to restore primary runtime: Bedrock region is missing"
+            )
+            return False
+        raw_guardrail = rt.get("bedrock_guardrail_config")
+        if raw_guardrail is not None and not isinstance(raw_guardrail, dict):
+            logging.warning(
+                "Failed to restore primary runtime: Bedrock guardrail policy is malformed"
+            )
+            return False
+        try:
+            timeout_provider = str(
+                rt.get("bedrock_timeout_provider") or "bedrock"
+            ).strip()
+            has_request_timeout = "bedrock_request_timeout" in rt
+            has_stale_timeout = "bedrock_stale_timeout" in rt
+            request_timeout = _coerce_timeout(rt.get("bedrock_request_timeout"))
+            stale_timeout = _coerce_timeout(rt.get("bedrock_stale_timeout"))
+            if (
+                has_request_timeout
+                and rt.get("bedrock_request_timeout") is not None
+                and request_timeout is None
+            ):
+                raise ValueError("Bedrock request timeout snapshot is malformed")
+            if (
+                has_stale_timeout
+                and rt.get("bedrock_stale_timeout") is not None
+                and stale_timeout is None
+            ):
+                raise ValueError("Bedrock stale timeout snapshot is malformed")
+            if not has_request_timeout or not has_stale_timeout:
+                legacy_policy = resolve_provider_timeout_policy(
+                    timeout_provider,
+                    str(rt.get("model") or ""),
+                    base_url=str(rt.get("base_url") or ""),
+                    fallback_provider_id="bedrock",
+                )
+                if not has_request_timeout:
+                    request_timeout = legacy_policy["request_timeout"]
+                if not has_stale_timeout:
+                    stale_timeout = legacy_policy["stale_timeout"]
+            raw_endpoint_url = str(
+                rt.get("bedrock_endpoint_url")
+                or _bedrock_fips_endpoint_from_base_url(rt.get("base_url"))
+                or ""
+            ).strip()
+            endpoint_url = (
+                normalize_bedrock_runtime_endpoint(raw_endpoint_url, region)
+                if raw_endpoint_url
+                else ""
+            )
+            guardrail_config = prepare_converse_guardrail_config(
+                copy.deepcopy(raw_guardrail),
+                streaming=True,
+            )
+            staged_anthropic_client = self._stage_bedrock_client(
+                client_kind,
+                region,
+                endpoint_url=endpoint_url,
+                timeout=request_timeout,
+            )
+        except Exception as exc:
+            logging.warning("Failed to restore primary runtime: %s", exc)
+            return False
+
+        agent_snapshot = dict(self.__dict__)
+        compressor = getattr(self, "context_compressor", None)
+        compressor_snapshot = (
+            dict(compressor.__dict__)
+            if compressor is not None and hasattr(compressor, "__dict__")
+            else None
+        )
+        old_client = getattr(self, "client", None)
+        old_anthropic_client = getattr(self, "_anthropic_client", None)
+        try:
+            self.model = rt["model"]
+            self.provider = "bedrock"
+            self.base_url = rt["base_url"]
+            self.api_mode = expected_api_mode
+            self.api_key = "aws-sdk"
+            self.client = None
+            self._client_kwargs = {}
+            self._bedrock_region = region
+            self._bedrock_endpoint_url = endpoint_url
+            self._bedrock_guardrail_config = copy.deepcopy(guardrail_config)
+            self._bedrock_timeout_provider = timeout_provider
+            self._bedrock_request_timeout = request_timeout
+            self._bedrock_stale_timeout = stale_timeout
+            self._anthropic_client = staged_anthropic_client
+            if client_kind == "anthropic_bedrock":
+                self._anthropic_api_key = "aws-sdk"
+                self._anthropic_base_url = rt["base_url"]
+            else:
+                self._anthropic_api_key = ""
+                self._anthropic_base_url = ""
+            self._is_anthropic_oauth = False
+            self._use_prompt_caching = rt["use_prompt_caching"]
+            self._use_native_cache_layout = rt.get(
+                "use_native_cache_layout",
+                False,
+            )
+            if hasattr(self, "_transport_cache"):
+                self._transport_cache.clear()
+
+            if compressor is not None:
+                self._update_context_engine_runtime(
+                    compressor,
+                    model=rt["compressor_model"],
+                    context_length=rt["compressor_context_length"],
+                    base_url=rt["compressor_base_url"],
+                    api_key=rt["compressor_api_key"],
+                    provider=rt["compressor_provider"],
+                    api_mode=expected_api_mode,
+                )
+            self._fallback_activated = False
+            self._fallback_index = 0
+        except Exception as exc:
+            self.__dict__.clear()
+            self.__dict__.update(agent_snapshot)
+            if compressor_snapshot is not None:
+                compressor.__dict__.clear()
+                compressor.__dict__.update(compressor_snapshot)
+            if (
+                staged_anthropic_client is not None
+                and staged_anthropic_client is not old_anthropic_client
+            ):
+                try:
+                    staged_anthropic_client.close()
+                except Exception:
+                    pass
+            logging.warning("Failed to restore primary runtime: %s", exc)
+            return False
+
+        for replaced_client in (old_client, old_anthropic_client):
+            if replaced_client is None or replaced_client is staged_anthropic_client:
+                continue
+            try:
+                close = getattr(replaced_client, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        logging.info(
+            "Primary runtime restored for new turn: %s (bedrock/%s)",
+            self.model,
+            client_kind,
+        )
+        return True
+
     def _restore_primary_runtime(self) -> bool:
         """Restore the primary runtime at the start of a new turn.
 
@@ -12240,6 +13771,8 @@ class AIAgent:
             return False  # primary still in rate-limit cooldown, stay on fallback
 
         rt = self._primary_runtime
+        if str(rt.get("provider") or "").strip().lower() == "bedrock":
+            return self._restore_bedrock_primary_runtime(rt)
         try:
             # ── Core runtime state ──
             self.model = rt["model"]
@@ -12257,6 +13790,12 @@ class AIAgent:
                 "use_native_cache_layout",
                 self.api_mode == "anthropic_messages" and self.provider == "anthropic",
             )
+            self._bedrock_region = None
+            self._bedrock_endpoint_url = ""
+            self._bedrock_guardrail_config = None
+            self._bedrock_timeout_provider = ""
+            self._bedrock_request_timeout = None
+            self._bedrock_stale_timeout = None
 
             # ── Rebuild client for the primary provider ──
             if self.api_mode == "anthropic_messages":
@@ -12275,6 +13814,10 @@ class AIAgent:
                     reason="restore_primary",
                     shared=True,
                 )
+                self._anthropic_client = None
+                self._anthropic_api_key = ""
+                self._anthropic_base_url = ""
+                self._is_anthropic_oauth = False
 
             # ── Restore context engine state ──
             cc = self.context_compressor
@@ -12336,6 +13879,18 @@ class AIAgent:
         provider_lower = (self.provider or "").strip().lower()
         if provider_lower in ("nous", "nous-research"):
             return False
+
+        if provider_lower == "bedrock":
+            if not self._restore_bedrock_primary_runtime(self._primary_runtime):
+                return False
+            wait_time = min(3 + retry_count, 8)
+            self._vprint(
+                f"{self.log_prefix}🔁 Transient {error_type} on bedrock — "
+                f"rebuilt client, waiting {wait_time}s before one last primary attempt.",
+                force=True,
+            )
+            time.sleep(wait_time)
+            return True
 
         try:
             # Close existing client to release stale connections

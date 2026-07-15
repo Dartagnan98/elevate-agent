@@ -1885,6 +1885,11 @@ def _build_child_agent(
     override_base_url: Optional[str] = None,
     override_api_key: Optional[str] = None,
     override_api_mode: Optional[str] = None,
+    # Bedrock timeout receipt resolved for the child's exact runtime identity.
+    # These values must travel with provider/model/base_url as one bundle.
+    override_bedrock_timeout_provider: Optional[str] = None,
+    override_request_timeout_seconds: Optional[float] = None,
+    override_stale_timeout_seconds: Optional[float] = None,
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
@@ -2222,12 +2227,63 @@ def _build_child_agent(
         child_provider_sort = None
         child_openrouter_min_coding_score = None
 
+    # A Bedrock timeout receipt is scoped to the provider/model/base URL that
+    # produced it. Prefer a receipt resolved for the child. Only reuse the
+    # parent's receipt when the child has the exact same runtime identity;
+    # otherwise leave these unset so AIAgent derives fresh defaults.
+    child_provider_identity = str(effective_provider or "").strip().lower()
+    parent_provider_identity = str(
+        getattr(parent_agent, "provider", None) or ""
+    ).strip().lower()
+    child_model_identity = str(effective_model or "").strip()
+    parent_model_identity = str(
+        getattr(parent_agent, "model", None) or ""
+    ).strip()
+    child_base_url_identity = str(effective_base_url or "").strip().rstrip("/")
+    parent_base_url_identity = str(
+        getattr(parent_agent, "base_url", None) or ""
+    ).strip().rstrip("/")
+    same_bedrock_runtime = (
+        child_provider_identity == parent_provider_identity == "bedrock"
+        and child_model_identity == parent_model_identity
+        and child_base_url_identity == parent_base_url_identity
+    )
+    child_receipt_resolved = any(
+        value is not None
+        for value in (
+            override_bedrock_timeout_provider,
+            override_request_timeout_seconds,
+            override_stale_timeout_seconds,
+        )
+    )
+    if child_provider_identity == "bedrock" and child_receipt_resolved:
+        child_bedrock_timeout_provider = override_bedrock_timeout_provider
+        child_request_timeout_seconds = override_request_timeout_seconds
+        child_stale_timeout_seconds = override_stale_timeout_seconds
+    elif same_bedrock_runtime:
+        child_bedrock_timeout_provider = getattr(
+            parent_agent, "_bedrock_timeout_provider", None
+        )
+        child_request_timeout_seconds = getattr(
+            parent_agent, "_bedrock_request_timeout", None
+        )
+        child_stale_timeout_seconds = getattr(
+            parent_agent, "_bedrock_stale_timeout", None
+        )
+    else:
+        child_bedrock_timeout_provider = None
+        child_request_timeout_seconds = None
+        child_stale_timeout_seconds = None
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
         model=effective_model,
         provider=effective_provider,
         api_mode=effective_api_mode,
+        bedrock_timeout_provider=child_bedrock_timeout_provider,
+        request_timeout_seconds=child_request_timeout_seconds,
+        stale_timeout_seconds=child_stale_timeout_seconds,
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
@@ -3440,6 +3496,15 @@ def delegate_task(
                 override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
                 override_api_mode=creds["api_mode"],
+                override_bedrock_timeout_provider=creds.get(
+                    "bedrock_timeout_provider"
+                ),
+                override_request_timeout_seconds=creds.get(
+                    "request_timeout_seconds"
+                ),
+                override_stale_timeout_seconds=creds.get(
+                    "stale_timeout_seconds"
+                ),
                 override_acp_command=t.get("acp_command")
                 or acp_command
                 or creds.get("command"),
@@ -3971,6 +4036,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": configured_base_url,
             "api_key": api_key,
             "api_mode": api_mode,
+            "bedrock_timeout_provider": None,
+            "request_timeout_seconds": None,
+            "stale_timeout_seconds": None,
         }
 
     if not configured_provider:
@@ -3981,6 +4049,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": None,
             "api_key": None,
             "api_mode": None,
+            "bedrock_timeout_provider": None,
+            "request_timeout_seconds": None,
+            "stale_timeout_seconds": None,
         }
 
     # Provider is configured — resolve full credentials
@@ -4009,6 +4080,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "base_url": runtime.get("base_url"),
         "api_key": api_key,
         "api_mode": runtime.get("api_mode"),
+        "bedrock_timeout_provider": runtime.get("bedrock_timeout_provider"),
+        "request_timeout_seconds": runtime.get("request_timeout_seconds"),
+        "stale_timeout_seconds": runtime.get("stale_timeout_seconds"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
     }

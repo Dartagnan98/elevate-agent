@@ -975,8 +975,13 @@ def _resolve_runtime_agent_kwargs() -> dict:
     from elevate_cli.beta_provider_policy import BetaProviderPolicyError
 
     try:
+        try:
+            target_model = _resolve_gateway_model()
+        except Exception:
+            target_model = None
         runtime = resolve_runtime_provider(
             requested=os.getenv("ELEVATE_INFERENCE_PROVIDER"),
+            target_model=target_model,
         )
     except BetaProviderPolicyError as policy_exc:
         raise RuntimeError(f"{policy_exc.code}: {policy_exc}") from policy_exc
@@ -1005,6 +1010,10 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
+        "bedrock_timeout_provider": runtime.get("bedrock_timeout_provider"),
+        "request_timeout_seconds": runtime.get("request_timeout_seconds"),
+        "stale_timeout_seconds": runtime.get("stale_timeout_seconds"),
+        "model": runtime.get("model"),
     }
 
 
@@ -1036,6 +1045,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     requested=entry.get("provider"),
                     explicit_base_url=entry.get("base_url"),
                     explicit_api_key=entry.get("api_key"),
+                    target_model=entry.get("model"),
                 )
                 logger.info("Fallback provider resolved: %s", runtime.get("provider"))
                 return {
@@ -1046,6 +1056,16 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
+                    "bedrock_timeout_provider": runtime.get(
+                        "bedrock_timeout_provider"
+                    ),
+                    "request_timeout_seconds": runtime.get(
+                        "request_timeout_seconds"
+                    ),
+                    "stale_timeout_seconds": runtime.get(
+                        "stale_timeout_seconds"
+                    ),
+                    "model": runtime.get("model") or entry.get("model"),
                 }
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
@@ -2329,8 +2349,55 @@ class GatewayRunner:
                 "api_key": override.get("api_key"),
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
+                "bedrock_timeout_provider": override.get(
+                    "bedrock_timeout_provider"
+                ),
+                "request_timeout_seconds": override.get(
+                    "request_timeout_seconds"
+                ),
+                "stale_timeout_seconds": override.get(
+                    "stale_timeout_seconds"
+                ),
             }
             if override_runtime.get("api_key"):
+                from elevate_cli.runtime_provider import (
+                    _bedrock_region_from_url,
+                    is_bedrock_provider_alias,
+                    resolve_runtime_provider,
+                )
+
+                override_provider = override_runtime.get("provider")
+                override_base_url = override_runtime.get("base_url")
+                if is_bedrock_provider_alias(
+                    override_provider
+                ) or _bedrock_region_from_url(override_base_url):
+                    # A complete session override bypasses global runtime
+                    # resolution.  Bedrock policy is still live config, though,
+                    # so refresh its model-aware timeout receipt on every turn.
+                    # The receipt participates in the cache signature below;
+                    # changing a bound therefore rebuilds the cached agent
+                    # instead of silently reusing stale stall/cancel limits.
+                    refreshed = resolve_runtime_provider(
+                        requested=override_provider,
+                        explicit_base_url=override_base_url,
+                        target_model=override_model,
+                    )
+                    refreshed_model = refreshed.get("model")
+                    if isinstance(refreshed_model, str) and refreshed_model.strip():
+                        override_model = refreshed_model.strip()
+                        override["model"] = override_model
+                    refreshed_mode = refreshed.get("api_mode")
+                    if refreshed_mode:
+                        override_runtime["api_mode"] = refreshed_mode
+                        override["api_mode"] = refreshed_mode
+                    for receipt_key in (
+                        "bedrock_timeout_provider",
+                        "request_timeout_seconds",
+                        "stale_timeout_seconds",
+                    ):
+                        receipt_value = refreshed.get(receipt_key)
+                        override_runtime[receipt_key] = receipt_value
+                        override[receipt_key] = receipt_value
                 logger.debug(
                     "Session model override (fast): session=%s config_model=%s -> override_model=%s provider=%s",
                     (resolved_session_key or "")[:30], model, override_model,
@@ -2351,6 +2418,9 @@ class GatewayRunner:
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_model = runtime_kwargs.get("model")
+        if isinstance(runtime_model, str) and runtime_model.strip():
+            model = runtime_model.strip()
         if beta_active:
             canonical_beta_provider(
                 runtime_kwargs.get("provider"), source="gateway runtime provider"
@@ -2400,6 +2470,15 @@ class GatewayRunner:
             "command": runtime_kwargs.get("command"),
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
+            "bedrock_timeout_provider": runtime_kwargs.get(
+                "bedrock_timeout_provider"
+            ),
+            "request_timeout_seconds": runtime_kwargs.get(
+                "request_timeout_seconds"
+            ),
+            "stale_timeout_seconds": runtime_kwargs.get(
+                "stale_timeout_seconds"
+            ),
         }
         route = {
             "model": model,
@@ -2411,6 +2490,9 @@ class GatewayRunner:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                runtime["bedrock_timeout_provider"],
+                runtime["request_timeout_seconds"],
+                runtime["stale_timeout_seconds"],
             ),
         }
 
@@ -12470,6 +12552,11 @@ class GatewayRunner:
                 runtime.get("base_url", ""),
                 runtime.get("provider", ""),
                 runtime.get("api_mode", ""),
+                runtime.get("command", ""),
+                tuple(runtime.get("args") or ()),
+                runtime.get("bedrock_timeout_provider"),
+                runtime.get("request_timeout_seconds"),
+                runtime.get("stale_timeout_seconds"),
                 sorted(enabled_toolsets) if enabled_toolsets else [],
                 # reasoning_config excluded — it's set per-message on the
                 # cached agent and doesn't affect system prompt or tools.
@@ -12494,11 +12581,28 @@ class GatewayRunner:
         override = self._session_model_overrides.get(session_key)
         if not override:
             return model, runtime_kwargs
+        original_identity = (
+            model,
+            runtime_kwargs.get("provider"),
+            runtime_kwargs.get("base_url"),
+        )
         model = override.get("model", model)
         for key in ("provider", "api_key", "base_url", "api_mode"):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
+        if original_identity != (
+            model,
+            runtime_kwargs.get("provider"),
+            runtime_kwargs.get("base_url"),
+        ):
+            # The receipt was resolved for the original model/provider/endpoint.
+            # Explicit timeout values are authoritative in AIAgent, so clear
+            # them whenever a session override changes that identity and let
+            # the replacement agent resolve the correct Bedrock policy.
+            runtime_kwargs["bedrock_timeout_provider"] = None
+            runtime_kwargs["request_timeout_seconds"] = None
+            runtime_kwargs["stale_timeout_seconds"] = None
         return model, runtime_kwargs
 
     def _is_intentional_model_switch(self, session_key: str, agent_model: str) -> bool:
@@ -12681,16 +12785,23 @@ class GatewayRunner:
             self._evict_cached_agent(session_key)
 
     def _evict_cached_agent(self, session_key: str) -> None:
-        """Remove a cached agent for a session (called on /new, /model, etc)."""
+        """Remove and release a cached agent for /new, /model, and resets."""
         _lock = getattr(self, "_agent_cache_lock", None)
         _cache = getattr(self, "_agent_cache", None)
         if _cache is None:
             return
+        evicted = None
         if _lock:
             with _lock:
-                _cache.pop(session_key, None)
+                evicted = _cache.pop(session_key, None)
         else:
-            _cache.pop(session_key, None)
+            evicted = _cache.pop(session_key, None)
+        evicted_agent = (
+            evicted[0]
+            if isinstance(evicted, tuple) and evicted
+            else evicted
+        )
+        self._release_replaced_cached_agent(evicted_agent)
 
     def _reset_context_overflow_session(
         self,
@@ -12737,6 +12848,16 @@ class GatewayRunner:
                 # Older agent instance (shouldn't happen in practice) —
                 # fall back to the legacy full-close path.
                 self._cleanup_agent_resources(agent)
+        except Exception:
+            pass
+
+    def _release_replaced_cached_agent(self, agent: Any) -> None:
+        """Release a discarded agent while preserving session tool state."""
+        if agent is None:
+            return
+        self._release_evicted_agent_soft(agent)
+        try:
+            agent.close_memory_connections()
         except Exception:
             pass
 
@@ -13844,6 +13965,7 @@ class GatewayRunner:
                 combined_ephemeral,
             )
             agent = None
+            replaced_cached_agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
             _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
@@ -13865,6 +13987,17 @@ class GatewayRunner:
                         agent._last_activity_desc = "starting new turn (cached)"
                         agent._api_call_count = 0
                         logger.debug("Reusing cached agent for session %s", session_key)
+                    elif cached:
+                        # The next constructor continues the same logical
+                        # session with a different runtime receipt.  Remove and
+                        # release the superseded instance before building the
+                        # replacement so stale provider clients and memory DB
+                        # connections cannot accumulate across turns.
+                        replaced_cached_agent = cached[0]
+                        _cache.pop(session_key, None)
+
+            if replaced_cached_agent is not None:
+                self._release_replaced_cached_agent(replaced_cached_agent)
 
             if agent is None:
                 # Config changed or first message — create fresh agent

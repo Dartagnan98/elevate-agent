@@ -5,9 +5,6 @@ accepted as base_url, and unknown keys go unreported.
 """
 
 import logging
-from unittest.mock import patch
-
-import pytest
 
 from elevate_cli.config import _normalize_custom_provider_entry
 
@@ -180,3 +177,17 @@ class TestNormalizeCustomProviderEntry:
         result = _normalize_custom_provider_entry(entry)
         assert result is not None
         assert "models" not in result
+
+    def test_timeout_policy_is_preserved_for_compatible_custom_provider(self):
+        entry = {
+            "name": "gov-bedrock",
+            "base_url": "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+            "requestTimeoutSeconds": 0.25,
+            "stale_timeout_seconds": 0.5,
+        }
+
+        result = _normalize_custom_provider_entry(entry)
+
+        assert result is not None
+        assert result["request_timeout_seconds"] == 0.25
+        assert result["stale_timeout_seconds"] == 0.5

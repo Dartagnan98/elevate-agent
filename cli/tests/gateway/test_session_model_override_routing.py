@@ -148,6 +148,123 @@ def test_beta_session_override_uses_fresh_local_codex_runtime(monkeypatch):
     resolver.assert_called_once_with()
 
 
+def test_bedrock_session_override_refreshes_timeout_receipt_and_signature(
+    monkeypatch,
+):
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_gateway_model",
+        lambda config=None: "global-model",
+    )
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        _explode_runtime_resolution,
+    )
+
+    from elevate_cli import runtime_provider
+
+    endpoint = "https://bedrock-runtime-fips.us-west-2.amazonaws.com"
+    selected_model = "anthropic.claude-3-7-sonnet-20250219-v1:0"
+    current_bounds = {"request": 17.0, "stale": 31.0}
+    resolution_calls = []
+
+    def _resolve_override(**kwargs):
+        resolution_calls.append(dict(kwargs))
+        return {
+            "provider": "bedrock",
+            "model": selected_model,
+            "api_mode": "anthropic_messages",
+            "base_url": endpoint,
+            "api_key": "aws-sdk",
+            "bedrock_timeout_provider": "west-bedrock",
+            "request_timeout_seconds": current_bounds["request"],
+            "stale_timeout_seconds": current_bounds["stale"],
+        }
+
+    monkeypatch.setattr(
+        runtime_provider,
+        "resolve_runtime_provider",
+        _resolve_override,
+    )
+    runner = _make_runner()
+    session_key = "agent:main:local:dm"
+    runner._session_model_overrides[session_key] = {
+        "model": selected_model,
+        "provider": "custom:west-bedrock",
+        "api_key": "aws-sdk",
+        "base_url": endpoint,
+        "api_mode": "anthropic_messages",
+    }
+
+    model, first_runtime = runner._resolve_session_agent_runtime(
+        session_key=session_key
+    )
+    first_signature = runner._resolve_turn_agent_config(
+        "first", model, first_runtime
+    )["signature"]
+
+    current_bounds.update(request=9.0, stale=14.0)
+    model, second_runtime = runner._resolve_session_agent_runtime(
+        session_key=session_key
+    )
+    second_signature = runner._resolve_turn_agent_config(
+        "second", model, second_runtime
+    )["signature"]
+
+    assert first_runtime["request_timeout_seconds"] == 17.0
+    assert first_runtime["stale_timeout_seconds"] == 31.0
+    assert second_runtime["request_timeout_seconds"] == 9.0
+    assert second_runtime["stale_timeout_seconds"] == 14.0
+    assert first_signature != second_signature
+    assert runner._session_model_overrides[session_key][
+        "bedrock_timeout_provider"
+    ] == "west-bedrock"
+    assert resolution_calls == [
+        {
+            "requested": "custom:west-bedrock",
+            "explicit_base_url": endpoint,
+            "target_model": selected_model,
+        },
+        {
+            "requested": "custom:west-bedrock",
+            "explicit_base_url": endpoint,
+            "target_model": selected_model,
+        },
+    ]
+
+
+def test_session_override_clears_timeout_receipt_when_identity_changes():
+    runner = _make_runner()
+    session_key = "agent:main:local:dm"
+    runner._session_model_overrides[session_key] = {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "provider": "bedrock",
+        "base_url": "https://bedrock-runtime-fips.us-west-2.amazonaws.com",
+        "api_mode": "anthropic_messages",
+    }
+    runtime = {
+        "provider": "bedrock",
+        "base_url": "https://bedrock-runtime.ca-central-1.amazonaws.com",
+        "api_mode": "bedrock_converse",
+        "bedrock_timeout_provider": "canada-bedrock",
+        "request_timeout_seconds": 17.0,
+        "stale_timeout_seconds": 31.0,
+    }
+
+    model, resolved = runner._apply_session_model_override(
+        session_key,
+        "amazon.nova-pro-v1:0",
+        runtime,
+    )
+
+    assert model == "anthropic.claude-3-7-sonnet-20250219-v1:0"
+    assert resolved["bedrock_timeout_provider"] is None
+    assert resolved["request_timeout_seconds"] is None
+    assert resolved["stale_timeout_seconds"] is None
+
+
 def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)

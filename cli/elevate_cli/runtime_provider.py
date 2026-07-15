@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ from elevate_cli.auth import (
     has_usable_secret,
 )
 from elevate_cli.config import get_compatible_custom_providers, load_config
+from elevate_cli.timeouts import resolve_provider_timeout_policy
 from elevate_cli.beta_provider_policy import (
     BETA_ALLOWED_PROVIDER,
     BetaProviderPolicyError,
@@ -105,7 +107,44 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
         return "anthropic_messages"
     if hostname == "api.kimi.com" and "/coding" in normalized:
         return "anthropic_messages"
+    if _bedrock_region_from_url(base_url):
+        return "bedrock_converse"
     return None
+
+
+_BEDROCK_RUNTIME_HOST_RE = re.compile(
+    r"^bedrock-runtime(?:-fips)?\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?$"
+)
+BEDROCK_PROVIDER_ALIASES = frozenset(
+    {"bedrock", "aws", "aws-bedrock", "amazon-bedrock", "amazon"}
+)
+
+
+def is_bedrock_provider_alias(provider: Any) -> bool:
+    return str(provider or "").strip().lower() in BEDROCK_PROVIDER_ALIASES
+
+
+def _bedrock_region_from_url(base_url: Any) -> str:
+    """Return the region only for an exact HTTPS AWS Runtime origin."""
+    try:
+        parsed = urlsplit(str(base_url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").lower()
+    match = _BEDROCK_RUNTIME_HOST_RE.fullmatch(hostname)
+    if (
+        parsed.scheme.lower() != "https"
+        or not match
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return match.group(1)
 
 
 def _host_derived_api_key(base_url: str) -> str:
@@ -532,6 +571,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                 if base_url:
                     result = {
                         "name": entry.get("name", ep_name),
+                        "provider_key": str(ep_name),
                         "base_url": base_url.strip(),
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
@@ -560,6 +600,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     if base_url:
                         result = {
                             "name": display_name,
+                            "provider_key": str(ep_name),
                             "base_url": base_url.strip(),
                             "api_key": resolved_api_key,
                             "model": entry.get("default_model", ""),
@@ -1279,6 +1320,7 @@ def resolve_runtime_provider(
         requested_provider = BETA_ALLOWED_PROVIDER
     else:
         requested_provider = resolve_requested_provider(requested)
+    bedrock_policy_provider = requested_provider
     if requested_provider == "claude-code-cli":
         return {
             "provider": "claude-code-cli",
@@ -1323,6 +1365,77 @@ def resolve_runtime_provider(
             target_model=target_model,
         )
         return azure_runtime
+
+    # Any user-selected custom entry pointing at an exact AWS Bedrock Runtime
+    # origin must retain AWS-SDK auth, model-aware transport, region, FIPS, and
+    # guardrail policy.  Resolve the saved entry before the generic custom path
+    # can select a credential pool or construct an OpenAI-wire client.
+    custom_bedrock_entry = _get_named_custom_provider(requested_provider)
+    requested_is_custom_family = requested_provider == "custom"
+    if not requested_is_custom_family:
+        try:
+            requested_is_custom_family = (
+                auth_mod.resolve_provider(requested_provider) == "custom"
+            )
+        except Exception:
+            requested_is_custom_family = False
+    # ``elevate chat --model <provider-name>`` is an established shorthand for
+    # selecting a saved custom provider.  When that shorthand targets Bedrock,
+    # the model argument is a selector rather than an AWS model ID.  Recover the
+    # named entry here so native promotion can substitute its configured model
+    # before transport classification and timeout-policy resolution.
+    target_model_text = str(target_model or "").strip()
+    if not custom_bedrock_entry and requested_is_custom_family and target_model_text:
+        selected_entry = _get_named_custom_provider(target_model_text)
+        if selected_entry and _bedrock_region_from_url(
+            selected_entry.get("base_url")
+        ):
+            custom_bedrock_entry = selected_entry
+    custom_bedrock_base_url = str(explicit_base_url or "").strip().rstrip("/")
+    if not custom_bedrock_base_url and custom_bedrock_entry:
+        custom_bedrock_base_url = str(
+            custom_bedrock_entry.get("base_url") or ""
+        ).strip().rstrip("/")
+    if not custom_bedrock_base_url and requested_is_custom_family:
+        configured_model = _get_model_config()
+        configured_provider = str(
+            configured_model.get("provider") or ""
+        ).strip().lower()
+        configured_is_custom_family = configured_provider == "custom"
+        if not configured_is_custom_family:
+            try:
+                configured_is_custom_family = (
+                    auth_mod.resolve_provider(configured_provider) == "custom"
+                )
+            except Exception:
+                configured_is_custom_family = False
+        if configured_is_custom_family:
+            custom_bedrock_base_url = str(
+                configured_model.get("base_url") or ""
+            ).strip().rstrip("/")
+    if _bedrock_region_from_url(custom_bedrock_base_url):
+        explicit_base_url = custom_bedrock_base_url
+        if custom_bedrock_entry:
+            custom_provider_key = str(
+                custom_bedrock_entry.get("provider_key")
+                or requested_provider.removeprefix("custom:")
+                or requested_provider
+            ).strip()
+            bedrock_policy_provider = custom_provider_key
+            entry_model = str(custom_bedrock_entry.get("model") or "").strip()
+            selector_aliases = {
+                str(requested_provider or "").strip().lower(),
+                str(requested_provider or "").removeprefix("custom:").strip().lower(),
+                custom_provider_key.lower(),
+                f"custom:{custom_provider_key.lower()}",
+                str(custom_bedrock_entry.get("name") or "").strip().lower(),
+            }
+            if entry_model and (
+                not target_model_text
+                or target_model_text.lower() in selector_aliases
+            ):
+                target_model = entry_model
+        requested_provider = "bedrock"
 
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,
@@ -1630,15 +1743,17 @@ def resolve_runtime_provider(
     if provider == "bedrock":
         from agent.bedrock_adapter import (
             has_aws_credentials,
+            normalize_bedrock_guardrail_config,
             resolve_aws_auth_env_var,
             resolve_bedrock_region,
             is_anthropic_bedrock_model,
+            prepare_converse_guardrail_config,
         )
         # When the user explicitly selected bedrock (not auto-detected),
         # trust boto3's credential chain — it handles IMDS, ECS task roles,
         # Lambda execution roles, SSO, and other implicit sources that our
         # env-var check can't detect.
-        is_explicit = requested_provider in {"bedrock", "aws", "aws-bedrock", "amazon-bedrock", "amazon"}
+        is_explicit = is_bedrock_provider_alias(requested_provider)
         if not is_explicit and not has_aws_credentials():
             raise AuthError(
                 "No AWS credentials found for Bedrock. Configure one of:\n"
@@ -1649,32 +1764,88 @@ def resolve_runtime_provider(
                 code="no_aws_credentials",
             )
         # Read bedrock-specific config from config.yaml
-        _bedrock_cfg = load_config().get("bedrock", {})
-        # Region priority: config.yaml bedrock.region → env var → us-east-1
-        region = (_bedrock_cfg.get("region") or "").strip() or resolve_bedrock_region()
+        _loaded_config = load_config()
+        _bedrock_cfg = (
+            _loaded_config.get("bedrock")
+            if isinstance(_loaded_config, dict)
+            else None
+        )
+        if _bedrock_cfg is not None and not isinstance(_bedrock_cfg, dict):
+            raise ValueError("Bedrock configuration must be a mapping")
+        _bedrock_cfg = _bedrock_cfg or {}
+        configured_provider = str(
+            model_cfg.get("provider") or ""
+        ).strip().lower()
+        try:
+            configured_provider = auth_mod.resolve_provider(configured_provider)
+        except Exception:
+            pass
+        configured_bedrock_base_url = (
+            str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            if configured_provider == "bedrock"
+            else ""
+        )
+        env_bedrock_base_url = os.getenv("BEDROCK_BASE_URL", "").strip().rstrip("/")
+        explicit_bedrock_base_url = str(
+            explicit_base_url
+            or env_bedrock_base_url
+            or configured_bedrock_base_url
+            or ""
+        ).strip().rstrip("/")
+        explicit_bedrock_region = _bedrock_region_from_url(
+            explicit_bedrock_base_url
+        )
+        if explicit_bedrock_base_url and not explicit_bedrock_region:
+            raise ValueError(
+                "Bedrock base URL must be an exact HTTPS AWS Runtime origin"
+            )
+        # An explicit trusted endpoint owns its region (and may require FIPS).
+        # Otherwise use config, then the AWS SDK environment/default chain.
+        region = (
+            explicit_bedrock_region
+            if explicit_bedrock_region
+            else str(_bedrock_cfg.get("region") or "").strip()
+            or resolve_bedrock_region()
+        )
+        bedrock_base_url = (
+            explicit_bedrock_base_url
+            if explicit_bedrock_region
+            else f"https://bedrock-runtime.{region}.amazonaws.com"
+        )
         auth_source = resolve_aws_auth_env_var() or "aws-sdk-default-chain"
         # Build guardrail config if configured
-        _gr = _bedrock_cfg.get("guardrail", {})
-        guardrail_config = None
-        if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
-            guardrail_config = {
-                "guardrailIdentifier": _gr["guardrail_identifier"],
-                "guardrailVersion": _gr["guardrail_version"],
-            }
-            if _gr.get("stream_processing_mode"):
-                guardrail_config["streamProcessingMode"] = _gr["stream_processing_mode"]
-            if _gr.get("trace"):
-                guardrail_config["trace"] = _gr["trace"]
+        _gr = _bedrock_cfg.get("guardrail")
+        if _gr is not None and not isinstance(_gr, dict):
+            raise ValueError("Bedrock guardrail configuration must be a mapping")
+        guardrail_config = normalize_bedrock_guardrail_config(
+            _gr,
+            allow_disabled_options=True,
+        )
+        if guardrail_config is not None:
+            guardrail_config = prepare_converse_guardrail_config(
+                guardrail_config,
+                streaming=True,
+            )
         # Dual-path routing: Claude models use AnthropicBedrock SDK for full
         # feature parity (prompt caching, thinking budgets, adaptive thinking).
         # Non-Claude models use the Converse API for multi-model support.
-        _current_model = str(model_cfg.get("default") or "").strip()
+        # Classify the model being switched to, not the persisted default from
+        # before the switch.  A blank override still falls back to config.
+        _target_model = str(target_model or "").strip()
+        _current_model = _target_model or str(model_cfg.get("default") or "").strip()
+        timeout_policy = resolve_provider_timeout_policy(
+            bedrock_policy_provider,
+            _current_model,
+            base_url=bedrock_base_url,
+            fallback_provider_id="bedrock",
+            config=_loaded_config,
+        )
         if is_anthropic_bedrock_model(_current_model):
             # Claude on Bedrock → AnthropicBedrock SDK → anthropic_messages path
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "anthropic_messages",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
+                "base_url": bedrock_base_url,
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,
@@ -1686,14 +1857,28 @@ def resolve_runtime_provider(
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "bedrock_converse",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
+                "base_url": bedrock_base_url,
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,
                 "requested_provider": requested_provider,
             }
+        if _current_model:
+            # The same effective model that selected the native transport and
+            # timeout policy is part of the runtime receipt. This is especially
+            # important after a named custom Bedrock entry is promoted to the
+            # canonical provider: callers must not keep using the selector
+            # (for example ``custom:gov-bedrock``) as the model name.
+            runtime["model"] = _current_model
         if guardrail_config:
             runtime["guardrail_config"] = guardrail_config
+        runtime["bedrock_timeout_provider"] = timeout_policy["policy_provider"]
+        if timeout_policy["request_timeout"] is not None:
+            runtime["request_timeout_seconds"] = timeout_policy["request_timeout"]
+            runtime["request_timeout_provider"] = timeout_policy["request_provider"]
+        if timeout_policy["stale_timeout"] is not None:
+            runtime["stale_timeout_seconds"] = timeout_policy["stale_timeout"]
+            runtime["stale_timeout_provider"] = timeout_policy["stale_provider"]
         return runtime
 
     # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)

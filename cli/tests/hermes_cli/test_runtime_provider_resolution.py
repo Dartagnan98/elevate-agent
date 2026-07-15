@@ -1654,6 +1654,44 @@ def test_get_named_custom_provider_excludes_empty_model(monkeypatch):
         )
 
 
+def test_named_custom_bedrock_receipt_uses_promoted_entry_model(monkeypatch):
+    """Native promotion must retain the entry's model in its receipt."""
+    endpoint = "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com"
+    entry_model = "amazon.nova-lite-v1:0"
+    config = {
+        "model": {
+            "provider": "custom:gov-bedrock",
+            "default": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        },
+        "bedrock": {"region": "us-east-1"},
+        "providers": {
+            "gov-bedrock": {
+                "base_url": endpoint,
+                "default_model": entry_model,
+                "request_timeout_seconds": 5,
+                "models": {
+                    entry_model: {"timeout_seconds": 0.25},
+                },
+            }
+        },
+    }
+    monkeypatch.setattr(rp, "load_config", lambda: config)
+    monkeypatch.setattr(rp, "_get_model_config", lambda: config["model"])
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "bedrock")
+
+    runtime = rp.resolve_runtime_provider(
+        requested="custom:gov-bedrock",
+        target_model="custom:gov-bedrock",
+    )
+
+    assert runtime["provider"] == "bedrock"
+    assert runtime["api_mode"] == "bedrock_converse"
+    assert runtime["model"] == entry_model
+    assert runtime["bedrock_timeout_provider"] == "gov-bedrock"
+    assert runtime["request_timeout_seconds"] == 0.25
+    assert runtime["request_timeout_provider"] == "gov-bedrock"
+
+
 def test_named_custom_runtime_propagates_model_direct_path(monkeypatch):
     """Model should propagate through the direct (non-pool) resolution path."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-server")
