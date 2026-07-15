@@ -1,8 +1,18 @@
 """C3 regression — a numeric/value correction ("$500k" → "$750k") must
 supersede the old fact, not silently keep it while telling the agent it saved.
 """
+import uuid
+
+import pytest
+
 from plugins.memory.holographic import HolographicMemoryProvider
 from plugins.memory.holographic.store import _strip_value_tokens
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    key = f"acct_num_{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr("elevate_cli.data.connection.get_account_key", lambda: key)
 
 
 def _provider(tmp_path):

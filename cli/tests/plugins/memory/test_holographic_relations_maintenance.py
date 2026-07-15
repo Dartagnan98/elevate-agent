@@ -7,16 +7,23 @@ Covers ISSUE #6 (memory_store.db bloat from memory_relations):
   - the destructive method is UNREACHABLE from the recall/hot path
   - it only fires from the daily-gated maintenance entrypoint
 
-All tests use a temp-file SQLite DB via the provider config — never the
-live ~/.elevate/memory_store.db.
+All tests use an isolated embedded-Postgres account — never the live account.
 """
 
 from __future__ import annotations
+
+import uuid
 
 import pytest
 
 from plugins.memory.holographic import HolographicMemoryProvider
 from plugins.memory.holographic.store import DAILY_MAINTENANCE_TOKEN
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    key = f"acct_rel_{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr("elevate_cli.data.connection.get_account_key", lambda: key)
 
 
 def _store(tmp_path):
@@ -38,9 +45,10 @@ def _mk_entities(store, n):
     with store._lock:
         for i in range(n):
             cur = store._conn.execute(
-                "INSERT INTO entities (name) VALUES (?)", (f"ent-{i}",)
+                "INSERT INTO entities (name) VALUES (?) RETURNING entity_id",
+                (f"ent-{i}",),
             )
-            ids.append(int(cur.lastrowid))
+            ids.append(int(cur.fetchone()["entity_id"]))
         store._conn.commit()
     return ids
 
@@ -58,19 +66,127 @@ def _mk_real_chunk(store):
     with store._lock:
         doc_id = int(
             store._conn.execute(
-                "INSERT INTO memory_documents (source_uri, title) VALUES (?,?)",
+                "INSERT INTO memory_documents (source_uri, title) VALUES (?,?) RETURNING document_id",
                 ("doc://t", "t"),
-            ).lastrowid
+            ).fetchone()["document_id"]
         )
         chunk_id = int(
             store._conn.execute(
                 "INSERT INTO memory_chunks "
-                "(document_id, chunk_index, content) VALUES (?,?,?)",
+                "(document_id, chunk_index, content) VALUES (?,?,?) RETURNING chunk_id",
                 (doc_id, 0, "real chunk body"),
-            ).lastrowid
+            ).fetchone()["chunk_id"]
         )
         store._conn.commit()
     return chunk_id
+
+
+def test_entity_merge_collision_preserves_transferred_links(tmp_path):
+    provider, store = _store(tmp_path)
+    try:
+        keeper_id, source_id, target_id = _mk_entities(store, 3)
+        chunk_id = _mk_real_chunk(store)
+        with store._lock:
+            fact_id = int(
+                store._conn.execute(
+                    "INSERT INTO facts (content) VALUES (?) RETURNING fact_id",
+                    ("Durable entity merge collision regression fact",),
+                ).fetchone()["fact_id"]
+            )
+            store._conn.execute(
+                "INSERT INTO fact_entities (fact_id, entity_id) VALUES (?, ?)",
+                (fact_id, source_id),
+            )
+            store._conn.execute(
+                "INSERT INTO memory_chunk_entities (chunk_id, entity_id) VALUES (?, ?)",
+                (chunk_id, source_id),
+            )
+            for relation_source in (keeper_id, source_id):
+                store._conn.execute(
+                    """
+                    INSERT INTO memory_relations (
+                        source_entity_id, target_entity_id, relation_type,
+                        source_type, source_id, weight, evidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        relation_source,
+                        target_id,
+                        "owns",
+                        "fact",
+                        fact_id,
+                        2.0,
+                        "seller owns the subject property in this transaction",
+                    ),
+                )
+            store._conn.commit()
+
+            source = store._conn.execute(
+                "SELECT entity_id, name, entity_type, aliases FROM entities WHERE entity_id = ?",
+                (source_id,),
+            ).fetchone()
+            keeper = store._conn.execute(
+                "SELECT entity_id, name, entity_type, aliases FROM entities WHERE entity_id = ?",
+                (keeper_id,),
+            ).fetchone()
+            store._merge_entity_into_keeper(source, keeper)
+            store._conn.commit()
+
+        assert store._conn.execute(
+            "SELECT 1 FROM fact_entities WHERE fact_id = ? AND entity_id = ?",
+            (fact_id, keeper_id),
+        ).fetchone()
+        assert store._conn.execute(
+            "SELECT 1 FROM memory_chunk_entities WHERE chunk_id = ? AND entity_id = ?",
+            (chunk_id, keeper_id),
+        ).fetchone()
+        assert int(store._conn.execute(
+            "SELECT COUNT(*) AS c FROM memory_relations WHERE source_entity_id = ?",
+            (keeper_id,),
+        ).fetchone()["c"]) == 1
+        assert store._conn.execute(
+            "SELECT 1 FROM entities WHERE entity_id = ?", (source_id,)
+        ).fetchone() is None
+    finally:
+        provider.shutdown()
+
+
+def test_graph_retype_collision_preserves_earlier_retype(tmp_path, monkeypatch):
+    provider, store = _store(tmp_path)
+    try:
+        source_id, target_id = _mk_entities(store, 2)
+        with store._lock:
+            for relation_type in ("co_occurs_with", "related_to"):
+                store._conn.execute(
+                    """
+                    INSERT INTO memory_relations (
+                        source_entity_id, target_entity_id, relation_type,
+                        source_type, source_id, weight, evidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_id,
+                        target_id,
+                        relation_type,
+                        "fact",
+                        77,
+                        2.0,
+                        "seller owns the subject property in this transaction",
+                    ),
+                )
+            store._conn.commit()
+
+        monkeypatch.setattr(store, "_infer_relation_type", lambda _row: "owns")
+        report = store.reprocess_memory_graph(mode="relations")
+
+        rows = store._conn.execute(
+            "SELECT relation_type FROM memory_relations ORDER BY relation_id"
+        ).fetchall()
+        assert [row["relation_type"] for row in rows] == ["owns"]
+        assert report["relations_retyped"] == 2
+        assert report["relations_pruned"] == 1
+    finally:
+        provider.shutdown()
 
 
 def test_orphan_prune_bounded_idempotent_and_no_dedup(tmp_path):

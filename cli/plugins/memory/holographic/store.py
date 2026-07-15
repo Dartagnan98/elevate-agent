@@ -20,9 +20,9 @@ The connection swap preserves the plugin's API surface:
 - FTS5 ``MATCH`` queries were rewritten to use ``tsvector @@
   websearch_to_tsquery`` against the ``search_tsv`` columns the PG
   schema maintains via BEFORE INSERT triggers.
-- ``sqlite3.IntegrityError`` catches were replaced with
-  ``psycopg.errors.UniqueViolation``; ``sqlite3.Error`` with
-  ``psycopg.Error``.
+- Integrity handlers accept both ``sqlite3.IntegrityError`` (the compatibility
+  shim's public exception) and ``psycopg.errors.UniqueViolation`` (the raw
+  driver exception); ``sqlite3.Error`` was replaced with ``psycopg.Error``.
 """
 
 import json
@@ -794,7 +794,7 @@ class MemoryStore:
                 returned = cur.fetchone()
                 self._conn.commit()
                 fact_id = int(returned["fact_id"])
-            except psycopg.errors.UniqueViolation:
+            except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation):
                 # Duplicate content — return existing id
                 self._conn.rollback()
                 row = self._conn.execute(
@@ -3617,6 +3617,7 @@ class MemoryStore:
                     if inferred_relation != current_relation:
                         report["relations_retyped"] += 1
                         if not dry_run:
+                            self._conn.execute("SAVEPOINT memory_graph_relation_retype")
                             try:
                                 self._conn.execute(
                                     """
@@ -3626,10 +3627,16 @@ class MemoryStore:
                                     """,
                                     (inferred_relation, int(row["relation_id"])),
                                 )
-                            except psycopg.errors.UniqueViolation:
-                                self._conn.rollback()
+                            except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation):
+                                # Preserve earlier mutations in this graph batch.
+                                # A full rollback here would undo them while the
+                                # report continued counting them as applied.
+                                self._conn.execute("ROLLBACK TO SAVEPOINT memory_graph_relation_retype")
+                                self._conn.execute("RELEASE SAVEPOINT memory_graph_relation_retype")
                                 self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(row["relation_id"]),))
                                 report["relations_pruned"] += 1
+                            else:
+                                self._conn.execute("RELEASE SAVEPOINT memory_graph_relation_retype")
                 if not dry_run:
                     self._conn.commit()
         after = self._graph_reprocess_snapshot() if not dry_run else before
@@ -3714,11 +3721,17 @@ class MemoryStore:
         for column in ("source_entity_id", "target_entity_id"):
             rows = self._conn.execute(f"SELECT relation_id FROM memory_relations WHERE {column} = ?", (source_id,)).fetchall()
             for rel in rows:
+                self._conn.execute("SAVEPOINT memory_entity_relation_merge")
                 try:
                     self._conn.execute(f"UPDATE memory_relations SET {column} = ?, updated_at = CURRENT_TIMESTAMP WHERE relation_id = ?", (keeper_id, int(rel["relation_id"])))
-                except psycopg.errors.UniqueViolation:
-                    self._conn.rollback()
+                except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation):
+                    # Keep fact/chunk link transfers and earlier relation moves
+                    # intact when this one move collides with a keeper edge.
+                    self._conn.execute("ROLLBACK TO SAVEPOINT memory_entity_relation_merge")
+                    self._conn.execute("RELEASE SAVEPOINT memory_entity_relation_merge")
                     self._conn.execute("DELETE FROM memory_relations WHERE relation_id = ?", (int(rel["relation_id"]),))
+                else:
+                    self._conn.execute("RELEASE SAVEPOINT memory_entity_relation_merge")
         self._conn.execute("DELETE FROM memory_relations WHERE source_entity_id = target_entity_id")
         self._conn.execute("DELETE FROM entities WHERE entity_id = ?", (source_id,))
         return aliases_added

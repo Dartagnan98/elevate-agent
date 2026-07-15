@@ -238,7 +238,7 @@ def test_merge_updates_content_only_when_strictly_more_specific(tmp_path):
     store = provider._store
     base = "Qg3 CMA review convention: comparable listings must be validated before send"
     more_specific = base + " to Skyleigh"
-    id_a = store.add_fact(base, category="project")
+    store.add_fact(base, category="project")
     detailed = store.add_fact_detailed(more_specific, category="project")
     assert detailed["outcome"] == "merged"
     facts = _facts_containing(store, "Qg3")
@@ -260,6 +260,13 @@ def test_exact_duplicate_returns_existing_and_reinforces(tmp_path):
     assert detailed["fact_id"] == id_a
     assert detailed["outcome"] in ("duplicate", "merged")
     assert len(_facts_containing(store, "Qg4")) == 1
+    reinforced = store._conn.execute(
+        "SELECT reinforced_count FROM memory_facts WHERE fact_id = ?", (id_a,)
+    ).fetchone()
+    assert int(reinforced["reinforced_count"] or 0) >= 1
+    tool_result = _tool(provider, {"action": "add", "content": content})
+    assert tool_result["fact_id"] == id_a
+    assert tool_result["status"] == "duplicate"
 
 
 def test_embedding_cosine_dedup_with_hash_backend(tmp_path):

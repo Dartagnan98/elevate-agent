@@ -509,7 +509,10 @@ def test_journal_status_segments_sessions_by_day(tmp_path):
 
 
 def test_concurrent_session_writes_and_organization(tmp_path):
-    provider = _provider(tmp_path)
+    # This test exercises journal locking and batch organization, not fact
+    # deduplication. Keep each promoted turn as a separate row so the final
+    # count remains a useful lost-write assertion.
+    provider = _provider(tmp_path, dedup_enabled="false")
     total_turns = 64
 
     def write_turn(i):
