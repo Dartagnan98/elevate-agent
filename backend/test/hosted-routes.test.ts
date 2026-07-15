@@ -7,10 +7,12 @@ import {
   assertEntitlementEnvelope,
   assertNoRawDiagnosticsText,
   barrierNextDeviceGrantDecisions,
+  barrierNextLoginCodeOperations,
   barrierNextSupabasePatches,
   barrierNextSupabaseRpcs,
   createFakeDb,
   failNextAtomicDeviceApproval,
+  failNextAtomicLoginCode,
   failNextSupabaseInsert,
   failNextSupabasePatch,
   failNextSupabaseSelect,
@@ -38,6 +40,27 @@ function patchStripeResource<T>(
   return () => {
     proto[method] = original;
   };
+}
+
+type PostRoute = { POST: (req: Request) => Promise<Response> };
+
+async function requestDevLoginCode(
+  route: PostRoute,
+  email: string,
+  ip = "127.0.0.1",
+): Promise<string> {
+  const response = await route.POST(
+    jsonRequest(
+      "/api/auth/login-code/request",
+      { email },
+      { headers: { "x-forwarded-for": ip, "user-agent": "login-code-test" } },
+    ),
+  );
+  const body = await responseJson(response);
+  assert.equal(response.status, 200);
+  const code = String((body.dev_only as { code?: string } | undefined)?.code || "");
+  assert.match(code, /^\d{6}$/);
+  return code;
 }
 
 describe("hosted route handlers", () => {
@@ -2437,17 +2460,18 @@ describe("hosted route handlers", () => {
         db.login_codes[0].code_hash,
         crypto.createHash("sha256").update(String(code)).digest("hex"),
       );
+      const wrongCode = code === "000000" ? "999999" : "000000";
 
       const rejected = await verifyRoute.POST(
         jsonRequest("/api/auth/login-code/verify", {
           email: "login-code@example.com",
-          code: "000000",
+          code: wrongCode,
         }),
       );
       const rejectedBody = await responseJson(rejected);
 
       assert.equal(rejected.status, 401);
-      assert.deepEqual(rejectedBody, { error: "invalid code", attempts_remaining: 4 });
+      assert.deepEqual(rejectedBody, { error: "invalid code" });
       assert.equal(db.login_codes[0].attempts, 1);
 
       const accepted = await verifyRoute.POST(
@@ -2462,14 +2486,15 @@ describe("hosted route handlers", () => {
       assert.equal(accepted.status, 200);
       assert.equal(typeof acceptedBody.access_token, "string");
       assert.equal(typeof acceptedBody.refresh_token, "string");
-      assert.equal(acceptedBody.license_id, "license-1");
+      assert.match(String(acceptedBody.license_id), /^[0-9a-f-]{36}$/);
       assert.equal(acceptedBody.tier, "pro");
       assert.deepEqual(acceptedBody.entitlements, ["real_estate_sales"]);
+      assert.equal(db.licenses[0].id, acceptedBody.license_id);
       assert.equal(db.licenses[0].device_label, "Admin Web");
       assert.equal(typeof db.login_codes[0].consumed_at, "string");
       assertEntitlementEnvelope(acceptedBody, {
         sub: user.id,
-        license_id: "license-1",
+        license_id: String(acceptedBody.license_id),
         email: user.email,
         tier: "pro",
         entitlements: ["real_estate_sales"],
@@ -2481,6 +2506,339 @@ describe("hosted route handlers", () => {
         Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
       }
     }
+  });
+
+  it("new login-code issuance supersedes every older unconsumed code", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "supersede-code@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+
+    const firstCode = await requestDevLoginCode(requestRoute, user.email, "127.0.0.10");
+    db.login_codes.push({
+      ...db.login_codes[0],
+      id: "legacy-unconsumed-login-code",
+      code_hash: crypto.createHash("sha256").update("123456").digest("hex"),
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+      consumed_at: null,
+    });
+    assert.equal(db.login_codes.filter((candidate) => candidate.consumed_at === null).length, 2);
+    let newestCode = await requestDevLoginCode(requestRoute, user.email, "127.0.0.11");
+    if (newestCode === firstCode) {
+      newestCode = await requestDevLoginCode(requestRoute, user.email, "127.0.0.12");
+    }
+
+    const active = db.login_codes.filter((candidate) => candidate.consumed_at === null);
+    assert.equal(active.length, 1);
+    assert.equal(
+      active[0].code_hash,
+      crypto.createHash("sha256").update(newestCode).digest("hex"),
+    );
+    assert.equal(
+      db.login_codes
+        .filter((candidate) => candidate.id !== active[0].id)
+        .every((candidate) => typeof candidate.consumed_at === "string"),
+      true,
+    );
+
+    const oldResponse = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: firstCode }),
+    );
+    assert.equal(oldResponse.status, 401);
+    assert.deepEqual(await responseJson(oldResponse), { error: "invalid code" });
+    assert.equal(db.licenses.length, 0);
+
+    const newestResponse = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: newestCode }),
+    );
+    assert.equal(newestResponse.status, 200);
+    assert.equal(db.licenses.length, 1);
+  });
+
+  it("concurrent login-code requests leave exactly one newest active code", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "concurrent-issue@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+
+    barrierNextSupabaseRpcs("issue_login_code_atomic");
+    const codes = await Promise.all([
+      requestDevLoginCode(requestRoute, user.email, "127.0.0.20"),
+      requestDevLoginCode(requestRoute, user.email, "127.0.0.21"),
+    ]);
+
+    assert.equal(db.login_codes.length, 2);
+    assert.equal(db.login_codes.filter((candidate) => candidate.consumed_at === null).length, 1);
+    assert.equal(db.login_codes.filter((candidate) => candidate.consumed_at !== null).length, 1);
+    const active = db.login_codes.find((candidate) => candidate.consumed_at === null);
+    assert.ok(active);
+    assert.equal(
+      codes.some(
+        (code) => crypto.createHash("sha256").update(code).digest("hex") === active.code_hash,
+      ),
+      true,
+    );
+    assert.equal(db.audit_log.length, 2);
+  });
+
+  it("concurrent wrong login-code guesses count exactly and enforce the cap", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "wrong-race@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+    const correctCode = await requestDevLoginCode(requestRoute, user.email, "127.0.0.30");
+    const wrongCode = correctCode === "000000" ? "999999" : "000000";
+
+    barrierNextSupabaseRpcs("record_login_code_attempt_atomic", 5);
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        verifyRoute.POST(
+          jsonRequest("/api/auth/login-code/verify", { email: user.email, code: wrongCode }),
+        ),
+      ),
+    );
+    for (const response of responses) {
+      assert.equal(response.status, 401);
+      assert.deepEqual(await responseJson(response), { error: "invalid code" });
+    }
+
+    assert.equal(db.login_codes[0].attempts, 5);
+    const sixth = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: wrongCode }),
+    );
+    const correctAfterCap = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: correctCode }),
+    );
+    assert.equal(sixth.status, 401);
+    assert.equal(correctAfterCap.status, 401);
+    assert.deepEqual(await responseJson(sixth), { error: "invalid code" });
+    assert.deepEqual(await responseJson(correctAfterCap), { error: "invalid code" });
+    assert.equal(db.login_codes[0].attempts, 5);
+    assert.equal(db.login_codes[0].consumed_at, null);
+    assert.equal(db.licenses.length, 0);
+  });
+
+  it("concurrent correct login-code redeems create exactly one license", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "correct-race@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+    const code = await requestDevLoginCode(requestRoute, user.email, "127.0.0.40");
+
+    barrierNextSupabaseRpcs("redeem_login_code_atomic");
+    const responses = await Promise.all([
+      verifyRoute.POST(jsonRequest("/api/auth/login-code/verify", { email: user.email, code })),
+      verifyRoute.POST(jsonRequest("/api/auth/login-code/verify", { email: user.email, code })),
+    ]);
+    const results = await Promise.all(
+      responses.map(async (response) => ({ response, body: await responseJson(response) })),
+    );
+    const winner = results.find(({ response }) => response.status === 200);
+    const loser = results.find(({ response }) => response.status === 401);
+
+    assert.ok(winner);
+    assert.ok(loser);
+    assert.deepEqual(loser.body, { error: "invalid code" });
+    assert.equal("access_token" in loser.body, false);
+    assert.equal("refresh_token" in loser.body, false);
+    assert.equal("entitlement_assertion" in loser.body, false);
+    assert.equal(db.licenses.length, 1);
+    assert.equal(db.licenses[0].id, winner.body.license_id);
+    assert.equal(typeof db.login_codes[0].consumed_at, "string");
+  });
+
+  it("concurrent correct and wrong login-code attempts preserve one winner", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "mixed-race@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+    const code = await requestDevLoginCode(requestRoute, user.email, "127.0.0.50");
+    const wrongCode = code === "000000" ? "999999" : "000000";
+
+    barrierNextLoginCodeOperations();
+    const [correct, wrong] = await Promise.all([
+      verifyRoute.POST(jsonRequest("/api/auth/login-code/verify", { email: user.email, code })),
+      verifyRoute.POST(
+        jsonRequest("/api/auth/login-code/verify", { email: user.email, code: wrongCode }),
+      ),
+    ]);
+
+    assert.equal(correct.status, 200);
+    assert.equal(wrong.status, 401);
+    assert.deepEqual(await responseJson(wrong), { error: "invalid code" });
+    assert.equal(db.licenses.length, 1);
+    assert.equal(typeof db.login_codes[0].consumed_at, "string");
+    assert.ok(db.login_codes[0].attempts === 0 || db.login_codes[0].attempts === 1);
+  });
+
+  it("new issuance racing an old correct code cannot redeem the replacement", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "new-old-race@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+    const oldCode = await requestDevLoginCode(requestRoute, user.email, "127.0.0.60");
+    const oldCodeId = db.login_codes[0].id;
+
+    barrierNextLoginCodeOperations();
+    const [newRequest, oldRedeem] = await Promise.all([
+      requestRoute.POST(
+        jsonRequest(
+          "/api/auth/login-code/request",
+          { email: user.email },
+          { headers: { "x-forwarded-for": "127.0.0.61" } },
+        ),
+      ),
+      verifyRoute.POST(
+        jsonRequest("/api/auth/login-code/verify", { email: user.email, code: oldCode }),
+      ),
+    ]);
+    const newBody = await responseJson(newRequest);
+    let newCode = String((newBody.dev_only as { code?: string } | undefined)?.code || "");
+
+    assert.equal(newRequest.status, 200);
+    assert.match(newCode, /^\d{6}$/);
+    assert.ok(oldRedeem.status === 200 || oldRedeem.status === 401);
+
+    // A random collision would make the old plaintext valid for the replacement
+    // by coincidence. Reissue once so this assertion tests identity binding,
+    // not six-digit-code luck.
+    if (newCode === oldCode) {
+      newCode = await requestDevLoginCode(requestRoute, user.email, "127.0.0.62");
+    }
+    assert.notEqual(newCode, oldCode);
+    assert.equal(db.login_codes.filter((candidate) => candidate.consumed_at === null).length, 1);
+    const active = db.login_codes.find((candidate) => candidate.consumed_at === null);
+    assert.ok(active);
+    assert.notEqual(active.id, oldCodeId);
+    assert.equal(active.code_hash, crypto.createHash("sha256").update(newCode).digest("hex"));
+    assert.equal(db.licenses.length, oldRedeem.status === 200 ? 1 : 0);
+
+    const licensesAfterRace = db.licenses.length;
+    const staleRetry = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: oldCode }),
+    );
+    assert.equal(staleRetry.status, 401);
+    assert.deepEqual(await responseJson(staleRetry), { error: "invalid code" });
+    assert.equal(db.licenses.length, licensesAfterRace);
+  });
+
+  for (const failureStage of [
+    "issue_after_invalidate",
+    "issue_after_insert",
+    "issue_after_audit",
+  ] as const) {
+    it(`login-code issuance rolls back every write when ${failureStage} fails`, async () => {
+      const db = useFakeDb();
+      const user = await makeUser({
+        email: `${failureStage.replaceAll("_", "-")}@example.com`,
+      });
+      db.users.push(user);
+      const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+      await requestDevLoginCode(requestRoute, user.email, "127.0.0.70");
+      const oldCode = db.login_codes[0];
+      const baselineAudit = db.audit_log.length;
+
+      failNextAtomicLoginCode(failureStage);
+      const failed = await requestRoute.POST(
+        jsonRequest(
+          "/api/auth/login-code/request",
+          { email: user.email },
+          { headers: { "x-forwarded-for": "127.0.0.71" } },
+        ),
+      );
+
+      assert.equal(failed.status, 200);
+      assert.deepEqual(await responseJson(failed), { ok: true });
+      assert.equal(db.login_codes.length, 1);
+      assert.equal(oldCode.consumed_at, null);
+      assert.equal(db.audit_log.length, baselineAudit);
+    });
+  }
+
+  it("login-code attempt rollback preserves the counter after an update failure", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "attempt-rollback@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+    const code = await requestDevLoginCode(requestRoute, user.email, "127.0.0.75");
+    const wrongCode = code === "000000" ? "000001" : "000000";
+
+    failNextAtomicLoginCode("attempt_after_increment");
+    const failed = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: wrongCode }),
+    );
+    assert.equal(failed.status, 401);
+    assert.deepEqual(await responseJson(failed), { error: "invalid code" });
+    assert.equal(db.login_codes[0].attempts, 0);
+
+    const retry = await verifyRoute.POST(
+      jsonRequest("/api/auth/login-code/verify", { email: user.email, code: wrongCode }),
+    );
+    assert.equal(retry.status, 401);
+    assert.equal(db.login_codes[0].attempts, 1);
+  });
+
+  for (const failureStage of [
+    "redeem_after_consume",
+    "redeem_after_license_insert",
+  ] as const) {
+    it(`login-code redeem rolls back code and license when ${failureStage} fails`, async () => {
+      const db = useFakeDb();
+      const user = await makeUser({
+        email: `${failureStage.replaceAll("_", "-")}@example.com`,
+      });
+      db.users.push(user);
+      const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+      const verifyRoute = await loadRoute<PostRoute>("auth/login-code/verify");
+      const code = await requestDevLoginCode(requestRoute, user.email, "127.0.0.80");
+
+      failNextAtomicLoginCode(failureStage);
+      const failed = await verifyRoute.POST(
+        jsonRequest("/api/auth/login-code/verify", { email: user.email, code }),
+      );
+      assert.equal(failed.status, 503);
+      assert.deepEqual(await responseJson(failed), { error: "license issuance unavailable" });
+      assert.equal(db.login_codes[0].consumed_at, null);
+      assert.equal(db.licenses.length, 0);
+
+      const retry = await verifyRoute.POST(
+        jsonRequest("/api/auth/login-code/verify", { email: user.email, code }),
+      );
+      assert.equal(retry.status, 200);
+      assert.equal(typeof db.login_codes[0].consumed_at, "string");
+      assert.equal(db.licenses.length, 1);
+    });
+  }
+
+  it("atomic login-code redeem rechecks active subscription before mutation", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ email: "rpc-inactive-code@example.com" });
+    db.users.push(user);
+    const requestRoute = await loadRoute<PostRoute>("auth/login-code/request");
+    await requestDevLoginCode(requestRoute, user.email, "127.0.0.90");
+    const loginCode = db.login_codes[0];
+    user.status = "inactive";
+    const { redeemLoginCode } = await import("../src/lib/store");
+
+    const result = await redeemLoginCode({
+      userId: user.id,
+      loginCodeId: loginCode.id,
+      codeHash: loginCode.code_hash,
+      licenseId: crypto.randomUUID(),
+      refreshTokenHash: refreshHash("inactive-refresh"),
+      deviceLabel: "Inactive RPC",
+      maxAttempts: 5,
+    });
+
+    assert.deepEqual(result, { result: "inactive" });
+    assert.equal(loginCode.consumed_at, null);
+    assert.equal(db.licenses.length, 0);
   });
 
   it("diagnostics requires bearer auth and stores sanitized idempotent rows", async () => {

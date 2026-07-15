@@ -197,6 +197,20 @@ export type AtomicDeviceApprovalFailureStage =
   | "after_grant_update"
   | "after_audit_insert";
 let nextAtomicDeviceApprovalFailure: AtomicDeviceApprovalFailureStage | null = null;
+let nextLoginCodeOperationBarrier: {
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
+export type AtomicLoginCodeFailureStage =
+  | "issue_after_invalidate"
+  | "issue_after_insert"
+  | "issue_after_audit"
+  | "attempt_after_increment"
+  | "redeem_after_consume"
+  | "redeem_after_license_insert";
+let nextAtomicLoginCodeFailure: AtomicLoginCodeFailureStage | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -232,6 +246,8 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextRpcBarrier = null;
   nextDeviceGrantDecisionBarrier = null;
   nextAtomicDeviceApprovalFailure = null;
+  nextLoginCodeOperationBarrier = null;
+  nextAtomicLoginCodeFailure = null;
   return activeDb;
 }
 
@@ -263,6 +279,18 @@ export function failNextAtomicDeviceApproval(
   stage: AtomicDeviceApprovalFailureStage,
 ): void {
   nextAtomicDeviceApprovalFailure = stage;
+}
+
+export function barrierNextLoginCodeOperations(parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextLoginCodeOperationBarrier = { parties, arrived: 0, promise, release };
+}
+
+export function failNextAtomicLoginCode(stage: AtomicLoginCodeFailureStage): void {
+  nextAtomicLoginCodeFailure = stage;
 }
 
 export function failNextSupabasePatch(
@@ -986,6 +1014,177 @@ function atomicDeviceApproval(body: unknown): Response {
   return okJson({ result: "approved", license_id: license.id });
 }
 
+function latestActiveLoginCode(userId: string, now = Date.now()): LoginCodeRow | null {
+  return (
+    activeDb.login_codes
+      .filter(
+        (candidate) =>
+          candidate.user_id === userId &&
+          candidate.consumed_at === null &&
+          Date.parse(candidate.expires_at) > now,
+      )
+      .sort((left, right) => {
+        const byCreated = right.created_at.localeCompare(left.created_at);
+        return byCreated || right.id.localeCompare(left.id);
+      })[0] ?? null
+  );
+}
+
+function atomicLoginCodeIssue(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const userId = String(input.p_user_id || "");
+  const codeHash = String(input.p_code_hash || "");
+  const expiresAt = String(input.p_expires_at || "");
+  const expiresAtMs = Date.parse(expiresAt);
+  const now = Date.now();
+  if (!/^[0-9a-f]{64}$/.test(codeHash) || !Number.isFinite(expiresAtMs) || expiresAtMs <= now) {
+    return okJson({ message: "invalid atomic login-code issue parameters" }, 400);
+  }
+  const user = activeDb.users.find((candidate) => candidate.id === userId);
+  if (!user) return okJson({ result: "not_found" });
+
+  if (nextAtomicLoginCodeFailure === "issue_after_invalidate") {
+    nextAtomicLoginCodeFailure = null;
+    return okJson({ message: "injected login-code failure after invalidate" }, 500);
+  }
+
+  const createdAt = new Date(now).toISOString();
+  const loginCode: LoginCodeRow = {
+    id: `login-code-${nextLoginCodeId}`,
+    user_id: userId,
+    code_hash: codeHash,
+    created_at: createdAt,
+    expires_at: expiresAt,
+    consumed_at: null,
+    attempts: 0,
+    ip_addr: (input.p_ip_addr as string | null | undefined) ?? null,
+    user_agent: (input.p_user_agent as string | null | undefined) ?? null,
+  };
+  if (nextAtomicLoginCodeFailure === "issue_after_insert") {
+    nextAtomicLoginCodeFailure = null;
+    return okJson({ message: "injected login-code failure after insert" }, 500);
+  }
+
+  const audit = {
+    actor_user_id: userId,
+    target_user_id: userId,
+    action: "auth.login_code_requested",
+    payload: { ip: loginCode.ip_addr, ua: loginCode.user_agent },
+  };
+  if (nextAtomicLoginCodeFailure === "issue_after_audit") {
+    nextAtomicLoginCodeFailure = null;
+    return okJson({ message: "injected login-code failure after audit" }, 500);
+  }
+
+  // Commit the staged transaction only after all phases succeed.
+  for (const candidate of activeDb.login_codes) {
+    if (candidate.user_id === userId && candidate.consumed_at === null) {
+      candidate.consumed_at = createdAt;
+    }
+  }
+  activeDb.login_codes.push(loginCode);
+  activeDb.audit_log.push(audit);
+  nextLoginCodeId += 1;
+  return okJson({ result: "issued", login_code_id: loginCode.id });
+}
+
+function atomicLoginCodeAttempt(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const userId = String(input.p_user_id || "");
+  const loginCodeId = String(input.p_login_code_id || "");
+  const attemptedHash = String(input.p_attempted_code_hash || "");
+  const maxAttempts = Number(input.p_max_attempts);
+  if (
+    !/^[0-9a-f]{64}$/.test(attemptedHash) ||
+    !Number.isInteger(maxAttempts) ||
+    maxAttempts < 1 ||
+    maxAttempts > 100
+  ) {
+    return okJson({ message: "invalid atomic login-code attempt parameters" }, 400);
+  }
+  if (!activeDb.users.some((candidate) => candidate.id === userId)) {
+    return okJson({ result: "invalid" });
+  }
+  const loginCode = latestActiveLoginCode(userId);
+  if (!loginCode || loginCode.id !== loginCodeId) return okJson({ result: "invalid" });
+  if (loginCode.attempts >= maxAttempts) {
+    return okJson({ result: "locked", attempts: loginCode.attempts });
+  }
+  if (loginCode.code_hash === attemptedHash) {
+    return okJson({ result: "match", attempts: loginCode.attempts });
+  }
+  const nextAttempts = loginCode.attempts + 1;
+  if (nextAtomicLoginCodeFailure === "attempt_after_increment") {
+    nextAtomicLoginCodeFailure = null;
+    return okJson({ message: "injected login-code failure after attempt increment" }, 500);
+  }
+  loginCode.attempts = nextAttempts;
+  return okJson({
+    result: loginCode.attempts >= maxAttempts ? "locked" : "invalid",
+    attempts: loginCode.attempts,
+  });
+}
+
+function atomicLoginCodeRedeem(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const userId = String(input.p_user_id || "");
+  const loginCodeId = String(input.p_login_code_id || "");
+  const codeHash = String(input.p_code_hash || "");
+  const licenseId = String(input.p_license_id || "");
+  const refreshHashValue = String(input.p_refresh_token_hash || "");
+  const maxAttempts = Number(input.p_max_attempts);
+  if (
+    !/^[0-9a-f]{64}$/.test(codeHash) ||
+    !/^[0-9a-f]{64}$/.test(refreshHashValue) ||
+    !licenseId ||
+    !Number.isInteger(maxAttempts) ||
+    maxAttempts < 1 ||
+    maxAttempts > 100
+  ) {
+    return okJson({ message: "invalid atomic login-code redeem parameters" }, 400);
+  }
+  const user = activeDb.users.find((candidate) => candidate.id === userId);
+  if (!user) return okJson({ result: "invalid" });
+  if (!["active", "trialing"].includes(user.status)) return okJson({ result: "inactive" });
+
+  const loginCode = latestActiveLoginCode(userId);
+  if (!loginCode || loginCode.id !== loginCodeId || loginCode.code_hash !== codeHash) {
+    return okJson({ result: "invalid" });
+  }
+  if (loginCode.attempts >= maxAttempts) return okJson({ result: "locked" });
+
+  if (nextAtomicLoginCodeFailure === "redeem_after_consume") {
+    nextAtomicLoginCodeFailure = null;
+    return okJson({ message: "injected login-code failure after consume" }, 500);
+  }
+
+  const license: LicenseRow = {
+    id: licenseId,
+    user_id: userId,
+    refresh_token_hash: refreshHashValue,
+    device_label: (input.p_device_label as string | null | undefined) || null,
+    revoked: false,
+    last_used_at: null,
+    created_at: new Date().toISOString(),
+  };
+  if (
+    activeDb.licenses.some(
+      (candidate) =>
+        candidate.id === license.id || candidate.refresh_token_hash === license.refresh_token_hash,
+    )
+  ) {
+    return okJson({ message: "duplicate login-code license" }, 409);
+  }
+  if (nextAtomicLoginCodeFailure === "redeem_after_license_insert") {
+    nextAtomicLoginCodeFailure = null;
+    return okJson({ message: "injected login-code failure after license insert" }, 500);
+  }
+
+  loginCode.consumed_at = new Date().toISOString();
+  activeDb.licenses.push(license);
+  return okJson({ result: "redeemed", license_id: license.id });
+}
+
 function headerValue(headers: HeadersInit | undefined, name: string): string {
   if (!headers) return "";
   if (headers instanceof Headers) return headers.get(name) || "";
@@ -1003,6 +1202,30 @@ async function waitForDeviceGrantDecisionBarrier(): Promise<void> {
   barrier.arrived += 1;
   if (barrier.arrived === barrier.parties) {
     nextDeviceGrantDecisionBarrier = null;
+    barrier.release();
+    return;
+  }
+  await barrier.promise;
+}
+
+async function waitForLoginCodeOperationBarrier(): Promise<void> {
+  if (!nextLoginCodeOperationBarrier) return;
+  const barrier = nextLoginCodeOperationBarrier;
+  barrier.arrived += 1;
+  if (barrier.arrived === barrier.parties) {
+    nextLoginCodeOperationBarrier = null;
+    barrier.release();
+    return;
+  }
+  await barrier.promise;
+}
+
+async function waitForNamedRpcBarrier(name: string): Promise<void> {
+  if (nextRpcBarrier?.name !== name) return;
+  const barrier = nextRpcBarrier;
+  barrier.arrived += 1;
+  if (barrier.arrived === barrier.parties) {
+    nextRpcBarrier = null;
     barrier.release();
     return;
   }
@@ -1027,17 +1250,29 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
   if (url.pathname.includes("/rpc/approve_device_grant_atomic")) {
     activeDb.calls.push({ table: "approve_device_grant_atomic", method, body });
     await waitForDeviceGrantDecisionBarrier();
-    if (nextRpcBarrier?.name === "approve_device_grant_atomic") {
-      const barrier = nextRpcBarrier;
-      barrier.arrived += 1;
-      if (barrier.arrived === barrier.parties) {
-        nextRpcBarrier = null;
-        barrier.release();
-      } else {
-        await barrier.promise;
-      }
-    }
+    await waitForNamedRpcBarrier("approve_device_grant_atomic");
     return atomicDeviceApproval(body);
+  }
+
+  if (url.pathname.includes("/rpc/issue_login_code_atomic")) {
+    activeDb.calls.push({ table: "issue_login_code_atomic", method, body });
+    await waitForLoginCodeOperationBarrier();
+    await waitForNamedRpcBarrier("issue_login_code_atomic");
+    return atomicLoginCodeIssue(body);
+  }
+
+  if (url.pathname.includes("/rpc/record_login_code_attempt_atomic")) {
+    activeDb.calls.push({ table: "record_login_code_attempt_atomic", method, body });
+    await waitForLoginCodeOperationBarrier();
+    await waitForNamedRpcBarrier("record_login_code_attempt_atomic");
+    return atomicLoginCodeAttempt(body);
+  }
+
+  if (url.pathname.includes("/rpc/redeem_login_code_atomic")) {
+    activeDb.calls.push({ table: "redeem_login_code_atomic", method, body });
+    await waitForLoginCodeOperationBarrier();
+    await waitForNamedRpcBarrier("redeem_login_code_atomic");
+    return atomicLoginCodeRedeem(body);
   }
 
   activeDb.calls.push({ table, method, body });

@@ -1104,26 +1104,35 @@ export type LoginCode = {
   user_agent: string | null;
 };
 
-export async function createLoginCode(input: {
+export type LoginCodeIssueResult =
+  | { result: "issued"; login_code_id: string }
+  | { result: "not_found" };
+
+export async function issueLoginCode(input: {
   user_id: string;
   code_hash: string;
   expires_at: string;
   ip_addr?: string | null;
   user_agent?: string | null;
-}): Promise<LoginCode> {
-  const { data, error } = await supabase()
-    .from("login_codes")
-    .insert({
-      user_id: input.user_id,
-      code_hash: input.code_hash,
-      expires_at: input.expires_at,
-      ip_addr: input.ip_addr ?? null,
-      user_agent: input.user_agent ?? null,
-    })
-    .select("*")
-    .single();
+}): Promise<LoginCodeIssueResult> {
+  const { data, error } = await supabase().rpc("issue_login_code_atomic", {
+    p_user_id: input.user_id,
+    p_code_hash: input.code_hash,
+    p_expires_at: input.expires_at,
+    p_ip_addr: input.ip_addr ?? null,
+    p_user_agent: input.user_agent ?? null,
+  });
   if (error) throw error;
-  return data as LoginCode;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic login-code issue result");
+  }
+  const value = data as Record<string, unknown>;
+  if (value.result === "issued" && typeof value.login_code_id === "string") {
+    return { result: "issued", login_code_id: value.login_code_id };
+  }
+  if (value.result === "not_found") return { result: "not_found" };
+  throw new Error("invalid atomic login-code issue result");
 }
 
 // Most recent un-consumed, un-expired code for a user, or null.
@@ -1137,33 +1146,86 @@ export async function findActiveLoginCode(
     .is("consumed_at", null)
     .gt("expires_at", new Date().toISOString())
     .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
   return (data as LoginCode) ?? null;
 }
 
-export async function incrementLoginCodeAttempts(id: string): Promise<number> {
-  // Read-modify-write: tiny per-code counter, no contention in practice.
-  const { data, error } = await supabase()
-    .from("login_codes")
-    .select("attempts")
-    .eq("id", id)
-    .single();
+export type LoginCodeAttemptResult = {
+  result: "invalid" | "locked" | "match";
+  attempts?: number;
+};
+
+export async function recordLoginCodeAttempt(input: {
+  userId: string;
+  loginCodeId: string;
+  attemptedCodeHash: string;
+  maxAttempts: number;
+}): Promise<LoginCodeAttemptResult> {
+  const { data, error } = await supabase().rpc("record_login_code_attempt_atomic", {
+    p_user_id: input.userId,
+    p_login_code_id: input.loginCodeId,
+    p_attempted_code_hash: input.attemptedCodeHash,
+    p_max_attempts: input.maxAttempts,
+  });
   if (error) throw error;
-  const next = ((data as { attempts: number }).attempts ?? 0) + 1;
-  const { error: upErr } = await supabase()
-    .from("login_codes")
-    .update({ attempts: next })
-    .eq("id", id);
-  if (upErr) throw upErr;
-  return next;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic login-code attempt result");
+  }
+  const value = data as Record<string, unknown>;
+  if (!["invalid", "locked", "match"].includes(String(value.result))) {
+    throw new Error("invalid atomic login-code attempt result");
+  }
+  const attempts = value.attempts;
+  if (attempts !== undefined && (!Number.isInteger(attempts) || Number(attempts) < 0)) {
+    throw new Error("invalid atomic login-code attempt result");
+  }
+  return {
+    result: value.result as LoginCodeAttemptResult["result"],
+    ...(attempts === undefined ? {} : { attempts: Number(attempts) }),
+  };
 }
 
-export async function consumeLoginCode(id: string): Promise<void> {
-  const { error } = await supabase()
-    .from("login_codes")
-    .update({ consumed_at: new Date().toISOString() })
-    .eq("id", id);
+export type LoginCodeRedeemResult =
+  | { result: "redeemed"; license_id: string }
+  | { result: "inactive" | "invalid" | "locked" };
+
+export async function redeemLoginCode(input: {
+  userId: string;
+  loginCodeId: string;
+  codeHash: string;
+  licenseId: string;
+  refreshTokenHash: string;
+  deviceLabel?: string | null;
+  maxAttempts: number;
+}): Promise<LoginCodeRedeemResult> {
+  const { data, error } = await supabase().rpc("redeem_login_code_atomic", {
+    p_user_id: input.userId,
+    p_login_code_id: input.loginCodeId,
+    p_code_hash: input.codeHash,
+    p_license_id: input.licenseId,
+    p_refresh_token_hash: input.refreshTokenHash,
+    p_device_label: input.deviceLabel ?? null,
+    p_max_attempts: input.maxAttempts,
+  });
   if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic login-code redeem result");
+  }
+  const value = data as Record<string, unknown>;
+  if (
+    value.result === "redeemed" &&
+    typeof value.license_id === "string" &&
+    value.license_id === input.licenseId
+  ) {
+    return { result: "redeemed", license_id: value.license_id };
+  }
+  if (["inactive", "invalid", "locked"].includes(String(value.result))) {
+    return { result: value.result as "inactive" | "invalid" | "locked" };
+  }
+  throw new Error("invalid atomic login-code redeem result");
 }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { createLoginCode, findUserByEmail, logAdminAction } from "@/lib/store";
+import { findUserByEmail, issueLoginCode } from "@/lib/store";
 import { loginCodeEmail, mailerEnabled, sendMail } from "@/lib/mailer";
 import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
 
@@ -59,20 +59,24 @@ export async function POST(req: NextRequest) {
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
   const ua = req.headers.get("user-agent") || null;
 
-  await createLoginCode({
-    user_id: user.id,
-    code_hash,
-    expires_at,
-    ip_addr: ip,
-    user_agent: ua,
-  });
-
-  await logAdminAction({
-    actor_user_id: user.id,
-    target_user_id: user.id,
-    action: "auth.login_code_requested",
-    payload: { ip, ua },
-  });
+  try {
+    const issued = await issueLoginCode({
+      user_id: user.id,
+      code_hash,
+      expires_at,
+      ip_addr: ip,
+      user_agent: ua,
+    });
+    if (issued.result !== "issued") {
+      return NextResponse.json({ ok: true });
+    }
+  } catch (error) {
+    // Preserve the endpoint's enumeration-safe contract: a database failure for
+    // a known address must look exactly like the unknown-address path. The RPC
+    // is transactional, so no older code was invalidated if issuance failed.
+    console.error("[auth/login-code/request] atomic issuance failed:", error);
+    return NextResponse.json({ ok: true });
+  }
 
   if (mailerEnabled()) {
     const { subject, html } = loginCodeEmail({

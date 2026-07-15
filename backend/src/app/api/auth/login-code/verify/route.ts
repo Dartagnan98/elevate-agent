@@ -2,13 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { z } from "zod";
 import {
-  consumeLoginCode,
-  createLicense,
   effectiveAccess,
   findActiveLoginCode,
   findActiveUser,
   findUserByEmail,
-  incrementLoginCodeAttempts,
+  recordLoginCodeAttempt,
+  redeemLoginCode,
 } from "@/lib/store";
 import { signAccessToken, generateRefreshToken } from "@/lib/jwt";
 import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
@@ -26,6 +25,10 @@ const Body = z.object({
 });
 
 const MAX_ATTEMPTS = 5;
+
+function invalidCode() {
+  return NextResponse.json({ error: "invalid code" }, { status: 401 });
+}
 
 // Verify a one-time login code and issue a session — mirrors the password
 // login route, swapping the bcrypt check for a hashed-code check.
@@ -47,37 +50,44 @@ export async function POST(req: NextRequest) {
   if (limited) return tooManyRequests(limited.retryAfter);
 
   const user = await findUserByEmail(normalized);
-  // Uniform 401 so neither unknown emails nor missing codes are distinguishable.
+  // Uniform 401/body so unknown emails, missing/expired codes, wrong guesses,
+  // exhausted codes, and concurrent losers are not distinguishable.
   if (!user) {
-    return NextResponse.json({ error: "invalid code" }, { status: 401 });
+    return invalidCode();
   }
 
   const active_code = await findActiveLoginCode(user.id);
   if (!active_code) {
-    return NextResponse.json({ error: "invalid code" }, { status: 401 });
+    return invalidCode();
   }
 
-  // Brute-force cap per issued code.
   if (active_code.attempts >= MAX_ATTEMPTS) {
-    return NextResponse.json(
-      { error: "too many attempts; request a new code" },
-      { status: 429 },
-    );
+    return invalidCode();
   }
 
   const code_hash = crypto.createHash("sha256").update(code).digest("hex");
-  const match = crypto.timingSafeEqual(
-    Buffer.from(code_hash, "hex"),
-    Buffer.from(active_code.code_hash, "hex"),
-  );
+  const storedHashIsValid = /^[0-9a-f]{64}$/.test(active_code.code_hash);
+  const match =
+    storedHashIsValid &&
+    crypto.timingSafeEqual(
+      Buffer.from(code_hash, "hex"),
+      Buffer.from(active_code.code_hash, "hex"),
+    );
 
   if (!match) {
-    const attempts = await incrementLoginCodeAttempts(active_code.id);
-    const remaining = Math.max(0, MAX_ATTEMPTS - attempts);
-    return NextResponse.json(
-      { error: "invalid code", attempts_remaining: remaining },
-      { status: 401 },
-    );
+    try {
+      await recordLoginCodeAttempt({
+        userId: user.id,
+        loginCodeId: active_code.id,
+        attemptedCodeHash: code_hash,
+        maxAttempts: MAX_ATTEMPTS,
+      });
+    } catch (error) {
+      // A verification-storage fault must not turn the endpoint into an email
+      // oracle. The atomic RPC either counted the attempt or rolled it back.
+      console.error("[auth/login-code/verify] atomic attempt failed:", error);
+    }
+    return invalidCode();
   }
 
   const active = await findActiveUser(user.id);
@@ -91,28 +101,52 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
   }
 
-  // Single-use: consume before issuing the session.
-  await consumeLoginCode(active_code.id);
-
   const access_info = await effectiveAccess(user.id);
   const refresh = generateRefreshToken();
-  const license = await createLicense(user.id, refresh.hash, device_label || null);
+  const licenseId = crypto.randomUUID();
   const access = await signAccessToken({
     sub: user.id,
     email: user.email,
     tier: access_info.tier,
-    license_id: license.id,
+    license_id: licenseId,
   });
 
   const envelope = createEntitlementEnvelope({
     access_token: access,
     refresh_token: refresh.token,
     sub: user.id,
-    license_id: license.id,
+    license_id: licenseId,
     email: user.email,
     tier: access_info.tier,
     entitlements: access_info.entitlements,
   }, entitlementSigner);
+
+  // Only after the complete signed response exists do we consume the code and
+  // create its exact license. The RPC rechecks newest/unexpired/attempt state
+  // and active subscription under one per-user lock, then commits both writes
+  // together. A concurrent loser receives no prepared credentials.
+  let redeemed: Awaited<ReturnType<typeof redeemLoginCode>>;
+  try {
+    redeemed = await redeemLoginCode({
+      userId: user.id,
+      loginCodeId: active_code.id,
+      codeHash: code_hash,
+      licenseId,
+      refreshTokenHash: refresh.hash,
+      deviceLabel: device_label || null,
+      maxAttempts: MAX_ATTEMPTS,
+    });
+  } catch (error) {
+    console.error("[auth/login-code/verify] atomic redeem failed:", error);
+    return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+  }
+
+  if (redeemed.result === "inactive") {
+    return NextResponse.json({ error: "no active subscription" }, { status: 402 });
+  }
+  if (redeemed.result !== "redeemed") {
+    return invalidCode();
+  }
 
   return NextResponse.json({
     ...envelope,
