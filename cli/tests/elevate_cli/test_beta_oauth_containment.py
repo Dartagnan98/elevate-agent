@@ -8,6 +8,7 @@ import sys
 from types import ModuleType
 
 import pytest
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -352,6 +353,16 @@ def test_beta_codex_completion_persists_runtime_provider_state_and_canonical_url
     )
     hostile_url = "https://codex.attacker.invalid/v1"
     monkeypatch.setenv("ELEVATE_CODEX_BASE_URL", hostile_url)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n"
+        "  provider: gemini\n"
+        "  default: gemini-2.5-flash\n"
+        "  base_url: https://generativelanguage.googleapis.com/v1beta\n"
+        "  api_key: stale-inline-secret\n"
+        "  key_env: GEMINI_API_KEY\n",
+        encoding="utf-8",
+    )
     session_id, _ = oauth._new_oauth_session(BETA_ALLOWED_PROVIDER, "device_code")
 
     oauth._codex_full_login_worker(session_id)
@@ -359,6 +370,15 @@ def test_beta_codex_completion_persists_runtime_provider_state_and_canonical_url
     session = oauth._oauth_sessions[session_id]
     assert session["status"] == "approved"
     assert hostile_url not in (tmp_path / "auth.json").read_text(encoding="utf-8")
+    written_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written_config["model"] == {
+        "provider": BETA_ALLOWED_PROVIDER,
+        "default": "gpt-5.5",
+        "base_url": BETA_CODEX_BASE_URL,
+        "api_mode": "codex_responses",
+    }
+    assert "stale-inline-secret" not in config_path.read_text(encoding="utf-8")
+    assert "GEMINI_API_KEY" not in config_path.read_text(encoding="utf-8")
     assert [call["url"] for call in http_calls] == [
         "https://auth.openai.com/api/accounts/deviceauth/usercode",
         "https://auth.openai.com/api/accounts/deviceauth/token",
@@ -376,6 +396,33 @@ def test_beta_codex_completion_persists_runtime_provider_state_and_canonical_url
     assert runtime["source"] == "elevate-auth-store"
     assert runtime["base_url"] == BETA_CODEX_BASE_URL
     assert runtime["api_key"] == "fake-access-token"
+
+
+def test_beta_codex_config_repair_failure_never_reports_oauth_approved(
+    tmp_path,
+    monkeypatch,
+):
+    _install_fake_httpx(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    before = (
+        b"model:\n"
+        b"  provider: gemini\n"
+        b"  default: gemini-2.5-flash\n"
+    )
+    config_path.write_bytes(before)
+
+    def fail_config_update(*_args, **_kwargs):
+        raise RuntimeError("canonical Beta config write failed")
+
+    monkeypatch.setattr(auth_module, "_update_config_for_provider", fail_config_update)
+    session_id, _ = oauth._new_oauth_session(BETA_ALLOWED_PROVIDER, "device_code")
+
+    oauth._codex_full_login_worker(session_id)
+
+    session = oauth._oauth_sessions[session_id]
+    assert session["status"] == "error"
+    assert session["error_message"] == "canonical Beta config write failed"
+    assert config_path.read_bytes() == before
 
 
 def test_stable_codex_completion_preserves_pool_only_and_endpoint_override(
@@ -399,6 +446,13 @@ def test_stable_codex_completion_preserves_pool_only_and_endpoint_override(
         "_save_codex_tokens",
         lambda *_args, **_kwargs: pytest.fail(
             "Stable dashboard flow unexpectedly wrote Codex provider state"
+        ),
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "_update_config_for_provider",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Stable dashboard flow unexpectedly changed model configuration"
         ),
     )
     stable_url = "https://stable-codex.invalid/v1"

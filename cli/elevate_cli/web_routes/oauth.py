@@ -815,7 +815,16 @@ def _codex_full_login_worker(session_id: str) -> None:
         if not access_token:
             raise RuntimeError("token exchange did not return access_token")
 
-        _persist_codex_device_credentials(access_token, refresh_token)
+        base_url = _persist_codex_device_credentials(access_token, refresh_token)
+        if beta_provider_policy_active():
+            # Dashboard/onboarding login must establish the same canonical
+            # runtime selection as the CLI login.  Persist credentials first
+            # because Beta config validation requires current-profile auth,
+            # then repair any stale pre-Beta provider/model before reporting
+            # the OAuth session as approved.
+            from elevate_cli.auth import _update_config_for_provider
+
+            _update_config_for_provider(BETA_ALLOWED_PROVIDER, base_url)
         with _oauth_sessions_lock:
             sess["status"] = "approved"
         _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
