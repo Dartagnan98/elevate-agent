@@ -7,8 +7,8 @@ from gateway.orchestration import OrchestrationStore
 from gateway.platforms.api_server import APIServerAdapter, cors_middleware
 
 
-def _make_adapter(tmp_path, api_key: str = "") -> APIServerAdapter:
-    extra = {"key": api_key} if api_key else {}
+def _make_adapter(tmp_path, api_key: str = "sk-test-default") -> APIServerAdapter:
+    extra = {"key": api_key}
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra=extra))
     adapter._orchestration_store = OrchestrationStore(tmp_path / "orchestration.db")
     return adapter
@@ -33,12 +33,20 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     return app
 
 
+def _authed_client(app: web.Application, adapter: APIServerAdapter) -> TestClient:
+    """Exercise the production always-authenticated API contract."""
+    return TestClient(
+        TestServer(app),
+        headers={"Authorization": f"Bearer {adapter._api_key}"},
+    )
+
+
 @pytest.mark.asyncio
 async def test_orchestration_snapshot_and_health(tmp_path):
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
-    async with TestClient(TestServer(app)) as cli:
+    async with _authed_client(app, adapter) as cli:
         snapshot_resp = await cli.get("/api/orchestration")
         assert snapshot_resp.status == 200
         snapshot = await snapshot_resp.json()
@@ -57,7 +65,7 @@ async def test_tools_snapshot_exposes_code_profile(tmp_path, monkeypatch):
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
-    async with TestClient(TestServer(app)) as cli:
+    async with _authed_client(app, adapter) as cli:
         resp = await cli.get(
             "/api/tools",
             params={
@@ -87,7 +95,7 @@ async def test_agent_run_crud_and_events(tmp_path):
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
-    async with TestClient(TestServer(app)) as cli:
+    async with _authed_client(app, adapter) as cli:
         create_resp = await cli.post(
             "/api/agent-runs",
             json={"agent_id": "outreach", "task": "Follow up with buyer lead", "status": "running"},

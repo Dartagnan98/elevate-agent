@@ -51,6 +51,7 @@ def test_focus_topic_injected_into_summary_prompt():
         captured_prompt["messages"] = kwargs["messages"]
         resp = MagicMock()
         resp.choices = [MagicMock()]
+        resp.choices[0].finish_reason = "stop"
         resp.choices[0].message.content = "## Goal\nUnderstand DB schema."
         return resp
 
@@ -78,6 +79,7 @@ def test_no_focus_topic_no_injection():
         captured_prompt["messages"] = kwargs["messages"]
         resp = MagicMock()
         resp.choices = [MagicMock()]
+        resp.choices[0].finish_reason = "stop"
         resp.choices[0].message.content = "## Goal\nGreeting."
         return resp
 

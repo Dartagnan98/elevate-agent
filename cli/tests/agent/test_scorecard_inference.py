@@ -24,7 +24,12 @@ from elevate_cli.data.deals import (
 def _make_deal():
     with connect() as conn:
         return create_deal(
-            conn, title="Maple Crescent Listing", side="listing", current_stage=0, actor="human:test"
+            conn,
+            title="Maple Crescent Listing",
+            side="listing",
+            province="BC",
+            current_stage=0,
+            actor="human:test",
         )
 
 

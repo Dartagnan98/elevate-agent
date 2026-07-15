@@ -55,7 +55,9 @@ def _make_agent(monkeypatch, api_mode, provider, response_fn):
             self._save_trajectory = self._save_session_log = lambda *a, **k: None
 
         def run_conversation(self, msg, conversation_history=None, task_id=None):
-            self._interruptible_api_call = lambda kw: response_fn()
+            self._interruptible_api_call = (
+                lambda kw, *, model_permit=None, on_first_delta=None: response_fn()
+            )
             self._disable_streaming = True
             return super().run_conversation(msg, conversation_history=conversation_history, task_id=task_id)
 

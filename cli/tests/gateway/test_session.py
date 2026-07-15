@@ -1019,6 +1019,156 @@ class TestSessionStoreEntriesAttribute:
         assert not hasattr(store, "_sessions")
 
 
+class TestAppendToTranscriptDurableMetadata:
+    """JSONL and SessionDB must retain the same terminal message truth."""
+
+    def test_forwards_identity_status_usage_and_codex_items(self, tmp_path):
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._loaded = True
+        store._db = MagicMock()
+
+        message = {
+            "role": "assistant",
+            "content": "The request failed.",
+            "finish_reason": "error",
+            "client_message_id": "assistant-terminal-1",
+            "platform_message_id": "platform-1",
+            "token_count": 17,
+            "codex_message_items": [{"type": "message"}],
+        }
+        store.append_to_transcript("session-1", message)
+
+        store._db.append_message_idempotent.assert_called_once_with(
+            session_id="session-1",
+            role="assistant",
+            content="The request failed.",
+            tool_name=None,
+            tool_calls=None,
+            tool_call_id=None,
+            token_count=17,
+            finish_reason="error",
+            reasoning=None,
+            reasoning_content=None,
+            reasoning_details=None,
+            codex_reasoning_items=None,
+            codex_message_items=[{"type": "message"}],
+            platform_message_id="platform-1",
+            client_message_id="assistant-terminal-1",
+        )
+
+    def test_identified_terminal_replay_dedupes_db_and_jsonl(self, tmp_path):
+        from elevate_state import SessionDB
+
+        config = GatewayConfig()
+        (tmp_path / "sessions").mkdir()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+        store._loaded = True
+        store._db = SessionDB(db_path=tmp_path / "state.db")
+        store._db.create_session(session_id="session-1", source="gateway")
+        message = {
+            "role": "assistant",
+            "content": "The request failed.",
+            "finish_reason": "error",
+            "client_message_id": "gateway-terminal-fixed",
+            "gateway_terminal_receipt": True,
+            "timestamp": "2026-07-15T12:00:00",
+        }
+
+        with patch(
+            "elevate_cli.data.sessiondb_shadow.shadow_append_message"
+        ):
+            store.append_to_transcript("session-1", message)
+            store.append_to_transcript("session-1", message)
+
+        rows = store._db.get_messages_as_conversation("session-1")
+        assert len(rows) == 1
+        assert rows[0]["client_message_id"] == "gateway-terminal-fixed"
+        assert rows[0]["finish_reason"] == "error"
+        jsonl_rows = [
+            json.loads(line)
+            for line in store.get_transcript_path("session-1")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert len(jsonl_rows) == 1
+        assert jsonl_rows[0]["client_message_id"] == rows[0]["client_message_id"]
+        assert jsonl_rows[0]["finish_reason"] == rows[0]["finish_reason"]
+
+    def test_db_only_conflicting_identity_fails_before_jsonl_write(self, tmp_path):
+        from elevate_state import SessionDB, SessionMessageConflictError
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=sessions_dir, config=config)
+        store._loaded = True
+        store._db = SessionDB(db_path=tmp_path / "state.db")
+        store._db.create_session(session_id="session-1", source="gateway")
+        first = {
+            "role": "assistant",
+            "content": "first truth",
+            "finish_reason": "error",
+            "client_message_id": "gateway-terminal-conflict",
+        }
+        second = {**first, "content": "conflicting truth"}
+
+        with patch(
+            "elevate_cli.data.sessiondb_shadow.shadow_append_message"
+        ):
+            store._db.append_message_idempotent(
+                session_id="session-1",
+                role=first["role"],
+                content=first["content"],
+                finish_reason=first["finish_reason"],
+                client_message_id=first["client_message_id"],
+            )
+            with pytest.raises(SessionMessageConflictError):
+                store.append_to_transcript("session-1", second)
+
+        assert not store.get_transcript_path("session-1").exists()
+        rows = store._db.get_messages_as_conversation("session-1")
+        assert [row["content"] for row in rows] == ["first truth"]
+
+    def test_jsonl_only_conflicting_identity_fails_before_db_write(self, tmp_path):
+        from elevate_state import SessionDB
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=sessions_dir, config=config)
+        store._loaded = True
+        store._db = SessionDB(db_path=tmp_path / "state.db")
+        store._db.create_session(session_id="session-1", source="gateway")
+        first = {
+            "role": "assistant",
+            "content": "first truth",
+            "finish_reason": "error",
+            "client_message_id": "gateway-terminal-conflict",
+        }
+        second = {**first, "content": "conflicting truth"}
+        store.get_transcript_path("session-1").write_text(
+            json.dumps(first) + "\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="conflicting JSONL message identity"):
+            store.append_to_transcript("session-1", second)
+
+        assert store._db.get_messages_as_conversation("session-1") == []
+        jsonl_rows = [
+            json.loads(line)
+            for line in store.get_transcript_path("session-1")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert [row["content"] for row in jsonl_rows] == ["first truth"]
+
+
 class TestHasAnySessions:
     """Tests for has_any_sessions() fix (issue #351)."""
 

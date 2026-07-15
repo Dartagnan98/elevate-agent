@@ -549,7 +549,11 @@ def test_run_codex_stream_rejects_tool_output_after_terminal(monkeypatch):
 
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: _codex_message_response("OK"),
+    )
 
     result = agent.run_conversation("Say OK")
 
@@ -565,7 +569,9 @@ def test_valid_final_response_on_last_allowed_call_is_completed(monkeypatch):
     monkeypatch.setattr(
         agent,
         "_interruptible_api_call",
-        lambda api_kwargs: _codex_message_response("Finished on the final call."),
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: _codex_message_response(
+            "Finished on the final call."
+        ),
     )
 
     result = agent.run_conversation("finish once")
@@ -582,7 +588,9 @@ def test_run_conversation_codex_empty_output_with_output_text(monkeypatch):
     _normalize_codex_response which synthesizes output from output_text."""
     agent = _build_agent(monkeypatch)
 
-    def _empty_output_response(api_kwargs):
+    def _empty_output_response(
+        api_kwargs, *, model_permit=None, on_first_delta=None
+    ):
         return SimpleNamespace(
             output=[],
             output_text="Hello from Codex",
@@ -605,7 +613,7 @@ def test_run_conversation_codex_empty_output_no_output_text_retries(monkeypatch)
     agent = _build_agent(monkeypatch)
     calls = {"api": 0}
 
-    def _fake_api_call(api_kwargs):
+    def _fake_api_call(api_kwargs, *, model_permit=None, on_first_delta=None):
         calls["api"] += 1
         if calls["api"] == 1:
             return SimpleNamespace(
@@ -635,7 +643,7 @@ def test_run_conversation_codex_refreshes_after_401_and_retries(monkeypatch):
             super().__init__("Error code: 401 - unauthorized")
             self.status_code = 401
 
-    def _fake_api_call(api_kwargs):
+    def _fake_api_call(api_kwargs, *, model_permit=None, on_first_delta=None):
         calls["api"] += 1
         if calls["api"] == 1:
             raise _UnauthorizedError()
@@ -666,7 +674,7 @@ def test_run_conversation_copilot_refreshes_after_401_and_retries(monkeypatch):
             super().__init__("Error code: 401 - unauthorized")
             self.status_code = 401
 
-    def _fake_api_call(api_kwargs):
+    def _fake_api_call(api_kwargs, *, model_permit=None, on_first_delta=None):
         calls["api"] += 1
         if calls["api"] == 1:
             raise _UnauthorizedError()
@@ -781,9 +789,18 @@ def test_try_refresh_copilot_client_credentials_rebuilds_even_if_token_unchanged
 def test_run_conversation_codex_tool_round_trip(monkeypatch):
     agent = _build_agent(monkeypatch)
     responses = [_codex_tool_call_response(), _codex_message_response("done")]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        retained_batch_permit=None,
+    ):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -945,13 +962,18 @@ def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
     responses = [_codex_tool_call_response(), _codex_message_response("done")]
     requests = []
 
-    def _fake_api_call(api_kwargs):
+    def _fake_api_call(api_kwargs, *, model_permit=None, on_first_delta=None):
         requests.append(api_kwargs)
         return responses.pop(0)
 
     monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        retained_batch_permit=None,
+    ):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -984,9 +1006,18 @@ def test_run_conversation_codex_continues_after_incomplete_interim_message(monke
         _codex_tool_call_response(),
         _codex_message_response("Architecture summary complete."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        retained_batch_permit=None,
+    ):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1021,12 +1052,12 @@ def test_tool_execution_exception_cannot_be_erased_by_later_done_text(
     monkeypatch.setattr(
         agent,
         "_interruptible_api_call",
-        lambda api_kwargs: responses.pop(0),
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
     )
     monkeypatch.setattr(
         agent,
         "_execute_tool_calls",
-        lambda *_args: (_ for _ in ()).throw(
+        lambda *_args, retained_batch_permit=None: (_ for _ in ()).throw(
             RuntimeError("terminal handler crashed before execution")
         ),
     )
@@ -1107,9 +1138,18 @@ def test_run_conversation_codex_continues_after_commentary_phase_message(monkeyp
         _codex_tool_call_response(),
         _codex_message_response("Architecture summary complete."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        retained_batch_permit=None,
+    ):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1143,9 +1183,18 @@ def test_run_conversation_codex_continues_after_ack_stop_message(monkeypatch):
         _codex_tool_call_response(),
         _codex_message_response("Architecture summary complete."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        retained_batch_permit=None,
+    ):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1184,9 +1233,18 @@ def test_run_conversation_codex_continues_after_ack_for_directory_listing_prompt
         _codex_tool_call_response(),
         _codex_message_response("Directory summary complete."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        retained_batch_permit=None,
+    ):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1329,7 +1387,11 @@ def test_run_conversation_codex_continues_after_reasoning_only_response(monkeypa
         _codex_reasoning_only_response(),
         _codex_message_response("The final answer is 42."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
     result = agent.run_conversation("what is the answer?")
 
@@ -1367,7 +1429,11 @@ def test_run_conversation_codex_preserves_encrypted_reasoning_in_interim(monkeyp
         reasoning_response,
         _codex_message_response("Done thinking."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
     result = agent.run_conversation("think hard")
 
@@ -1444,7 +1510,11 @@ def test_duplicate_detection_distinguishes_different_codex_reasoning(monkeypatch
         ),
         _codex_message_response("Final answer after thinking."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs, *, model_permit=None, on_first_delta=None: responses.pop(0),
+    )
 
     result = agent.run_conversation("think very hard")
 

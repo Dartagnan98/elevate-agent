@@ -243,6 +243,7 @@ class TestFlushMemoriesCodexFallback:
             output=[
                 SimpleNamespace(
                     type="function_call",
+                    id="fc_call_1",
                     call_id="call_1",
                     name="memory",
                     arguments=json.dumps({
@@ -250,10 +251,12 @@ class TestFlushMemoriesCodexFallback:
                         "target": "notes",
                         "content": "Codex flush test",
                     }),
+                    status="completed",
                 ),
             ],
             usage=SimpleNamespace(input_tokens=50, output_tokens=10, total_tokens=60),
             status="completed",
+            incomplete_details=None,
             model="gpt-5-codex",
         )
 

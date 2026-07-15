@@ -594,6 +594,7 @@ class SessionStore:
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
         self._lock = threading.Lock()
+        self._transcript_lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
         
         # Initialize SQLite session database
@@ -1188,28 +1189,122 @@ class SessionStore:
                      via its own _flush_messages_to_session_db(), preventing
                      the duplicate-write bug (#860).
         """
-        # Write to SQLite (unless the agent already handled it)
-        if self._db and not skip_db:
-            try:
-                self._db.append_message(
-                    session_id=session_id,
-                    role=message.get("role", "unknown"),
-                    content=message.get("content"),
-                    tool_name=message.get("tool_name"),
-                    tool_calls=message.get("tool_calls"),
-                    tool_call_id=message.get("tool_call_id"),
-                    reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
-                    reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
-                    reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
-                    codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
-                )
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
-        
-        # Also write legacy JSONL (keeps existing tooling working during transition)
+        client_message_id = message.get("client_message_id")
+        append_kwargs = {
+            "session_id": session_id,
+            "role": message.get("role", "unknown"),
+            "content": message.get("content"),
+            "tool_name": message.get("tool_name"),
+            "tool_calls": message.get("tool_calls"),
+            "tool_call_id": message.get("tool_call_id"),
+            "token_count": message.get("token_count"),
+            "finish_reason": message.get("finish_reason"),
+            "reasoning": (
+                message.get("reasoning")
+                if message.get("role") == "assistant"
+                else None
+            ),
+            "reasoning_content": (
+                message.get("reasoning_content")
+                if message.get("role") == "assistant"
+                else None
+            ),
+            "reasoning_details": (
+                message.get("reasoning_details")
+                if message.get("role") == "assistant"
+                else None
+            ),
+            "codex_reasoning_items": (
+                message.get("codex_reasoning_items")
+                if message.get("role") == "assistant"
+                else None
+            ),
+            "codex_message_items": (
+                message.get("codex_message_items")
+                if message.get("role") == "assistant"
+                else None
+            ),
+            "platform_message_id": (
+                message.get("platform_message_id")
+                or message.get("message_id")
+            ),
+            "client_message_id": client_message_id,
+        }
+
+        # Validate any existing JSONL identity before touching SessionDB, then
+        # hold the transcript lock through both writes. This prevents either
+        # side of a partial-write retry from accepting conflicting content.
         transcript_path = self.get_transcript_path(session_id)
-        with open(transcript_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(message, ensure_ascii=False) + "\n")
+        transcript_lock = getattr(self, "_transcript_lock", None)
+        if transcript_lock is None:
+            # Some focused tests construct SessionStore via object.__new__.
+            transcript_lock = threading.Lock()
+            self._transcript_lock = transcript_lock
+        with transcript_lock:
+            jsonl_has_exact_identity = False
+            if client_message_id and transcript_path.exists():
+                with open(transcript_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            existing = json.loads(line)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if existing.get("client_message_id") != client_message_id:
+                            continue
+                        durable_fields = (
+                            "role",
+                            "content",
+                            "tool_name",
+                            "tool_calls",
+                            "tool_call_id",
+                            "token_count",
+                            "finish_reason",
+                            "reasoning",
+                            "reasoning_content",
+                            "reasoning_details",
+                            "codex_reasoning_items",
+                            "codex_message_items",
+                            "platform_message_id",
+                        )
+                        if any(
+                            existing.get(field) != message.get(field)
+                            for field in durable_fields
+                        ):
+                            raise ValueError(
+                                "conflicting JSONL message identity "
+                                f"{client_message_id!r} in session {session_id!r}"
+                            )
+                        jsonl_has_exact_identity = True
+                        break
+
+            # Write to SQLite (unless the agent already handled it). Stable
+            # identities use the atomic idempotent path so response-loss retry
+            # repairs the missing store without duplicating the durable row.
+            if self._db and not skip_db:
+                try:
+                    append_idempotent = getattr(
+                        self._db, "append_message_idempotent", None
+                    )
+                    if client_message_id and callable(append_idempotent):
+                        append_idempotent(**append_kwargs)
+                    else:
+                        self._db.append_message(**append_kwargs)
+                except Exception as e:
+                    try:
+                        from elevate_state import SessionMessageConflictError
+                    except ImportError:
+                        SessionMessageConflictError = ()
+                    if isinstance(e, SessionMessageConflictError):
+                        raise
+                    logger.debug("Session DB operation failed: %s", e)
+
+            # Also write legacy JSONL (keeps existing tooling working during
+            # transition). An exact replay may still have repaired a missing DB
+            # row above, but it must not append the JSONL row twice.
+            if jsonl_has_exact_identity:
+                return
+            with open(transcript_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(message, ensure_ascii=False) + "\n")
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.

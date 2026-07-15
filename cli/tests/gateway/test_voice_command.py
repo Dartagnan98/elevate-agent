@@ -1,5 +1,6 @@
 """Tests for the /voice command and auto voice reply in the gateway."""
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -82,6 +83,36 @@ def _make_runner(tmp_path):
     runner.session_store = MagicMock()
     runner._is_user_authorized = lambda source: True
     return runner
+
+
+def _make_base_voice_adapter(response: str):
+    """Build a real base adapter around mocked platform I/O."""
+    from gateway.config import Platform, PlatformConfig
+    from gateway.platforms.base import BasePlatformAdapter
+
+    class _VoiceAdapter(BasePlatformAdapter):
+        async def connect(self):
+            return True
+
+        async def disconnect(self):
+            return None
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return SimpleNamespace(success=True)
+
+        async def get_chat_info(self, chat_id):
+            return {}
+
+    adapter = _VoiceAdapter(
+        PlatformConfig(enabled=True, token="test-token"),
+        Platform.TELEGRAM,
+    )
+    adapter._message_handler = AsyncMock(return_value=response)
+    adapter._keep_typing = AsyncMock(return_value=None)
+    adapter._run_processing_hook = AsyncMock()
+    adapter._send_with_retry = AsyncMock(return_value=SimpleNamespace(success=True))
+    adapter._get_human_delay = MagicMock(return_value=0.0)
+    return adapter
 
 
 # =====================================================================
@@ -1366,14 +1397,20 @@ class TestAutoTtsEmptyTextGuard:
         # So code blocks are partially stripped but may leave content
         # The real fix is in base.py — empty check after strip
 
-    def test_base_empty_check_in_source(self):
-        """base.py must check speech_text is non-empty before calling TTS."""
-        import ast, inspect
-        from gateway.platforms.base import BasePlatformAdapter
-        source = inspect.getsource(BasePlatformAdapter._process_message_background)
-        assert "if not speech_text" in source or "not speech_text" in source, (
-            "base.py must guard against empty speech_text before TTS call"
-        )
+    @pytest.mark.asyncio
+    async def test_base_empty_check_skips_tts_call(self):
+        """Markdown-only replies must not invoke the TTS generator."""
+        adapter = _make_base_voice_adapter("****")
+        event = _make_event(message_type=MessageType.VOICE)
+        session_key = "telegram:dm:123"
+        adapter._active_sessions[session_key] = asyncio.Event()
+
+        with patch("tools.tts_tool.check_tts_requirements", return_value=True), \
+             patch("tools.tts_tool.text_to_speech_tool") as tts_tool, \
+             patch("gateway.correlation.record_correlation_event"):
+            await adapter._process_message_background_scoped(event, session_key)
+
+        tts_tool.assert_not_called()
 
 
 class TestStreamTtsToSpeaker:
@@ -1977,20 +2014,25 @@ class TestSendVoiceReplyCleanup:
 class TestAutoTtsTempFileCleanup:
     """Base adapter auto-TTS must clean up generated audio file."""
 
-    def test_source_has_finally_remove(self):
-        """play_tts call is wrapped in try/finally with os.remove."""
-        import inspect
-        from gateway.platforms.base import BasePlatformAdapter
-        source = inspect.getsource(BasePlatformAdapter._process_message_background)
-        # Find the play_tts section and verify cleanup
-        play_tts_idx = source.find("play_tts")
-        assert play_tts_idx > 0
-        after_play = source[play_tts_idx:]
-        finally_idx = after_play.find("finally")
-        remove_idx = after_play.find("os.remove")
-        assert finally_idx > 0, "play_tts must be in a try/finally block"
-        assert remove_idx > 0, "finally block must call os.remove on _tts_path"
-        assert remove_idx > finally_idx, "os.remove must be inside the finally block"
+    @pytest.mark.asyncio
+    async def test_temp_file_removed_when_playback_raises(self, tmp_path):
+        """Generated TTS audio is removed even if platform playback fails."""
+        audio_path = tmp_path / "voice-reply.mp3"
+        audio_path.write_bytes(b"audio")
+        adapter = _make_base_voice_adapter("Hello from Elevate")
+        adapter.play_tts = AsyncMock(side_effect=RuntimeError("playback failed"))
+        event = _make_event(message_type=MessageType.VOICE)
+        session_key = "telegram:dm:123"
+        adapter._active_sessions[session_key] = asyncio.Event()
+        tts_result = json.dumps({"success": True, "file_path": str(audio_path)})
+
+        with patch("tools.tts_tool.check_tts_requirements", return_value=True), \
+             patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
+             patch("gateway.correlation.record_correlation_event"):
+            await adapter._process_message_background_scoped(event, session_key)
+
+        adapter.play_tts.assert_awaited_once()
+        assert not audio_path.exists()
 
 
 # =====================================================================

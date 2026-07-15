@@ -123,7 +123,9 @@ class TestContentHasVisiblePayload:
 
 
 def _make_adapter() -> APIServerAdapter:
-    return APIServerAdapter(PlatformConfig(enabled=True))
+    return APIServerAdapter(
+        PlatformConfig(enabled=True, extra={"key": "sk-test-default"})
+    )
 
 
 def _create_app(adapter: APIServerAdapter) -> web.Application:
@@ -134,6 +136,14 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     return app
+
+
+def _authed_client(app: web.Application, adapter: APIServerAdapter) -> TestClient:
+    """Exercise the production always-authenticated API contract."""
+    return TestClient(
+        TestServer(app),
+        headers={"Authorization": f"Bearer {adapter._api_key}"},
+    )
 
 
 @pytest.fixture
@@ -151,7 +161,7 @@ class TestChatCompletionsMultimodalHTTP:
         ]
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with _authed_client(app, adapter) as cli:
             with patch.object(
                 adapter,
                 "_run_agent",
@@ -180,7 +190,7 @@ class TestChatCompletionsMultimodalHTTP:
     async def test_text_only_array_collapses_to_string(self, adapter):
         """Text-only array becomes a plain string so logging stays unchanged."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with _authed_client(app, adapter) as cli:
             with patch.object(adapter, "_run_agent", new=MagicMock()) as mock_run:
                 async def _stub(**kwargs):
                     mock_run.captured = kwargs
@@ -206,7 +216,7 @@ class TestChatCompletionsMultimodalHTTP:
     @pytest.mark.asyncio
     async def test_file_part_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with _authed_client(app, adapter) as cli:
             resp = await cli.post(
                 "/v1/chat/completions",
                 json={
@@ -224,7 +234,7 @@ class TestChatCompletionsMultimodalHTTP:
     @pytest.mark.asyncio
     async def test_non_image_data_url_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with _authed_client(app, adapter) as cli:
             resp = await cli.post(
                 "/v1/chat/completions",
                 json={
@@ -251,7 +261,7 @@ class TestResponsesMultimodalHTTP:
     @pytest.mark.asyncio
     async def test_input_image_canonicalized_and_forwarded(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with _authed_client(app, adapter) as cli:
             with patch.object(adapter, "_run_agent", new=MagicMock()) as mock_run:
                 async def _stub(**kwargs):
                     mock_run.captured = kwargs
@@ -290,7 +300,7 @@ class TestResponsesMultimodalHTTP:
     @pytest.mark.asyncio
     async def test_input_file_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with _authed_client(app, adapter) as cli:
             resp = await cli.post(
                 "/v1/responses",
                 json={

@@ -15311,7 +15311,15 @@ class AIAgent:
                     permit_cleanup.callback(permit.release)
 
         artifact_baselines_by_call: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        preexecution_errors: list[Optional[str]] = [None] * num_tools
+        preexecution_errors: list[Optional[str]] = [
+            (
+                f"[Tool execution cancelled — {function_name} was skipped "
+                "due to user interrupt]"
+                if skip_all_due_interrupt
+                else None
+            )
+            for _tool_call, function_name, _function_args in parsed_calls
+        ]
         checkpointed_workdirs: set[str] = set()
         blocked_checkpoint_workdirs: set[str] = set()
         for index, (tool_call, function_name, function_args) in enumerate(

@@ -614,6 +614,7 @@ class TestToolResultPreflightCompression:
         agent.compression_enabled = True
         agent.context_compressor.context_length = 200_000
         agent.context_compressor.threshold_tokens = 130_000  # below the 135k reported usage
+        agent._compression_threshold_pinned = True
         agent.context_compressor.last_prompt_tokens = 130_000
         agent.context_compressor.last_completion_tokens = 5_000
 

@@ -15,6 +15,11 @@ def _mock_response(*, usage: dict, content: str = "done"):
 
 
 def _make_agent(session_db, *, platform: str):
+    session_row = {}
+    session_db.get_session.side_effect = lambda _session_id: dict(session_row)
+    session_db.update_system_prompt.side_effect = (
+        lambda _session_id, prompt: session_row.__setitem__("system_prompt", prompt)
+    )
     with (
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),

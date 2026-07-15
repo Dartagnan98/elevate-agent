@@ -90,7 +90,7 @@ def _make_runner():
     ],
 )
 @pytest.mark.asyncio
-async def test_normal_message_failure_sentinels_are_visible_and_not_persisted(
+async def test_normal_message_failure_sentinels_are_visible_and_persisted_truthfully(
     monkeypatch, sentinel
 ):
     import gateway.run as gateway_run
@@ -119,14 +119,146 @@ async def test_normal_message_failure_sentinels_are_visible_and_not_persisted(
         marker in result.lower()
         for marker in ("did not complete", "interrupted", "request failed")
     )
-    runner.session_store.append_to_transcript.assert_not_called()
+    transcript_calls = runner.session_store.append_to_transcript.call_args_list
+    assert len(transcript_calls) == 3
+    assert transcript_calls[0].args[1]["role"] == "session_meta"
+    assert transcript_calls[1].args[1]["role"] == "user"
+    assert transcript_calls[1].args[1]["content"] == "finish the task"
+    assert transcript_calls[1].args[1]["client_message_id"].startswith(
+        "gateway-user-"
+    )
+    assert transcript_calls[1].args[1]["platform_message_id"] == "m1"
+    assert transcript_calls[2].args[1]["role"] == "assistant"
+    assert transcript_calls[2].args[1]["content"] == result
+    assert transcript_calls[2].args[1]["finish_reason"] == (
+        "interrupted" if sentinel.get("interrupted") else "error"
+    )
+    assert transcript_calls[2].args[1]["gateway_terminal_receipt"] is True
+    assert transcript_calls[2].args[1]["client_message_id"].startswith(
+        "gateway-terminal-"
+    )
+    assert transcript_calls[2].kwargs["skip_db"] is False
     runner.session_store.update_session.assert_not_called()
     runner._should_send_voice_reply.assert_not_called()
     runner._send_voice_reply.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_legacy_empty_sentinel_gets_visible_failure_and_no_persistence(
+async def test_failed_turn_with_agent_messages_persists_visible_terminal_receipt(
+    monkeypatch,
+):
+    """Raw agent rows plus the gateway-only failure explanation stay durable."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    # A real gateway agent flushes its user/assistant rows to SessionDB before
+    # returning.  The gateway must add only its normalized assistant receipt;
+    # replaying the user row here would duplicate the prompt on resume.
+    runner._session_db = MagicMock()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "Partial answer",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "finish the task",
+                    "client_message_id": "user-turn-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Partial answer",
+                    "client_message_id": "assistant-turn-1",
+                },
+            ],
+            "history_offset": 0,
+            "api_calls": 1,
+            "completed": True,
+            "failed": True,
+            "error": "provider failed",
+            "already_sent": True,
+        }
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("finish the task"))
+
+    assert result == (
+        "Partial answer\n\n"
+        "⚠️ This turn did not complete: provider failed"
+    )
+    transcript_calls = runner.session_store.append_to_transcript.call_args_list
+    rows = [call.args[1] for call in transcript_calls]
+    assert [row["role"] for row in rows].count("user") == 1
+    assert [row["content"] for row in rows if row["role"] == "assistant"] == [
+        "Partial answer",
+        result,
+    ]
+    receipt_call = transcript_calls[-1]
+    assert receipt_call.args[1]["gateway_terminal_receipt"] is True
+    assert receipt_call.args[1]["finish_reason"] == "error"
+    assert receipt_call.args[1]["client_message_id"].startswith(
+        "gateway-terminal-"
+    )
+    assert receipt_call.kwargs["skip_db"] is False
+
+
+@pytest.mark.asyncio
+async def test_matching_visible_failure_without_terminal_status_gets_receipt(
+    monkeypatch,
+):
+    """Content equality cannot turn a legacy failed row into reload success."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._session_db = MagicMock()
+    visible_failure = "The request failed: provider unavailable"
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": visible_failure,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "finish the task",
+                    "client_message_id": "user-turn-matching-failure",
+                },
+                {
+                    "role": "assistant",
+                    "content": visible_failure,
+                    "client_message_id": "assistant-turn-matching-failure",
+                },
+            ],
+            "history_offset": 0,
+            "api_calls": 1,
+            "completed": False,
+            "failed": True,
+            "error": "provider unavailable",
+        }
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("finish the task"))
+
+    assert result == visible_failure
+    assistant_rows = [
+        call.args[1]
+        for call in runner.session_store.append_to_transcript.call_args_list
+        if call.args[1].get("role") == "assistant"
+    ]
+    assert [row["content"] for row in assistant_rows] == [
+        visible_failure,
+        visible_failure,
+    ]
+    assert "finish_reason" not in assistant_rows[0]
+    assert assistant_rows[1]["finish_reason"] == "error"
+    assert assistant_rows[1]["gateway_terminal_receipt"] is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_sentinel_gets_visible_persisted_failure(
     monkeypatch,
 ):
     import gateway.run as gateway_run
@@ -149,7 +281,16 @@ async def test_legacy_empty_sentinel_gets_visible_failure_and_no_persistence(
 
     assert "did not complete" in result.lower()
     assert "(empty)" not in result
-    runner.session_store.append_to_transcript.assert_not_called()
+    transcript_calls = runner.session_store.append_to_transcript.call_args_list
+    assert len(transcript_calls) == 3
+    assert transcript_calls[1].args[1]["content"] == "finish the task"
+    assert transcript_calls[2].args[1]["role"] == "assistant"
+    assert transcript_calls[2].args[1]["content"] == result
+    assert transcript_calls[2].args[1]["finish_reason"] == "error"
+    assert transcript_calls[2].args[1]["gateway_terminal_receipt"] is True
+    assert transcript_calls[2].args[1]["client_message_id"].startswith(
+        "gateway-terminal-"
+    )
     runner.session_store.update_session.assert_not_called()
 
 

@@ -250,6 +250,19 @@ def resolve_command(name: str) -> CommandDef | None:
     return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
 
 
+# Gateway clients shipped ``/compress`` before ``/compact`` became the sole
+# canonical compaction command.  Discord/Slack buttons and old Telegram chats
+# can still send the legacy spelling, so the gateway keeps a narrow transport
+# compatibility alias without re-introducing it into the CLI registry/menu.
+_GATEWAY_COMPAT_ALIASES: dict[str, str] = {"compress": "compact"}
+
+
+def resolve_gateway_command(name: str) -> CommandDef | None:
+    """Resolve a gateway command, including transport compatibility aliases."""
+    normalized = name.lower().lstrip("/")
+    return resolve_command(_GATEWAY_COMPAT_ALIASES.get(normalized, normalized))
+
+
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
     if cmd.args_hint:
@@ -374,7 +387,7 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     ACTIVE_SESSION_BYPASS_COMMANDS remains the subset of commands with
     explicit Level-2 handlers; the rest fall through to the catch-all.
     """
-    return resolve_command(command_name) is not None if command_name else False
+    return resolve_gateway_command(command_name) is not None if command_name else False
 
 
 def _resolve_config_gates() -> set[str]:

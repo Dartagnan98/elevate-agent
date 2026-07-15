@@ -20,6 +20,7 @@ test runner at ``scripts/run_tests.sh``.
 """
 
 import asyncio
+import atexit
 import importlib.util
 import os
 import re
@@ -27,6 +28,7 @@ import resource
 import signal
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from unittest.mock import patch
@@ -58,6 +60,91 @@ def _raise_nofile_limit_for_tests() -> None:
 
 
 _raise_nofile_limit_for_tests()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _stop_embedded_postgres_before_worker_exit():
+    """Close each xdist worker's pool and postmaster before its pipe closes.
+
+    ``pgserver`` registers an atexit cleanup hook, but pytest-xdist workers can
+    terminate through a path that does not run Python atexit handlers.  The
+    orphan postmaster inherits the worker's capture descriptors, so the parent
+    pytest process waits forever after reporting 100%.  A normal session
+    fixture finalizer runs while the worker and its imports are still alive.
+    """
+    yield
+    # Do not import database modules during finalization: the per-test
+    # ELEVATE_HOME fixture has already unwound, so a cold import could resolve
+    # the user's real ~/.elevate installation.  Only tear down state that this
+    # worker already created.
+    pg_server = sys.modules.get("elevate_cli.data.pg_server")
+    connection = sys.modules.get("elevate_cli.data.connection")
+    server = getattr(pg_server, "_server", None)
+    if server is None:
+        return
+
+    # A test worker may stop only a postmaster rooted below the OS temp
+    # directory.  This turns any accidental production-home adoption into a
+    # loud failure without signaling or closing the user's real Stable/Beta DB.
+    try:
+        pgdata = Path(server.pgdata).resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        pgdata.relative_to(temp_root)
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"refusing to stop non-test PostgreSQL data directory: "
+            f"{getattr(server, 'pgdata', None)!s}"
+        ) from exc
+
+    reset = getattr(connection, "_reset_schema_cache", None)
+    if not callable(reset):
+        reset = getattr(pg_server, "_reset_server_for_tests", None)
+    if not callable(reset):
+        return
+
+    # We are taking ownership of this worker-local server's shutdown while
+    # pytest capture is still open. Prevent pgserver's duplicate late atexit
+    # callback from logging through already-closed capture streams.
+    try:
+        atexit.unregister(server._cleanup)
+        atexit.unregister(pg_server._atexit_stop)
+    except (AttributeError, TypeError):
+        pass
+
+    finished = threading.Event()
+
+    def _reset() -> None:
+        try:
+            reset()
+        except Exception:
+            pass
+        finally:
+            finished.set()
+
+    cleanup = threading.Thread(
+        target=_reset,
+        name="pytest-postgres-cleanup",
+        daemon=True,
+    )
+    cleanup.start()
+    cleanup.join(timeout=8.0)
+    if finished.is_set() or server is None:
+        return
+
+    # pgserver's internal ``pg_ctl -w stop`` has no subprocess timeout.  If a
+    # leaked test checkout keeps it waiting, stop the already-isolated test
+    # postmaster directly so the daemon cleanup thread can unwind.
+    try:
+        process = server.get_postmaster_info().process
+        if process.is_running():
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=3.0)
+            except Exception:
+                process.kill()
+        cleanup.join(timeout=3.0)
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -294,6 +381,8 @@ _ELEVATE_BEHAVIORAL_VARS = frozenset({
     "DISCORD_ALLOWED_USERS",
     "WHATSAPP_ALLOWED_USERS",
     "SLACK_ALLOWED_USERS",
+    "SLACK_REQUIRE_MENTION",
+    "SLACK_FREE_RESPONSE_CHANNELS",
     "SIGNAL_ALLOWED_USERS",
     "SIGNAL_GROUP_ALLOWED_USERS",
     "EMAIL_ALLOWED_USERS",

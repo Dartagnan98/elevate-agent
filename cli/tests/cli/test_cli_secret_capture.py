@@ -36,7 +36,9 @@ def _make_cli_stub(with_app=False):
     return cli
 
 
-def test_secret_capture_callback_can_be_completed_from_cli_state_machine():
+def test_secret_capture_callback_can_be_completed_from_cli_state_machine(
+    closed_prompt_toolkit_output,
+):
     cli = _make_cli_stub(with_app=True)
     results = []
 
@@ -83,7 +85,7 @@ def test_cancel_secret_capture_marks_setup_skipped():
     assert cli._secret_deadline == 0
 
 
-def test_secret_capture_uses_getpass_without_tui():
+def test_secret_capture_uses_getpass_without_tui(closed_prompt_toolkit_output):
     cli = _make_cli_stub()
 
     with patch("elevate_cli.callbacks.getpass.getpass", return_value="secret-value"), patch(
@@ -101,7 +103,9 @@ def test_secret_capture_uses_getpass_without_tui():
     assert result["skipped"] is False
 
 
-def test_secret_capture_timeout_clears_hidden_input_buffer():
+def test_secret_capture_timeout_clears_hidden_input_buffer(
+    closed_prompt_toolkit_output,
+):
     cli = _make_cli_stub(with_app=True)
     cleared = {"value": False}
 

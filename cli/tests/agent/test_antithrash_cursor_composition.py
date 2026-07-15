@@ -41,6 +41,7 @@ def compressor():
 def _summary_response(text="## Active Task\ngo"):
     resp = MagicMock()
     resp.choices = [MagicMock()]
+    resp.choices[0].finish_reason = "stop"
     resp.choices[0].message.content = text
     return resp
 

@@ -470,6 +470,7 @@ class TestInlineThinkBlockExtraction(unittest.TestCase):
         agent = MagicMock(spec=AIAgent)
         agent._build_assistant_message = AIAgent._build_assistant_message.__get__(agent)
         agent._extract_reasoning = AIAgent._extract_reasoning.__get__(agent)
+        agent._invoke_generation_callback = AIAgent._invoke_generation_callback.__get__(agent)
         agent.verbose_logging = False
         agent.reasoning_callback = None
         agent.stream_delta_callback = None  # non-streaming by default

@@ -62,7 +62,13 @@ def _fresh_plugin_manager():
 def _stub_child_builder(monkeypatch):
     """Replace _build_child_agent with a MagicMock factory so delegate_task
     never transitively imports run_agent / openai.  Keeps the test runnable
-    in environments without heavyweight runtime deps installed."""
+    in environments without heavyweight runtime deps installed.
+
+    Keep the delegation config hermetic too.  ``cli.CLI_CONFIG`` is populated
+    at module-import time, before per-test ELEVATE_HOME isolation, so full-suite
+    collection order can otherwise leak a real/profile max-child limit or
+    provider override into this hook-only unit test.
+    """
     def _fake_build_child(task_index, **kwargs):
         child = MagicMock()
         child._delegate_saved_tool_names = []
@@ -72,6 +78,7 @@ def _stub_child_builder(monkeypatch):
     monkeypatch.setattr(
         "tools.delegate_tool._build_child_agent", _fake_build_child,
     )
+    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {})
 
 
 def _register_capturing_hook():

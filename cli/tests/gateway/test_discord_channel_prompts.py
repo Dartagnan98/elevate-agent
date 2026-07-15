@@ -80,6 +80,10 @@ def _make_runner():
     runner._session_db = None
     runner._agent_cache = {}
     runner._agent_cache_lock = threading.Lock()
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
     runner._session_model_overrides = {}
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     runner.config = SimpleNamespace(streaming=None)

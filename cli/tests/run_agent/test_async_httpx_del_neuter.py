@@ -178,11 +178,16 @@ class TestClientCacheBoundedGrowth:
         """When the loop changes, the old entry should be replaced, not duplicated."""
         from agent.auxiliary_client import (
             _client_cache,
+            _client_cache_key,
             _client_cache_lock,
             _get_cached_client,
         )
 
-        key = ("test_replace", True, "", "", "", (), False, "")
+        # Build the key through the production canonicalizer.  The key carries
+        # model/runtime/provider-policy identity and intentionally evolves when
+        # a new safety boundary is added; hand-building the old tuple shape
+        # leaves an unrelated entry that _get_cached_client must not reuse.
+        key = _client_cache_key("test_replace", async_mode=True)
 
         # Simulate a stale entry from a closed loop
         old_loop = asyncio.new_event_loop()

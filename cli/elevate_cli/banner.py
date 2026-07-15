@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from prompt_toolkit import print_formatted_text as _pt_print
+from prompt_toolkit.application import get_app_or_none
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
 
 logger = logging.getLogger(__name__)
@@ -34,8 +36,12 @@ _RST = "\033[0m"
 
 
 def cprint(text: str):
-    """Print ANSI-colored text through prompt_toolkit's renderer."""
-    _pt_print(_PT_ANSI(text))
+    """Print ANSI text without retaining a replaced or closed stdout."""
+    app = get_app_or_none()
+    if app is not None:
+        _pt_print(_PT_ANSI(text), output=app.output)
+    else:
+        _pt_print(_PT_ANSI(text), file=sys.stdout)
 
 
 # =========================================================================

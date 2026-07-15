@@ -1,7 +1,7 @@
 """Tests for the /fast CLI command and service-tier config handling."""
 
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -37,14 +37,23 @@ class TestParseServiceTierConfig(unittest.TestCase):
 
 class TestHandleFastCommand(unittest.TestCase):
     def _make_cli(self, service_tier=None):
-        return SimpleNamespace(
+        cli_mod = _import_cli()
+        agent = MagicMock()
+        agent.model = "gpt-5.4"
+        stub = SimpleNamespace(
             service_tier=service_tier,
             provider="openai-codex",
             requested_provider="openai-codex",
             model="gpt-5.4",
             _fast_command_available=lambda: True,
-            agent=MagicMock(),
+            agent=agent,
+            _active_agent_route_signature=("old-route",),
         )
+        stub._discard_agent_for_rebuild = MethodType(
+            cli_mod.ElevateCLI._discard_agent_for_rebuild,
+            stub,
+        )
+        return stub
 
     def test_no_args_shows_status(self):
         cli_mod = _import_cli()
@@ -77,6 +86,7 @@ class TestHandleFastCommand(unittest.TestCase):
     def test_normal_argument_clears_service_tier(self):
         cli_mod = _import_cli()
         stub = self._make_cli(service_tier="priority")
+        old_agent = stub.agent
         with (
             patch.object(cli_mod, "_cprint"),
             patch.object(cli_mod, "save_config_value", return_value=True) as mock_save,
@@ -86,6 +96,9 @@ class TestHandleFastCommand(unittest.TestCase):
         mock_save.assert_called_once_with("agent.service_tier", "normal")
         self.assertIsNone(stub.service_tier)
         self.assertIsNone(stub.agent)
+        self.assertIsNone(stub._active_agent_route_signature)
+        old_agent.release_clients.assert_called_once_with()
+        old_agent.close_memory_connections.assert_called_once_with()
 
     def test_unsupported_model_does_not_expose_fast(self):
         cli_mod = _import_cli()

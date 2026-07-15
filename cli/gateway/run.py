@@ -5814,7 +5814,7 @@ class GatewayRunner:
             # Resolve the command once for all early-intercept checks below.
             from elevate_cli.commands import (
                 ACTIVE_SESSION_BYPASS_COMMANDS as _DEDICATED_HANDLERS,
-                resolve_command as _resolve_cmd_inner,
+                resolve_gateway_command as _resolve_cmd_inner,
             )
             _evt_cmd = event.get_command()
             _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
@@ -6089,7 +6089,7 @@ class GatewayRunner:
         from elevate_cli.commands import (
             GATEWAY_KNOWN_COMMANDS,
             is_gateway_known_command,
-            resolve_command as _resolve_cmd,
+            resolve_gateway_command as _resolve_cmd,
         )
 
         # Resolve aliases to canonical name so dispatch and hook names
@@ -7710,10 +7710,11 @@ class GatewayRunner:
             # intermediate reasoning) so sessions can be resumed with full context
             # and transcripts are useful for debugging and training data.
             #
-            # IMPORTANT: When the agent failed (e.g. context-overflow 400,
-            # compression exhausted), do NOT persist the user's message.
-            # Persisting it would make the session even larger, causing the
-            # same failure on the next attempt — an infinite loop. (#1630, #9893)
+            # IMPORTANT: Persist ordinary failed/interrupted terminal turns so
+            # restart and reconnect retain truthful user-visible history.  Only
+            # explicit context-overflow/compression-exhaustion failures suppress
+            # growth; replaying those inputs would create an infinite loop.
+            # (#1630, #9893)
             suppress_transcript_growth = _should_suppress_transcript_growth(
                 agent_result
             )
@@ -7762,17 +7763,83 @@ class GatewayRunner:
             if not suppress_transcript_growth:
                 history_len = agent_result.get("history_offset", len(history))
                 new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
+
+                # Derive one stable identity for this gateway turn before the
+                # transcript path branches.  Proxy/provider failures can
+                # legitimately return no messages; those turns still need the
+                # same durable terminal receipt as failures that returned raw
+                # agent rows.  Prefer the platform message id because it
+                # survives delivery retries, then a persisted user-row id,
+                # with the run correlation id as the final in-process anchor.
+                terminal_anchor = (
+                    str(getattr(event, "message_id", "") or "").strip()
+                    or next(
+                        (
+                            str(msg.get("client_message_id") or "").strip()
+                            for msg in reversed(new_messages)
+                            if msg.get("role") == "user"
+                            and str(msg.get("client_message_id") or "").strip()
+                        ),
+                        "",
+                    )
+                    or _run_correlation_id.strip()
+                )
+                if not terminal_anchor:
+                    terminal_anchor = f"{history_len}:{message_text}"
+                import hashlib as _hashlib
+
+                terminal_identity_digest = _hashlib.sha256(
+                    (
+                        f"{session_entry.session_id}\0"
+                        f"{terminal_anchor}"
+                    ).encode("utf-8", errors="replace")
+                ).hexdigest()[:32]
+                terminal_receipt_id = (
+                    "gateway-terminal-" + terminal_identity_digest
+                )
+                fallback_user_id = "gateway-user-" + terminal_identity_digest
+                terminal_finish_reason = (
+                    "interrupted"
+                    if agent_result.get("interrupted")
+                    else "error"
+                )
+                should_persist_terminal_failure = bool(
+                    not turn_succeeded
+                    and not turn_pending
+                    and not agent_result_needs_input(agent_result)
+                    and response
+                )
                 
                 # If no new messages found (edge case), fall back to simple user/assistant
                 if not new_messages:
                     self.session_store.append_to_transcript(
                         session_entry.session_id,
-                        {"role": "user", "content": message_text, "timestamp": ts}
+                        {
+                            "role": "user",
+                            "content": message_text,
+                            "client_message_id": fallback_user_id,
+                            "platform_message_id": getattr(event, "message_id", None),
+                            "timestamp": ts,
+                        },
                     )
                     if response:
+                        assistant_entry = {
+                            "role": "assistant",
+                            "content": response,
+                            "timestamp": ts,
+                        }
+                        if should_persist_terminal_failure:
+                            assistant_entry.update(
+                                {
+                                    "finish_reason": terminal_finish_reason,
+                                    "client_message_id": terminal_receipt_id,
+                                    "gateway_terminal_receipt": True,
+                                }
+                            )
                         self.session_store.append_to_transcript(
                             session_entry.session_id,
-                            {"role": "assistant", "content": response, "timestamp": ts}
+                            assistant_entry,
+                            skip_db=False,
                         )
                 else:
                     # The agent already persisted these messages to SQLite via
@@ -7789,6 +7856,38 @@ class GatewayRunner:
                         self.session_store.append_to_transcript(
                             session_entry.session_id, entry,
                             skip_db=agent_persisted,
+                        )
+
+                    # The agent persists its raw conversation rows before the
+                    # gateway turns a partial/interrupted result into the exact
+                    # user-visible failure explanation.  Preserve the raw tool
+                    # history, then append that normalized terminal truth as a
+                    # distinct assistant receipt.  This write deliberately does
+                    # not use ``skip_db``: the raw rows are already in SessionDB,
+                    # but the gateway-only explanation is not.  Never replay the
+                    # user row just to attach the receipt.
+                    visible_failure_already_persisted = any(
+                        msg.get("role") == "assistant"
+                        and isinstance(msg.get("content"), str)
+                        and msg.get("content") == response
+                        and msg.get("finish_reason") == terminal_finish_reason
+                        for msg in new_messages
+                    )
+                    if (
+                        should_persist_terminal_failure
+                        and not visible_failure_already_persisted
+                    ):
+                        self.session_store.append_to_transcript(
+                            session_entry.session_id,
+                            {
+                                "role": "assistant",
+                                "content": response,
+                                "finish_reason": terminal_finish_reason,
+                                "client_message_id": terminal_receipt_id,
+                                "gateway_terminal_receipt": True,
+                                "timestamp": ts,
+                            },
+                            skip_db=False,
                         )
             
             # Token counts and model are now persisted by the agent directly.
@@ -7880,10 +7979,16 @@ class GatewayRunner:
                 _failed_latency_ms = 0
                 if '_turn_started_at' in locals():
                     _failed_latency_ms = int(max(0.0, time.monotonic() - _turn_started_at) * 1000)
+                _failed_agent_result = locals().get("agent_result")
+                _failed_provider = (
+                    str(_failed_agent_result.get("provider") or "")
+                    if isinstance(_failed_agent_result, dict)
+                    else ""
+                )
                 record_gateway_turn(
                     agent_result={
                         "session_id": getattr(session_entry, "session_id", None),
-                        "provider": _resolve_gateway_provider() if '_resolve_gateway_provider' in globals() else "",
+                        "provider": _failed_provider,
                         "model": _resolve_gateway_model(),
                         "status": "failed",
                         "failed": True,
@@ -15047,7 +15152,7 @@ class GatewayRunner:
                 _pending_cmd_word = _pending_parts[0][1:].lower() if _pending_parts else ""
                 if _pending_cmd_word:
                     try:
-                        from elevate_cli.commands import resolve_command as _rc_pending
+                        from elevate_cli.commands import resolve_gateway_command as _rc_pending
                         if _rc_pending(_pending_cmd_word):
                             logger.info(
                                 "Discarding command '/%s' from pending queue — "

@@ -110,7 +110,10 @@ class TestToolsSlashDisableWithReset:
 
 class TestToolsSlashEnableWithReset:
 
-    def test_enable_applies_directly_and_resets_session(self):
+    def test_enable_applies_directly_and_resets_session(
+        self,
+        closed_prompt_toolkit_output,
+    ):
         """Enable applies immediately (no confirmation prompt) and resets session."""
         cli_obj = _make_cli(["memory"])
         with patch("elevate_cli.tools_config.load_config",

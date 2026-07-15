@@ -6,8 +6,6 @@ import re
 from collections.abc import Mapping
 from typing import Any, Callable
 
-from fastapi import HTTPException
-
 from elevate_cli.beta_provider_policy import beta_provider_policy_active
 
 
@@ -70,7 +68,12 @@ _BETA_TELEGRAM_CLOSED_ACCESS_ENV = {
 }
 
 
-def _beta_policy_error(code: str, message: str) -> HTTPException:
+def _beta_policy_error(code: str, message: str) -> Exception:
+    # FastAPI belongs to the optional web surface.  Gateway config imports
+    # this policy for pack metadata and must remain usable in the lean CLI
+    # environment where FastAPI is intentionally absent.
+    from fastapi import HTTPException
+
     return HTTPException(status_code=409, detail={"code": code, "message": message})
 
 
@@ -189,12 +192,27 @@ def enforce_beta_env_store_local() -> None:
         return
     try:
         from elevate_cli.config import get_elevate_home, get_env_path, is_managed
+    except Exception as exc:
+        raise _beta_policy_error(
+            "beta_env_store_unavailable",
+            "Realtor Beta could not verify its local credential store. Reopen the app and try again.",
+        ) from exc
 
-        if is_managed():
-            raise _beta_policy_error(
-                "beta_env_store_managed",
-                "This managed Realtor Beta profile must receive credentials from its deployment configuration.",
-            )
+    try:
+        managed = is_managed()
+    except Exception as exc:
+        raise _beta_policy_error(
+            "beta_env_store_unavailable",
+            "Realtor Beta could not verify its local credential store. Reopen the app and try again.",
+        ) from exc
+
+    if managed:
+        raise _beta_policy_error(
+            "beta_env_store_managed",
+            "This managed Realtor Beta profile must receive credentials from its deployment configuration.",
+        )
+
+    try:
         home = get_elevate_home().expanduser()
         env_path = get_env_path().expanduser()
         unsafe = home.is_symlink() or env_path.is_symlink()
@@ -204,18 +222,16 @@ def enforce_beta_env_store_local() -> None:
             unsafe = unsafe or not env_path.is_file()
             unsafe = unsafe or env_path.resolve().parent != home.resolve()
             unsafe = unsafe or env_path.stat().st_nlink != 1
-        if unsafe:
-            raise _beta_policy_error(
-                "beta_env_store_not_local",
-                "Realtor Beta will not read or modify a linked credential store. Reopen the local Beta profile.",
-            )
-    except HTTPException:
-        raise
     except Exception as exc:
         raise _beta_policy_error(
             "beta_env_store_unavailable",
             "Realtor Beta could not verify its local credential store. Reopen the app and try again.",
         ) from exc
+    if unsafe:
+        raise _beta_policy_error(
+            "beta_env_store_not_local",
+            "Realtor Beta will not read or modify a linked credential store. Reopen the local Beta profile.",
+        )
 
 
 def _reject_unsafe_env_value_expansion(value: str) -> None:

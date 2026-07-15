@@ -21,10 +21,14 @@ These tests pin the contract:
 """
 from __future__ import annotations
 
+import json
 import textwrap
+from datetime import datetime
 from pathlib import Path
 
 import pytest
+
+from run_agent import AIAgent
 
 
 CLI_ROOT = Path(__file__).resolve().parents[2]
@@ -57,24 +61,38 @@ class TestSidecarNeverLeaksToDisk:
             "branches; we require at least one)"
         )
 
-    def test_session_log_pop_is_inside_save_session_log(self) -> None:
-        # Tighter check: the session-log strip happens between the
-        # _save_session_log signature and the next def.  Without this,
-        # someone could delete the strip and the prior test still passes
-        # because the api-loop pop still exists in the file.
-        idx_def = RUN_AGENT_SRC.index("def _save_session_log(")
-        # Find the next "def " at a lower indent.
-        rest = RUN_AGENT_SRC[idx_def:]
-        next_def_rel = rest.index("\n    def ", 1)
-        body = rest[:next_def_rel]
-        assert (
-            'msg.pop("_ephemeral_context", None)' in body
-            or '"_ephemeral_context" in msg' in body
-        ), (
-            "_save_session_log body must strip _ephemeral_context — "
-            "if the strip moves out of this method, the on-disk JSON "
-            "starts accumulating sidecar bytes again"
+    def test_session_log_never_persists_sidecar(
+        self, tmp_path: Path
+    ) -> None:
+        # Exercise the persistence projection instead of assuming that the
+        # public cancellation-fenced wrapper contains the serialization loop.
+        agent = object.__new__(AIAgent)
+        agent.session_log_file = tmp_path / "session.json"
+        agent.session_id = "sidecar-privacy"
+        agent.model = "test-model"
+        agent.base_url = "https://example.invalid/v1"
+        agent.platform = "test"
+        agent.session_start = datetime.now()
+        agent._cached_system_prompt = ""
+        agent.tools = []
+        messages = [
+            {
+                "role": "user",
+                "content": "hello",
+                "_ephemeral_context": "private recalled context",
+            }
+        ]
+
+        assert agent._save_session_log_impl(messages) is True
+
+        persisted = json.loads(agent.session_log_file.read_text(encoding="utf-8"))
+        assert persisted["messages"] == [{"role": "user", "content": "hello"}]
+        assert "private recalled context" not in agent.session_log_file.read_text(
+            encoding="utf-8"
         )
+        # Persistence is a projection; the live in-memory sidecar remains
+        # available for stable cross-turn API cache bytes.
+        assert messages[0]["_ephemeral_context"] == "private recalled context"
 
 
 class TestSidecarSourceContract:

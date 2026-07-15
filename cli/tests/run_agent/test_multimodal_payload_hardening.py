@@ -177,19 +177,28 @@ def test_agent_externalizes_live_media_and_hydrates_api_copy(tmp_path, monkeypat
     assert "data:image" in json.dumps(messages)
 
 
-def test_pending_steer_appends_to_multimodal_envelope_without_corrupting_it():
+def test_pending_steer_reserves_user_row_without_corrupting_multimodal_envelope():
     agent = object.__new__(AIAgent)
     agent._pending_steer = "focus on the navbar"
-    agent._pending_steer_lock = None
     content = _native_tool_result()
     messages = [{"role": "tool", "content": content, "tool_call_id": "call_1"}]
 
     agent._apply_pending_steer_to_tool_results(messages, 1)
 
+    assert len(messages) == 2
     assert messages[0]["content"]["_multimodal"] is True
     assert isinstance(messages[0]["content"]["content"], list)
-    assert "User guidance: focus on the navbar" in messages[0]["content"]["content"][0]["text"]
-    assert "User guidance: focus on the navbar" in messages[0]["content"]["text_summary"]
+    assert messages[0]["content"]["content"][0]["text"] == (
+        "Image attached at: /tmp/cma/screenshot.png"
+    )
+    assert messages[0]["content"]["text_summary"] == (
+        "Image attached natively: /tmp/cma/screenshot.png"
+    )
+    assert messages[1]["role"] == "user"
+    assert messages[1]["content"] == "User guidance: focus on the navbar"
+    assert messages[1]["_display_content"] == "focus on the navbar"
+    assert messages[1]["finish_reason"] == "guidance_reserved_steer"
+    assert messages[1]["client_message_id"].startswith("steer.")
 
 
 def test_soft_interrupt_appends_to_multimodal_envelope_without_corrupting_it():

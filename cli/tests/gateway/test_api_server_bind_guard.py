@@ -1,7 +1,7 @@
 """Tests for the API server bind-address startup guard.
 
 Validates that is_network_accessible() correctly classifies addresses and
-that connect() refuses to start on non-loopback without API_SERVER_KEY.
+that every bind address receives an API key, generated when one is not set.
 """
 
 import socket
@@ -97,26 +97,43 @@ class TestIsNetworkAccessible:
 
 
 class TestConnectBindGuard:
-    """Verify that connect() refuses dangerous configurations."""
+    """Verify that bind configurations cannot remain unauthenticated."""
 
-    @pytest.mark.asyncio
-    async def test_refuses_ipv4_wildcard_without_key(self):
-        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "0.0.0.0"}))
-        result = await adapter.connect()
-        assert result is False
+    def test_generates_key_for_ipv4_wildcard_without_configured_key(self):
+        with patch.object(
+            APIServerAdapter,
+            "_ensure_persisted_api_key",
+            return_value="generated-test-key",
+        ):
+            adapter = APIServerAdapter(
+                PlatformConfig(enabled=True, extra={"host": "0.0.0.0"})
+            )
+        assert adapter._api_key == "generated-test-key"
+        assert is_network_accessible(adapter._host) is True
 
-    @pytest.mark.asyncio
-    async def test_refuses_ipv6_wildcard_without_key(self):
-        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "::"}))
-        result = await adapter.connect()
-        assert result is False
+    def test_generates_key_for_ipv6_wildcard_without_configured_key(self):
+        with patch.object(
+            APIServerAdapter,
+            "_ensure_persisted_api_key",
+            return_value="generated-test-key",
+        ):
+            adapter = APIServerAdapter(
+                PlatformConfig(enabled=True, extra={"host": "::"})
+            )
+        assert adapter._api_key == "generated-test-key"
+        assert is_network_accessible(adapter._host) is True
 
-    def test_allows_loopback_without_key(self):
-        """Loopback with no key should pass the guard."""
-        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1"}))
-        assert adapter._api_key == ""
-        # The guard condition: is_network_accessible(host) AND NOT api_key
-        # For loopback, is_network_accessible is False so the guard does not block.
+    def test_loopback_without_configured_key_still_generates_key(self):
+        """Local processes and browser rebinding cannot reach a keyless agent."""
+        with patch.object(
+            APIServerAdapter,
+            "_ensure_persisted_api_key",
+            return_value="generated-test-key",
+        ):
+            adapter = APIServerAdapter(
+                PlatformConfig(enabled=True, extra={"host": "127.0.0.1"})
+            )
+        assert adapter._api_key == "generated-test-key"
         assert is_network_accessible(adapter._host) is False
 
     @pytest.mark.asyncio

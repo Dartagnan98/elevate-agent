@@ -4,6 +4,8 @@ from run_agent import AIAgent
 class _FakeAgent:
     _emit_warning = AIAgent._emit_warning
     _emit_status = AIAgent._emit_status
+    _emit_status_impl = AIAgent._emit_status_impl
+    _invoke_generation_callback = AIAgent._invoke_generation_callback
     _status_category_key = staticmethod(AIAgent._status_category_key)
 
     def __init__(self):

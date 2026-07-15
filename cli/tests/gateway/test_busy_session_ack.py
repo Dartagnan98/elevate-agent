@@ -108,10 +108,11 @@ class TestBusySessionAck:
             == "skill-runner"
         )
 
-    def test_profile_decision_explains_lazy_code_route(self):
+    def test_profile_decision_explains_lazy_code_route(self, monkeypatch):
         """Runtime brain decisions should be inspectable by API/dashboard clients."""
         from gateway.run import GatewayRunner
 
+        monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
         decision = GatewayRunner._gateway_tool_profile_decision(
             {
                 "agent": {"gateway_tool_profile": "auto"},

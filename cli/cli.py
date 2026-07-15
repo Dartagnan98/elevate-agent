@@ -43,7 +43,7 @@ import yaml
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.application import Application
+from prompt_toolkit.application import Application, get_app_or_none
 from prompt_toolkit.layout import Layout, HSplit, Window, FormattedTextControl, ConditionalContainer
 from prompt_toolkit.layout.processors import Processor, Transformation, PasswordProcessor, ConditionalProcessor
 from prompt_toolkit.filters import Condition
@@ -1250,9 +1250,18 @@ def _cprint(text: str):
 
     Raw ANSI escapes written via print() are swallowed by patch_stdout's
     StdoutProxy.  Routing through print_formatted_text(ANSI(...)) lets
-    prompt_toolkit parse the escapes and render real colors.
+    prompt_toolkit parse the escapes and render real colors.  Outside a
+    running TUI, bind the renderer to the *current* stdout rather than the
+    process-global AppSession output.  Test capture, shell redirection, and
+    embedding hosts can replace stdout during the process lifetime; the
+    AppSession caches its first output and may otherwise retain a closed
+    stream.  A running application still owns its configured output.
     """
-    _pt_print(_PT_ANSI(text))
+    app = get_app_or_none()
+    if app is not None:
+        _pt_print(_PT_ANSI(text), output=app.output)
+    else:
+        _pt_print(_PT_ANSI(text), file=sys.stdout)
 
 
 # ---------------------------------------------------------------------------

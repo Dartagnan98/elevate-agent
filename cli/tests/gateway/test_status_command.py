@@ -55,6 +55,13 @@ def _make_runner(session_entry: SessionEntry):
     runner._pending_approvals = {}
     runner._session_db = MagicMock()
     runner._session_db.get_session_title.return_value = None
+    runner._session_db.get_session.return_value = {
+        "input_tokens": session_entry.total_tokens,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+    }
     runner._reasoning_config = None
     runner._provider_routing = {}
     runner._fallback_model = None
