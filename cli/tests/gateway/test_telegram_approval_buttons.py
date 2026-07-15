@@ -851,6 +851,13 @@ class TestTelegramApprovalCallback:
             "executive-session",
             "once",
             request_id="request-executive",
+            resolver_identity="222",
+            resolver_context={
+                "actor_id": "222",
+                "platform": "telegram",
+                "chat_id": "12345",
+                "thread_id": "",
+            },
         )
         assert approval_id not in adapter._approval_state
 
@@ -950,6 +957,13 @@ class TestTelegramApprovalCallback:
             "beta-session",
             "deny",
             request_id="request-beta",
+            resolver_identity="222",
+            resolver_context={
+                "actor_id": "222",
+                "platform": "telegram",
+                "chat_id": "12345",
+                "thread_id": "",
+            },
         )
 
     def test_beta_paired_numeric_caller_is_authorized(self):

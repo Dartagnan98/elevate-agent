@@ -172,7 +172,7 @@ def test_exact_beta_ignores_stale_session_and_permanent_allowlists(monkeypatch):
 
 @pytest.mark.parametrize("guard", ["direct", "combined"])
 @pytest.mark.parametrize("choice", ["once", "session", "always"])
-def test_exact_beta_affirmative_choice_applies_only_to_current_command(
+def test_exact_beta_cli_callback_cannot_bypass_durable_approval_bridge(
     monkeypatch,
     choice,
     guard,
@@ -201,9 +201,8 @@ def test_exact_beta_affirmative_choice_applies_only_to_current_command(
     )
     _, pattern_key, _ = approval.detect_dangerous_command(_DANGEROUS_COMMAND)
 
-    assert first["approved"] is True
-    if guard == "combined":
-        assert first["user_approved"] is True
+    assert first["approved"] is False
+    assert first["status"] == "approval_bridge_unavailable"
     assert second["approved"] is False
     assert approval.is_approved(_SESSION_KEY, pattern_key) is False
     assert save == []
@@ -227,8 +226,37 @@ def test_exact_beta_invalid_callback_choice_fails_closed(check):
 def test_exact_beta_gateway_resolver_reduces_affirmative_scope_to_once(
     monkeypatch,
     choice,
+    tmp_path,
 ):
-    entry = approval._ApprovalEntry({"command": _DANGEROUS_COMMAND})
+    from elevate_state import SessionDB
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    db = SessionDB(tmp_path / "state.db")
+    approval._initialize_approval_store(db)
+    session_tokens = set_session_vars(
+        platform="gateway",
+        chat_id=_SESSION_KEY,
+        user_id="u1",
+        session_key=_SESSION_KEY,
+    )
+    policy_token = approval.set_current_execution_policy(
+        approval.ExecutionPolicy.for_mode("turn-beta-resolver", "default"),
+        policy_revision=0,
+    )
+    try:
+        entry = approval._ApprovalEntry(
+            {"command": _DANGEROUS_COMMAND},
+            grant_store=db,
+        )
+        assert approval._prepare_durable_approval_grant(
+            entry,
+            _SESSION_KEY,
+            _DANGEROUS_COMMAND,
+            timeout_seconds=300,
+        )
+    finally:
+        approval.reset_current_execution_policy(policy_token)
+        clear_session_vars(session_tokens)
     monkeypatch.setattr(
         approval,
         "_record_approval_receipt",
@@ -241,6 +269,12 @@ def test_exact_beta_gateway_resolver_reduces_affirmative_scope_to_once(
         _SESSION_KEY,
         choice,
         request_id=entry.request_id,
+        resolver_identity="u1",
+        resolver_context={
+            "actor_id": "u1",
+            "platform": "gateway",
+            "chat_id": _SESSION_KEY,
+        },
     )
 
     assert resolved == 1

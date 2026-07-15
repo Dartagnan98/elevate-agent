@@ -1902,7 +1902,7 @@ class FeishuAdapter(BasePlatformAdapter):
             result = self._finalize_send_result(response, "send_exec_approval failed")
             if result.success:
                 with self._approval_state_lock:
-                    self._approval_state[approval_id] = {
+                    approval_state = {
                         "actor_id": str(
                             (metadata or {}).get("approval_actor_id") or ""
                         ).strip(),
@@ -1911,6 +1911,12 @@ class FeishuAdapter(BasePlatformAdapter):
                         "message_id": result.message_id or "",
                         "chat_id": chat_id,
                     }
+                    thread_id = str(
+                        (metadata or {}).get("thread_id") or ""
+                    ).strip()
+                    if thread_id:
+                        approval_state["thread_id"] = thread_id
+                    self._approval_state[approval_id] = approval_state
             return result
         except Exception as exc:
             logger.warning("[Feishu] send_exec_approval failed: %s", exc)
@@ -2545,6 +2551,11 @@ class FeishuAdapter(BasePlatformAdapter):
         context = getattr(event, "context", None)
         chat_id = str(getattr(context, "open_chat_id", "") or "")
         message_id = str(getattr(context, "open_message_id", "") or "")
+        thread_id = str(
+            getattr(context, "open_thread_id", "")
+            or getattr(context, "thread_id", "")
+            or ""
+        )
         user_name = self._get_cached_sender_name(open_id) or open_id
 
         resolution_status, resolved_choice = self._resolve_approval_now(
@@ -2554,6 +2565,7 @@ class FeishuAdapter(BasePlatformAdapter):
             actor_ids=actor_ids,
             chat_id=chat_id,
             message_id=message_id,
+            thread_id=thread_id,
         )
         with self._approval_state_lock:
             retryable = approval_id in self._approval_state
@@ -2587,6 +2599,7 @@ class FeishuAdapter(BasePlatformAdapter):
         actor_ids: Sequence[str] = (),
         chat_id: str = "",
         message_id: str = "",
+        thread_id: str = "",
     ) -> tuple[str, Optional[str]]:
         """Resolve one exact request and consume local state only on success."""
         with self._approval_state_lock:
@@ -2600,10 +2613,12 @@ class FeishuAdapter(BasePlatformAdapter):
             }
             expected_chat_id = str(state.get("chat_id") or "")
             expected_message_id = str(state.get("message_id") or "")
+            expected_thread_id = str(state.get("thread_id") or "")
             if (
                 (expected_actor_id and expected_actor_id not in callback_actor_ids)
                 or (expected_chat_id and chat_id != expected_chat_id)
                 or (expected_message_id and message_id != expected_message_id)
+                or (expected_thread_id and thread_id != expected_thread_id)
             ):
                 logger.warning(
                     "Feishu approval callback context did not match its delivery "
@@ -2614,13 +2629,38 @@ class FeishuAdapter(BasePlatformAdapter):
             try:
                 from tools.approval import resolve_gateway_approval
 
+                try:
+                    from elevate_cli.beta_provider_policy import (
+                        beta_provider_policy_active,
+                    )
+
+                    exact_beta = beta_provider_policy_active()
+                except Exception:
+                    exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
                 request_id = state.get("request_id", "")
                 if not request_id:
                     raise RuntimeError("approval request identity missing")
+                resolver_actor_id = (
+                    expected_actor_id
+                    if expected_actor_id in callback_actor_ids
+                    else next(iter(callback_actor_ids), "")
+                )
+                resolver_kwargs = {"request_id": request_id}
+                if exact_beta:
+                    resolver_kwargs.update(
+                        resolver_identity=resolver_actor_id,
+                        resolver_context={
+                            "actor_id": resolver_actor_id,
+                            "platform": "feishu",
+                            "chat_id": chat_id,
+                            "thread_id": thread_id,
+                        },
+                    )
                 count = resolve_gateway_approval(
                     state["session_key"],
                     choice,
-                    request_id=request_id,
+                    **resolver_kwargs,
                 )
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
@@ -2667,6 +2707,7 @@ class FeishuAdapter(BasePlatformAdapter):
         actor_id: str = "",
         chat_id: str = "",
         message_id: str = "",
+        thread_id: str = "",
     ) -> None:
         """Async compatibility wrapper used by adapter tests and older callers."""
         self._resolve_approval_now(
@@ -2676,6 +2717,7 @@ class FeishuAdapter(BasePlatformAdapter):
             actor_ids=(actor_id,) if actor_id else (),
             chat_id=chat_id,
             message_id=message_id,
+            thread_id=thread_id,
         )
 
     async def _handle_reaction_event(self, event_type: str, data: Any) -> None:

@@ -118,12 +118,14 @@ class _MatrixApprovalPrompt:
         chat_id: str,
         message_id: str,
         request_id: str = "",
+        thread_id: str = "",
         resolved: bool = False,
     ):
         self.session_key = session_key
         self.chat_id = chat_id
         self.message_id = message_id
         self.request_id = request_id
+        self.thread_id = thread_id
         self.resolved = resolved
         self.bot_reaction_events: dict[str, str] = {}  # emoji -> event_id
 
@@ -1272,6 +1274,7 @@ class MatrixAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             message_id=result.message_id,
             request_id=request_id,
+            thread_id=str((metadata or {}).get("thread_id") or ""),
         )
         old_event = self._approval_prompt_by_session.get(session_key)
         if old_event:
@@ -2229,10 +2232,29 @@ class MatrixAdapter(BasePlatformAdapter):
                     if not prompt.request_id:
                         logger.error("Matrix approval state missing request identity")
                         return
+                    try:
+                        from elevate_cli.beta_provider_policy import (
+                            beta_provider_policy_active,
+                        )
+
+                        exact_beta = beta_provider_policy_active()
+                    except Exception:
+                        exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+                    resolver_kwargs = {"request_id": prompt.request_id}
+                    if exact_beta:
+                        resolver_kwargs.update(
+                            resolver_identity=str(sender),
+                            resolver_context={
+                                "actor_id": str(sender),
+                                "platform": "matrix",
+                                "chat_id": str(room_id),
+                                "thread_id": str(prompt.thread_id or ""),
+                            },
+                        )
                     count = resolve_gateway_approval(
                         prompt.session_key,
                         choice,
-                        request_id=prompt.request_id,
+                        **resolver_kwargs,
                     )
                     if count:
                         prompt.resolved = True

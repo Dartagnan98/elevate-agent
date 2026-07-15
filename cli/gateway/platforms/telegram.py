@@ -1969,7 +1969,7 @@ class TelegramAdapter(BasePlatformAdapter):
             msg = await bot.send_message(**kwargs)
 
             # Bind this platform interaction to the exact central queue entry.
-            self._approval_state[approval_id] = {
+            approval_state = {
                 "actor_id": str((metadata or {}).get("approval_actor_id") or "").strip(),
                 "chat_id": str(chat_id),
                 "message_id": str(msg.message_id),
@@ -1977,6 +1977,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 "session_key": session_key,
                 "agent_id": str((metadata or {}).get("agent_id") or "").strip(),
             }
+            if message_thread_id is not None:
+                approval_state["thread_id"] = str(message_thread_id)
+            self._approval_state[approval_id] = approval_state
 
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -2355,11 +2358,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 callback_message_id = str(
                     getattr(getattr(query, "message", None), "message_id", "") or ""
                 )
+                raw_callback_thread_id = getattr(
+                    getattr(query, "message", None),
+                    "message_thread_id",
+                    "",
+                )
+                callback_thread_id = (
+                    str(raw_callback_thread_id)
+                    if isinstance(raw_callback_thread_id, (str, int))
+                    and not isinstance(raw_callback_thread_id, bool)
+                    else ""
+                )
                 expected_actor_id = str(approval_state.get("actor_id") or "").strip()
                 if (
                     callback_chat_id != str(approval_state.get("chat_id") or "")
                     or callback_message_id
                     != str(approval_state.get("message_id") or "")
+                    or callback_thread_id
+                    != str(approval_state.get("thread_id") or "")
                     or (expected_actor_id and caller_id != expected_actor_id)
                 ):
                     await query.answer(
@@ -2397,10 +2413,21 @@ class TelegramAdapter(BasePlatformAdapter):
                     request_id = approval_state.get("request_id", "")
                     if not request_id:
                         raise RuntimeError("approval request identity missing")
+                    resolver_kwargs = {"request_id": request_id}
+                    if exact_beta:
+                        resolver_kwargs.update(
+                            resolver_identity=caller_id,
+                            resolver_context={
+                                "actor_id": caller_id,
+                                "platform": "telegram",
+                                "chat_id": callback_chat_id,
+                                "thread_id": callback_thread_id,
+                            },
+                        )
                     count = resolve_gateway_approval(
                         session_key,
                         choice,
-                        request_id=request_id,
+                        **resolver_kwargs,
                     )
                 except Exception as exc:
                     logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)

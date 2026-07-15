@@ -71,9 +71,44 @@ def _clear_approval_state():
     from tools import approval as mod
     mod._gateway_queues.clear()
     mod._gateway_notify_cbs.clear()
+    mod._gateway_grant_stores.clear()
     mod._session_approved.clear()
     mod._permanent_approved.clear()
     mod._pending.clear()
+
+
+def _durable_beta_entry(db, session_key: str, command: str):
+    """Seed the same durable grant an exact-Beta terminal request creates."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from tools import approval
+
+    approval._initialize_approval_store(db)
+    session_tokens = set_session_vars(
+        platform="telegram",
+        chat_id="c1",
+        user_id="u1",
+        session_key=session_key,
+        message_id="m1",
+    )
+    policy_token = approval.set_current_execution_policy(
+        approval.ExecutionPolicy.for_mode(f"turn-{command}", "default"),
+        policy_revision=0,
+    )
+    try:
+        entry = approval._ApprovalEntry(
+            {"command": command},
+            grant_store=db,
+        )
+        assert approval._prepare_durable_approval_grant(
+            entry,
+            session_key,
+            command,
+            timeout_seconds=300,
+        )
+        return entry
+    finally:
+        approval.reset_current_execution_policy(policy_token)
+        clear_session_vars(session_tokens)
 
 
 # ------------------------------------------------------------------
@@ -475,15 +510,18 @@ class TestApproveCommand:
     async def test_exact_beta_requires_and_resolves_the_displayed_request_id(
         self,
         monkeypatch,
+        tmp_path,
     ):
-        from tools.approval import _ApprovalEntry, _gateway_queues
+        from elevate_state import SessionDB
+        from tools.approval import _gateway_queues
 
         monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
         runner = _make_runner()
         source = _make_source()
         session_key = runner._session_key_for_source(source)
-        first = _ApprovalEntry({"command": "first"})
-        second = _ApprovalEntry({"command": "second"})
+        db = SessionDB(tmp_path / "state.db")
+        first = _durable_beta_entry(db, session_key, "first")
+        second = _durable_beta_entry(db, session_key, "second")
         _gateway_queues[session_key] = [first, second]
 
         missing = await runner._handle_approve_command(_make_event("/approve"))
@@ -575,15 +613,21 @@ class TestDenyCommand:
         assert "No pending command" in result
 
     @pytest.mark.asyncio
-    async def test_exact_beta_denies_only_the_displayed_request_id(self, monkeypatch):
-        from tools.approval import _ApprovalEntry, _gateway_queues
+    async def test_exact_beta_denies_only_the_displayed_request_id(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from elevate_state import SessionDB
+        from tools.approval import _gateway_queues
 
         monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
         runner = _make_runner()
         source = _make_source()
         session_key = runner._session_key_for_source(source)
-        first = _ApprovalEntry({"command": "first"})
-        second = _ApprovalEntry({"command": "second"})
+        db = SessionDB(tmp_path / "state.db")
+        first = _durable_beta_entry(db, session_key, "first")
+        second = _durable_beta_entry(db, session_key, "second")
         _gateway_queues[session_key] = [first, second]
 
         result = await runner._handle_deny_command(

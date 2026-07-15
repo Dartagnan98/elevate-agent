@@ -111,6 +111,26 @@ def _gateway_approval_text_prompt(
     )
 
 
+def _require_approval_delivery(
+    result: Any,
+    *,
+    delivery_name: str,
+    require_message_id: bool = False,
+) -> None:
+    """Reject adapter results that do not prove an approval prompt was sent."""
+    if result is None or not bool(getattr(result, "success", False)):
+        error = str(getattr(result, "error", "") or "").strip()
+        detail = error or "adapter returned an unsuccessful result"
+        raise RuntimeError(f"{delivery_name} failed: {detail}")
+
+    if require_message_id:
+        message_id = str(getattr(result, "message_id", "") or "").strip()
+        if not message_id:
+            raise RuntimeError(
+                f"{delivery_name} failed: adapter returned no message identity"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Gateway provider-error / secret-redaction helpers (pure, no I/O).
 # Ported from Hermes via subagent-resilience-2026-05-19 — pre-PR helpers used
@@ -11177,6 +11197,13 @@ class GatewayRunner:
             choice,
             resolve_all=resolve_all,
             request_id=request_id,
+            resolver_identity=str(source.user_id or ""),
+            resolver_context={
+                "actor_id": str(source.user_id or ""),
+                "platform": source.platform.value,
+                "chat_id": str(source.chat_id or ""),
+                "thread_id": str(source.thread_id or ""),
+            },
         )
         if not count:
             return "No matching pending command to approve."
@@ -11233,6 +11260,13 @@ class GatewayRunner:
             "deny",
             resolve_all=resolve_all,
             request_id=request_id,
+            resolver_identity=str(source.user_id or ""),
+            resolver_context={
+                "actor_id": str(source.user_id or ""),
+                "platform": source.platform.value,
+                "chat_id": str(source.chat_id or ""),
+                "thread_id": str(source.thread_id or ""),
+            },
         )
         if not count:
             return "No matching pending command to deny."
@@ -14083,12 +14117,12 @@ class GatewayRunner:
                             ),
                             _loop_for_step,
                         ).result(timeout=15)
-                        if _approval_result.success:
-                            return
-                        logger.warning(
-                            "Button-based approval failed (send returned error), falling back to text: %s",
-                            _approval_result.error,
+                        _require_approval_delivery(
+                            _approval_result,
+                            delivery_name="button-based approval delivery",
+                            require_message_id=True,
                         )
+                        return
                     except Exception as _e:
                         logger.warning(
                             "Button-based approval failed, falling back to text: %s", _e
@@ -14097,7 +14131,7 @@ class GatewayRunner:
                 # Fallback: plain text approval prompt
                 msg = _gateway_approval_text_prompt(cmd, desc, request_id)
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    _text_result = asyncio.run_coroutine_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
@@ -14105,8 +14139,13 @@ class GatewayRunner:
                         ),
                         _loop_for_step,
                     ).result(timeout=15)
+                    _require_approval_delivery(
+                        _text_result,
+                        delivery_name="text approval delivery",
+                    )
                 except Exception as _e:
                     logger.error("Failed to send approval request: %s", _e)
+                    raise RuntimeError("approval notification delivery failed") from _e
 
             # Prepend pending model switch note so the model knows about the switch
             _pending_notes = getattr(self, '_pending_model_notes', {})
@@ -14201,7 +14240,11 @@ class GatewayRunner:
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
-            register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            register_gateway_notify(
+                _approval_session_key,
+                _approval_notify_sync,
+                approval_store=self._session_db,
+            )
             try:
                 _persist_override = persist_user_message
                 # Consume any parked async-delegation results: this turn

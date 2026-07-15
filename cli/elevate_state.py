@@ -16,6 +16,7 @@ Key design decisions:
 
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -24,6 +25,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+import psutil
 
 from agent.memory_manager import sanitize_context
 from elevate_constants import get_elevate_home
@@ -35,7 +38,13 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_elevate_home() / "state.db"
 
-SCHEMA_VERSION = 13
+# Survives every SessionDB instance in this interpreter, but changes after an
+# exec/restart even when the operating system reuses the same PID.
+_PROCESS_IMPORT_PID = os.getpid()
+_PROCESS_START_ID = uuid.uuid4().hex
+_PROCESS_CREATE_TIME = psutil.Process(_PROCESS_IMPORT_PID).create_time()
+
+SCHEMA_VERSION = 14
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -271,6 +280,38 @@ CREATE TABLE IF NOT EXISTS prompt_receipts (
 
 CREATE INDEX IF NOT EXISTS idx_prompt_receipts_recovery
 ON prompt_receipts(session_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS approval_grants (
+    request_id TEXT PRIMARY KEY,
+    boot_id TEXT NOT NULL,
+    session_key_digest TEXT NOT NULL,
+    session_id TEXT,
+    root_correlation_id TEXT,
+    turn_id TEXT NOT NULL,
+    tool_identity TEXT NOT NULL,
+    command_digest TEXT NOT NULL,
+    canonical_args_digest TEXT NOT NULL,
+    accepted_policy_json TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    effect_set_json TEXT NOT NULL DEFAULT '[]',
+    allowed_actor_id TEXT NOT NULL,
+    delivery_platform TEXT NOT NULL,
+    delivery_chat_id TEXT NOT NULL,
+    delivery_thread_id TEXT,
+    origin_message_id TEXT,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'approved', 'denied', 'expired', 'cancelled')),
+    decision TEXT,
+    resolver_identity TEXT,
+    resolver_context_json TEXT,
+    resolved_at REAL,
+    resolution_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_grants_pending
+ON approval_grants(state, boot_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
@@ -2293,6 +2334,565 @@ class SessionDB:
                 decoded_policy if isinstance(decoded_policy, dict) else None
             )
         return receipt
+
+    @staticmethod
+    def _decode_approval_grant(row: sqlite3.Row) -> Dict[str, Any]:
+        """Decode one content-free durable approval grant row."""
+        grant = dict(row)
+        for json_key, decoded_key, fallback in (
+            ("accepted_policy_json", "accepted_policy", None),
+            ("effect_set_json", "effect_set", []),
+            ("resolver_context_json", "resolver_context", None),
+        ):
+            raw = grant.pop(json_key, None)
+            if raw is None:
+                grant[decoded_key] = fallback
+                continue
+            try:
+                decoded = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                decoded = fallback
+            grant[decoded_key] = decoded
+        return grant
+
+    def activate_approval_boot(
+        self,
+        boot_id: str,
+        *,
+        process_id: Optional[int] = None,
+        process_start_id: Optional[str] = None,
+        process_create_time: Optional[float] = None,
+    ) -> bool:
+        """Claim the one-live-boot lease for exact-Beta approvals.
+
+        A different boot owned by a live process fails closed. A dead owner's
+        lease may be replaced, after which startup cleanup can terminalize its
+        pending rows. Processes deliberately sharing the same inherited boot
+        ID are one logical app boot and may share the authority.
+        """
+        if not isinstance(boot_id, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", boot_id
+        ):
+            raise ValueError("boot_id must be an opaque 128-bit hex identifier")
+        runtime_pid = os.getpid()
+        pid = runtime_pid if process_id is None else process_id
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise ValueError("process_id must be a positive integer")
+        start_id = _PROCESS_START_ID if process_start_id is None else process_start_id
+        if not isinstance(start_id, str) or not start_id.strip():
+            raise ValueError("process_start_id is required")
+        if process_create_time is None:
+            # A fork without exec inherits module globals from its parent.
+            # Refresh the OS creation time in that child instead of recording
+            # the parent's timestamp against the child's PID.
+            create_time = (
+                psutil.Process(runtime_pid).create_time()
+                if pid == runtime_pid and runtime_pid != _PROCESS_IMPORT_PID
+                else _PROCESS_CREATE_TIME
+            )
+        else:
+            create_time = process_create_time
+        if (
+            isinstance(create_time, bool)
+            or not isinstance(create_time, (int, float))
+            or not math.isfinite(float(create_time))
+            or float(create_time) <= 0
+        ):
+            raise ValueError("process_create_time must be a positive timestamp")
+        now = time.time()
+        lease_key = "approval_grants.active_boot"
+
+        def _lease_owner_is_live(
+            owner_pid: int,
+            owner_create_time: float,
+        ) -> bool:
+            try:
+                live_create_time = psutil.Process(owner_pid).create_time()
+            except psutil.NoSuchProcess:
+                return False
+            except psutil.AccessDenied:
+                return True
+            # A live process with the same PID but a different creation time
+            # is PID reuse, not the lease owner recorded before the crash.
+            return (
+                owner_create_time <= 0
+                or abs(float(live_create_time) - owner_create_time) < 0.001
+            )
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT value FROM state_meta WHERE key = ?",
+                (lease_key,),
+            ).fetchone()
+            prior = None
+            if row is not None:
+                try:
+                    prior = json.loads(row["value"] or "")
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise RuntimeError(
+                        "Approval Grant boot lease is corrupt"
+                    ) from exc
+                if (
+                    not isinstance(prior, dict)
+                    or not isinstance(prior.get("boot_id"), str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", prior["boot_id"])
+                ):
+                    raise RuntimeError("Approval Grant boot lease is corrupt")
+            current_owner = {
+                "process_id": pid,
+                "process_start_id": start_id,
+                "process_create_time": float(create_time),
+            }
+            owners = []
+            prior_boot = ""
+            if isinstance(prior, dict):
+                prior_boot = str(prior.get("boot_id") or "")
+                raw_owners = prior.get("owners")
+                if isinstance(raw_owners, list):
+                    owners = [owner for owner in raw_owners if isinstance(owner, dict)]
+                elif prior.get("process_id"):
+                    # Migrate the original single-owner lease shape in place.
+                    owners = [prior]
+                else:
+                    raise RuntimeError("Approval Grant boot lease is corrupt")
+                if not owners:
+                    raise RuntimeError("Approval Grant boot lease is corrupt")
+
+                normalized_owners = []
+                for owner in owners:
+                    owner_pid = owner.get("process_id")
+                    owner_start_id = owner.get("process_start_id")
+                    owner_create_time = owner.get("process_create_time", 0.0)
+                    if (
+                        isinstance(owner_pid, bool)
+                        or not isinstance(owner_pid, int)
+                        or owner_pid <= 0
+                        or not isinstance(owner_start_id, str)
+                        or not owner_start_id.strip()
+                        or isinstance(owner_create_time, bool)
+                        or not isinstance(owner_create_time, (int, float))
+                        or not math.isfinite(float(owner_create_time))
+                        or float(owner_create_time) < 0
+                    ):
+                        raise RuntimeError("Approval Grant boot lease is corrupt")
+                    normalized_owners.append(
+                        {
+                            "process_id": owner_pid,
+                            "process_start_id": owner_start_id,
+                            "process_create_time": float(owner_create_time),
+                        }
+                    )
+                owners = normalized_owners
+
+            def _owner_is_live(owner: dict) -> bool:
+                try:
+                    owner_pid = int(owner.get("process_id") or 0)
+                except (TypeError, ValueError):
+                    owner_pid = 0
+                owner_start_id = str(owner.get("process_start_id") or "")
+                try:
+                    owner_create_time = float(
+                        owner.get("process_create_time") or 0
+                    )
+                except (TypeError, ValueError):
+                    owner_create_time = 0.0
+                if owner_pid == pid:
+                    return bool(owner_start_id and owner_start_id == start_id)
+                return bool(
+                    owner_pid > 0
+                    and _lease_owner_is_live(owner_pid, owner_create_time)
+                )
+
+            if prior_boot and prior_boot != boot_id:
+                if any(_owner_is_live(owner) for owner in owners):
+                    raise RuntimeError(
+                        "another live process owns the Approval Grant boot lease"
+                    )
+                owners = []
+
+            def _owner_is_current(owner: dict) -> bool:
+                try:
+                    owner_pid = int(owner.get("process_id") or 0)
+                except (TypeError, ValueError):
+                    return False
+                return (
+                    owner_pid == pid
+                    and str(owner.get("process_start_id") or "") == start_id
+                )
+
+            same_owner = any(_owner_is_current(owner) for owner in owners)
+            if not same_owner:
+                owners.append(current_owner)
+
+            payload = json.dumps(
+                {
+                    "boot_id": boot_id,
+                    "owners": owners,
+                    "activated_at": now,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (lease_key, payload),
+            )
+            return bool(prior_boot and prior_boot != boot_id)
+
+        return bool(self._execute_write(_do))
+
+    def prepare_approval_grant(
+        self,
+        *,
+        request_id: str,
+        boot_id: str,
+        session_key_digest: str,
+        session_id: Optional[str],
+        root_correlation_id: Optional[str],
+        turn_id: Optional[str],
+        tool_identity: str,
+        command_digest: str,
+        canonical_args_digest: str,
+        accepted_policy: Dict[str, Any],
+        policy_revision: int,
+        effect_set: List[str],
+        allowed_actor_id: str,
+        delivery_platform: str,
+        delivery_chat_id: str,
+        delivery_thread_id: Optional[str],
+        origin_message_id: Optional[str],
+        created_at: float,
+        expires_at: float,
+    ) -> Dict[str, Any]:
+        """Persist one pending Approval Grant before any user notification.
+
+        The row intentionally stores digests instead of raw commands/arguments.
+        A duplicate request identifier is an integrity error, never a replay.
+        """
+        required = {
+            "request_id": request_id,
+            "boot_id": boot_id,
+            "session_key_digest": session_key_digest,
+            "tool_identity": tool_identity,
+            "command_digest": command_digest,
+            "canonical_args_digest": canonical_args_digest,
+            "delivery_platform": delivery_platform,
+            "delivery_chat_id": delivery_chat_id,
+            "allowed_actor_id": allowed_actor_id,
+            "turn_id": turn_id,
+        }
+        for name, value in required.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        for name, value in (("request_id", request_id), ("boot_id", boot_id)):
+            if not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        digest_re = re.compile(r"^[0-9a-f]{64}$")
+        for name, value in (
+            ("session_key_digest", session_key_digest),
+            ("command_digest", command_digest),
+            ("canonical_args_digest", canonical_args_digest),
+        ):
+            if not digest_re.fullmatch(value):
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+        if (
+            isinstance(policy_revision, bool)
+            or not isinstance(policy_revision, int)
+            or policy_revision < 0
+        ):
+            raise ValueError("policy_revision must be a non-negative integer")
+        if not isinstance(effect_set, list) or not all(
+            isinstance(effect, str) and effect.strip() for effect in effect_set
+        ):
+            raise ValueError("effect_set must be a list of non-empty strings")
+        if (
+            not isinstance(created_at, (int, float))
+            or isinstance(created_at, bool)
+            or not math.isfinite(float(created_at))
+            or not isinstance(expires_at, (int, float))
+            or isinstance(expires_at, bool)
+            or not math.isfinite(float(expires_at))
+            or float(expires_at) <= float(created_at)
+        ):
+            raise ValueError("approval grant expiry must be after creation")
+
+        if not isinstance(accepted_policy, dict):
+            raise TypeError("accepted_policy must be a dict")
+        from tools.approval import ExecutionPolicy
+
+        restored_policy = ExecutionPolicy.from_dict(accepted_policy)
+        if restored_policy.accepted_turn_id != turn_id:
+            raise ValueError("approval turn_id must match accepted policy")
+        canonical_effects = sorted(
+            str(effect) for effect in restored_policy.allowed_effects
+        )
+        if sorted(set(effect_set)) != canonical_effects:
+            raise ValueError("approval effect_set must match accepted policy")
+        accepted_policy_json = json.dumps(
+            restored_policy.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        effect_set_json = json.dumps(
+            sorted(set(effect_set)),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            if lease is None:
+                raise RuntimeError("Approval Grant boot lease is not active")
+            try:
+                active_boot = str(json.loads(lease["value"])["boot_id"])
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise RuntimeError("Approval Grant boot lease is corrupt") from exc
+            if active_boot != boot_id:
+                raise RuntimeError("Approval Grant boot lease changed")
+            conn.execute(
+                "INSERT INTO approval_grants "
+                "(request_id, boot_id, session_key_digest, session_id, "
+                "root_correlation_id, turn_id, tool_identity, command_digest, "
+                "canonical_args_digest, accepted_policy_json, policy_revision, "
+                "effect_set_json, allowed_actor_id, delivery_platform, "
+                "delivery_chat_id, delivery_thread_id, origin_message_id, "
+                "created_at, expires_at, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                (
+                    request_id,
+                    boot_id,
+                    session_key_digest,
+                    session_id,
+                    root_correlation_id,
+                    turn_id,
+                    tool_identity,
+                    command_digest,
+                    canonical_args_digest,
+                    accepted_policy_json,
+                    policy_revision,
+                    effect_set_json,
+                    allowed_actor_id,
+                    delivery_platform,
+                    delivery_chat_id,
+                    delivery_thread_id,
+                    origin_message_id,
+                    float(created_at),
+                    float(expires_at),
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM approval_grants WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+
+        return self._decode_approval_grant(self._execute_write(_do))
+
+    def resolve_approval_grant(
+        self,
+        request_id: str,
+        *,
+        boot_id: str,
+        session_key_digest: str,
+        expected_root_correlation_id: Optional[str],
+        expected_turn_id: Optional[str],
+        expected_command_digest: str,
+        expected_origin_message_id: Optional[str],
+        target_state: str,
+        decision: str,
+        resolution_reason: str,
+        resolver_identity: str = "",
+        resolver_context: Optional[Dict[str, Any]] = None,
+        now: Optional[float] = None,
+    ) -> int:
+        """Atomically terminalize exactly one pending Approval Grant.
+
+        Returns ``1`` only for the single successful ``pending -> terminal``
+        transition. Missing, stale, expired, wrong-boot, or wrong-context
+        requests return ``0`` and cannot authorize execution.
+        """
+        if target_state not in {"approved", "denied", "expired", "cancelled"}:
+            raise ValueError("invalid approval grant target state")
+        if not request_id or not boot_id or not session_key_digest:
+            return 0
+        resolved_at = time.time() if now is None else float(now)
+        context = {
+            str(key): str(value or "")
+            for key, value in (resolver_context or {}).items()
+            if isinstance(key, str)
+        }
+        context_json = json.dumps(
+            context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return 0
+            if active_boot != boot_id:
+                return 0
+            row = conn.execute(
+                "SELECT * FROM approval_grants WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None or row["state"] != "pending":
+                return 0
+
+            # Expiry wins every later user decision in the same transaction.
+            if row["expires_at"] <= resolved_at and target_state != "expired":
+                conn.execute(
+                    "UPDATE approval_grants SET state = 'expired', decision = 'timeout', "
+                    "resolver_identity = 'system:expiry', resolver_context_json = '{}', "
+                    "resolved_at = ?, resolution_reason = 'grant_expired' "
+                    "WHERE request_id = ? AND state = 'pending'",
+                    (resolved_at, request_id),
+                )
+                return 0
+
+            if (
+                row["boot_id"] != boot_id
+                or row["session_key_digest"] != session_key_digest
+                or row["command_digest"] != expected_command_digest
+                or (row["root_correlation_id"] or "")
+                != (expected_root_correlation_id or "")
+                or (row["turn_id"] or "") != (expected_turn_id or "")
+                or (row["origin_message_id"] or "")
+                != (expected_origin_message_id or "")
+            ):
+                return 0
+
+            if target_state in {"approved", "denied"}:
+                context_actor = context.get("actor_id", "")
+                if context_actor != resolver_identity:
+                    return 0
+                allowed_actor = row["allowed_actor_id"] or ""
+                if not allowed_actor or resolver_identity != allowed_actor:
+                    return 0
+                for column, key in (
+                    ("delivery_platform", "platform"),
+                    ("delivery_chat_id", "chat_id"),
+                    ("delivery_thread_id", "thread_id"),
+                ):
+                    expected = row[column] or ""
+                    if column != "delivery_thread_id" and not expected:
+                        return 0
+                    if expected and context.get(key, "") != expected:
+                        return 0
+
+            cursor = conn.execute(
+                "UPDATE approval_grants SET state = ?, decision = ?, "
+                "resolver_identity = ?, resolver_context_json = ?, "
+                "resolved_at = ?, resolution_reason = ? "
+                "WHERE request_id = ? AND state = 'pending'",
+                (
+                    target_state,
+                    decision,
+                    resolver_identity,
+                    context_json,
+                    resolved_at,
+                    resolution_reason,
+                    request_id,
+                ),
+            )
+            return 1 if cursor.rowcount == 1 else 0
+
+        return int(self._execute_write(_do))
+
+    def cancel_prior_boot_approval_grants(
+        self,
+        current_boot_id: str,
+        *,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Cancel or expire every pending grant owned by an older boot."""
+        if not current_boot_id:
+            raise ValueError("current_boot_id is required")
+        resolved_at = time.time() if now is None else float(now)
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise RuntimeError("Approval Grant boot lease is corrupt") from exc
+            if active_boot != current_boot_id:
+                raise RuntimeError("Approval Grant boot lease changed")
+            rows = conn.execute(
+                "SELECT * FROM approval_grants "
+                "WHERE state = 'pending' AND boot_id <> ? ORDER BY created_at",
+                (current_boot_id,),
+            ).fetchall()
+            updated = []
+            for row in rows:
+                expired = row["expires_at"] <= resolved_at
+                state = "expired" if expired else "cancelled"
+                decision = "timeout" if expired else "cancelled"
+                reason = "startup_expired" if expired else "prior_boot_cancelled"
+                cursor = conn.execute(
+                    "UPDATE approval_grants SET state = ?, decision = ?, "
+                    "resolver_identity = ?, resolver_context_json = '{}', "
+                    "resolved_at = ?, resolution_reason = ? "
+                    "WHERE request_id = ? AND state = 'pending' AND boot_id <> ?",
+                    (
+                        state,
+                        decision,
+                        f"boot:{current_boot_id}",
+                        resolved_at,
+                        reason,
+                        row["request_id"],
+                        current_boot_id,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    terminal = dict(row)
+                    terminal.update(
+                        state=state,
+                        decision=decision,
+                        resolver_identity=f"boot:{current_boot_id}",
+                        resolver_context_json="{}",
+                        resolved_at=resolved_at,
+                        resolution_reason=reason,
+                    )
+                    updated.append(terminal)
+            return updated
+
+        return [
+            self._decode_approval_grant(row)
+            for row in self._execute_write(_do)
+        ]
+
+    def get_approval_grant(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """Return one Approval Grant for diagnostics and recovery tests."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM approval_grants WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return self._decode_approval_grant(row) if row is not None else None
 
     @staticmethod
     def _canonical_prompt_policy(

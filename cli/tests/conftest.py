@@ -464,6 +464,7 @@ def _reset_module_state():
         _approval_mod._pending.clear()
         _approval_mod._gateway_queues.clear()
         _approval_mod._gateway_notify_cbs.clear()
+        _approval_mod._gateway_grant_stores.clear()
         # ContextVar: reset to empty string so get_current_session_key()
         # falls through to the env var / default path, matching a fresh
         # process.

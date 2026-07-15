@@ -9,6 +9,8 @@ This module is the single source of truth for the dangerous command system:
 """
 
 import contextvars
+import hashlib
+import json
 import logging
 import os
 import re
@@ -527,6 +529,8 @@ class _ApprovalEntry:
         "correlation_id",
         "data",
         "event",
+        "grant_context",
+        "grant_store",
         "receipt_lock",
         "receipt_outcome",
         "receipt_retry_scheduled",
@@ -535,7 +539,13 @@ class _ApprovalEntry:
         "result",
     )
 
-    def __init__(self, data: dict):
+    def __init__(
+        self,
+        data: dict,
+        *,
+        grant_store: object | None = None,
+        grant_context: dict | None = None,
+    ):
         # Never derive this identifier from a command, session, platform, or
         # caller-provided value.  It crosses the UI boundary, so it must be an
         # opaque capability identifying exactly one pending decision.
@@ -556,6 +566,8 @@ class _ApprovalEntry:
         self.data.pop("session_id", None)
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
         self.resolution_reason = ""
+        self.grant_store = grant_store
+        self.grant_context = dict(grant_context or {})
         self.receipt_lock = threading.Lock()
         self.receipt_outcome: Optional[str] = None
         self.receipt_retry_scheduled = False
@@ -563,8 +575,35 @@ class _ApprovalEntry:
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+_gateway_grant_stores: dict[str, object | None] = {}
+
+# One boot owns every exact-Beta Approval Grant minted by this process. Pending
+# rows from any different boot are never recoverable authorizations: startup
+# cleanup terminalizes them before this boot can send a new approval prompt.
+_inherited_approval_boot_id = str(
+    os.getenv("ELEVATE_APPROVAL_BOOT_ID", "") or ""
+).strip()
+if re.fullmatch(r"[0-9a-f]{32}", _inherited_approval_boot_id):
+    _APPROVAL_BOOT_ID = _inherited_approval_boot_id
+else:
+    _APPROVAL_BOOT_ID = uuid.uuid4().hex
+    # Subprocesses spawned by this app inherit one logical boot identity.
+    os.environ["ELEVATE_APPROVAL_BOOT_ID"] = _APPROVAL_BOOT_ID
+_APPROVAL_STORE_UNSET = object()
+_default_approval_store: object | None = None
+_default_approval_store_attempted = False
+_approval_store_init_lock = threading.Lock()
+_initialized_approval_stores: set[str] = set()
 
 _VALID_GATEWAY_APPROVAL_CHOICES = frozenset({"once", "session", "always", "deny"})
+_INTERNAL_GATEWAY_APPROVAL_REASONS = frozenset({
+    "gateway_unregistered",
+    "notify_failed",
+    "session_cleared",
+    "session_interrupted",
+    "session_stopped",
+    "wait_timeout",
+})
 _OPAQUE_APPROVAL_LINEAGE_RE = re.compile(r"^(?:corr_|attempt_)[0-9a-f]{32}$")
 
 
@@ -582,6 +621,227 @@ def _current_approval_correlation_id() -> str:
         return get_session_env("ELEVATE_SESSION_CORRELATION_ID", "") or ""
     except Exception:
         return os.getenv("ELEVATE_SESSION_CORRELATION_ID", "") or ""
+
+
+def _approval_sha256(value: object) -> str:
+    """Return a canonical content digest without persisting command text."""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _approval_delivery_context() -> dict[str, str]:
+    """Snapshot the accepted turn's actor and delivery lane."""
+    names = {
+        "session_id": "ELEVATE_SESSION_ID",
+        "platform": "ELEVATE_SESSION_PLATFORM",
+        "chat_id": "ELEVATE_SESSION_CHAT_ID",
+        "thread_id": "ELEVATE_SESSION_THREAD_ID",
+        "actor_id": "ELEVATE_SESSION_USER_ID",
+        "origin_message_id": "ELEVATE_SESSION_MESSAGE_ID",
+        "agent_id": "ELEVATE_SESSION_AGENT_ID",
+    }
+    try:
+        from gateway.session_context import get_session_env
+
+        return {
+            key: str(get_session_env(env_name, "") or "").strip()
+            for key, env_name in names.items()
+        }
+    except Exception:
+        return {
+            key: str(os.getenv(env_name, "") or "").strip()
+            for key, env_name in names.items()
+        }
+
+
+def _approval_store_key(store: object) -> str:
+    path = getattr(store, "db_path", None)
+    if path is not None:
+        try:
+            return str(path.expanduser().resolve())
+        except Exception:
+            return str(path)
+    return f"object:{id(store)}"
+
+
+def _record_startup_grant_cleanup(grant: dict) -> None:
+    """Project a prior-boot terminal decision into the diagnostics stream."""
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            "approval.decision",
+            session_id=None,
+            correlation_id=grant.get("root_correlation_id") or None,
+            payload={
+                "request_id": grant.get("request_id"),
+                "outcome": grant.get("decision") or grant.get("state"),
+                "reason": grant.get("resolution_reason") or "prior_boot_cancelled",
+                "status": "resolved",
+            },
+            severity="warning",
+            source="approval",
+            component="tools.approval",
+        )
+    except Exception:
+        logger.debug("approval startup cleanup projection failed", exc_info=True)
+
+
+def _initialize_approval_store(store: object) -> object:
+    """Run exact-Beta prior-boot cleanup exactly once per state DB path."""
+    key = _approval_store_key(store)
+    with _approval_store_init_lock:
+        if key in _initialized_approval_stores:
+            return store
+        cleanup = getattr(store, "cancel_prior_boot_approval_grants", None)
+        activate = getattr(store, "activate_approval_boot", None)
+        if not callable(cleanup) or not callable(activate):
+            raise RuntimeError("approval grant persistence is unavailable")
+        activate(_APPROVAL_BOOT_ID, process_id=os.getpid())
+        terminal = cleanup(_APPROVAL_BOOT_ID)
+        _initialized_approval_stores.add(key)
+    for grant in terminal or []:
+        if isinstance(grant, dict):
+            _record_startup_grant_cleanup(grant)
+    return store
+
+
+def _get_default_approval_store() -> object | None:
+    """Open the existing state.db authority when a caller did not supply it."""
+    global _default_approval_store, _default_approval_store_attempted
+    with _approval_store_init_lock:
+        if _default_approval_store_attempted:
+            return _default_approval_store
+        _default_approval_store_attempted = True
+        try:
+            from elevate_state import SessionDB
+
+            _default_approval_store = SessionDB()
+        except Exception:
+            logger.error(
+                "Exact-Beta approval persistence could not open state.db",
+                exc_info=True,
+            )
+            _default_approval_store = None
+        return _default_approval_store
+
+
+def _prepare_durable_approval_grant(
+    entry: _ApprovalEntry,
+    session_key: str,
+    command: str,
+    *,
+    timeout_seconds: int,
+) -> bool:
+    """Commit one exact-Beta pending grant before any notification/hook."""
+    store = entry.grant_store
+    if store is None:
+        return False
+    delivery = _approval_delivery_context()
+    policy = get_current_execution_policy()
+    policy_revision = get_current_execution_policy_revision()
+    if policy is None or policy_revision is None:
+        logger.error(
+            "Exact-Beta approval refused without an accepted-turn policy receipt"
+        )
+        return False
+    if not delivery["actor_id"]:
+        logger.error(
+            "Exact-Beta approval refused without a canonical resolver actor"
+        )
+        return False
+    accepted_policy = policy.to_dict()
+    turn_id = policy.accepted_turn_id
+    effect_set = (
+        sorted(str(effect) for effect in policy.allowed_effects)
+        if policy is not None
+        else []
+    )
+    created_at = time.time()
+    command_identity = {"command": str(command)}
+    context = {
+        "boot_id": _APPROVAL_BOOT_ID,
+        "session_key_digest": _approval_sha256({"session_key": session_key}),
+        "root_correlation_id": entry.correlation_id,
+        "turn_id": turn_id,
+        "command_digest": _approval_sha256(command_identity),
+        "origin_message_id": delivery["origin_message_id"],
+    }
+    try:
+        store.prepare_approval_grant(
+            request_id=entry.request_id,
+            boot_id=_APPROVAL_BOOT_ID,
+            session_key_digest=context["session_key_digest"],
+            session_id=delivery["session_id"] or None,
+            root_correlation_id=entry.correlation_id or None,
+            turn_id=turn_id or None,
+            tool_identity="terminal",
+            command_digest=context["command_digest"],
+            canonical_args_digest=_approval_sha256(command_identity),
+            accepted_policy=accepted_policy,
+            policy_revision=policy_revision,
+            effect_set=effect_set,
+            allowed_actor_id=delivery["actor_id"],
+            delivery_platform=delivery["platform"] or "gateway",
+            delivery_chat_id=delivery["chat_id"] or session_key,
+            delivery_thread_id=delivery["thread_id"] or None,
+            origin_message_id=delivery["origin_message_id"] or None,
+            created_at=created_at,
+            expires_at=created_at + max(float(timeout_seconds), 0.001),
+        )
+    except Exception:
+        logger.error(
+            "Exact-Beta approval grant persistence failed before notification",
+            exc_info=True,
+        )
+        return False
+    entry.grant_context = context
+    return True
+
+
+def _transition_durable_approval_grant(
+    entry: _ApprovalEntry,
+    *,
+    target_state: str,
+    decision: str,
+    reason: str,
+    resolver_identity: str = "",
+    resolver_context: Mapping[str, object] | None = None,
+) -> int:
+    """Execute the exact-Beta durable CAS for one in-memory entry."""
+    store = entry.grant_store
+    context = entry.grant_context
+    if store is None or not context:
+        return 0
+    durable_resolver_context = dict(resolver_context or {})
+    try:
+        count = store.resolve_approval_grant(
+            entry.request_id,
+            boot_id=context["boot_id"],
+            session_key_digest=context["session_key_digest"],
+            expected_root_correlation_id=context.get("root_correlation_id") or None,
+            expected_turn_id=context.get("turn_id") or None,
+            expected_command_digest=context["command_digest"],
+            expected_origin_message_id=context.get("origin_message_id") or None,
+            target_state=target_state,
+            decision=decision,
+            resolution_reason=reason,
+            resolver_identity=str(resolver_identity or ""),
+            resolver_context=durable_resolver_context,
+        )
+    except Exception:
+        logger.error("Exact-Beta approval grant transition failed", exc_info=True)
+        return 0
+    return (
+        count
+        if isinstance(count, int) and not isinstance(count, bool) and count == 1
+        else 0
+    )
 
 
 def _record_approval_event(
@@ -674,7 +934,12 @@ def _record_approval_receipt(
     ).start()
 
 
-def register_gateway_notify(session_key: str, cb) -> None:
+def register_gateway_notify(
+    session_key: str,
+    cb,
+    *,
+    approval_store: object = _APPROVAL_STORE_UNSET,
+) -> None:
     """Register a per-session callback for sending approval requests to the user.
 
     The callback signature is ``cb(approval_data: dict) -> None`` where
@@ -682,8 +947,25 @@ def register_gateway_notify(session_key: str, cb) -> None:
     ``pattern_keys``.  The callback bridges sync→async (runs in the agent
     thread, must schedule the actual send on the event loop).
     """
+    grant_store: object | None = None
+    if _beta_approval_policy_active():
+        grant_store = (
+            _get_default_approval_store()
+            if approval_store is _APPROVAL_STORE_UNSET
+            else approval_store
+        )
+        if grant_store is not None:
+            try:
+                grant_store = _initialize_approval_store(grant_store)
+            except Exception:
+                logger.error(
+                    "Exact-Beta approval startup cleanup failed closed",
+                    exc_info=True,
+                )
+                grant_store = None
     with _lock:
         _gateway_notify_cbs[session_key] = cb
+        _gateway_grant_stores[session_key] = grant_store
 
 
 def unregister_gateway_notify(session_key: str) -> None:
@@ -694,11 +976,20 @@ def unregister_gateway_notify(session_key: str) -> None:
     """
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
+        _gateway_grant_stores.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
         # Queue removal, terminal result, and waiter publication are one
         # state transition.  A timeout cannot interleave and misreport these
         # cleanup denials as timeouts.
         for entry in entries:
+            if _beta_approval_policy_active():
+                _transition_durable_approval_grant(
+                    entry,
+                    target_state="cancelled",
+                    decision="deny",
+                    reason="gateway_unregistered",
+                    resolver_identity="system:gateway_unregistered",
+                )
             entry.result = "deny"
             entry.resolution_reason = "gateway_unregistered"
             entry.event.set()
@@ -718,6 +1009,8 @@ def resolve_gateway_approval(
     *,
     request_id: str | None = None,
     reason: str = "user_response",
+    resolver_identity: str = "",
+    resolver_context: Mapping[str, object] | None = None,
 ) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
@@ -735,8 +1028,9 @@ def resolve_gateway_approval(
     normalized_choice = str(choice or "").strip().lower()
     if normalized_choice not in _VALID_GATEWAY_APPROVAL_CHOICES:
         return 0
+    exact_beta = _beta_approval_policy_active()
     if (
-        _beta_approval_policy_active()
+        exact_beta
         and normalized_choice in {"once", "session", "always"}
     ):
         # Record and publish the scope that the exact-Beta runtime will
@@ -744,6 +1038,15 @@ def resolve_gateway_approval(
         # result directly instead of going through check_all_command_guards().
         normalized_choice = "once"
     target_id = str(request_id or "").strip()
+    internal_request = reason in _INTERNAL_GATEWAY_APPROVAL_REASONS
+    if exact_beta and not internal_request and not target_id:
+        return 0
+    normalized_resolver_context = dict(resolver_context or {})
+    normalized_resolver_identity = str(
+        resolver_identity
+        or normalized_resolver_context.get("actor_id")
+        or ""
+    ).strip()
 
     with _lock:
         queue = _gateway_queues.get(session_key)
@@ -756,13 +1059,42 @@ def resolve_gateway_approval(
             )
             if target is None:
                 return 0
-            targets = [target]
-            queue.remove(target)
+            candidates = [target]
         elif resolve_all:
-            targets = list(queue)
-            queue.clear()
+            candidates = list(queue)
         else:
-            targets = [queue.pop(0)]
+            candidates = [queue[0]]
+
+        targets = []
+        for entry in candidates:
+            if exact_beta:
+                internal_resolution = internal_request
+                target_state = (
+                    "cancelled"
+                    if internal_resolution
+                    else "approved"
+                    if normalized_choice == "once"
+                    else "denied"
+                )
+                confirmed = _transition_durable_approval_grant(
+                    entry,
+                    target_state=target_state,
+                    decision=normalized_choice,
+                    reason=reason,
+                    resolver_identity=(
+                        normalized_resolver_identity
+                        if not internal_resolution
+                        else normalized_resolver_identity or f"system:{reason}"
+                    ),
+                    resolver_context=normalized_resolver_context,
+                )
+                if confirmed != 1:
+                    continue
+            targets.append(entry)
+
+        for entry in targets:
+            if entry in queue:
+                queue.remove(entry)
         if not queue:
             _gateway_queues.pop(session_key, None)
         # Publish result + event atomically with queue removal.  Otherwise a
@@ -835,6 +1167,14 @@ def clear_session(session_key: str) -> None:
         # Session-boundary cleanup should cancel blocked waits immediately,
         # with the result visible before the event wakes any waiter.
         for entry in entries:
+            if _beta_approval_policy_active():
+                _transition_durable_approval_grant(
+                    entry,
+                    target_state="cancelled",
+                    decision="deny",
+                    reason="session_cleared",
+                    resolver_identity="system:session_cleared",
+                )
             entry.result = "deny"
             entry.resolution_reason = "session_cleared"
             entry.event.set()
@@ -1818,6 +2158,27 @@ def _beta_unattended_dangerous_block_result(
     return result
 
 
+def _beta_approval_bridge_block_result(
+    description: str,
+    *,
+    pattern_key: str | None = None,
+) -> dict:
+    """Fail closed when exact Beta has no durable interactive bridge."""
+    result = {
+        "approved": False,
+        "status": "approval_bridge_unavailable",
+        "description": description,
+        "message": (
+            "BLOCKED: Realtor Beta could not create a durable approval request. "
+            "No approval prompt was sent and no later text response can authorize "
+            "this command. Do NOT retry this command."
+        ),
+    }
+    if pattern_key:
+        result["pattern_key"] = pattern_key
+    return result
+
+
 def _approval_choice_for_current_command(choice: object) -> object:
     """Return the effective decision for the command currently under review.
 
@@ -1947,6 +2308,11 @@ def check_dangerous_command(command: str, env_type: str,
         return {"approved": True, "message": None}
 
     if is_gateway or env_var_enabled("ELEVATE_EXEC_ASK"):
+        if _beta_approval_policy_active():
+            return _beta_approval_bridge_block_result(
+                description,
+                pattern_key=pattern_key,
+            )
         submit_pending(session_key, {
             "command": command,
             "pattern_key": pattern_key,
@@ -1963,6 +2329,12 @@ def check_dangerous_command(command: str, env_type: str,
                 f"Asking the user for approval.\n\n**Command:**\n```\n{command}\n```"
             ),
         }
+
+    if _beta_approval_policy_active():
+        return _beta_approval_bridge_block_result(
+            description,
+            pattern_key=pattern_key,
+        )
 
     choice = prompt_dangerous_approval(
         command,
@@ -2184,8 +2556,10 @@ def check_all_command_guards(command: str, env_type: str,
     # gets the command output (approved) or a definitive "BLOCKED" message.
     if is_gateway or is_ask:
         notify_cb = None
+        grant_store = None
         with _lock:
             notify_cb = _gateway_notify_cbs.get(session_key)
+            grant_store = _gateway_grant_stores.get(session_key)
 
         if notify_cb is not None:
             # --- Blocking gateway approval (queue-based) ---
@@ -2198,7 +2572,31 @@ def check_all_command_guards(command: str, env_type: str,
                 "description": combined_desc,
                 "correlation_id": _current_approval_correlation_id(),
             }
-            entry = _ApprovalEntry(approval_data)
+            timeout = _get_approval_config().get("gateway_timeout", 300)
+            try:
+                timeout = int(timeout)
+            except (ValueError, TypeError):
+                timeout = 300
+
+            entry = _ApprovalEntry(
+                approval_data,
+                grant_store=grant_store,
+            )
+            if _beta_approval_policy_active() and not _prepare_durable_approval_grant(
+                entry,
+                session_key,
+                command,
+                timeout_seconds=timeout,
+            ):
+                return {
+                    "approved": False,
+                    "message": (
+                        "BLOCKED: Approval persistence is unavailable; no approval "
+                        "request was sent. Do NOT retry this command."
+                    ),
+                    "pattern_key": primary_key,
+                    "description": combined_desc,
+                }
             with _lock:
                 _gateway_queues.setdefault(session_key, []).append(entry)
 
@@ -2223,6 +2621,14 @@ def check_all_command_guards(command: str, env_type: str,
             except Exception as exc:
                 logger.warning("Gateway approval notify failed: %s", exc)
                 with _lock:
+                    if _beta_approval_policy_active():
+                        _transition_durable_approval_grant(
+                            entry,
+                            target_state="cancelled",
+                            decision="deny",
+                            reason="notify_failed",
+                            resolver_identity="system:notify_failed",
+                        )
                     queue = _gateway_queues.get(session_key, [])
                     if entry in queue:
                         queue.remove(entry)
@@ -2244,8 +2650,9 @@ def check_all_command_guards(command: str, env_type: str,
                     "description": combined_desc,
                 }
 
-            # The UI notification stays ahead of best-effort disk I/O so a
-            # cold recorder import cannot delay or hide the approval prompt.
+            # The authoritative grant committed before the UI notification.
+            # This diagnostics projection stays best-effort and is not an
+            # authorization source.
             _record_approval_event(
                 "approval.requested",
                 entry,
@@ -2262,12 +2669,6 @@ def check_all_command_guards(command: str, env_type: str,
             # 1800s) kills the agent while the user is still responding to
             # the approval prompt.  Mirrors the _wait_for_process() cadence
             # in tools/environments/base.py.
-            timeout = _get_approval_config().get("gateway_timeout", 300)
-            try:
-                timeout = int(timeout)
-            except (ValueError, TypeError):
-                timeout = 300
-
             try:
                 from tools.environments.base import touch_activity_if_due
             except Exception:  # pragma: no cover
@@ -2296,6 +2697,14 @@ def check_all_command_guards(command: str, env_type: str,
             with _lock:
                 queue = _gateway_queues.get(session_key, [])
                 if entry in queue:
+                    if _beta_approval_policy_active():
+                        _transition_durable_approval_grant(
+                            entry,
+                            target_state="expired",
+                            decision="timeout",
+                            reason="wait_timeout",
+                            resolver_identity="system:expiry",
+                        )
                     queue.remove(entry)
                     entry.resolution_reason = "wait_timeout"
                 if not queue:
@@ -2369,7 +2778,14 @@ def check_all_command_guards(command: str, env_type: str,
                     "user_approved": True, "description": combined_desc}
 
         # Fallback: no gateway callback registered (e.g. cron, batch).
-        # Return approval_required for backward compat.
+        # Stable returns approval_required for backward compatibility. Exact
+        # Beta must not create a memory-only request that a later text command
+        # could appear to authorize.
+        if _beta_approval_policy_active():
+            return _beta_approval_bridge_block_result(
+                combined_desc,
+                pattern_key=primary_key,
+            )
         submit_pending(session_key, {
             "command": command,
             "pattern_key": primary_key,
@@ -2389,6 +2805,11 @@ def check_all_command_guards(command: str, env_type: str,
         }
 
     # CLI interactive: single combined prompt
+    if _beta_approval_policy_active():
+        return _beta_approval_bridge_block_result(
+            combined_desc,
+            pattern_key=primary_key,
+        )
     # Hide [a]lways when any tirith warning is present
     _fire_approval_hook(
         "pre_approval_request",

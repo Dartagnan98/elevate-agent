@@ -81,16 +81,104 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
-def test_exact_beta_approval_respond_requires_and_targets_request_id(monkeypatch):
+def test_approval_emit_raises_when_transport_rejects_prompt(monkeypatch):
+    recorded = []
+    rejected_transport = types.SimpleNamespace(write=lambda _obj: False)
+    monkeypatch.setattr(server, "current_transport", lambda: None)
+    monkeypatch.setattr(server, "_stdio_transport", rejected_transport)
+    monkeypatch.setattr(
+        server,
+        "_record_gateway_event",
+        lambda *args: recorded.append(args),
+    )
+    server._sessions["sid"] = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 7,
+        "transports": [rejected_transport],
+    }
+    try:
+        with pytest.raises(RuntimeError, match="notification delivery failed"):
+            server._emit_approval_request("sid", {"request_id": "a" * 32})
+
+        assert recorded == []
+        assert server._sessions["sid"]["events"] == []
+        assert server._sessions["sid"]["events_seq"] == 7
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_approval_emit_projects_once_after_transport_accepts_prompt(monkeypatch):
+    recorded = []
+    accepted_transport = types.SimpleNamespace(write=lambda _obj: True)
+    monkeypatch.setattr(
+        server,
+        "_record_gateway_event",
+        lambda *args: recorded.append(args),
+    )
+    server._sessions["sid"] = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 7,
+        "transports": [accepted_transport],
+    }
+    try:
+        server._emit_approval_request("sid", {"request_id": "b" * 32})
+
+        assert len(recorded) == 1
+        assert server._sessions["sid"]["events_seq"] == 8
+        assert [event["type"] for event in server._sessions["sid"]["events"]] == [
+            "approval.request"
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_exact_beta_approval_respond_requires_and_targets_request_id(
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_state import SessionDB
+    from gateway.session_context import clear_session_vars, set_session_vars
     from tools import approval as approval_module
 
     sid = "approval-sid"
     session_key = "approval-session"
-    first = approval_module._ApprovalEntry({"command": "first"})
-    second = approval_module._ApprovalEntry({"command": "second"})
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    db = SessionDB(tmp_path / "state.db")
+    approval_module._initialize_approval_store(db)
+
+    def durable_entry(command: str):
+        session_tokens = set_session_vars(
+            platform="tui",
+            chat_id=session_key,
+            user_id="tui:local-user",
+            session_key=session_key,
+        )
+        policy_token = approval_module.set_current_execution_policy(
+            approval_module.ExecutionPolicy.for_mode(f"turn-{command}", "default"),
+            policy_revision=0,
+        )
+        try:
+            entry = approval_module._ApprovalEntry(
+                {"command": command},
+                grant_store=db,
+            )
+            assert approval_module._prepare_durable_approval_grant(
+                entry,
+                session_key,
+                command,
+                timeout_seconds=300,
+            )
+            return entry
+        finally:
+            approval_module.reset_current_execution_policy(policy_token)
+            clear_session_vars(session_tokens)
+
+    first = durable_entry("first")
+    second = durable_entry("second")
     server._sessions[sid] = {"session_key": session_key}
     approval_module._gateway_queues[session_key] = [first, second]
-    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setattr(
         "elevate_cli.diagnostics.session_recorder.record_session_event",
         lambda *args, **kwargs: True,

@@ -958,7 +958,7 @@ def _live_subagent_resume_payload(
     return payload
 
 
-def write_json(obj: dict) -> bool:
+def write_json(obj: dict, *, buffer_on_delivery_only: bool = False) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
     Precedence:
@@ -972,38 +972,48 @@ def write_json(obj: dict) -> bool:
     3. Otherwise the module-level stdio transport, matching the historical
        behaviour and keeping tests that monkey-patch ``_real_stdout`` green.
     """
+    sess = None
+
+    def _buffer_event_for_resume() -> None:
+        if sess is None:
+            return
+        # Capture the event params into the session's ring buffer so
+        # session.resume can replay them on reattach. Approval prompts can
+        # opt into delivery-first buffering: a rejected wire write then leaves
+        # neither a phantom replay entry nor a sequence gap/rollback race.
+        ring = sess.get("events")
+        if ring is None:
+            return
+        lock = sess.get("events_lock")
+        params = obj.get("params") or {}
+        event_type = params.get("type") if isinstance(params, dict) else None
+
+        def _append() -> None:
+            sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
+            _ring_append(ring, params, event_type)
+            # Once a turn TRULY completes the server transcript holds
+            # everything visible from it; drop the ring so a later resume
+            # does not replay already-committed messages and tool cards.
+            if event_type == "message.complete" and not _event_is_followup(params):
+                ring.clear()
+
+        if lock is not None:
+            with lock:
+                _append()
+        else:
+            _append()
+
+    def _finish_delivery(delivered: object) -> bool:
+        accepted = bool(delivered)
+        if accepted and buffer_on_delivery_only:
+            _buffer_event_for_resume()
+        return accepted
+
     if obj.get("method") == "event":
         sid = ((obj.get("params") or {}).get("session_id")) or ""
         sess = _sessions.get(sid) if sid else None
-        if sess is not None:
-            # Capture the event params into the session's ring buffer so
-            # session.resume can replay them on reattach. Cap at maxlen
-            # to bound memory; the final transcript still goes to the DB
-            # via prompt.submit, so the buffer is purely for "what
-            # happened while I was looking at another chat" replay.
-            ring = sess.get("events")
-            if ring is not None:
-                lock = sess.get("events_lock")
-                params = obj.get("params") or {}
-                event_type = params.get("type") if isinstance(params, dict) else None
-                if lock is not None:
-                    with lock:
-                        sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
-                        _ring_append(ring, params, event_type)
-                        # Once a turn TRULY completes the server transcript
-                        # holds everything visible from it; drop the ring so
-                        # a later resume doesn't replay (and double up)
-                        # already-committed messages and tool cards. A
-                        # followup-flagged complete is a steer continuation
-                        # of the same visual run — keep the ring so a
-                        # reattach mid-steer replays the whole run.
-                        if event_type == "message.complete" and not _event_is_followup(params):
-                            ring.clear()
-                else:
-                    sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
-                    _ring_append(ring, params, event_type)
-                    if event_type == "message.complete" and not _event_is_followup(params):
-                        ring.clear()
+        if sess is not None and not buffer_on_delivery_only:
+            _buffer_event_for_resume()
         if sess is not None:
             transports = sess.get("transports")
             if isinstance(transports, list) and transports:
@@ -1023,21 +1033,45 @@ def write_json(obj: dict) -> bool:
                         except ValueError:
                             pass
                 if delivered:
-                    return True
+                    return _finish_delivery(True)
                 # Every attached peer is gone — fall through to the
                 # context/stdio transport like a session-less frame.
             elif (t := sess.get("transport")) is not None:
-                return t.write(obj)
+                return _finish_delivery(t.write(obj))
 
-    return (current_transport() or _stdio_transport).write(obj)
+    return _finish_delivery((current_transport() or _stdio_transport).write(obj))
 
 
-def _emit(event: str, sid: str, payload: dict | None = None):
+def _emit(
+    event: str,
+    sid: str,
+    payload: dict | None = None,
+    *,
+    project_on_delivery_only: bool = False,
+):
     params = {"type": event, "session_id": sid, "ts": time.time()}
     if payload is not None:
         params["payload"] = payload
-    write_json({"jsonrpc": "2.0", "method": "event", "params": params})
-    _record_gateway_event(event, sid, payload)
+    frame = {"jsonrpc": "2.0", "method": "event", "params": params}
+    delivered = (
+        write_json(frame, buffer_on_delivery_only=True)
+        if project_on_delivery_only
+        else write_json(frame)
+    )
+    if delivered or not project_on_delivery_only:
+        _record_gateway_event(event, sid, payload)
+    return bool(delivered)
+
+
+def _emit_approval_request(sid: str, payload: dict) -> None:
+    """Raise when the TUI transport did not accept an approval prompt."""
+    if not _emit(
+        "approval.request",
+        sid,
+        payload,
+        project_on_delivery_only=True,
+    ):
+        raise RuntimeError("TUI approval notification delivery failed")
 
 
 def _status_update(sid: str, kind: str, text: str | None = None, **extra):
@@ -1227,6 +1261,7 @@ def _set_session_context(session_key: str, *, correlation_id: str = "") -> list:
         return set_session_vars(
             platform="tui",
             chat_id=session_key,
+            user_id="tui:local-user",
             session_key=session_key,
             correlation_id=correlation_id,
         )
@@ -2841,7 +2876,11 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
-        register_gateway_notify(key, lambda data: _emit("approval.request", sid, data))
+        register_gateway_notify(
+            key,
+            lambda data: _emit_approval_request(sid, data),
+            approval_store=_get_db(),
+        )
         load_permanent_allowlist()
     except Exception:
         pass
@@ -3430,7 +3469,9 @@ def _(rid, params: dict) -> dict:
                 )
 
                 register_gateway_notify(
-                    key, lambda data: _emit("approval.request", sid, data)
+                    key,
+                    lambda data: _emit_approval_request(sid, data),
+                    approval_store=_get_db(),
                 )
                 notify_registered = True
                 load_permanent_allowlist()
@@ -3800,7 +3841,9 @@ def _(rid, params: dict) -> dict:
                 )
 
                 register_gateway_notify(
-                    target, lambda data: _emit("approval.request", sid, data)
+                    target,
+                    lambda data: _emit_approval_request(sid, data),
+                    approval_store=_get_db(),
                 )
                 notify_registered = True
                 load_permanent_allowlist()
@@ -7004,6 +7047,13 @@ def _(rid, params: dict) -> dict:
             choice,
             resolve_all=bool(params.get("all", False)) and not request_id,
             request_id=request_id or None,
+            resolver_identity="tui:local-user",
+            resolver_context={
+                "actor_id": "tui:local-user",
+                "platform": "tui",
+                "chat_id": str(session["session_key"]),
+                "thread_id": "",
+            },
         )
         if request_id and not resolved:
             return _err(rid, 4009, "no pending approval request")
@@ -7822,7 +7872,10 @@ def _(rid, params: dict) -> dict:
             from tools.approval import resolve_gateway_approval
             if session:
                 resolve_gateway_approval(
-                    session["session_key"], "deny", resolve_all=True
+                    session["session_key"],
+                    "deny",
+                    resolve_all=True,
+                    reason="session_stopped",
                 )
         except Exception:
             pass

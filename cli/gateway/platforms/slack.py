@@ -1613,10 +1613,20 @@ class SlackAdapter(BasePlatformAdapter):
             result = await self._get_client(chat_id).chat_postMessage(**kwargs)
             msg_ts = result.get("ts", "")
             if msg_ts:
-                self._approval_state[msg_ts] = {
+                approval_state = {
                     "request_id": request_id,
                     "session_key": session_key,
                 }
+                if exact_beta:
+                    approval_state.update(
+                        actor_id=str(
+                            (metadata or {}).get("approval_actor_id") or ""
+                        ).strip(),
+                        chat_id=str(chat_id),
+                        thread_id=str(thread_ts or ""),
+                        exact_beta=True,
+                    )
+                self._approval_state[msg_ts] = approval_state
 
             return SendResult(success=True, message_id=msg_ts, raw_response=result)
         except Exception as e:
@@ -1662,6 +1672,26 @@ class SlackAdapter(BasePlatformAdapter):
         approval_state = self._approval_state.get(msg_ts)
         if not approval_state:
             return
+        try:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            exact_beta = beta_provider_policy_active()
+        except Exception:
+            exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+        exact_beta = exact_beta or bool(approval_state.get("exact_beta"))
+        callback_thread_id = str(message.get("thread_ts") or "")
+        expected_actor_id = str(approval_state.get("actor_id") or "")
+        expected_chat_id = str(approval_state.get("chat_id") or "")
+        expected_thread_id = str(approval_state.get("thread_id") or "")
+        if (
+            (expected_actor_id and user_id != expected_actor_id)
+            or (expected_chat_id and str(channel_id) != expected_chat_id)
+            or (expected_thread_id and callback_thread_id != expected_thread_id)
+        ):
+            logger.warning(
+                "[Slack] Approval callback context did not match its delivery"
+            )
+            return
 
         try:
             from tools.approval import resolve_gateway_approval
@@ -1669,10 +1699,21 @@ class SlackAdapter(BasePlatformAdapter):
             request_id = approval_state.get("request_id", "")
             if not request_id:
                 raise RuntimeError("approval request identity missing")
+            resolver_kwargs = {"request_id": request_id}
+            if exact_beta:
+                resolver_kwargs.update(
+                    resolver_identity=str(user_id),
+                    resolver_context={
+                        "actor_id": str(user_id),
+                        "platform": "slack",
+                        "chat_id": str(channel_id),
+                        "thread_id": callback_thread_id,
+                    },
+                )
             count = resolve_gateway_approval(
                 session_key,
                 choice,
-                request_id=request_id,
+                **resolver_kwargs,
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Slack button: %s", exc)

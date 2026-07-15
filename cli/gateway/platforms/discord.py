@@ -4074,6 +4074,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
                 exact_beta=exact_beta,
+                delivery_chat_id=str(chat_id),
+                delivery_thread_id=str(
+                    (metadata or {}).get("thread_id") or ""
+                ),
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -5032,6 +5036,8 @@ def _define_discord_view_classes() -> None:
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
             exact_beta: bool = False,
+            delivery_chat_id: str = "",
+            delivery_thread_id: str = "",
         ):
             super().__init__(timeout=300)  # 5-minute timeout
             self.session_key = session_key
@@ -5040,6 +5046,8 @@ def _define_discord_view_classes() -> None:
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
             self.exact_beta = exact_beta
+            self.delivery_chat_id = str(delivery_chat_id or "")
+            self.delivery_thread_id = str(delivery_thread_id or "")
             self.visible_approval_labels = (
                 ("Allow Once", "Deny")
                 if exact_beta
@@ -5073,14 +5081,47 @@ def _define_discord_view_classes() -> None:
                 )
                 return
 
+            resolver_actor_id = str(
+                getattr(getattr(interaction, "user", None), "id", "") or ""
+            )
+            actual_channel_id = str(
+                getattr(interaction, "channel_id", "")
+                or getattr(getattr(interaction, "channel", None), "id", "")
+                or ""
+            )
+            expected_channel_id = (
+                self.delivery_thread_id or self.delivery_chat_id
+            )
+            if (
+                self.exact_beta
+                and expected_channel_id
+                and actual_channel_id != expected_channel_id
+            ):
+                await interaction.response.send_message(
+                    "This approval belongs to a different channel~",
+                    ephemeral=True,
+                )
+                return
+
             try:
                 from tools.approval import resolve_gateway_approval
                 if not self.request_id:
                     raise RuntimeError("approval request identity missing")
+                resolver_kwargs = {"request_id": self.request_id}
+                if self.exact_beta:
+                    resolver_kwargs.update(
+                        resolver_identity=resolver_actor_id,
+                        resolver_context={
+                            "actor_id": resolver_actor_id,
+                            "platform": "discord",
+                            "chat_id": self.delivery_chat_id,
+                            "thread_id": self.delivery_thread_id,
+                        },
+                    )
                 count = resolve_gateway_approval(
                     self.session_key,
                     choice,
-                    request_id=self.request_id,
+                    **resolver_kwargs,
                 )
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from Discord button: %s", exc)
