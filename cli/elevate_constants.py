@@ -80,6 +80,18 @@ def get_account_key() -> str:
     restart — callers re-resolve their store live.
     """
     global _account_key_cache
+    if exact_realtor_beta_active():
+        # The exact Beta identity is never read from mutable unsigned JSON and
+        # never served from an mtime-only cache. Every lookup re-verifies the
+        # backend signature and token bindings through the canonical reader.
+        try:
+            from elevate_cli.license import read_verified_beta_license_snapshot
+
+            beta_license = read_verified_beta_license_snapshot(require_current=True)
+            email = beta_license.email
+        except Exception:
+            return "default"
+        return "acct_" + hashlib.sha1(email.encode("utf-8")).hexdigest()[:16]
     lic = get_elevate_home() / "license.json"
     try:
         mtime = lic.stat().st_mtime_ns

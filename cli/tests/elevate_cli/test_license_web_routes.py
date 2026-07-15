@@ -327,7 +327,11 @@ def test_exact_beta_keeps_post_login_activation_inside_signed_backend_scope(
 
     response = client.post(
         "/api/license/activate",
-        json={"email": "agent@example.test", "password": "secret-password"},
+        json={
+            "email": "agent@example.test",
+            "password": "secret-password",
+            "skip_skill_sync": True,
+        },
     )
 
     assert response.status_code == 200

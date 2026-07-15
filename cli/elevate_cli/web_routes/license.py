@@ -62,8 +62,10 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             status = 502
         elif code == "beta_license_revoked":
             status = 401
+        elif code == "beta_entitlement_verifier_unavailable":
+            status = 503
         elif code.startswith("beta_license_response_") or code.startswith(
-            "beta_entitlement_snapshot_"
+            "beta_entitlement_"
         ):
             status = 502
         elif code.startswith("beta_"):
@@ -125,7 +127,11 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             lic = lic_mod.login(body.email, body.password)
             activation = lic_mod.activate_install(
                 lic,
-                sync_skills=not body.skip_skill_sync,
+                sync_skills=(
+                    True
+                    if lic_mod._exact_realtor_beta_active()
+                    else not body.skip_skill_sync
+                ),
             )
         except lic_mod.LicenseError as exc:
             raise _license_http_exception(exc, default_status=401)
@@ -161,7 +167,11 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             )
             activation = lic_mod.activate_install(
                 lic,
-                sync_skills=not body.skip_skill_sync,
+                sync_skills=(
+                    True
+                    if lic_mod._exact_realtor_beta_active()
+                    else not body.skip_skill_sync
+                ),
             )
         except lic_mod.LicenseError as exc:
             raise _license_http_exception(exc, default_status=400)
@@ -205,7 +215,11 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             lic = lic_mod.login_with_code(body.email, body.code)
             activation = lic_mod.activate_install(
                 lic,
-                sync_skills=not body.skip_skill_sync,
+                sync_skills=(
+                    True
+                    if lic_mod._exact_realtor_beta_active()
+                    else not body.skip_skill_sync
+                ),
             )
         except lic_mod.LicenseError as exc:
             raise _license_http_exception(exc, default_status=401)

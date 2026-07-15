@@ -124,6 +124,22 @@ def _beta_runtime_receipt(
     local_auth = auth_status if isinstance(auth_status, dict) else {}
     configured_provider, configured_model = _configured_primary(raw_config)
 
+    entitlement_schema = 1
+    entitlement_key_id = "ent-2026-07-a"
+    entitlement_verifier_ready = False
+    try:
+        from elevate_cli.entitlement_assertion import (
+            ENTITLEMENT_ASSERTION_KID,
+            ENTITLEMENT_ASSERTION_SCHEMA,
+            verifier_ready,
+        )
+
+        entitlement_schema = ENTITLEMENT_ASSERTION_SCHEMA
+        entitlement_key_id = ENTITLEMENT_ASSERTION_KID
+        entitlement_verifier_ready = verifier_ready()
+    except Exception:
+        entitlement_verifier_ready = False
+
     blocked_reason: str | None = None
     try:
         validate_beta_config_for_persistence(
@@ -138,6 +154,8 @@ def _beta_runtime_receipt(
         blocked_reason = "missing_beta_provider"
     if blocked_reason is None and not configured_model:
         blocked_reason = "missing_beta_model"
+    if blocked_reason is None and not entitlement_verifier_ready:
+        blocked_reason = "beta_entitlement_verifier_unavailable"
 
     auth_ready = bool(local_auth.get("logged_in"))
     auth_reason = local_auth.get("reason")
@@ -151,12 +169,16 @@ def _beta_runtime_receipt(
         and auth_ready
         and configured_provider == BETA_ALLOWED_PROVIDER
         and configured_model in BETA_ALLOWED_MODELS
+        and entitlement_verifier_ready
     )
     return {
         "releaseChannel": "beta",
         "elevateHome": str(normalized_home),
         "providerPolicyVersion": BETA_PROVIDER_POLICY_VERSION,
         "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
+        "entitlementAssertionSchema": entitlement_schema,
+        "entitlementAssertionKeyId": entitlement_key_id,
+        "entitlementVerifierReady": entitlement_verifier_ready,
         "allowedProvider": BETA_ALLOWED_PROVIDER,
         "configuredProvider": configured_provider,
         "configuredModel": configured_model,

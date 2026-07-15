@@ -40,6 +40,18 @@ def load_session_token() -> str:
 
 def license_signed_in(*, license_path: Path) -> bool:
     """Return True iff a license.json with an unexpired access token exists."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        try:
+            from elevate_cli import license as license_mod
+
+            if license_path.expanduser().absolute() != license_mod.LICENSE_PATH.expanduser().absolute():
+                return False
+            lic = license_mod.read_verified_beta_license_snapshot(require_current=True)
+        except Exception:
+            return False
+        return lic.expires_at > (time.time() + 30)
     try:
         with license_path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)

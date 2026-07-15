@@ -4746,6 +4746,18 @@ def _license_signed_in() -> bool:
     the HTTP layer apply the same rule. Returning False blocks prompt.submit
     and falls back to a sign-in nag rendered in the chat pane.
     """
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        try:
+            from elevate_cli import license as license_mod
+
+            if _LICENSE_PATH.expanduser().absolute() != license_mod.LICENSE_PATH.expanduser().absolute():
+                return False
+            lic = license_mod.read_verified_beta_license_snapshot(require_current=True)
+        except Exception:
+            return False
+        return lic.expires_at > (time.time() + 30)
     if _SIGN_IN_BYPASS:
         return True
     try:

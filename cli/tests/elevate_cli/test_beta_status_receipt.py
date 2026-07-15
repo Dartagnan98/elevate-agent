@@ -57,6 +57,9 @@ def test_beta_runtime_receipt_reports_only_public_runtime_truth(tmp_path):
         "elevateHome": str(home.resolve(strict=False)),
         "providerPolicyVersion": BETA_PROVIDER_POLICY_VERSION,
         "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
+        "entitlementAssertionSchema": 1,
+        "entitlementAssertionKeyId": "ent-2026-07-a",
+        "entitlementVerifierReady": True,
         "allowedProvider": BETA_ALLOWED_PROVIDER,
         "configuredProvider": BETA_ALLOWED_PROVIDER,
         "configuredModel": BETA_DEFAULT_MODEL,
@@ -139,6 +142,28 @@ def test_status_adds_receipt_only_for_exact_lowercase_beta(monkeypatch, tmp_path
 
     assert payload["beta_runtime"]["runtimeReady"] is True
     assert payload["beta_runtime"]["releaseChannel"] == "beta"
+    assert payload["beta_runtime"]["entitlementAssertionSchema"] == 1
+    assert payload["beta_runtime"]["entitlementAssertionKeyId"] == "ent-2026-07-a"
+    assert payload["beta_runtime"]["entitlementVerifierReady"] is True
+
+
+def test_beta_runtime_receipt_blocks_when_entitlement_verifier_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_cli import entitlement_assertion
+
+    monkeypatch.setattr(entitlement_assertion, "verifier_ready", lambda: False)
+
+    receipt = _beta_runtime_receipt(
+        elevate_home=tmp_path,
+        config=_config(),
+        auth_status=_auth(),
+    )
+
+    assert receipt["entitlementVerifierReady"] is False
+    assert receipt["runtimeReady"] is False
+    assert receipt["blockedReason"] == "beta_entitlement_verifier_unavailable"
 
 
 @pytest.mark.parametrize("channel", ["latest", "Beta", "BETA", " beta"])
