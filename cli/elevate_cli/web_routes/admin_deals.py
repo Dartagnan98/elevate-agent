@@ -182,6 +182,15 @@ class _RunResultBody(BaseModel):
     error: Optional[str] = None
 
 
+class _ManualReviewedRunDocumentBody(BaseModel):
+    reviewed: bool = False
+    kind: str
+    filename: Optional[str] = None
+    contentB64: Optional[str] = None
+    filePath: Optional[str] = None
+    summary: Optional[str] = None
+
+
 class _DealAdvanceBody(BaseModel):
     force: bool = False
 
@@ -399,6 +408,93 @@ def _profile_artifact_dir(*parts: str) -> Path:
         )
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _require_exact_beta_forms_provider_for_local_document_mutation() -> None:
+    """Fail closed before any mutable local Offer Kit/form-pack operation."""
+    from elevate_constants import exact_realtor_beta_active
+
+    if not exact_realtor_beta_active():
+        return
+    from elevate_cli.data import connect
+    from elevate_cli.data.admin_setup import forms_provider_capability
+
+    with connect() as conn:
+        capability = forms_provider_capability(conn)
+    provider_available = capability.get("available") is True
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "local_reference_form_route_disabled",
+            "reason": (
+                "provider_native_route_required"
+                if provider_available
+                else capability.get("reason") or "live_forms_provider_not_verified"
+            ),
+            "message": (
+                "This exact-Beta route uses mutable local reference templates and is disabled. "
+                "Complete the form in the licensed provider and attach the reviewed PDF."
+            ),
+            "manualCompletion": "Attach the reviewed PDF to the parked MLC/CPS task.",
+        },
+    )
+
+
+def _persist_manual_review_upload(
+    *,
+    deal_id: str,
+    run_id: str,
+    filename: str | None,
+    content_b64: str,
+) -> Path:
+    """Persist one bounded browser-uploaded PDF inside the active profile."""
+    import base64
+    import binascii
+    import tempfile
+    import uuid
+
+    encoded = str(content_b64 or "").strip()
+    if encoded.startswith("data:"):
+        encoded = encoded.partition(",")[2]
+    if not encoded:
+        raise HTTPException(status_code=400, detail="PDF content is required")
+    if len(encoded) > 36 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PDF upload exceeds the 25 MB limit")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="PDF upload is not valid base64") from exc
+    if not data or len(data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PDF upload exceeds the 25 MB limit")
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="uploaded document is not a PDF")
+
+    root = _profile_artifact_dir("uploads", "manual-reviewed-documents")
+    original = _artifact_slug(filename or "reviewed-document.pdf", "reviewed-document.pdf")
+    if not original.lower().endswith(".pdf"):
+        original = f"{original}.pdf"
+    destination = root / (
+        f"{_artifact_slug(deal_id, 'deal')}-{_artifact_slug(run_id, 'run')}-"
+        f"{uuid.uuid4().hex[:12]}-{original}"
+    )
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{destination.stem}-",
+        suffix=".tmp",
+        dir=root,
+        delete=False,
+    ) as staged:
+        staged.write(data)
+        staged.flush()
+        os.fsync(staged.fileno())
+        staged_path = Path(staged.name)
+    try:
+        os.replace(staged_path, destination)
+    finally:
+        try:
+            staged_path.unlink()
+        except OSError:
+            pass
+    return destination
 
 
 def _is_pdf(path: Path) -> bool:
@@ -762,6 +858,9 @@ def create_admin_deals_router(
                 setup_profile = (get_admin_setup(conn).get("profile") or {})
                 province = body.province if body.province is not None else (jurisdiction["province"] or setup_profile.get("province"))
                 market = body.market if body.market is not None else (jurisdiction["market"] or setup_profile.get("market"))
+                from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+                enforce_exact_beta_province(province)
                 return create_deal(
                     conn,
                     title=body.title,
@@ -800,6 +899,9 @@ def create_admin_deals_router(
                 setup_profile = (get_admin_setup(conn).get("profile") or {})
                 province = body.province if body.province is not None else (jurisdiction["province"] or setup_profile.get("province"))
                 market = body.market if body.market is not None else (jurisdiction["market"] or setup_profile.get("market"))
+                from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+                enforce_exact_beta_province(province)
                 return promote_profile_to_admin_deal(
                     conn,
                     profile_id=body.profileId,
@@ -975,6 +1077,7 @@ def create_admin_deals_router(
         # in Preview/Acrobat where the AcroForm fields are actually editable
         # (browser tabs render forms read-only). Auth: Bearer header or ?token=.
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             import json as _json
             from elevate_cli.data import connect
 
@@ -1014,6 +1117,7 @@ def create_admin_deals_router(
     def post_admin_deal_kit_doc_approve(deal_id: str, doc_id: str, body: _KitDocApproveBody):
         # Toggle a kit document's status (approved / draft) from the card.
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             import json as _json
             from elevate_cli.data import connect
 
@@ -1068,6 +1172,7 @@ def create_admin_deals_router(
         # Save one editable form field for a kit document (the in-app inputs the
         # operator edits on the card / on their phone).
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             import json as _json
             from elevate_cli.data import connect
 
@@ -1114,6 +1219,7 @@ def create_admin_deals_router(
         # and write the per-deal editable PDF. This is the "Generate" button: the
         # operator edits fields on the card, then generates the compliant PDF.
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             import json as _json
             import subprocess
             import tempfile
@@ -1267,6 +1373,7 @@ def create_admin_deals_router(
         # fields from the deal's data so most of the form is pre-filled. Preserves
         # operator edits on an existing kit (the deal only fills blanks).
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             import json as _json
             from elevate_cli.data import connect
 
@@ -1355,6 +1462,7 @@ def create_admin_deals_router(
         # Add a form to the offer kit: upload a PDF (base64 in contentB64) or pick
         # a wired catalog template (templateId). Appends to offerKit.documents.
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             import json as _json
             import base64 as _b64
             import re as _re
@@ -1653,6 +1761,79 @@ def create_admin_deals_router(
             _log.exception("POST /api/deals/%s/runs/%s/result failed", deal_id, run_id)
             raise HTTPException(status_code=500, detail=f"Deal run result failed: {exc}")
 
+    @router.post(
+        "/api/deals/{deal_id}/runs/{run_id}/manual-reviewed-document"
+    )
+    def post_manual_reviewed_run_document(
+        deal_id: str,
+        run_id: str,
+        body: _ManualReviewedRunDocumentBody,
+    ):
+        """Complete a parked MLC/CPS run with one realtor-reviewed PDF."""
+        uploaded_path: Path | None = None
+        completed = False
+        try:
+            has_upload = bool(str(body.contentB64 or "").strip())
+            has_local_path = bool(str(body.filePath or "").strip())
+            if has_upload == has_local_path:
+                raise HTTPException(
+                    status_code=400,
+                    detail="provide exactly one of contentB64 or filePath",
+                )
+            if has_upload:
+                uploaded_path = _persist_manual_review_upload(
+                    deal_id=deal_id,
+                    run_id=run_id,
+                    filename=body.filename,
+                    content_b64=str(body.contentB64),
+                )
+                file_path = str(uploaded_path)
+            else:
+                file_path = str(body.filePath or "")
+
+            from elevate_cli.data import (
+                complete_run_with_reviewed_manual_pdf,
+                connect,
+            )
+
+            with connect() as conn:
+                result = complete_run_with_reviewed_manual_pdf(
+                    conn,
+                    deal_id,
+                    run_id,
+                    kind=body.kind,
+                    file_path=file_path,
+                    reviewed=body.reviewed,
+                    summary=body.summary,
+                    actor=web_actor,
+                )
+            completed = True
+            return result
+        except HTTPException:
+            raise
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception(
+                "POST /api/deals/%s/runs/%s/manual-reviewed-document failed",
+                deal_id,
+                run_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Manual reviewed document completion failed: {exc}",
+            )
+        finally:
+            if uploaded_path is not None and not completed:
+                try:
+                    uploaded_path.unlink()
+                except OSError:
+                    pass
+
     # --- CPS Offer Prep (buyer side) -------------------------------------
 
     def _cps_deal_facts(deal_id: Optional[str]) -> Dict[str, Any]:
@@ -1780,6 +1961,7 @@ def create_admin_deals_router(
         import subprocess as _sp
 
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             require_admin_setup_ready_for_launch()
             if not body.umbrella:
                 raise HTTPException(status_code=400, detail="Pick a form first")
@@ -1827,6 +2009,7 @@ def create_admin_deals_router(
         import subprocess as _sp
 
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             require_admin_setup_ready_for_launch()
             form = (body.form or "").strip().lower()
             if form not in ("pnc", "dorts", "disclosure-rem"):
@@ -1871,6 +2054,7 @@ def create_admin_deals_router(
         import subprocess as _sp
 
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             require_admin_setup_ready_for_launch()
             if not body.umbrella:
                 raise HTTPException(status_code=400, detail="Pick a form first")
@@ -1955,6 +2139,7 @@ def create_admin_deals_router(
         import subprocess as _sp
 
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             require_admin_setup_ready_for_launch()
             form = (body.form or "").strip().lower()
             if form not in ("agency", "dorts", "pnc"):
@@ -1997,6 +2182,7 @@ def create_admin_deals_router(
         decide, which keeps that run small. Falls back to direct agent dispatch if
         the deterministic prep fails (never worse than the prior behavior)."""
         try:
+            _require_exact_beta_forms_provider_for_local_document_mutation()
             require_admin_setup_ready_for_launch()
             import json as _json
             import subprocess as _sp

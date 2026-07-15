@@ -82,6 +82,7 @@ def sync_province_guide_to_memory(
     province: str,
     *,
     store: Any | None = None,
+    prune_stale_same_province: bool = False,
 ) -> dict[str, Any]:
     """Ingest a province's admin guide into the holographic memory store.
 
@@ -108,6 +109,8 @@ def sync_province_guide_to_memory(
     documents = 0
     chunks = 0
     evicted = 0
+    stale_evicted = 0
+    expected_source_uris: set[str] = set()
     try:
         for kind, row in records:
             content = str(row.get("content") or "").strip()
@@ -116,6 +119,7 @@ def sync_province_guide_to_memory(
             slug = str(row.get("slug") or "").strip()
             title = str(row.get("title") or slug or kind).strip()
             source_uri = f"elevate://province-guide/{province}/{kind}/{slug}"
+            expected_source_uris.add(source_uri)
             result = store.add_document_chunks(
                 source_uri=source_uri,
                 chunks=store.chunk_text(content),
@@ -126,6 +130,7 @@ def sync_province_guide_to_memory(
                     "kind": kind,
                     "slug": slug,
                     "sourcePath": row.get("sourcePath"),
+                    "contentHash": row.get("contentHash"),
                 },
             )
             documents += 1
@@ -133,6 +138,24 @@ def sync_province_guide_to_memory(
         # After loading the active province, purge every other province's
         # guide docs so recall is scoped to ONLY this province (no leakage).
         evicted = _evict_other_provinces(store, province)
+        if prune_stale_same_province:
+            for _ in range(10):
+                status = store.document_status(source_type=SOURCE_TYPE, limit=200)
+                removed_this_pass = 0
+                for doc in status.get("documents", []) or []:
+                    uri = str(doc.get("source_uri") or "")
+                    metadata = doc.get("metadata") or {}
+                    doc_province = str(metadata.get("province") or "").strip().upper()
+                    if (
+                        doc_province == province
+                        and uri
+                        and uri not in expected_source_uris
+                    ):
+                        store.delete_document(source_uri=uri)
+                        stale_evicted += 1
+                        removed_this_pass += 1
+                if removed_this_pass == 0:
+                    break
     finally:
         if own_store:
             close = getattr(store, "close", None)
@@ -153,5 +176,6 @@ def sync_province_guide_to_memory(
         "documents": documents,
         "chunks": chunks,
         "evicted": evicted,
+        "staleEvicted": stale_evicted,
         "sourceType": SOURCE_TYPE,
     }

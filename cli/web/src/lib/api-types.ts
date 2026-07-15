@@ -486,6 +486,15 @@ export interface DealAttachmentCreateRequest {
   sourceSnapshotId?: string | null;
 }
 
+export interface ManualReviewedRunDocumentRequest {
+  reviewed: true;
+  kind: "mlc_pdf" | "cps_draft";
+  filename?: string | null;
+  contentB64?: string | null;
+  filePath?: string | null;
+  summary?: string | null;
+}
+
 export interface DealAttachment {
   id: string;
   dealId: string;
@@ -683,6 +692,10 @@ export interface ProvinceStageDocumentItem {
   side?: string | null;
   category?: string | null;
   sourcePath?: string | null;
+  availability?: "provider_required" | "imported_reference";
+  referenceOnly?: boolean;
+  currentVersionVerified?: boolean | null;
+  licensedBlankRequired?: boolean;
   condition?: { field: string; value: string } | null;
 }
 
@@ -730,6 +743,10 @@ export interface AdminProvinceGuideForm {
   pageCount?: number | null;
   annotationCount?: number | null;
   localImagePaths?: string[];
+  availability?: "provider_required" | "imported_reference";
+  referenceOnly?: boolean;
+  currentVersionVerified?: boolean | null;
+  licensedBlankRequired?: boolean;
 }
 
 export interface AdminProvinceGuide {
@@ -741,6 +758,9 @@ export interface AdminProvinceGuide {
     forms: number;
     pageTypes?: Record<string, number>;
     hasTransactionGuide: boolean;
+    referenceOnly?: boolean;
+    availability?: "provider_required" | "imported_reference";
+    licensedBlankRequired?: boolean;
   };
   pages: AdminProvinceGuidePage[];
   checklists: AdminProvinceGuidePage[];
@@ -755,10 +775,15 @@ export interface AdminProvinceGuideCoverage {
   checklists: number;
   forms: number;
   hasTransactionGuide: boolean;
+  referenceOnly?: boolean;
+  availability?: "provider_required" | "imported_reference";
+  licensedBlankRequired?: boolean;
 }
 
 export interface AdminProvinceGuidesResponse {
   items: AdminProvinceGuideCoverage[];
+  realtorBeta?: boolean;
+  supportedProvinces?: string[];
 }
 
 export interface AdminProvinceGuideImportResult {
@@ -871,6 +896,25 @@ export interface AdminSetupSnapshot {
     hasProvinceGuide?: boolean;
   };
   verificationWarnings?: string[];
+  provincePack?: {
+    ready: boolean;
+    province: string;
+    packId?: string;
+    packSha256?: string;
+    referenceOnly?: boolean;
+    currentVersionVerified?: boolean;
+    licensedBlankRequired?: boolean;
+    availability?: "provider_required";
+    documentSearchVerified?: boolean;
+    reason?: string | null;
+  };
+  capabilities?: {
+    formsProvider?: {
+      available: boolean;
+      reason?: string | null;
+      message?: string | null;
+    };
+  };
 }
 
 export interface AdminSetupUpdateRequest {

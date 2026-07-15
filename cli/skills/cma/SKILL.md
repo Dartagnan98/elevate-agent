@@ -79,7 +79,7 @@ Every phase should leave a compact handoff so the next run can resume without re
 }
 ```
 
-When attached to an Admin deal, close through `admin-result-writer` with artifacts, checklist updates, and any next tasks. If it is chat-only CMA work, report the artifact path and approval question in the conversation.
+When attached to an Admin deal, close through `admin-result-writer` with the verified PDF under artifact kind `cma_report`, checklist updates, and any next tasks. If it is chat-only CMA work, report the artifact path and approval question in the conversation. Never mark the Admin run successful without the `cma_report` artifact.
 
 ## Provenance contract
 

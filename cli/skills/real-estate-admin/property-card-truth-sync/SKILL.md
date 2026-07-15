@@ -204,7 +204,7 @@ If a value comes from ID evidence, save only the needed transaction fact. Do not
 First confirm which runtime is serving the visible dashboard. If the dashboard process is the packaged Electron app runtime, for example:
 
 ```bash
-/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -m elevate_cli.main dashboard --port 9120
+/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B -m elevate_cli.main dashboard --port 9120
 ```
 
 then run the write script with that packaged Python runtime. Writing with `/Users/admin/.elevate/elevate/cli/.venv/bin/python` can update the source checkout store while the visible dashboard still shows old values. This exact runtime split caused a backfill verification to fail on one property until the same updates were rerun with the packaged runtime.

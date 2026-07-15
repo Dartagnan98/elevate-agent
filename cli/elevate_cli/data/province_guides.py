@@ -12,7 +12,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from elevate_cli.config import get_elevate_home
 from elevate_cli.data._util import new_id, now_iso, sha256
@@ -91,7 +91,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
         "field_value": "strata",
         "doc_code": "strata_docs",
         "doc_name": "Strata documents",
-        "notes": "Seeded from the BC transaction guide strata/condo resale topics.",
+        "notes": "Code-defined workflow reminder. Verify current transaction and brokerage requirements before use.",
     },
     {
         "province": "BC",
@@ -101,7 +101,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
         "field_value": "true",
         "doc_code": "tenancy_docs",
         "doc_name": "Tenancy documents / notice requirements",
-        "notes": "Seeded from the BC transaction guide tenants topic.",
+        "notes": "Code-defined workflow reminder. Verify current transaction and brokerage requirements before use.",
     },
     {
         "province": "BC",
@@ -111,7 +111,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
         "field_value": "true",
         "doc_code": "offer_matrix",
         "doc_name": "Multiple-offer comparison matrix",
-        "notes": "Seeded from the BC transaction guide multiple offers topic.",
+        "notes": "Code-defined workflow reminder. Verify current transaction and brokerage requirements before use.",
     },
     {
         "province": "BC",
@@ -121,7 +121,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
         "field_value": "true",
         "doc_code": "poa_authority",
         "doc_name": "Power of attorney authority review",
-        "notes": "Seeded from the BC transaction guide POA/corporate client topic.",
+        "notes": "Code-defined workflow reminder. Verify current transaction and brokerage requirements before use.",
     },
 ]
 
@@ -234,7 +234,11 @@ def _row_to_checklist(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _row_to_form(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    source_path = row["source_path"]
+    provider_required = str(source_path or "").startswith(
+        "elevate://province-pack/bc-residential-resale-reference-v1/"
+    )
+    result = {
         "id": row["id"],
         "province": row["province"],
         "code": row["code"],
@@ -245,10 +249,21 @@ def _row_to_form(row: sqlite3.Row) -> dict[str, Any]:
         "annotationCount": row["annotation_count"],
         "imageUrls": _decode_json(row["image_urls_json"]) or [],
         "localImagePaths": _decode_json(row["local_image_paths_json"]) or [],
-        "sourcePath": row["source_path"],
+        "sourcePath": source_path,
+        "availability": "provider_required" if provider_required else "imported_reference",
+        "referenceOnly": provider_required,
+        "currentVersionVerified": False if provider_required else None,
+        "licensedBlankRequired": provider_required,
         "importedAt": row["imported_at"],
         "updatedAt": row["updated_at"],
     }
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active() and str(row["province"] or "").upper() == "BC":
+        result["requiresLiveFormsProvider"] = (
+            str(row["code"] or "").strip().upper() in {"MLC", "CPS-RES"}
+        )
+    return result
 
 
 def _upsert_reference_page(
@@ -445,8 +460,21 @@ def import_exp_agent_centre(
     provided, import can be narrowed to that province; ``prune_other_provinces``
     is an explicit maintenance escape hatch, not the onboarding default.
     """
-    base = Path(root).expanduser() if root is not None else default_exp_agent_centre_root()
     target_province = normalize_province_code(province)
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        from elevate_cli.data.beta_province_pack import (
+            enforce_exact_beta_province,
+            import_exact_beta_bc_pack,
+        )
+
+        enforce_exact_beta_province(target_province)
+        if root is not None:
+            raise ValueError("Realtor Beta province packs must come from the signed app bundle")
+        return import_exact_beta_bc_pack(conn)
+
+    base = Path(root).expanduser() if root is not None else default_exp_agent_centre_root()
     target_set = {target_province} if target_province else None
     if not base.exists():
         return {
@@ -686,6 +714,13 @@ def province_agent_memory(
             "checklists": len(checklist_rows),
             "forms": len(form_rows),
             "hasTransactionGuide": bool(checklist_rows or form_rows),
+            "referenceOnly": bool(form_rows) and all(row.get("referenceOnly") for row in form_rows),
+            "availability": (
+                "provider_required"
+                if form_rows and all(row.get("availability") == "provider_required" for row in form_rows)
+                else "imported_reference"
+            ),
+            "licensedBlankRequired": bool(form_rows) and all(row.get("licensedBlankRequired") for row in form_rows),
         },
         "referencePages": [
             {
@@ -714,6 +749,19 @@ def province_agent_memory(
                 "pageCount": row["pageCount"],
                 "annotationCount": row["annotationCount"],
                 "sourcePath": row["sourcePath"],
+                "availability": row.get("availability"),
+                "referenceOnly": row.get("referenceOnly"),
+                "currentVersionVerified": row.get("currentVersionVerified"),
+                "licensedBlankRequired": row.get("licensedBlankRequired"),
+                **(
+                    {
+                        "requiresLiveFormsProvider": row.get(
+                            "requiresLiveFormsProvider"
+                        )
+                    }
+                    if "requiresLiveFormsProvider" in row
+                    else {}
+                ),
             }
             for row in form_rows[:max_forms]
         ],
@@ -793,6 +841,13 @@ def province_guide_summary(conn: sqlite3.Connection, province: str) -> dict[str,
             "forms": len(form_rows),
             "pageTypes": page_counts,
             "hasTransactionGuide": bool(checklist_rows or form_rows),
+            "referenceOnly": bool(form_rows) and all(form.get("referenceOnly") for form in form_rows),
+            "availability": (
+                "provider_required"
+                if form_rows and all(form.get("availability") == "provider_required" for form in form_rows)
+                else "imported_reference"
+            ),
+            "licensedBlankRequired": bool(form_rows) and all(form.get("licensedBlankRequired") for form in form_rows),
         },
         "pages": [
             {k: page[k] for k in ("province", "slug", "pageType", "title", "sourceUrl", "sourcePath")}
@@ -811,6 +866,10 @@ def province_guide_summary(conn: sqlite3.Connection, province: str) -> dict[str,
                 "pageCount": form["pageCount"],
                 "annotationCount": form["annotationCount"],
                 "localImagePaths": form["localImagePaths"],
+                "availability": form.get("availability"),
+                "referenceOnly": form.get("referenceOnly"),
+                "currentVersionVerified": form.get("currentVersionVerified"),
+                "licensedBlankRequired": form.get("licensedBlankRequired"),
             }
             for form in form_rows
         ],
@@ -1047,17 +1106,24 @@ def province_stage_documents(
     for form in forms:
         stage, form_side, status = _match_form_stage(form, province=province, side=side)
         if status == "matched" and stage is not None:
-            stages.setdefault(stage, []).append(
-                {
-                    "code": form.get("code"),
-                    "name": form.get("name") or form.get("code"),
-                    "source": "form",
-                    "side": form_side,
-                    "category": form.get("category"),
-                    "sourcePath": form.get("sourcePath"),
-                    "condition": None,
-                }
-            )
+            document = {
+                "code": form.get("code"),
+                "name": form.get("name") or form.get("code"),
+                "source": "form",
+                "side": form_side,
+                "category": form.get("category"),
+                "sourcePath": form.get("sourcePath"),
+                "availability": form.get("availability"),
+                "referenceOnly": form.get("referenceOnly"),
+                "currentVersionVerified": form.get("currentVersionVerified"),
+                "licensedBlankRequired": form.get("licensedBlankRequired"),
+                "condition": None,
+            }
+            if "requiresLiveFormsProvider" in form:
+                document["requiresLiveFormsProvider"] = form.get(
+                    "requiresLiveFormsProvider"
+                )
+            stages.setdefault(stage, []).append(document)
             mapped_count += 1
         elif status == "other_side":
             other_side.append(
@@ -1154,7 +1220,15 @@ def province_coverage(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "SELECT province, COUNT(*) AS count FROM province_forms GROUP BY province"
         ).fetchall()
     }
-    return [
+    provider_required_counts = {
+        row["province"]: row["count"]
+        for row in conn.execute(
+            "SELECT province, COUNT(*) AS count FROM province_forms "
+            "WHERE source_path LIKE ? GROUP BY province",
+            ("elevate://province-pack/bc-residential-resale-reference-v1/%",),
+        ).fetchall()
+    }
+    coverage = [
         {
             "province": row["province"],
             "provinceLabel": PROVINCE_LABELS.get(row["province"], row["province"]),
@@ -1163,6 +1237,18 @@ def province_coverage(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "checklists": checklist_counts.get(row["province"], 0),
             "forms": form_counts.get(row["province"], 0),
             "hasTransactionGuide": bool(checklist_counts.get(row["province"]) or form_counts.get(row["province"])),
+            "referenceOnly": bool(form_counts.get(row["province"])) and provider_required_counts.get(row["province"], 0) == form_counts.get(row["province"], 0),
+            "availability": (
+                "provider_required"
+                if form_counts.get(row["province"]) and provider_required_counts.get(row["province"], 0) == form_counts.get(row["province"], 0)
+                else "imported_reference"
+            ),
+            "licensedBlankRequired": bool(form_counts.get(row["province"])) and provider_required_counts.get(row["province"], 0) == form_counts.get(row["province"], 0),
         }
         for row in rows
     ]
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        return [item for item in coverage if item["province"] == "BC"]
+    return coverage

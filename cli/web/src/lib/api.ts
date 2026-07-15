@@ -20,6 +20,7 @@ import type {
   DealContact,
   DealAttachmentCreateRequest,
   DealAttachment,
+  ManualReviewedRunDocumentRequest,
   AdminAction,
   AdminActionRun,
   AdminDealTasksResponse,
@@ -2052,6 +2053,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  completeManualReviewedRun: (
+    dealId: string,
+    runId: string,
+    body: ManualReviewedRunDocumentRequest,
+  ) =>
+    fetchJSON<AdminActionRun>(
+      `/api/deals/${encodeURIComponent(dealId)}/runs/${encodeURIComponent(runId)}/manual-reviewed-document`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   approveAdminActionRun: (runId: string, body: { approved?: boolean; runNow?: boolean } = {}) =>
     fetchJSON<AdminActionRun>(`/api/admin/action-runs/${encodeURIComponent(runId)}/approve`, {
       method: "POST",

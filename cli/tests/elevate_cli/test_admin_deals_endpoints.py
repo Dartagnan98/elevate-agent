@@ -2116,6 +2116,188 @@ def test_run_result_rejects_missing_artifact_without_closing_run_or_gate(
     assert context["checklist"].get("pricing-recap") is not True
 
 
+def test_document_run_contract_rejects_empty_wrong_kind_wrong_deal_and_invalid_artifacts(
+    client,
+    tmp_path,
+):
+    deal = _create(
+        title="Buyer CPS artifact truth",
+        side="buyer",
+        current_stage=1,
+        dispatch_initial_stage=False,
+    )
+    other_deal = _create(
+        title="Different buyer deal",
+        side="buyer",
+        current_stage=1,
+        dispatch_initial_stage=False,
+    )
+    with connect() as conn:
+        action = create_action(
+            conn,
+            name="CPS artifact contract",
+            trigger="stage_entry",
+            skill="real-estate-admin/buyer-cps",
+            skill_args={
+                "mode": "draft",
+                "requiredArtifactKinds": ["cps_draft"],
+            },
+            side="buyer",
+            to_stage=1,
+        )
+        run = next(
+            item
+            for item in evaluate_dispatch(
+                conn,
+                deal_id=deal["id"],
+                trigger="stage_entry",
+                actor="human:test",
+                to_stage=1,
+            )
+            if item["registryId"] == action["id"]
+        )
+
+    endpoint = f"/api/deals/{deal['id']}/runs/{run['id']}/result"
+    empty = client.post(
+        endpoint,
+        json={"status": "completed", "idempotencyKey": "cps-empty"},
+    )
+    assert empty.status_code == 400, empty.text
+    assert "cps_draft" in empty.text
+
+    wrong_kind_pdf = _write_valid_pdf(tmp_path / "wrong-kind.pdf", "Different document")
+    wrong_kind = client.post(
+        endpoint,
+        json={
+            "status": "completed",
+            "idempotencyKey": "cps-wrong-kind",
+            "artifacts": [
+                {"kind": "supporting_document", "filePath": str(wrong_kind_pdf)}
+            ],
+        },
+    )
+    assert wrong_kind.status_code == 400, wrong_kind.text
+    assert "cps_draft" in wrong_kind.text
+
+    invalid = client.post(
+        endpoint,
+        json={
+            "status": "completed",
+            "idempotencyKey": "cps-invalid",
+            "artifacts": [
+                {"kind": "cps_draft", "filePath": str(tmp_path / "missing.pdf")}
+            ],
+        },
+    )
+    assert invalid.status_code == 400, invalid.text
+
+    malformed_pdf = tmp_path / "malformed-cps.pdf"
+    malformed_pdf.write_bytes(b"not a real PDF")
+    malformed = client.post(
+        endpoint,
+        json={
+            "status": "completed",
+            "idempotencyKey": "cps-malformed",
+            "artifacts": [
+                {"kind": "cps_draft", "filePath": str(malformed_pdf)}
+            ],
+        },
+    )
+    assert malformed.status_code == 400, malformed.text
+
+    wrong_deal = client.post(
+        f"/api/deals/{other_deal['id']}/runs/{run['id']}/result",
+        json={"status": "completed", "idempotencyKey": "cps-wrong-deal"},
+    )
+    assert wrong_deal.status_code == 404, wrong_deal.text
+
+    cps_pdf = _write_valid_pdf(tmp_path / "cps-draft.pdf", "Buyer CPS draft")
+    valid = client.post(
+        endpoint,
+        json={
+            "status": "completed",
+            "idempotencyKey": "cps-valid",
+            "artifacts": [
+                {"kind": "cps_draft", "filePath": str(cps_pdf)}
+            ],
+        },
+    )
+    assert valid.status_code == 200, valid.text
+    body = valid.json()
+    assert body["status"] == "succeeded"
+    assert body["result"]["requiredArtifactKinds"] == ["cps_draft"]
+    assert body["result"]["verifiedArtifactKinds"] == ["cps_draft"]
+    with connect() as conn:
+        attachments = list_deal_attachments(conn, deal["id"])
+    assert [(item["kind"], item["filePath"]) for item in attachments] == [
+        ("cps_draft", str(cps_pdf.resolve()))
+    ]
+
+
+def test_mlc_document_run_contract_accepts_verified_mlc_pdf(client, tmp_path):
+    deal = _create(
+        title="Listing MLC artifact truth",
+        side="listing",
+        current_stage=2,
+        dispatch_initial_stage=False,
+    )
+    with connect() as conn:
+        action = create_action(
+            conn,
+            name="MLC artifact contract",
+            trigger="stage_entry",
+            skill="real-estate-admin/mlc",
+            skill_args={
+                "mode": "documents",
+                "requiredArtifactKinds": ["mlc_pdf"],
+            },
+            side="listing",
+            to_stage=2,
+        )
+        run = next(
+            item
+            for item in evaluate_dispatch(
+                conn,
+                deal_id=deal["id"],
+                trigger="stage_entry",
+                actor="human:test",
+                to_stage=2,
+            )
+            if item["registryId"] == action["id"]
+        )
+
+    wrong_extension = _write_valid_docx(
+        tmp_path / "mlc.docx",
+        "Multiple Listing Contract draft",
+    )
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/runs/{run['id']}/result",
+        json={
+            "status": "completed",
+            "idempotencyKey": "mlc-wrong-extension",
+            "artifacts": [
+                {"kind": "mlc_pdf", "filePath": str(wrong_extension)}
+            ],
+        },
+    )
+    assert rejected.status_code == 400, rejected.text
+    assert "incompatible with kind mlc_pdf" in rejected.text
+
+    mlc_pdf = _write_valid_pdf(tmp_path / "mlc.pdf", "Multiple Listing Contract draft")
+    response = client.post(
+        f"/api/deals/{deal['id']}/runs/{run['id']}/result",
+        json={
+            "status": "completed",
+            "idempotencyKey": "mlc-valid",
+            "artifacts": [{"kind": "mlc_pdf", "filePath": str(mlc_pdf)}],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "succeeded"
+    assert response.json()["result"]["requiredArtifactKinds"] == ["mlc_pdf"]
+    assert response.json()["result"]["verifiedArtifactKinds"] == ["mlc_pdf"]
+
+
 def test_failed_run_cannot_attach_success_evidence(client, tmp_path):
     deal = _create(
         title="Failed run artifact",
@@ -2313,6 +2495,74 @@ def test_offer_kit_path_rejects_symlink_escape(monkeypatch, tmp_path):
 
     assert raised.value.status_code == 409
     assert raised.value.detail["code"] == "document_artifact_outside_profile"
+
+
+def test_exact_beta_blocks_every_mutable_or_open_local_form_pack_route(
+    client,
+    monkeypatch,
+):
+    from elevate_cli.data import get_deal
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    deal = _create(
+        title="Exact Beta local form routes",
+        side="buyer",
+        dispatch_initial_stage=False,
+    )
+    cps_body = {
+        "umbrella": "residential",
+        "clauses": [],
+        "customClauses": [],
+        "vars": {},
+        "deal_id": deal["id"],
+    }
+    calls = [
+        ("post", f"/api/admin/deals/{deal['id']}/offer-kit/build", None),
+        (
+            "post",
+            f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/generate",
+            None,
+        ),
+        (
+            "post",
+            f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/approve",
+            {"status": "approved"},
+        ),
+        (
+            "post",
+            f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/field",
+            {"key": "price", "value": "650000"},
+        ),
+        (
+            "post",
+            f"/api/admin/deals/{deal['id']}/kit-doc/add",
+            {"templateId": "cps-residential"},
+        ),
+        ("get", f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential", None),
+        ("post", "/api/admin/offer-prep/generate", cps_body),
+        (
+            "post",
+            "/api/admin/offer-prep/form",
+            {"form": "pnc", "deal_id": deal["id"]},
+        ),
+        ("post", "/api/admin/offer-prep/package", cps_body),
+        (
+            "post",
+            f"/api/admin/deals/{deal['id']}/onboarding-doc",
+            {"form": "agency"},
+        ),
+        ("post", f"/api/admin/deals/{deal['id']}/onboarding-sign", None),
+    ]
+
+    for method, path, payload in calls:
+        response = client.request(method, path, json=payload)
+        assert response.status_code == 409, (path, response.text)
+        assert response.json()["detail"]["code"] == "local_reference_form_route_disabled"
+        assert "licensed provider" in response.json()["detail"]["message"]
+
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    assert "offerKit" not in stored["extraToggles"]
 
 
 def test_offer_kit_build_does_not_mark_missing_pdfs_ready(client):

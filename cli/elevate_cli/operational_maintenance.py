@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from elevate_constants import get_elevate_home
+from elevate_constants import exact_realtor_beta_active, get_elevate_home
 
 
 STATE_DIR = get_elevate_home() / "state" / "cron-health"
@@ -129,11 +129,16 @@ def main() -> int:
         stale_admin = _run_step(
             report,
             "mark_stale_action_runs",
-            # 15 min (was 180): a run 'running' that long with no result callback
-            # means its worker session died. mark_stale_action_runs re-queues it
-            # (up to its retry cap) so drain_queued below re-dispatches a fresh
-            # session — the run self-heals instead of sitting dead for hours.
-            lambda: mark_stale_action_runs(conn, max_running_minutes=15, actor="operational-maintenance"),
+            # Exact Realtor Beta recovers actual worker exits immediately in the
+            # scheduler. Its time-only fallback is intentionally conservative:
+            # Admin runs do not yet have a per-run activity lease, so a healthy
+            # browser/CMA/document task must not be duplicated after five minutes.
+            # Established channels retain the existing 15-minute behavior.
+            lambda: mark_stale_action_runs(
+                conn,
+                max_running_minutes=120 if exact_realtor_beta_active() else 15,
+                actor="operational-maintenance",
+            ),
         )
         if isinstance(stale_admin, list):
             requeued = sum(1 for r in stale_admin if isinstance(r, dict) and r.get("status") == "queued")

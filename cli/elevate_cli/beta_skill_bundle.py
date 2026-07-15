@@ -63,6 +63,10 @@ DEFAULT_PROVINCE_CODE_PATHS: Final[tuple[str, ...]] = (
     "elevate_cli/admin_deal_flow.py",
     "elevate_cli/data/province_guides.py",
     "elevate_cli/data/province_guide_memory.py",
+    "elevate_cli/data/beta_province_pack.py",
+    "elevate_cli/data/province_packs/bc_residential_resale/manifest.json",
+    "elevate_cli/data/province_packs/bc_residential_resale/guide.md",
+    "elevate_cli/data/province_packs/bc_residential_resale/forms.json",
 )
 
 DEFAULT_MAX_FILE_BYTES: Final[int] = 1 * 1024 * 1024

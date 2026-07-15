@@ -152,7 +152,7 @@ The realtor specifically wants paid-ad leads kept separate from Lofty CRM, Apple
      #!/usr/bin/env bash
      set -euo pipefail
      cd /Users/admin/Elevation
-     exec /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 \
+     exec /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B \
        /Users/admin/.elevate/tools/data/sources/paid-ads/artifacts/import_making_it_rain_gmail.py \
        --limit 50 \
        --lookback 30d
@@ -165,7 +165,7 @@ The realtor specifically wants paid-ad leads kept separate from Lofty CRM, Apple
 Run these checks after changes:
 
 ```bash
-/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -m py_compile \
+/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B -m py_compile \
   /Users/admin/.elevate/tools/data/sources/paid-ads/artifacts/import_making_it_rain_gmail.py
 ```
 
@@ -178,7 +178,7 @@ Run one import/check:
 Verify source status/counts:
 
 ```bash
-/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 - <<'PY'
+/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B - <<'PY'
 import json
 from pathlib import Path
 from elevate_cli.data import db_source_inbox_response
@@ -252,7 +252,7 @@ Keep the draft pending approval. Do not create this listing-specific draft from 
 - Distinguish verification levels before writing lead-specific language: raw Making It Rain notification emails may prove only program/order attribution; a saved `program_mappings.json` entry proves the program-to-listing mapping; only the live lead detail/dashboard can prove an individual lead viewed a specific property. If live Browser Use verification is blocked by Okta/login, report the blocker and avoid overstating individual behaviour in drafts.
 - When the user is actively working through wording/strategy, do not harden those draft experiments into this skill or importer logic unless they explicitly ask to save/update the skill. It is okay to edit the current pending draft rows as a working version, but keep reusable skill rules separate until approved.
 - Imported display names may initially fall back to email handles like `Randy55Kemp` or `chrisolsenmail`. Before creating client-facing drafts, use the Making It Rain lead table/contact page names when available, and sanitize greetings to a human first name or `there` rather than using ugly email handles.
-- If the user says only one Making It Rain program's leads are visible, run a full Gmail-backlog import rather than only the default cron window: `/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 /Users/admin/.elevate/tools/data/sources/paid-ads/artifacts/import_making_it_rain_gmail.py --limit 500 --lookback 6m` after a dry-run check. A dry run may show `found: 458` and `new_to_process: 0`; that still proves the full backlog is already present and the real run can still apply saved program mappings / migration refresh. This imports every paid-program notification found in Gmail into the Paid Ads source, then migrates to the operational DB.
+- If the user says only one Making It Rain program's leads are visible, run a full Gmail-backlog import rather than only the default cron window: `/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B /Users/admin/.elevate/tools/data/sources/paid-ads/artifacts/import_making_it_rain_gmail.py --limit 500 --lookback 6m` after a dry-run check. A dry run may show `found: 458` and `new_to_process: 0`; that still proves the full backlog is already present and the real run can still apply saved program mappings / migration refresh. This imports every paid-program notification found in Gmail into the Paid Ads source, then migrates to the operational DB.
 - For verification, prefer `elevate_cli.data.db_source_inbox_response(limit=5000)` over the legacy `build_source_inbox_response(limit=5000)`. Current app-bundle `SOURCE_CONNECTION_BLUEPRINTS` may not list `paid-ads`, so the legacy JSONL source list can show `paid_ads: 0` even though DB-primary `/leads/source` has the Paid Ads threads. Count `sourceId == 'paid-ads'` inside `db_source_inbox_response()['threads']` and confirm `conversations.source_id='paid-ads'` in Postgres. It is normal for `sources` metadata to omit a friendly Paid Ads connector label while the actual source inbox threads are present.
 - Do not use `leads_overview.pendingBySource` to verify Paid Ads source-inbox visibility. That overview reports outreach/send-queue pending approvals, so it can show only `apple-messages` or `crm` even when hundreds of `paid-ads` source inbox threads exist. Verify Paid Ads import with JSONL file counts, `conversations where source_id='paid-ads'`, `db_source_inbox_response()['threads']`, and explicit `send_queue` / `outreach_send_queue` zero-count checks for safety.
 - The importer's `status.json` `counts` can lag after `refresh_existing_rows_from_program_mappings()` creates additional pending listing drafts because `update_status()` may use the pre-refresh `result['counts']`. When reporting final counts, read the JSONL files directly and query DB conversations/send queues, do not rely only on `status.json`.

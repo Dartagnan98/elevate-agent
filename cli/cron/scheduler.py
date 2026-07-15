@@ -39,7 +39,7 @@ from typing import List, Optional
 # the module) fail with ModuleNotFoundError for elevate_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from elevate_constants import get_elevate_home
+from elevate_constants import exact_realtor_beta_active, get_elevate_home
 from elevate_cli._subprocess_compat import windows_hide_flags
 from elevate_cli.config import load_config, _expand_env_vars
 from elevate_cli.env_loader import load_elevate_dotenv
@@ -498,6 +498,58 @@ def _record_agent_handoff_delivery(
         msg = f"failed to deliver handoff rollup: {exc}"
         logger.error("Job '%s': %s", job.get("id", "?"), msg)
         return msg
+
+def _record_admin_action_worker_exit(
+    job: dict,
+    *,
+    success: bool,
+    error: str | None,
+) -> Optional[str]:
+    """Recover an exact-Beta Admin run when cron exits before its callback.
+
+    The authenticated result callback is the durable completion receipt. If the
+    matching run is still ``running`` at worker exit, immediately re-queue it
+    (or visibly fail after the retry cap) instead of forwarding an unsupported
+    success claim.
+    """
+    if not exact_realtor_beta_active():
+        return None
+    origin = job.get("origin")
+    if not isinstance(origin, dict) or origin.get("source") != "admin_hub":
+        return None
+    run_id = str(origin.get("run_id") or "").strip()
+    if not run_id:
+        return None
+    try:
+        from elevate_cli.data.connection import connect
+        from elevate_cli.data.dispatch import record_action_run_worker_exit
+
+        with connect() as conn:
+            run = record_action_run_worker_exit(
+                conn,
+                run_id,
+                cron_job_id=str(job.get("id") or ""),
+                success=success,
+                error=error,
+                actor="cron-scheduler",
+            )
+    except Exception as exc:
+        message = f"failed to verify Admin result callback: {exc}"
+        logger.error("Job '%s': %s", job.get("id", "?"), message)
+        return message
+
+    recovery = (run.get("payload") or {}).get("recovery") or {}
+    event = str(recovery.get("event") or "")
+    run_status = str(run.get("status") or "")
+    if event == "worker_exit_without_callback_requeued" and run_status == "queued":
+        return (
+            "Admin worker exited without the required result callback; "
+            f"retry {recovery.get('attempts')}/{recovery.get('maxRetries')} was queued."
+        )
+    if event == "worker_exit_without_callback_failed" and run_status == "failed":
+        return str(run.get("errorMessage") or "Admin worker exited without a result callback.")
+    return None
+
 
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
@@ -3040,6 +3092,20 @@ def tick(verbose: bool = True, adapters=None, loop=None, on_delivered=None) -> i
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
+                missing_admin_callback = _record_admin_action_worker_exit(
+                    job,
+                    success=success,
+                    error=error,
+                )
+                if missing_admin_callback:
+                    success = False
+                    error = missing_admin_callback
+                    cron_outcome = "error"
+                    # Never deliver the worker's unsupported completion prose.
+                    # The failure delivery below reports the queued retry or the
+                    # terminal callback failure instead.
+                    final_response = ""
+
                 # Deliver the final response to the origin/target chat.
                 # If the agent responded with [SILENT], skip delivery (but
                 # output is already saved above).  Failed jobs always deliver.
@@ -3098,19 +3164,25 @@ def tick(verbose: bool = True, adapters=None, loop=None, on_delivered=None) -> i
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
+                missing_admin_callback = _record_admin_action_worker_exit(
+                    job,
+                    success=False,
+                    error=str(e),
+                )
+                processing_error = missing_admin_callback or str(e)
                 delivery_error = _record_agent_handoff_delivery(
                     job,
                     success=False,
                     final_response="",
-                    error=str(e),
+                    error=processing_error,
                     cron_outcome="error",
                     adapters=adapters,
                     loop=loop,
                 )
                 mark_job_run(
-                    job["id"], False, str(e),
+                    job["id"], False, processing_error,
                     delivery_error=delivery_error,
-                    summary=str(e),
+                    summary=processing_error,
                     session_id=_cron_session_id,
                 )
                 return False

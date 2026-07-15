@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "packId": "bc-residential-resale-reference-v1",
+  "province": "BC",
+  "scope": "residential-resale",
+  "referenceOnly": true,
+  "currentVersionVerified": false,
+  "licensedBlankRequired": true,
+  "availability": "provider_required",
+  "guide": {
+    "path": "guide.md",
+    "sha256": "3807d17569797627e798cd99cc4ec2f68431b6e76af8743c9572765642799e09"
+  },
+  "catalog": {
+    "path": "forms.json",
+    "sha256": "7a154aaea1ae0118c0bc38aaf7a75fb833940eb70a871b436dead879da6792f8",
+    "formCount": 34
+  }
+}

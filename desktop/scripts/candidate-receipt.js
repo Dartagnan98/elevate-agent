@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const { StringDecoder } = require("node:string_decoder");
 const yaml = require("js-yaml");
 const { sanitizeFileName } = require("builder-util/out/filename");
@@ -31,6 +32,7 @@ const PRE_SIGN_EVIDENCE_SCHEMA_VERSION = 1;
 const PUBLIC_BASE_URL = "https://api.elevationrealestatehq.com/updates";
 const TRUSTED_APPLE_TEAM_ID = "G5TK395RYH";
 const SMOKE_EVIDENCE_SCHEMA_VERSION = 1;
+const REALTOR_BETA_GATE_EVIDENCE_SCHEMA_VERSION = 1;
 const REQUIRED_SMOKE_CHECK_IDS = [
   "candidate_binding",
   "app_version",
@@ -47,6 +49,26 @@ const REQUIRED_LIVE_AI_CHECK_IDS = [
   "session_persistence",
   "terminal_truth",
   "log_profile",
+];
+const REQUIRED_REALTOR_BETA_GATE_CHECK_IDS = [
+  "candidate_binding",
+  "beta_profile_coexistence",
+  "installed_runtime_import",
+  "tool_request_receipt_parity",
+  "bc_pack_baseline",
+  "bc_pack_missing_fail_closed",
+  "bc_pack_corrupt_fail_closed",
+  "bc_pack_decoy_fail_closed",
+  "bc_pack_stale_receipt_fail_closed",
+  "forms_proof_missing_fail_closed",
+  "forms_proof_fake_fail_closed",
+  "artifact_missing_fail_closed",
+  "artifact_wrong_kind_fail_closed",
+  "worker_no_callback_retry_exhaustion",
+  "session_restart_resume",
+  "rollback_target_metadata",
+  "rollback_local_rpo0",
+  "stable_feed_untouched",
 ];
 
 function sha256(value) {
@@ -314,7 +336,59 @@ function hashPortableTree(root, { mode = "default" } = {}) {
   return { sha256: hash.digest("hex"), file_count: fileCount, size: totalSize };
 }
 
+function declaredAsarSize(asarPath) {
+  const rawHeader = asar.getRawHeader(asarPath);
+  if (!Number.isSafeInteger(rawHeader.headerSize) || rawHeader.headerSize < 0) {
+    throw new Error(`[candidate] invalid ASAR header size: ${asarPath}`);
+  }
+  let packedEnd = 0n;
+  function walk(entry) {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`[candidate] invalid ASAR header entry: ${asarPath}`);
+    }
+    if (entry.files && typeof entry.files === "object") {
+      for (const child of Object.values(entry.files)) walk(child);
+      return;
+    }
+    if (!Object.hasOwn(entry, "size") || entry.unpacked === true) return;
+    if (!Number.isSafeInteger(entry.size) || entry.size < 0
+        || typeof entry.offset !== "string" || !/^\d+$/.test(entry.offset)) {
+      throw new Error(`[candidate] invalid packed ASAR file record: ${asarPath}`);
+    }
+    const end = BigInt(entry.offset) + BigInt(entry.size);
+    if (end > packedEnd) packedEnd = end;
+  }
+  walk(rawHeader.header);
+  return 8n + BigInt(rawHeader.headerSize) + packedEnd;
+}
+
+function assertCompleteAsar(asarPath) {
+  const expectedSize = declaredAsarSize(asarPath);
+  const actualSize = fs.statSync(asarPath, { bigint: true }).size;
+  if (actualSize !== expectedSize) {
+    const condition = actualSize < expectedSize ? "truncated" : "has trailing bytes";
+    throw new Error(
+      `[candidate] ASAR ${condition}: ${asarPath} `
+      + `(expected ${expectedSize} bytes, found ${actualSize})`,
+    );
+  }
+  return { expected_size: expectedSize, actual_size: actualSize };
+}
+
+async function waitForCompleteAsar(asarPath, outputStream) {
+  const expectedSize = declaredAsarSize(asarPath);
+  const actualSize = fs.statSync(asarPath, { bigint: true }).size;
+  if (actualSize === expectedSize) return assertCompleteAsar(asarPath);
+  if (actualSize > expectedSize || !outputStream || typeof outputStream.once !== "function") {
+    return assertCompleteAsar(asarPath);
+  }
+  if (!outputStream.writableFinished) await once(outputStream, "finish");
+  return assertCompleteAsar(asarPath);
+}
+
 function portableAsarDirectoryHash(asarPath, directory) {
+  assertCompleteAsar(asarPath);
+  asar.uncache(asarPath);
   const prefix = `${String(directory).replace(/^\/+|\/+$/g, "")}/`;
   const hash = crypto.createHash("sha256");
   let fileCount = 0;
@@ -556,6 +630,8 @@ function sourceInputs({ repoRoot = REPO, desktopRoot = DESKTOP } = {}) {
     "cli/uv.lock",
     "cli/web/package-lock.json",
     "cli/scripts/installed_runtime_smoke.py",
+    "cli/scripts/exact_candidate_realtor_beta_gate.py",
+    "cli/docs/realtor-beta-rollback-runbook.md",
   ];
   const files = Object.fromEntries(requiredFiles.map((relative) => {
     const absolute = path.join(repoRoot, relative);
@@ -882,6 +958,8 @@ function appRecord(
   const updatePath = path.join(resources, "app-update.yml");
   const update = yaml.load(fs.readFileSync(updatePath, "utf8")) || {};
   const asarPath = path.join(resources, "app.asar");
+  assertCompleteAsar(asarPath);
+  asar.uncache(asarPath);
   const packageMetadata = JSON.parse(asar.extractFile(asarPath, "package.json").toString("utf8"));
   const embeddedDesktopSrc = portableAsarDirectoryHash(asarPath, "src");
   const executable = path.join(appPath, "Contents", "MacOS", plist.CFBundleExecutable);
@@ -1344,10 +1422,19 @@ function createFinalReceipt({
     rollback_target: publicFeeds[release.channel] || null,
     production_feed_untouched: stableUntouched,
     smoke_entrypoint: fileRecord(path.join(repoRoot, "cli", "scripts", "installed_runtime_smoke.py"), repoRoot),
+    realtor_beta_gate_entrypoint: release.channel === "beta"
+      ? fileRecord(path.join(repoRoot, "cli", "scripts", "exact_candidate_realtor_beta_gate.py"), repoRoot)
+      : null,
+    realtor_beta_rollback_runbook: release.channel === "beta"
+      ? fileRecord(path.join(repoRoot, "cli", "docs", "realtor-beta-rollback-runbook.md"), repoRoot)
+      : null,
     required_evidence: {
       x64_smoke: "desktop/dist/evidence/smoke-x64.json",
       arm64_smoke: "desktop/dist/evidence/smoke-arm64.json",
       live_ai: "desktop/dist/evidence/live-ai.json",
+      ...(release.channel === "beta"
+        ? { realtor_beta_gate: "desktop/dist/evidence/realtor-beta-gate.json" }
+        : {}),
     },
   };
   return writeImmutableReceipt(outputPath, receipt, "candidate_id");
@@ -1388,6 +1475,23 @@ function verifyCandidateReceipt({
     if (webBuild.web_build_id !== receipt.web_build?.web_build_id) {
       throw new Error("[candidate] web build receipt changed after finalization");
     }
+    assertFileRecord(
+      path.join(repoRoot, receipt.smoke_entrypoint?.path || ""),
+      receipt.smoke_entrypoint,
+      "installed runtime smoke entrypoint",
+    );
+    if (receipt.release.channel === "beta") {
+      assertFileRecord(
+        path.join(repoRoot, receipt.realtor_beta_gate_entrypoint?.path || ""),
+        receipt.realtor_beta_gate_entrypoint,
+        "Realtor Beta gate entrypoint",
+      );
+      assertFileRecord(
+        path.join(repoRoot, receipt.realtor_beta_rollback_runbook?.path || ""),
+        receipt.realtor_beta_rollback_runbook,
+        "Realtor Beta rollback runbook",
+      );
+    }
     for (const arch of ARCHITECTURES) {
       validatePreSignEvidence(receipt.pre_sign_contracts?.[arch], {
         architecture: arch,
@@ -1427,13 +1531,28 @@ function verifyCandidateReceipt({
   if (requireEvidence) {
     const requiredKeys = requireEvidence === "static"
       ? ["x64_smoke", "arm64_smoke"]
-      : ["x64_smoke", "arm64_smoke", "live_ai"];
+      : [
+        "x64_smoke",
+        "arm64_smoke",
+        "live_ai",
+        ...(receipt.release.channel === "beta" ? ["realtor_beta_gate"] : []),
+      ];
     for (const key of requiredKeys) {
       const relative = receipt.required_evidence?.[key];
       if (!relative) throw new Error(`[candidate] final receipt is missing required evidence pointer: ${key}`);
       const evidencePath = path.join(repoRoot, relative);
       if (!fs.existsSync(evidencePath)) throw new Error(`[candidate] missing required evidence: ${key}`);
       const evidence = readJson(evidencePath);
+      if (key === "realtor_beta_gate") {
+        validateRealtorBetaGateEvidence(
+          evidence,
+          receipt,
+          normalizeArchitecture(hostArchitecture),
+          receiptPath,
+          key,
+        );
+        continue;
+      }
       const live = key === "live_ai";
       const expectedArch = live ? normalizeArchitecture(hostArchitecture) : (key.startsWith("x64") ? "x64" : "arm64");
       validateSmokeEvidence(evidence, receipt, expectedArch, receiptPath, key, {
@@ -1568,6 +1687,104 @@ function validateSmokeEvidence(
   return true;
 }
 
+function validateRealtorBetaGateEvidence(
+  evidence,
+  receipt,
+  architecture,
+  receiptPath,
+  label = "realtor_beta_gate",
+) {
+  const release = receipt.release || {};
+  const profile = release.profile || {};
+  const rollback = evidence.rollback || {};
+  const expectedRollback = receipt.rollback_target || {};
+  const stable = receipt.public_feeds_at_finalize?.latest || {};
+  const candidateFeed = receipt.artifacts?.[release.feed_name] || {};
+  if (release.channel !== "beta"
+      || profile.appBundleName !== "Elevate Beta.app"
+      || receipt.production_feed_untouched !== true
+      || !ARCHITECTURES.includes(architecture)
+      || !receipt.apps?.[architecture]) {
+    throw new Error(`[candidate] invalid Realtor Beta gate context: ${label}`);
+  }
+  if (evidence.evidence_schema_version !== REALTOR_BETA_GATE_EVIDENCE_SCHEMA_VERSION
+      || evidence.kind !== "elevate-realtor-beta-prepublish-gate"
+      || evidence.ok !== true
+      || !Array.isArray(evidence.failures) || evidence.failures.length !== 0
+      || evidence.candidate_id !== receipt.candidate_id
+      || evidence.source_receipt_id !== receipt.source_receipt_id
+      || evidence.candidate_architecture !== architecture
+      || evidence.candidate_receipt_sha256 !== sha256File(receiptPath)
+      || evidence.candidate_app_version !== release.version
+      || evidence.candidate_app_bundle_manifest_sha256 !== receipt.apps[architecture].bundle_manifest.sha256
+      || evidence.release_channel !== "beta"
+      || evidence.release_app_bundle_name !== profile.appBundleName
+      || evidence.installed_app_name !== profile.appBundleName) {
+    throw new Error(`[candidate] invalid required Realtor Beta gate evidence: ${label}`);
+  }
+  if (!Array.isArray(evidence.check_ids)
+      || evidence.check_ids.length !== new Set(evidence.check_ids).size
+      || REQUIRED_REALTOR_BETA_GATE_CHECK_IDS.some((check) => !evidence.check_ids.includes(check))) {
+    throw new Error(`[candidate] Realtor Beta gate evidence is missing required checks: ${label}`);
+  }
+  if (evidence.test_profile?.name !== "exact-installed-realtor-beta-prepublish-v1"
+      || evidence.test_profile.isolated_home !== true
+      || evidence.test_profile.installed_profile_mutation !== false
+      || evidence.test_profile.remote_mutation !== false
+      || evidence.test_profile.public_feed_mutation !== false
+      || evidence.profile?.identities_distinct !== true
+      || evidence.profile?.production_feed_untouched !== true
+      || !Number.isInteger(evidence.profile?.preferred_port)
+      || evidence.profile.preferred_port !== Number(profile.preferredPort)) {
+    throw new Error(`[candidate] Realtor Beta gate used the wrong isolation profile: ${label}`);
+  }
+  if (evidence.installed_runtime?.module_count < 7
+      || evidence.installed_runtime?.python_major !== 3
+      || evidence.tool_parity?.request_count !== evidence.tool_parity?.receipt_count
+      || evidence.tool_parity?.request_count < 2
+      || evidence.pack?.form_count !== 34
+      || !/^[a-f0-9]{64}$/.test(evidence.pack?.pack_sha256 || "")
+      || evidence.action_faults?.forms_missing_available !== false
+      || evidence.action_faults?.forms_fake_available !== false
+      || evidence.action_faults?.artifact_rejections !== 2
+      || evidence.action_faults?.worker_retry_count !== 1
+      || evidence.action_faults?.worker_terminal_status !== "failed"
+      || evidence.session_resume?.session_id_preserved !== true
+      || evidence.session_resume?.message_count < 1
+      || evidence.session_resume?.resume_pending_cleared !== true) {
+    throw new Error(`[candidate] Realtor Beta installed fault evidence is invalid: ${label}`);
+  }
+  if (rollback.mode !== "local-fixture-dry-run"
+      || rollback.target_version !== expectedRollback.version
+      || rollback.target_feed_sha256 !== expectedRollback.sha256
+      || rollback.beta_after_sha256 !== expectedRollback.sha256
+      || rollback.candidate_feed_sha256 !== candidateFeed.sha256
+      || rollback.stable_before_sha256 !== stable.sha256
+      || rollback.stable_after_sha256 !== stable.sha256
+      || rollback.stable_expected_sha256 !== stable.sha256
+      || rollback.stable_alias_count !== 2
+      || rollback.beta_alias_count !== 4
+      || rollback.rollback_dmg_count !== 2
+      || rollback.artifact_bytes_mode !== "synthetic-local-fixture"
+      || rollback.remote_mutation !== false
+      || rollback.production_mutated !== false
+      || rollback.profile_data_mutations !== 0
+      || rollback.rpo_seconds !== 0
+      || rollback.procedure_id !== "realtor-beta-feed-and-alias-rollback-v1") {
+    throw new Error(`[candidate] Realtor Beta rollback drill evidence is invalid: ${label}`);
+  }
+  const started = Date.parse(evidence.started_at || "");
+  const completed = Date.parse(evidence.completed_at || "");
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started
+      || !Number.isFinite(evidence.duration_ms) || evidence.duration_ms < 0) {
+    throw new Error(`[candidate] Realtor Beta gate evidence has invalid timing: ${label}`);
+  }
+  if (evidence.evidence_integrity_sha256 !== evidenceIntegrity(evidence)) {
+    throw new Error(`[candidate] Realtor Beta gate evidence integrity mismatch: ${label}`);
+  }
+  return true;
+}
+
 function syncPath(filePath) {
   const fd = fs.openSync(filePath, "r");
   try {
@@ -1608,11 +1825,17 @@ function archiveSuccessfulRelease({
   if (!candidate?.candidate_id || receiptId(candidate, "candidate_id") !== candidate.candidate_id) {
     throw new Error("[candidate] cannot archive an invalid final candidate");
   }
+  const archiveEvidenceKeys = [
+    "x64_smoke",
+    "arm64_smoke",
+    "live_ai",
+    ...(candidate.release.channel === "beta" ? ["realtor_beta_gate"] : []),
+  ];
   const active = [
     ["candidate-source.json", sourceReceiptPath],
     ["candidate-web.json", webBuildReceiptPath],
     ["candidate-receipt.json", candidateReceiptPath],
-    ...["x64_smoke", "arm64_smoke", "live_ai"].map((key) => {
+    ...archiveEvidenceKeys.map((key) => {
       const relative = candidate.required_evidence?.[key];
       if (!relative) throw new Error(`[candidate] missing archive evidence pointer: ${key}`);
       return [`evidence/${path.basename(relative)}`, path.join(repoRoot, relative)];
@@ -1729,13 +1952,16 @@ module.exports = {
   CANDIDATE_RECEIPT_SCHEMA_VERSION,
   CANDIDATE_RECEIPT,
   PRE_SIGN_EVIDENCE_SCHEMA_VERSION,
+  REALTOR_BETA_GATE_EVIDENCE_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
+  REQUIRED_REALTOR_BETA_GATE_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
   SOURCE_RECEIPT_SCHEMA_VERSION,
   SOURCE_RECEIPT,
   SMOKE_EVIDENCE_SCHEMA_VERSION,
   TRUSTED_APPLE_TEAM_ID,
   WEB_BUILD_RECEIPT,
+  assertCompleteAsar,
   assertBundleManifest,
   assertCanonicalPackagedPermissions,
   assertEmbeddedWebMatchesBuild,
@@ -1768,6 +1994,7 @@ module.exports = {
   sha256File,
   verifyAppAgainstReceipt,
   validateSmokeEvidence,
+  validateRealtorBetaGateEvidence,
   validateZipArchiveEntries,
   validateZipEntries,
   validateZipEntryListing,
@@ -1777,6 +2004,7 @@ module.exports = {
   verifyWebBuildReceipt,
   validateFeed,
   verifyReleaseArchive,
+  waitForCompleteAsar,
   writeAtomicJson,
   writeImmutableReceipt,
 };

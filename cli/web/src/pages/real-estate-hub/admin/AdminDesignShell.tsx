@@ -9,7 +9,10 @@ import { adminDealToDeal, adminDealToBuyerDeal } from "./admin-mappers";
 import { computeAdminKpis } from "./compute-admin-kpis";
 import { computeAdminEvents } from "./compute-admin-events";
 import { useAdminEvents } from "./use-admin-events";
-import { resolveAdminSetupShellState } from "./admin-onboarding-state";
+import {
+  adminFormsProviderCardModel,
+  resolveAdminSetupShellState,
+} from "./admin-onboarding-state";
 import {
   AdminSetupLaunch,
   AdminOnboardingCoach,
@@ -57,6 +60,10 @@ export function AdminDesignShell() {
     setup: setupSnapshot,
     forceOnboarding,
   });
+  const formsProviderCard = useMemo(
+    () => adminFormsProviderCardModel(setupSnapshot),
+    [setupSnapshot],
+  );
 
   const { listingDeals, buyerDeals } = useMemo(() => {
     const listing = [];
@@ -157,17 +164,38 @@ export function AdminDesignShell() {
           )}
         </div>
       ) : (
-        <AdminBoard
-          deals={listingDeals.length > 0 ? listingDeals : undefined}
-          buyerDeals={buyerDeals.length > 0 ? buyerDeals : undefined}
-          kpis={kpis}
-          events={events}
-          loading={loading}
-          error={visibleError}
-          onRefresh={() => handleRefresh()}
-          onMoveDeal={moveDeal}
-          onReRunOnboarding={() => setForceOnboarding(true)}
-        />
+        <>
+          {formsProviderCard.visible && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="m-4 mb-0 flex flex-col gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground sm:flex-row sm:items-center sm:justify-between"
+            >
+              <span className="flex min-w-0 items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                <span>
+                  <strong>Admin is ready. Document drafting is paused.</strong>{" "}
+                  {formsProviderCard.provider ? `${formsProviderCard.provider} is saved, but ` : "Your forms provider is not yet configured and "}
+                  live forms access is not verified. MLC and CPS tasks will wait for manual completion instead of claiming success.
+                </span>
+              </span>
+              <Button variant="outline" size="sm" onClick={() => setForceOnboarding(true)}>
+                Review forms access
+              </Button>
+            </div>
+          )}
+          <AdminBoard
+            deals={listingDeals.length > 0 ? listingDeals : undefined}
+            buyerDeals={buyerDeals.length > 0 ? buyerDeals : undefined}
+            kpis={kpis}
+            events={events}
+            loading={loading}
+            error={visibleError}
+            onRefresh={() => handleRefresh()}
+            onMoveDeal={moveDeal}
+            onReRunOnboarding={() => setForceOnboarding(true)}
+          />
+        </>
       )}
     </div>
   );

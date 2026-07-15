@@ -12,7 +12,7 @@ metadata:
 
 Use this skill whenever the realtor asks about local approved forms, stale-form risk, BCREA/BCFSA/board form changes, or whether a local form can be used instead of WEBForms/TransactionDesk.
 
-Operational preference for this pattern: **local approved forms are the source of truth**, not WEBForms/TransactionDesk, when WEBForms two-step authentication repeatedly blocks workflows. The compliance guard is not "use WEBForms"; the guard is "verify and maintain the local approved-forms library against official update notices."
+Stable operational preference for this pattern: **local approved forms are the source of truth** when the register, clean template, tested mapping, and official update evidence all agree. Exact Realtor Beta is stricter: the bundled BC catalog and mutable local register are reference-only, current versions remain unverified, and only a licensed blank acquired through the live-verified forms provider or brokerage library can authorize document drafting. Provider MFA is a `waiting_human` blocker, not permission to promote a local or bundled reference into an approved form.
 
 ## Source Priority
 
@@ -20,7 +20,7 @@ Operational preference for this pattern: **local approved forms are the source o
 2. BCREA form launch/release notices in Gmail and BCREA website pages.
 3. BCFSA advisories, bulletins, Knowledge Base updates, and clause/disclosure guidance.
 4. Association of Interior REALTORS notices for local/board rules, InterLink/WEBForms access, association forms, and MLS rules.
-5. WEBForms/TransactionDesk only as an optional cross-check when accessible, not as the day-to-day source of truth.
+5. Stable may use WEBForms/TransactionDesk as an optional cross-check. Exact Realtor Beta requires live provider or brokerage-library acquisition of the licensed blank before drafting and must retain the provider/version evidence with the artifact.
 
 ## Existing Watchers
 

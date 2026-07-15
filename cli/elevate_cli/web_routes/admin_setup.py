@@ -675,6 +675,9 @@ def create_admin_setup_router(
                 province=province,
                 package_key=explicit_package,
             )
+            from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+            enforce_exact_beta_province(province)
             real_estate.update(
                 {
                     "country": country,
@@ -686,7 +689,12 @@ def create_admin_setup_router(
             config["real_estate"] = real_estate
             save_config(config)
             try:
-                from elevate_cli.data import connect, update_admin_setup
+                from elevate_cli.data import (
+                    connect,
+                    province_guide_summary,
+                    sync_admin_setup_runtime,
+                    update_admin_setup,
+                )
 
                 with connect() as conn:
                     update_admin_setup(
@@ -694,6 +702,14 @@ def create_admin_setup_router(
                         profile={"country": country, "province": province, "market": market},
                         actor="admin:jurisdiction",
                     )
+                    from elevate_constants import exact_realtor_beta_active
+
+                    if exact_realtor_beta_active() and province:
+                        sync_admin_setup_runtime(
+                            conn,
+                            province_guide=province_guide_summary(conn, province),
+                            actor="admin:jurisdiction",
+                        )
             except Exception:
                 _log.exception("failed to sync Admin setup jurisdiction profile")
                 raise
@@ -722,7 +738,16 @@ def create_admin_setup_router(
     def put_admin_setup_endpoint(body: _AdminSetupUpdateBody):
         """Update Admin setup profile/items while the launch gate is open."""
         try:
-            from elevate_cli.data import connect, update_admin_setup
+            from elevate_cli.data import (
+                connect,
+                province_guide_summary,
+                sync_admin_setup_runtime,
+                update_admin_setup,
+            )
+            from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+            if body.profile and "province" in body.profile:
+                enforce_exact_beta_province(body.profile.get("province"))
 
             _mirror_admin_setup_portal_env(body.items, log=_log)
             with connect() as conn:
@@ -732,6 +757,15 @@ def create_admin_setup_router(
                     items=[item.dict() for item in body.items],
                     actor=web_actor,
                 )
+                from elevate_constants import exact_realtor_beta_active
+
+                saved_province = str((setup.get("profile") or {}).get("province") or "").upper()
+                if exact_realtor_beta_active() and saved_province:
+                    setup = sync_admin_setup_runtime(
+                        conn,
+                        province_guide=province_guide_summary(conn, saved_province),
+                        actor=web_actor,
+                    )
             if body.profile and any(key in body.profile for key in ("country", "province", "market", "packageKey", "package_key")):
                 from elevate_cli.admin_deal_flow import package_key_from_jurisdiction
 

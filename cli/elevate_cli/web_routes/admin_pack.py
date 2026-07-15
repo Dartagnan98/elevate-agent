@@ -92,12 +92,23 @@ def create_admin_pack_router(
         try:
             from elevate_cli.data import connect, province_coverage, province_guide_summary
             from elevate_cli.data.province_guides import normalize_province_code
+            from elevate_constants import exact_realtor_beta_active
 
             with connect() as conn:
                 requested_province = normalize_province_code(province) if province and province.strip() else None
+                if exact_realtor_beta_active():
+                    from elevate_cli.data import import_exp_agent_centre
+                    from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+                    enforce_exact_beta_province(requested_province)
+                    import_exp_agent_centre(conn, province=requested_province)
                 if requested_province:
                     return province_guide_summary(conn, requested_province)
-                return {"items": province_coverage(conn)}
+                return {
+                    "items": province_coverage(conn),
+                    "realtorBeta": exact_realtor_beta_active(),
+                    "supportedProvinces": ["BC"] if exact_realtor_beta_active() else [],
+                }
         except HTTPException:
             raise
         except ValueError as exc:

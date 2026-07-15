@@ -458,7 +458,6 @@ def _print_setup_summary(config: dict, elevate_home):
             tool_status.append(("Text-to-Speech (NeuTTS — not installed)", False, "run 'elevate setup tts'"))
     elif tts_provider == "kittentts":
         try:
-            import importlib.util
             kittentts_ok = importlib.util.find_spec("kittentts") is not None
         except Exception:
             kittentts_ok = False
@@ -1153,7 +1152,6 @@ def _setup_tts_provider(config: dict):
     elif selected == "kittentts":
         # Check if already installed
         try:
-            import importlib.util
             already_installed = importlib.util.find_spec("kittentts") is not None
         except Exception:
             already_installed = False
@@ -2088,7 +2086,13 @@ def setup_admin(config: dict, quick: bool = False):
     print()
 
     coverage = {str(row.get("province")): row for row in coverage_rows if isinstance(row, dict)}
-    province_choices = list(PROVINCE_LABELS.items())
+    from elevate_constants import exact_realtor_beta_active
+
+    province_choices = (
+        [("BC", PROVINCE_LABELS["BC"])]
+        if exact_realtor_beta_active()
+        else list(PROVINCE_LABELS.items())
+    )
     profile = snapshot.get("profile") or {}
     province_labels = [
         _province_choice_label(code, label, coverage) for code, label in province_choices

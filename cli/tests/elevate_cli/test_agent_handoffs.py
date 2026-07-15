@@ -1975,7 +1975,8 @@ def test_agent_worker_tolerates_bad_numeric_config():
     assert status["limits"] == {
         "handoffs": 25,
         "adminRuns": 25,
-        "staleRunningMinutes": 120,
+        "staleHandoffRunningMinutes": 120,
+        "staleAdminRunningMinutes": 120,
     }
 
 

@@ -38,6 +38,11 @@ PROVINCE_DERIVED_SETUP_KEYS = (
     "forms_provider",
     "regional_memory",
 )
+_BETA_FORMS_PROVIDER_UNAVAILABLE_REASON = "live_forms_provider_not_verified"
+_BETA_FORMS_PROVIDER_UNAVAILABLE_MESSAGE = (
+    "Live forms-provider access is not verified in this Beta. MLC and CPS document "
+    "creation pauses for completion in the realtor's licensed forms provider."
+)
 
 PROVINCE_TERMINOLOGY: dict[str, dict[str, str]] = {
     "BC": {
@@ -386,6 +391,33 @@ def _clean_key(value: Any) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+def _provider_identity(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def forms_provider_capability(
+    conn: sqlite3.Connection | None = None,
+    *,
+    item: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the runtime truth for licensed forms-provider document access."""
+    from elevate_constants import exact_realtor_beta_active
+
+    if not exact_realtor_beta_active():
+        return {"available": True, "reason": None, "message": None}
+    # Exact Realtor Beta has no server-owned provider probe yet. Admin Setup's
+    # value_json is operator-writable, so no receipt stored there may unlock
+    # licensed form generation. Keep the capability unavailable until a
+    # durable private proof store exists; manual reviewed PDFs are the safe
+    # completion path in this release.
+    _ = conn, item
+    return {
+        "available": False,
+        "reason": _BETA_FORMS_PROVIDER_UNAVAILABLE_REASON,
+        "message": _BETA_FORMS_PROVIDER_UNAVAILABLE_MESSAGE,
+    }
+
+
 def _env_value(env_values: Mapping[str, Any] | None, *keys: str) -> str | None:
     if not env_values:
         return None
@@ -707,7 +739,7 @@ def build_admin_province_playbook(
 
     Combines the realtor's saved profile + provider stack with the chosen
     province's regulator, contract names, condition vocabulary, and the
-    forms/checklists imported into SQLite from the eXp Agent Centre scrape.
+    verified province-pack forms and reference material imported into SQLite.
     This is the prompt the Admin agent loads as its province-aware source
     of truth.
     """
@@ -754,7 +786,7 @@ def build_admin_province_playbook(
     )
     lines.append("")
 
-    lines.append(f"## Operator profile")
+    lines.append("## Operator profile")
     lines.append(f"- Realtor: {realtor_name}")
     lines.append(f"- Brokerage: {brokerage}")
     lines.append(f"- Province: {province_label} ({province_code})")
@@ -796,16 +828,24 @@ def build_admin_province_playbook(
 
     if isinstance(province_memory, Mapping):
         coverage = province_memory.get("coverage") if isinstance(province_memory.get("coverage"), Mapping) else {}
-        lines.append("## Province forms + reference material (imported from eXp Agent Centre)")
+        lines.append("## Province forms + reference material (verified local pack)")
         ref_pages = int(coverage.get("referencePages") or 0)
         checklists = int(coverage.get("checklists") or 0)
         forms = int(coverage.get("forms") or 0)
+        reference_only = bool(coverage.get("referenceOnly"))
         lines.append(
-            f"- Coverage: {ref_pages} reference pages, {checklists} checklists, {forms} forms."
+            f"- Coverage: {ref_pages} reference pages, {checklists} checklists, "
+            f"{forms} {'form references' if reference_only else 'forms'}."
         )
-        lines.append(
-            "- Full corpus lives in SQLite `province_guides`; pull deeper excerpts on demand."
-        )
+        if reference_only:
+            lines.append(
+                "- Reference-only catalog: current versions are unverified and every licensed blank "
+                "must come from the configured forms provider. The pack contains no form bodies or fill maps."
+            )
+        else:
+            lines.append(
+                "- Full corpus lives in SQLite `province_guides`; pull deeper excerpts on demand."
+            )
         lines.append("")
         form_rows = province_memory.get("forms") if isinstance(province_memory.get("forms"), list) else []
         if form_rows:
@@ -817,9 +857,14 @@ def build_admin_province_playbook(
                 name = _redact_memory_text(row.get("name")) or "(unnamed form)"
                 category = _redact_memory_text(row.get("category"))
                 suffix = f" — {category}" if category else ""
-                lines.append(f"- **{code}**: {name}{suffix}")
+                availability = _redact_memory_text(row.get("availability"))
+                policy = " — provider required; reference only" if availability == "provider_required" else ""
+                lines.append(f"- **{code}**: {name}{suffix}{policy}")
             if len(form_rows) > 20:
-                lines.append(f"- (+{len(form_rows) - 20} more forms in SQLite)")
+                lines.append(
+                    f"- (+{len(form_rows) - 20} more "
+                    f"{'form references' if reference_only else 'forms'} in SQLite)"
+                )
             lines.append("")
         checklist_rows = province_memory.get("checklists") if isinstance(province_memory.get("checklists"), list) else []
         if checklist_rows:
@@ -1042,7 +1087,34 @@ def get_admin_setup(conn: sqlite3.Connection) -> dict[str, Any]:
     item_rows = conn.execute(
         "SELECT * FROM admin_setup_items ORDER BY sort_order ASC, key ASC"
     ).fetchall()
-    snapshot = _snapshot(_row_to_profile(profile_row), [_row_to_item(row) for row in item_rows])
+    profile = _row_to_profile(profile_row)
+    items = [_row_to_item(row) for row in item_rows]
+    pack_readiness: dict[str, Any] | None = None
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active() and str(profile.get("province") or "").upper() == "BC":
+        from elevate_cli.data.beta_province_pack import exact_beta_bc_pack_readiness
+
+        pack_readiness = exact_beta_bc_pack_readiness(conn)
+        for item in items:
+            if item.get("key") != "regional_memory":
+                continue
+            value = item.get("value") if isinstance(item.get("value"), Mapping) else {}
+            item["value"] = {**value, "provincePack": pack_readiness}
+            item["provider"] = "BC"
+            item["status"] = "configured" if pack_readiness.get("ready") else "missing"
+            break
+    snapshot = _snapshot(profile, items)
+    if pack_readiness is not None:
+        snapshot["provincePack"] = pack_readiness
+    if exact_realtor_beta_active():
+        forms_item = next(
+            (item for item in items if item.get("key") == "forms_provider"),
+            None,
+        )
+        snapshot["capabilities"] = {
+            "formsProvider": forms_provider_capability(item=forms_item),
+        }
     memory_path = _admin_setup_memory_path()
     snapshot["memory"] = {
         "path": str(memory_path),
@@ -1363,12 +1435,27 @@ def sync_admin_setup_runtime(
 
     forms_connector = connectors.get("forms-signing")
     if _connector_configured(forms_connector):
+        provider_label = str(
+            forms_connector.get("label")
+            or profile.get("formsProvider")
+            or "Forms"
+        )
         mark(
             "forms_provider",
             status="configured",
-            provider=str(forms_connector.get("label") or profile.get("formsProvider") or "Forms"),
+            provider=provider_label,
             signals=["Forms/signing source connector configured"],
-            details={"sourceId": "forms-signing", "state": forms_connector.get("state")},
+            details={
+                "sourceId": "forms-signing",
+                "state": forms_connector.get("state"),
+                "connected": forms_connector.get("connected") is True,
+                # This catalog connector is an unwired setup scaffold. Its
+                # status receipt is never provider-side proof that licensed
+                # MLC/CPS templates were found and can be created.
+                "providerProof": False,
+                "providerIdentity": _provider_identity(provider_label),
+                "lastCheckedAt": forms_connector.get("lastCheckedAt"),
+            },
         )
         mark(
             "signing_provider",
@@ -1471,7 +1558,43 @@ def sync_admin_setup_runtime(
     guide_counts = _guide_counts(province_guide)
     province = str(profile.get("province") or "").upper()
     guide_memory_result: dict[str, Any] | None = None
-    if province and sum(guide_counts.values()) > 0:
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active() and province:
+        from elevate_cli.data.beta_province_pack import (
+            activate_exact_beta_bc_pack,
+            enforce_exact_beta_province,
+            exact_beta_bc_pack_readiness,
+        )
+
+        enforce_exact_beta_province(province)
+        activation = exact_beta_bc_pack_readiness(conn)
+        if not activation.get("ready"):
+            activation = activate_exact_beta_bc_pack(conn)
+        if not activation.get("ready"):
+            raise RuntimeError(activation.get("reason") or "BC province pack activation failed")
+        mark(
+            "regional_memory",
+            status="configured",
+            provider=province,
+            signals=[
+                "Signed BC reference pack verified in SQLite",
+                "Province pack verified through document_search",
+            ],
+            details={
+                "province": province,
+                "packId": activation.get("packId"),
+                "packSha256": activation.get("packSha256"),
+                "forms": activation.get("forms"),
+                "memoryDocuments": activation.get("memoryDocuments"),
+                "availability": activation.get("availability"),
+                "referenceOnly": activation.get("referenceOnly"),
+                "currentVersionVerified": activation.get("currentVersionVerified"),
+                "licensedBlankRequired": activation.get("licensedBlankRequired"),
+            },
+        )
+        guide_memory_result = activation.get("memory")
+    elif province and sum(guide_counts.values()) > 0:
         mark(
             "regional_memory",
             status="configured",
@@ -1479,9 +1602,6 @@ def sync_admin_setup_runtime(
             signals=["Province guide imported into SQLite"],
             details={"province": province, **guide_counts},
         )
-        # Make the full province guide corpus searchable on demand: ingest it
-        # into the holographic memory store so the agent can document_search /
-        # recall it, not just read the compact excerpts injected into prompts.
         try:
             from elevate_cli.data.province_guide_memory import (
                 sync_province_guide_to_memory,

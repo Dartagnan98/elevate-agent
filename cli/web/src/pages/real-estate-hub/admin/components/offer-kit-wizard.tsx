@@ -102,6 +102,23 @@ export default function OfferKitWizard({
   const collapsed = manualCollapse !== null ? manualCollapse : (currentStage ?? 0) !== 1;
   const setCollapsed = setManualCollapse;
   const [kitError, setKitError] = useState("");
+  const [offerKitPolicy, setOfferKitPolicy] = useState<"checking" | "beta" | "stable" | "unavailable">("checking");
+
+  // Exact Realtor Beta exposes a forms-provider capability in Admin Setup.
+  // Until a provider-native CPS workflow exists, never expose the legacy local
+  // template generator in that profile. Stable keeps its existing behavior.
+  useEffect(() => {
+    let active = true;
+    api.getAdminSetup()
+      .then((setup) => {
+        if (!active) return;
+        setOfferKitPolicy(setup.capabilities?.formsProvider === undefined ? "stable" : "beta");
+      })
+      .catch(() => {
+        if (active) setOfferKitPolicy("unavailable");
+      });
+    return () => { active = false; };
+  }, []);
 
   // ── clause selection (Step 3) ──
   const allClauses: AnyObj[] = (clauseLibrary.clauses as AnyObj[]) || [];
@@ -610,7 +627,7 @@ export default function OfferKitWizard({
   const kitBtn: React.CSSProperties = { fontSize: 12, padding: "5px 13px", borderRadius: 7, border: `1px solid #d4d8de`, background: "#fff", color: INK, cursor: "pointer", fontWeight: 600 };
   const kitInput: React.CSSProperties = { width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 9px", borderRadius: 6, border: `1px solid #d4d8de`, color: INK, fontFamily: "inherit" };
   const readyCount = builtDocs.filter((d) => d.ready).length;
-  const Step4 = (
+  const StableStep4 = (
     <div style={panel}>
       <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Documents in the kit</div>
       <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 14px" }}>
@@ -715,6 +732,27 @@ export default function OfferKitWizard({
     </div>
   );
 
+  const Step4 = offerKitPolicy === "stable" ? StableStep4 : (
+    <div style={panel}>
+      <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Licensed-provider handoff</div>
+      <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 14px" }}>
+        Your property, terms, and subject-clause selections are saved on the deal.
+      </div>
+      <div role="status" aria-live="polite" style={{ background: "#fff6ed", border: "1px solid #edc9ad", borderRadius: 10, padding: "14px 16px" }}>
+        <div style={{ fontWeight: 700, color: "#7a3f20", fontSize: 13.5 }}>
+          {offerKitPolicy === "beta" ? "CPS creation is paused in this Beta" : "Document policy could not be verified"}
+        </div>
+        <div style={{ fontSize: 12.5, color: "#7a5039", marginTop: 4 }}>
+          {offerKitPolicy === "beta"
+            ? "Elevate will not generate a CPS from local templates. Prepare the current contract in your licensed forms provider, review the PDF, and attach it to the waiting CPS task."
+            : offerKitPolicy === "checking"
+              ? "Elevate is checking the release and forms-provider policy. Document generation stays paused until that check completes."
+              : "Elevate could not confirm whether local document generation is allowed. Refresh the deal before continuing; no document was built or sent."}
+        </div>
+      </div>
+    </div>
+  );
+
   const Placeholder = (
     <div style={{ ...panel, color: MUTED, fontSize: 14 }}>This step lands next.</div>
   );
@@ -737,9 +775,23 @@ export default function OfferKitWizard({
           {step > 1 ? (
             <button type="button" onClick={() => setStep((s) => s - 1)} style={{ ...navBtn, background: "#fff", color: INK, border: `1px solid ${BORDER}` }}>← Back</button>
           ) : <span />}
-          <button type="button" disabled={building} onClick={() => { if (step === 4) buildKit(); else setStep((s) => Math.min(4, s + 1)); }} style={{ ...navBtn, background: step === 4 ? GREEN : NAVY, color: "#fff", opacity: building ? 0.7 : 1 }}>
-            {step === 1 ? "Continue to Terms →" : step === 2 ? "Continue to Subjects →" : step === 3 ? "Continue to Build →" : building ? "Building…" : "Build Transaction Kit"}
-          </button>
+          {step < 4 ? (
+            <button type="button" onClick={() => setStep((s) => Math.min(4, s + 1))} style={{ ...navBtn, background: NAVY, color: "#fff" }}>
+              {step === 1
+                ? "Continue to Terms →"
+                : step === 2
+                  ? "Continue to Subjects →"
+                  : offerKitPolicy === "stable"
+                    ? "Continue to Build →"
+                    : "Continue to Provider Handoff →"}
+            </button>
+          ) : offerKitPolicy === "stable" ? (
+            <button type="button" disabled={building} onClick={buildKit} style={{ ...navBtn, background: GREEN, color: "#fff", opacity: building ? 0.7 : 1 }}>
+              {building ? "Building…" : "Build Transaction Kit"}
+            </button>
+          ) : (
+            <span role="status" style={{ color: GREEN, fontWeight: 700, fontSize: 13 }}>Deal details saved · provider PDF required</span>
+          )}
         </div>
       </div>
       <ClausePickerModal

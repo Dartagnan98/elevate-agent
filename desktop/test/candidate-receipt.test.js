@@ -10,9 +10,11 @@ const asar = require("@electron/asar");
 const {
   CANDIDATE_RECEIPT_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
+  REQUIRED_REALTOR_BETA_GATE_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
   SOURCE_RECEIPT_SCHEMA_VERSION,
   archiveSuccessfulRelease,
+  assertCompleteAsar,
   assertBundleManifest,
   assertCanonicalPackagedPermissions,
   assertFileRecord,
@@ -43,6 +45,7 @@ const {
   validateFeed,
   validateZipEntryListing,
   validateZipEntries,
+  waitForCompleteAsar,
   writeImmutableReceipt,
 } = require("../scripts/candidate-receipt");
 const { BETA, STABLE } = require("../src/release-profile");
@@ -323,9 +326,25 @@ test("the real build runner exports one verified source ID into both builder con
     scripts["smoke:mac"],
     /--installed-app "\$DESKTOP_ROOT\/dist\/mac-arm64\/\$APP_BUNDLE"/,
   );
+  assert.equal(
+    (scripts["smoke:mac"].match(/"\$PYTHON" -B \.\.\/cli\/scripts\/installed_runtime_smoke\.py/g) || []).length,
+    2,
+  );
   assert.match(scripts["smoke:mac:live"], /--live-candidate/);
+  assert.match(
+    scripts["smoke:mac:live"],
+    /"\$PYTHON" -B \.\.\/cli\/scripts\/installed_runtime_smoke\.py/,
+  );
   assert.match(scripts["smoke:mac:live"], /live-ai\.json/);
   assert.doesNotMatch(scripts["smoke:mac:live"], /--skip-sidecar/);
+  assert.match(scripts["smoke:mac:live"], /npm run gate:realtor-beta/);
+  assert.match(
+    scripts["gate:realtor-beta"],
+    /"\$PYTHON" -B \.\.\/cli\/scripts\/exact_candidate_realtor_beta_gate\.py/,
+  );
+  assert.match(scripts["gate:realtor-beta"], /--installed-app "\$INSTALLED_APP"/);
+  assert.match(scripts["gate:realtor-beta"], /realtor-beta-gate\.json/);
+  assert.match(scripts["gate:realtor-beta"], /if \[ "\$CHANNEL" != beta \]/);
 });
 
 test("Beta release preflight probes the signed Codex-only runtime policy", () => {
@@ -367,7 +386,7 @@ test("final app metadata rejects a missing or wrong embedded source ID", () => {
   assert.throws(() => assertPackagedMetadata({ ...metadata, elevateSourceReceiptId: "wrong" }, release, sourceReceiptId), /metadata drift/);
 });
 
-test("portable desktop/src hash matches ASAR bytes and rejects altered packaged source", async (t) => {
+test("portable desktop/src hash matches complete ASAR bytes and rejects truncated or altered source", async (t) => {
   const root = temporaryDirectory(t);
   const packageRoot = path.join(root, "package");
   const src = path.join(packageRoot, "src");
@@ -376,12 +395,20 @@ test("portable desktop/src hash matches ASAR bytes and rejects altered packaged 
   fs.writeFileSync(path.join(src, "main.js"), "module.exports = 'approved';\n");
   const approved = hashPortableTree(src);
   const approvedAsar = path.join(root, "approved.asar");
-  await asar.createPackage(packageRoot, approvedAsar);
+  const approvedOutput = await asar.createPackage(packageRoot, approvedAsar);
+  await waitForCompleteAsar(approvedAsar, approvedOutput);
   assert.equal(portableAsarDirectoryHash(approvedAsar, "src").sha256, approved.sha256);
+
+  const truncatedAsar = path.join(root, "truncated.asar");
+  fs.copyFileSync(approvedAsar, truncatedAsar);
+  fs.truncateSync(truncatedAsar, fs.statSync(truncatedAsar).size - 1);
+  assert.throws(() => assertCompleteAsar(truncatedAsar), /ASAR truncated/);
+  assert.throws(() => portableAsarDirectoryHash(truncatedAsar, "src"), /ASAR truncated/);
 
   fs.writeFileSync(path.join(src, "main.js"), "module.exports = 'altered';\n");
   const alteredAsar = path.join(root, "altered.asar");
-  await asar.createPackage(packageRoot, alteredAsar);
+  const alteredOutput = await asar.createPackage(packageRoot, alteredAsar);
+  await waitForCompleteAsar(alteredAsar, alteredOutput);
   assert.notEqual(portableAsarDirectoryHash(alteredAsar, "src").sha256, approved.sha256);
 });
 
@@ -626,6 +653,9 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   const root = temporaryDirectory(t);
   const home = path.join(root, "home");
   const receiptPath = path.join(root, "candidate-receipt.json");
+  const candidateFeedPath = path.join(root, "desktop", "dist", "beta-mac.yml");
+  fs.mkdirSync(path.dirname(candidateFeedPath), { recursive: true });
+  fs.writeFileSync(candidateFeedPath, "version: 1.2.67\n");
   const receipt = {
     schema_version: CANDIDATE_RECEIPT_SCHEMA_VERSION,
     kind: "elevate-final-candidate",
@@ -633,13 +663,14 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     release: {
       version: "1.2.67",
       channel: "beta",
+      feed_name: "beta-mac.yml",
       profile: {
         appBundleName: "Elevate Beta.app",
         productName: "Elevate Beta",
         preferredPort: 9139,
       },
     },
-    artifacts: {},
+    artifacts: { "beta-mac.yml": fileRecord(candidateFeedPath, root) },
     apps: {
       x64: { bundle_manifest: { sha256: "app-x64" } },
       arm64: { bundle_manifest: { sha256: "app-arm64" } },
@@ -648,7 +679,13 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
       x64_smoke: "desktop/dist/evidence/smoke-x64.json",
       arm64_smoke: "desktop/dist/evidence/smoke-arm64.json",
       live_ai: "desktop/dist/evidence/live-ai.json",
+      realtor_beta_gate: "desktop/dist/evidence/realtor-beta-gate.json",
     },
+    rollback_target: { version: "1.2.65", sha256: "b".repeat(64) },
+    public_feeds_at_finalize: {
+      latest: { version: "1.2.63", sha256: "c".repeat(64) },
+    },
+    production_feed_untouched: true,
   };
   receipt.candidate_id = receiptId(receipt, "candidate_id");
   fs.writeFileSync(receiptPath, JSON.stringify(receipt));
@@ -702,6 +739,75 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     evidence.evidence_integrity_sha256 = evidenceIntegrity(evidence);
     return evidence;
   };
+  const makeRealtorBetaGateEvidence = (arch = "arm64") => {
+    const evidence = {
+      evidence_schema_version: 1,
+      kind: "elevate-realtor-beta-prepublish-gate",
+      ok: true,
+      failures: [],
+      check_ids: REQUIRED_REALTOR_BETA_GATE_CHECK_IDS.slice(),
+      candidate_id: receipt.candidate_id,
+      source_receipt_id: receipt.source_receipt_id,
+      candidate_architecture: arch,
+      candidate_receipt_sha256: receiptHash,
+      candidate_app_version: receipt.release.version,
+      candidate_app_bundle_manifest_sha256: receipt.apps[arch].bundle_manifest.sha256,
+      release_channel: "beta",
+      release_app_bundle_name: "Elevate Beta.app",
+      installed_app_name: "Elevate Beta.app",
+      started_at: "2026-07-10T10:00:00.000Z",
+      completed_at: "2026-07-10T10:00:01.000Z",
+      duration_ms: 1000,
+      test_profile: {
+        name: "exact-installed-realtor-beta-prepublish-v1",
+        isolated_home: true,
+        installed_profile_mutation: false,
+        remote_mutation: false,
+        public_feed_mutation: false,
+      },
+      profile: {
+        identities_distinct: true,
+        preferred_port: 9139,
+        production_feed_untouched: true,
+      },
+      installed_runtime: { module_count: 7, python_major: 3, python_minor: 12 },
+      tool_parity: { request_count: 2, receipt_count: 2 },
+      pack: { form_count: 34, pack_sha256: "a".repeat(64) },
+      action_faults: {
+        forms_missing_available: false,
+        forms_fake_available: false,
+        artifact_rejections: 2,
+        worker_retry_count: 1,
+        worker_terminal_status: "failed",
+      },
+      session_resume: {
+        session_id_preserved: true,
+        message_count: 1,
+        resume_pending_cleared: true,
+      },
+      rollback: {
+        mode: "local-fixture-dry-run",
+        target_version: receipt.rollback_target.version,
+        target_feed_sha256: receipt.rollback_target.sha256,
+        candidate_feed_sha256: receipt.artifacts["beta-mac.yml"].sha256,
+        beta_after_sha256: receipt.rollback_target.sha256,
+        stable_before_sha256: receipt.public_feeds_at_finalize.latest.sha256,
+        stable_after_sha256: receipt.public_feeds_at_finalize.latest.sha256,
+        stable_expected_sha256: receipt.public_feeds_at_finalize.latest.sha256,
+        stable_alias_count: 2,
+        beta_alias_count: 4,
+        rollback_dmg_count: 2,
+        artifact_bytes_mode: "synthetic-local-fixture",
+        remote_mutation: false,
+        production_mutated: false,
+        profile_data_mutations: 0,
+        rpo_seconds: 0,
+        procedure_id: "realtor-beta-feed-and-alias-rollback-v1",
+      },
+    };
+    evidence.evidence_integrity_sha256 = evidenceIntegrity(evidence);
+    return evidence;
+  };
   for (const arch of ["x64", "arm64"]) {
     fs.writeFileSync(path.join(evidenceDir, `smoke-${arch}.json`), JSON.stringify(makeEvidence(arch)));
   }
@@ -724,6 +830,20 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     hostArchitecture: "arm64",
   }), /missing required evidence: live_ai/);
   fs.writeFileSync(path.join(evidenceDir, "live-ai.json"), JSON.stringify(makeEvidence("arm64", { live: true })));
+  assert.throws(() => verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: true,
+    evidenceHome: home,
+    hostArchitecture: "arm64",
+  }), /missing required evidence: realtor_beta_gate/);
+  fs.writeFileSync(
+    path.join(evidenceDir, "realtor-beta-gate.json"),
+    JSON.stringify(makeRealtorBetaGateEvidence()),
+  );
   assert.equal(verifyCandidateReceipt({
     receiptPath,
     desktopRoot: root,
@@ -734,6 +854,25 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     evidenceHome: home,
     hostArchitecture: "arm64",
   }).candidate_id, receipt.candidate_id);
+
+  const invalidGate = makeRealtorBetaGateEvidence();
+  invalidGate.rollback.stable_after_sha256 = "f".repeat(64);
+  invalidGate.evidence_integrity_sha256 = evidenceIntegrity(invalidGate);
+  fs.writeFileSync(path.join(evidenceDir, "realtor-beta-gate.json"), JSON.stringify(invalidGate));
+  assert.throws(() => verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: true,
+    evidenceHome: home,
+    hostArchitecture: "arm64",
+  }), /rollback drill evidence is invalid/);
+  fs.writeFileSync(
+    path.join(evidenceDir, "realtor-beta-gate.json"),
+    JSON.stringify(makeRealtorBetaGateEvidence()),
+  );
 
   const assertLiveRejected = (mutate, pattern) => {
     const evidence = makeEvidence("arm64", { live: true });
@@ -817,6 +956,7 @@ test("successful release archive preserves proof and clears only active pointers
       x64_smoke: "dist/evidence/smoke-x64.json",
       arm64_smoke: "dist/evidence/smoke-arm64.json",
       live_ai: "dist/evidence/live-ai.json",
+      realtor_beta_gate: "dist/evidence/realtor-beta-gate.json",
     },
   };
   candidate.candidate_id = receiptId(candidate, "candidate_id");
@@ -827,13 +967,14 @@ test("successful release archive preserves proof and clears only active pointers
     x64: path.join(evidenceDir, "smoke-x64.json"),
     arm64: path.join(evidenceDir, "smoke-arm64.json"),
     live: path.join(evidenceDir, "live-ai.json"),
+    realtorGate: path.join(evidenceDir, "realtor-beta-gate.json"),
     public: path.join(evidenceDir, "public-readback.json"),
     ship: path.join(evidenceDir, "ship.json"),
   };
   fs.writeFileSync(active.source, JSON.stringify(source));
   fs.writeFileSync(active.web, JSON.stringify(web));
   fs.writeFileSync(active.candidate, JSON.stringify(candidate));
-  for (const filePath of [active.x64, active.arm64, active.live, active.ship]) {
+  for (const filePath of [active.x64, active.arm64, active.live, active.realtorGate, active.ship]) {
     fs.writeFileSync(filePath, JSON.stringify({ candidate_id: candidate.candidate_id }));
   }
   const unrelated = path.join(evidenceDir, "keep-me.txt");

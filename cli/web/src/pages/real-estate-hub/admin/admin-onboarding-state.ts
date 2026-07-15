@@ -89,6 +89,56 @@ export function canClaimAdminSetupReady(setup: AdminSetupSnapshot): boolean {
   );
 }
 
+export type AdminFormsProviderCardModel = {
+  exactBeta: boolean;
+  visible: boolean;
+  available: boolean;
+  provider: string;
+  title: "Forms provider";
+  statusLabel: "provider needed" | "document drafting paused" | "verified";
+  message: string;
+  buttonLabel: "Connect & verify";
+  buttonDisabled: boolean;
+  disabledReason: string;
+};
+
+/**
+ * Project the exact-Beta forms capability into truthful, realtor-facing UI.
+ * Stable snapshots omit the capability and therefore keep their existing UI.
+ */
+export function adminFormsProviderCardModel(
+  setup: AdminSetupSnapshot | null,
+): AdminFormsProviderCardModel {
+  const capability = setup?.capabilities?.formsProvider;
+  const item = setup?.items.find((candidate) => candidate.key === "forms_provider");
+  const provider = String(item?.provider || setup?.profile.formsProvider || "").trim();
+  const exactBeta = capability !== undefined;
+  const available = capability?.available === true;
+  const paused = exactBeta && !available;
+  const fallbackMessage = provider
+    ? "Admin is ready, but live MLC and CPS drafting stays paused until forms-provider access is verified. Use the named provider manually in the meantime."
+    : "Choose the forms provider your brokerage uses. Admin can start after setup, but MLC and CPS drafting stays manual until live access is verified.";
+
+  return {
+    exactBeta,
+    visible: paused,
+    available,
+    provider,
+    title: "Forms provider",
+    statusLabel: available
+      ? "verified"
+      : provider
+        ? "document drafting paused"
+        : "provider needed",
+    message: String(capability?.message || "").trim() || fallbackMessage,
+    buttonLabel: "Connect & verify",
+    buttonDisabled: paused,
+    disabledReason: paused
+      ? "Automatic live forms verification is not available in this Beta build. Elevation will hold MLC and CPS drafting for manual completion instead of claiming a connection."
+      : "",
+  };
+}
+
 export type AdminSetupShellState = "loading" | "error" | "onboarding" | "ready";
 
 export function resolveAdminSetupShellState(input: {

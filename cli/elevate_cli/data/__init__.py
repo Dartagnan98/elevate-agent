@@ -134,6 +134,7 @@ from elevate_cli.data.templates import (
 from elevate_cli.data.deals import (
     add_deal_attachment,
     add_deal_contact,
+    complete_run_with_reviewed_manual_pdf,
     create_deal,
     deals_overview,
     DealPhaseGateBlocked,
@@ -210,6 +211,13 @@ from elevate_cli.data.province_guides import (
     province_coverage,
     province_guide_summary,
     province_stage_documents,
+)
+from elevate_cli.data.beta_province_pack import (
+    activate_exact_beta_bc_pack,
+    enforce_exact_beta_province,
+    exact_beta_bc_pack_readiness,
+    import_exact_beta_bc_pack,
+    load_exact_beta_bc_pack,
 )
 from elevate_cli.data.admin_setup import (
     admin_setup_memory_summary,
@@ -322,7 +330,8 @@ __all__ = [
     "retire_template", "template_leaderboard", "template_stats",
     "template_stats_with_ambiguous",
     # deals
-    "add_deal_attachment", "add_deal_contact", "create_deal",
+    "add_deal_attachment", "add_deal_contact",
+    "complete_run_with_reviewed_manual_pdf", "create_deal",
     "deals_overview", "DealPhaseGateBlocked",
     "get_deal", "get_deal_context", "list_deal_action_runs",
     "list_deal_attachments", "list_deal_contacts", "list_deal_events",
@@ -352,6 +361,9 @@ __all__ = [
     "list_province_checklists", "list_province_forms",
     "list_province_reference_pages", "province_agent_memory", "province_coverage",
     "province_guide_summary", "province_stage_documents",
+    "activate_exact_beta_bc_pack", "enforce_exact_beta_province",
+    "exact_beta_bc_pack_readiness", "import_exact_beta_bc_pack",
+    "load_exact_beta_bc_pack",
     # Admin setup readiness gate
     "admin_setup_memory_summary", "admin_setup_ready",
     "build_admin_province_playbook", "complete_admin_setup",

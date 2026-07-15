@@ -40,10 +40,24 @@ export default function OnboardingPanel({
   const [busy, setBusy] = useState("");
   const [pkgMsg, setPkgMsg] = useState("");
   const [urls, setUrls] = useState<Record<string, string>>({});
+  const [documentPolicy, setDocumentPolicy] = useState<"checking" | "beta" | "stable" | "unavailable">("checking");
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen !== null ? manualOpen : (currentStage ?? 0) === 0;
   const [subOpen, setSubOpen] = useState<Record<string, boolean>>({ client: true, search: true, docs: true });
   const toggleSub = (k: string) => setSubOpen((s) => ({ ...s, [k]: !s[k] }));
+
+  useEffect(() => {
+    let active = true;
+    api.getAdminSetup()
+      .then((setup) => {
+        if (!active) return;
+        setDocumentPolicy(setup.capabilities?.formsProvider === undefined ? "stable" : "beta");
+      })
+      .catch(() => {
+        if (active) setDocumentPolicy("unavailable");
+      });
+    return () => { active = false; };
+  }, []);
 
   // Deal-level field overrides (mailing, timeline, financing, lender).
   const [fvals, setFvals] = useState<Record<string, string>>({});
@@ -181,7 +195,11 @@ export default function OnboardingPanel({
           <span style={{ fontSize: 14.5, fontWeight: 700 }}>Client Onboarding</span>
           <span style={{ fontSize: 11.5, fontWeight: 700, color: "#aeb9d4" }}>{open ? "▾" : "▸"}</span>
         </div>
-        <div style={{ fontSize: 11.5, color: "#aeb9d4", marginTop: 4 }}>Gather info → pick documents → generate → send for signatures.</div>
+        <div style={{ fontSize: 11.5, color: "#aeb9d4", marginTop: 4 }}>
+          {documentPolicy === "stable"
+            ? "Gather info → pick documents → generate → send for signatures."
+            : "Gather info → confirm required documents → complete them in the licensed provider."}
+        </div>
       </header>
       {open && (
         <div style={{ padding: "14px 14px 4px" }}>
@@ -220,21 +238,54 @@ export default function OnboardingPanel({
             {subHead("docs", "3", "Onboarding Documents", `${docsDone} of ${docsTotal} complete`, docsDone === docsTotal)}
             {subOpen.docs && (
               <div style={{ padding: "6px 14px 12px" }}>
-                <div style={{ fontSize: 10.5, fontWeight: 800, color: "#9aa4b8", textTransform: "uppercase", letterSpacing: 0.4, margin: "8px 0 0" }}>Shared (all buyers sign)</div>
-                {DOCS.map((it) => docRow(it.key, it.label, it.sub, status[it.key] || "",
-                  () => sendDoc(it.key), status[it.key] === "sent" ? "Resend" : "Generate",
-                  urls[it.key] || sv("onboard_" + it.key + "_url")))}
-                <div style={{ fontSize: 10.5, fontWeight: 800, color: "#9aa4b8", textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 0" }}>FINTRAC ID — one per buyer</div>
-                {buyers.map((b, i) => docRow(`fintrac-${i}`, `FINTRAC — ${b.name.trim() || `Buyer ${i + 1}`}`, "Individual identification record", fintrac[i] || "",
-                  () => setFintracStatus(i, "verified"), "Mark verified"))}
-                {unsigned.length > 0 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 14, paddingTop: 13, borderTop: "1px solid #eef1f6" }}>
-                    <button onClick={sendPackage} disabled={!!busy} style={{ background: "#044B35", border: "none", color: "#fff", fontSize: 13, fontWeight: 700, padding: "11px 18px", borderRadius: 9, cursor: "pointer" }}>{busy === "pkg" ? "Dispatching…" : "Approve & send for signatures →"}</button>
-                    <span style={{ fontSize: 11, color: MUTED }}>Bundles the agency, DORTS &amp; PNC (all buyers' names + signature lines) into one envelope.</span>
-                  </div>
-                )}
-                {pkgMsg && (
-                  <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: pkgMsg.startsWith("Could not") ? TERRA : GREEN, background: pkgMsg.startsWith("Could not") ? "#fdf1e9" : "#eaf5ee", borderRadius: 8, padding: "9px 12px" }}>{pkgMsg}</div>
+                {documentPolicy === "stable" ? (
+                  <>
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: "#9aa4b8", textTransform: "uppercase", letterSpacing: 0.4, margin: "8px 0 0" }}>Shared (all buyers sign)</div>
+                    {DOCS.map((it) => docRow(it.key, it.label, it.sub, status[it.key] || "",
+                      () => sendDoc(it.key), status[it.key] === "sent" ? "Resend" : "Generate",
+                      urls[it.key] || sv("onboard_" + it.key + "_url")))}
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: "#9aa4b8", textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 0" }}>FINTRAC ID — one per buyer</div>
+                    {buyers.map((b, i) => docRow(`fintrac-${i}`, `FINTRAC — ${b.name.trim() || `Buyer ${i + 1}`}`, "Individual identification record", fintrac[i] || "",
+                      () => setFintracStatus(i, "verified"), "Mark verified"))}
+                    {unsigned.length > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 14, paddingTop: 13, borderTop: "1px solid #eef1f6" }}>
+                        <button onClick={sendPackage} disabled={!!busy} style={{ background: "#044B35", border: "none", color: "#fff", fontSize: 13, fontWeight: 700, padding: "11px 18px", borderRadius: 9, cursor: "pointer" }}>{busy === "pkg" ? "Dispatching…" : "Approve & send for signatures →"}</button>
+                        <span style={{ fontSize: 11, color: MUTED }}>Bundles the agency, DORTS &amp; PNC (all buyers' names + signature lines) into one envelope.</span>
+                      </div>
+                    )}
+                    {pkgMsg && (
+                      <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: pkgMsg.startsWith("Could not") ? TERRA : GREEN, background: pkgMsg.startsWith("Could not") ? "#fdf1e9" : "#eaf5ee", borderRadius: 8, padding: "9px 12px" }}>{pkgMsg}</div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div role="status" aria-live="polite" style={{ margin: "8px 0 12px", background: "#fff6ed", border: "1px solid #edc9ad", borderRadius: 9, padding: "12px 13px" }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700, color: "#7a3f20" }}>
+                        {documentPolicy === "beta" ? "Onboarding form generation is paused in this Beta" : "Document policy could not be verified"}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "#7a5039", marginTop: 4 }}>
+                        {documentPolicy === "beta"
+                          ? "Use the current Agency, DORTS, PNC, and FINTRAC records in your licensed provider. Elevate will not open, regenerate, approve, or send stale local forms."
+                          : documentPolicy === "checking"
+                            ? "Elevate is checking the release policy. Local document actions remain unavailable until the check completes."
+                            : "Refresh the deal before continuing. No onboarding document was generated or sent."}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: "#9aa4b8", textTransform: "uppercase", letterSpacing: 0.4 }}>Provider-required checklist</div>
+                    {DOCS.map((it) => (
+                      <div key={it.key} style={{ display: "flex", alignItems: "center", gap: 13, padding: "12px 2px", borderTop: "1px solid #f3f5f9" }}>
+                        <span style={{ width: 22, height: 22, borderRadius: "50%", flex: "0 0 auto", border: "1.6px solid #cdd5e2" }} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: NAVY }}>{it.label}</div>
+                          <div style={{ fontSize: 11, color: MUTED, marginTop: 2 }}>{it.sub}</div>
+                        </div>
+                        <span style={{ fontSize: 10.5, fontWeight: 700, borderRadius: 6, padding: "3px 9px", background: "#fdf1e9", color: TERRA }}>PROVIDER REQUIRED</span>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: "#9aa4b8", textTransform: "uppercase", letterSpacing: 0.4, margin: "14px 0 0" }}>FINTRAC ID — one per buyer</div>
+                    {buyers.map((b, i) => docRow(`fintrac-${i}`, `FINTRAC — ${b.name.trim() || `Buyer ${i + 1}`}`, "Complete the licensed record before marking it verified", fintrac[i] || "",
+                      () => setFintracStatus(i, "verified"), "Mark verified"))}
+                  </>
                 )}
               </div>
             )}

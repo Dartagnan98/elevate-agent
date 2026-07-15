@@ -50,6 +50,7 @@ Convert relative dates to absolute dates before creating forms.
 - When signed documents return, attach the executed PDFs and update only the checklist cells supported by evidence.
 - If a provider blocks on MFA or login, write `waiting_human` with the exact portal/account needed.
 - Amendments use an approved BC2040-style template only; blank all unrelated amendment sections.
+- A successful `mode=documents` Admin run must attach the verified draft under artifact kind `mlc_pdf`. If no valid draft exists, return `waiting_human` or `failed`; never report success with an empty artifact list.
 
 ## Output Contract
 

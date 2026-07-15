@@ -12,6 +12,7 @@ Public surface:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -109,6 +110,7 @@ _DOCX_IMAGE_MEDIA_SUFFIXES = _LISTING_PHOTO_SUFFIXES | frozenset(
 _KIND_FORMAT_CONTRACTS: dict[str, frozenset[str]] = {
     "contract": frozenset({".docx", ".pdf"}),
     "cma_report": frozenset({".pdf"}),
+    "mlc_pdf": frozenset({".pdf"}),
     "title_search": frozenset({".pdf", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}),
     "signed_envelope": frozenset({".pdf"}),
     "signed_docs": frozenset({".pdf"}),
@@ -128,6 +130,8 @@ _KIND_FORMAT_CONTRACTS: dict[str, frozenset[str]] = {
 _DOCUMENT_KIND_HINT_RE = re.compile(
     r"(?:^|_)(?:contract|disclosure|document|draft|envelope|form|lawyer|pdf|receipt|report|search|sheet|signed)(?:_|$)"
 )
+
+_MANUAL_FORMS_REVIEW_GATE = object()
 _GENERIC_DOCUMENT_SUFFIXES = frozenset(
     {".csv", ".doc", ".docx", ".eml", ".msg", ".odt", ".pdf", ".rtf", ".txt", ".xls", ".xlsx"}
 )
@@ -722,6 +726,12 @@ def create_deal(
         raise ValueError("title is required")
     if side not in _VALID_SIDES:
         raise ValueError(f"invalid side {side!r}")
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+        province = enforce_exact_beta_province(province)
     current_stage = _validate_stage(current_stage)
     if primary_contact_id is not None:
         contact = conn.execute(
@@ -1024,6 +1034,13 @@ def promote_profile_to_admin_deal(
         raise ValueError("profile_id is required")
     if side not in _VALID_SIDES:
         raise ValueError(f"invalid side {side!r}")
+    from elevate_constants import exact_realtor_beta_active
+
+    exact_beta = exact_realtor_beta_active()
+    if exact_beta:
+        from elevate_cli.data.beta_province_pack import enforce_exact_beta_province
+
+        province = enforce_exact_beta_province(province)
     current_stage = _validate_stage(current_stage)
     context = dict(profile_context or {})
     display_name = _compact_string(display_name) or _compact_string(context.get("displayName"))
@@ -1050,6 +1067,12 @@ def promote_profile_to_admin_deal(
         primary_contact_id=valid_primary_contact_id,
         verifier_keys=verifier_keys,
     )
+    if exact_beta and existing is not None:
+        existing_province = str(existing.get("province") or "").strip().upper()
+        if existing_province not in {"", province}:
+            raise ValueError(
+                "Realtor Beta cannot promote a profile into a non-BC Admin deal"
+            )
     existing_extra = existing.get("extraToggles") if isinstance((existing or {}).get("extraToggles"), Mapping) else {}
     promotion_fields = _profile_promotion_extra_fields(
         profile_id=profile_id,
@@ -1096,6 +1119,8 @@ def promote_profile_to_admin_deal(
         extra[key] = _normalize_extra_field_value(value)
 
     updates: dict[str, Any] = dict(named_fields)
+    if exact_beta and str(row["province"] or "").strip().upper() != province:
+        updates["province"] = province
     if valid_primary_contact_id and not row["primary_contact_id"]:
         updates["primary_contact_id"] = valid_primary_contact_id
     listing_address = _compact_string(listing_address)
@@ -2912,6 +2937,47 @@ def _run_payload_stage(payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _required_artifact_kinds_for_run(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> tuple[str, ...]:
+    """Return the explicit document-evidence contract for an action run."""
+    configured: Any = None
+    registry_id = row["registry_id"] if "registry_id" in row.keys() else None
+    if registry_id:
+        registry = conn.execute(
+            "SELECT skill_args_json FROM admin_action_registry WHERE id=?",
+            (registry_id,),
+        ).fetchone()
+        if registry is not None:
+            skill_args = _decode_json(registry["skill_args_json"]) or {}
+            if isinstance(skill_args, Mapping):
+                configured = skill_args.get("requiredArtifactKinds")
+    payload = _decode_json(row["payload_json"]) or {}
+    if configured is None and isinstance(payload, Mapping):
+        configured = payload.get("requiredArtifactKinds")
+    kinds: list[str] = []
+    if configured is not None:
+        if not isinstance(configured, Sequence) or isinstance(configured, (str, bytes)):
+            raise ValueError("requiredArtifactKinds must be a list of artifact kinds")
+        for value in configured:
+            kind = str(value or "").strip()
+            if not kind:
+                raise ValueError("requiredArtifactKinds cannot contain an empty kind")
+            if kind not in kinds:
+                kinds.append(kind)
+
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        from elevate_cli.data.dispatch import required_forms_artifact_kind_for_run
+
+        semantic_kind = required_forms_artifact_kind_for_run(conn, str(row["id"]))
+        if semantic_kind and semantic_kind not in kinds:
+            kinds.append(semantic_kind)
+    return tuple(kinds)
+
+
 def _is_missing_info_prompt(human_prompt: Mapping[str, Any] | None) -> bool:
     """True for a 'fill in to continue' card (one with requiredFields).
 
@@ -2953,7 +3019,14 @@ def record_run_result(
     human_prompt: Mapping[str, Any] | None = None,
     error: str | None = None,
     actor: str = "skill",
+    _manual_forms_review_gate: object | None = None,
+    _manual_forms_review_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    manual_forms_review = _manual_forms_review_gate is _MANUAL_FORMS_REVIEW_GATE
+    if _manual_forms_review_gate is not None and not manual_forms_review:
+        raise PermissionError("invalid manual forms-review completion gate")
+    if _manual_forms_review_receipt is not None and not manual_forms_review:
+        raise PermissionError("manual forms-review receipt requires the private completion gate")
     if get_deal(conn, deal_id) is None:
         raise LookupError(f"deal {deal_id!r} not found")
     row = conn.execute(
@@ -2977,9 +3050,45 @@ def record_run_result(
         raise ValueError("action run result has already been recorded")
     if prior_result and row["status"] in {"succeeded", "completed", "failed", "skipped", "cancelled"}:
         raise ValueError("action run result has already been recorded")
+    if (
+        row["status"] == "waiting_human"
+        and normalized_status in {"succeeded", "skipped"}
+        and _is_skill_actor(actor)
+        and not manual_forms_review
+    ):
+        raise PermissionError(
+            "an automated actor cannot terminally complete a run awaiting human action"
+        )
+    if normalized_status in {"succeeded", "completed"}:
+        from elevate_cli.data.dispatch import (
+            live_forms_provider_block_reason_for_run,
+            park_run_for_live_forms_provider,
+        )
+
+        if live_forms_provider_block_reason_for_run(conn, run_id) and not manual_forms_review:
+            return park_run_for_live_forms_provider(
+                conn,
+                run_id,
+                actor=actor,
+            )
     artifact_rows = [dict(item) for item in (artifacts or [])]
     if artifact_rows and normalized_status not in {"succeeded", "completed"}:
         raise ValueError("only a successful run may attach result artifacts")
+    required_artifact_kinds = _required_artifact_kinds_for_run(conn, row)
+    if normalized_status in {"succeeded", "completed"} and required_artifact_kinds:
+        artifact_kinds = {
+            str(artifact.get("kind") or "").strip()
+            for artifact in artifact_rows
+            if str(artifact.get("kind") or "").strip()
+        }
+        missing_artifact_kinds = [
+            kind for kind in required_artifact_kinds if kind not in artifact_kinds
+        ]
+        if missing_artifact_kinds:
+            raise ValueError(
+                "successful document run is missing required result artifact kind(s): "
+                + ", ".join(missing_artifact_kinds)
+            )
     # Validate every artifact before the first attachment/event/gate mutation.
     # This keeps a valid-first/invalid-second callback from leaving a partial
     # result when a direct caller catches the later validation error.
@@ -3061,6 +3170,10 @@ def record_run_result(
     result_payload = {
         "status": status,
         "artifacts": artifact_rows,
+        "requiredArtifactKinds": list(required_artifact_kinds),
+        "verifiedArtifactKinds": sorted(
+            {str(item.get("kind") or "").strip() for item in artifact_rows}
+        ),
         "nextTasks": [dict(item) for item in (next_tasks or [])],
         "checklistUpdates": checklist_updates,
         "protectedChecklistSkipped": [],
@@ -3069,6 +3182,10 @@ def record_run_result(
         "idempotencyKey": idempotency_key,
         "recordedAt": now,
     }
+    if _manual_forms_review_receipt is not None:
+        result_payload["manualFormsReviewReceipt"] = dict(
+            _manual_forms_review_receipt
+        )
     payload["result"] = result_payload
     output_path = row["output_path"]
     for artifact in artifact_rows:
@@ -3182,10 +3299,132 @@ def record_run_result(
         deal_id=deal_id,
         kind="run_result",
         actor=actor,
-        payload={"runId": run_id, "status": normalized_status, "humanPrompt": human_prompt, "error": error},
+        payload={
+            "runId": run_id,
+            "status": normalized_status,
+            "humanPrompt": human_prompt,
+            "error": error,
+            "manualFormsReviewReceipt": (
+                dict(_manual_forms_review_receipt)
+                if _manual_forms_review_receipt is not None
+                else None
+            ),
+        },
         created_at=now,
     )
     if normalized_status in {"succeeded", "completed"}:
         _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=_run_payload_stage(payload))
     updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
     return _row_to_action_run(updated)
+
+
+def complete_run_with_reviewed_manual_pdf(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    run_id: str,
+    *,
+    kind: str,
+    file_path: str,
+    reviewed: bool,
+    summary: str | None = None,
+    actor: str = "human",
+) -> dict[str, Any]:
+    """Close a parked exact-Beta MLC/CPS run with a human-reviewed PDF.
+
+    This is the truthful Option-B escape hatch: it never claims provider
+    access or dispatch. The persisted receipt binds the human actor, semantic
+    document kind, canonical local artifact, content hash, and review time.
+    """
+    from elevate_constants import exact_realtor_beta_active
+
+    if not exact_realtor_beta_active():
+        raise ValueError("manual forms-provider completion is only enabled in exact Beta")
+    if not str(actor or "").startswith("human"):
+        raise PermissionError("manual document completion requires a human actor")
+    if reviewed is not True:
+        raise ValueError("confirm that the PDF was reviewed before completing the run")
+    if get_deal(conn, deal_id) is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    row = conn.execute(
+        "SELECT * FROM admin_action_runs WHERE id=? AND deal_id=?",
+        (run_id, deal_id),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"action run {run_id!r} not found for deal {deal_id!r}")
+
+    from elevate_cli.data.dispatch import (
+        forms_document_type_for_run,
+        live_forms_provider_block_reason_for_run,
+        required_forms_artifact_kind_for_run,
+    )
+
+    document_type = forms_document_type_for_run(conn, run_id)
+    expected_kind = required_forms_artifact_kind_for_run(conn, run_id)
+    if document_type not in {"mlc", "cps"} or not expected_kind:
+        raise ValueError("run is not semantic MLC/CPS document creation")
+    if str(kind or "").strip() != expected_kind:
+        raise ValueError(
+            f"manual {document_type.upper()} completion requires artifact kind {expected_kind}"
+        )
+    if not live_forms_provider_block_reason_for_run(conn, run_id):
+        raise ValueError("run is not blocked on unavailable live forms-provider access")
+
+    canonical_path = _validated_deal_attachment_path(file_path)
+    path = Path(canonical_path)
+    if path.suffix.lower() != ".pdf":
+        raise ValueError("manual MLC/CPS completion requires a reviewed PDF")
+    _validate_deal_attachment_kind(expected_kind, path)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+    idempotency_key = f"manual-reviewed-pdf:{run_id}:{sha256}"
+
+    prior_key = (
+        row["result_idempotency_key"]
+        if "result_idempotency_key" in row.keys()
+        else None
+    )
+    if not prior_key:
+        prompt = _decode_json(
+            row["human_prompt_json"] if "human_prompt_json" in row.keys() else None
+        ) or {}
+        if row["status"] != "waiting_human" or not isinstance(prompt, Mapping):
+            raise ValueError("run is not parked for human forms-provider completion")
+        if prompt.get("kind") != "forms_provider":
+            raise ValueError("run is not parked on the forms-provider gate")
+        if row["cron_job_id"] or row["callback_token_hash"]:
+            raise ValueError("manual completion requires a run with no provider dispatch")
+
+    reviewed_at = now_iso()
+    receipt = {
+        "schema": "elevate.manual-forms-review.v1",
+        "completionMethod": "manual_reviewed_pdf",
+        "providerDispatch": False,
+        "formsDocumentType": document_type,
+        "artifactKind": expected_kind,
+        "filePath": canonical_path,
+        "sha256": sha256,
+        "reviewed": True,
+        "reviewedBy": actor,
+        "reviewedAt": reviewed_at,
+    }
+    return record_run_result(
+        conn,
+        deal_id,
+        run_id,
+        status="succeeded",
+        idempotency_key=idempotency_key,
+        artifacts=[
+            {
+                "kind": expected_kind,
+                "filePath": canonical_path,
+                "summary": summary
+                or "Human-reviewed manual PDF completed outside provider dispatch.",
+            }
+        ],
+        actor=actor,
+        _manual_forms_review_gate=_MANUAL_FORMS_REVIEW_GATE,
+        _manual_forms_review_receipt=receipt,
+    )

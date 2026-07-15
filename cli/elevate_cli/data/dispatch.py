@@ -26,11 +26,13 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from elevate_constants import exact_realtor_beta_active
 from elevate_cli.data._util import new_id, now_iso
 
 
@@ -74,7 +76,7 @@ _ADMIN_DEAL_MATCHER_SKILL = "real-estate-admin/deal-matcher"
 _ADMIN_WORKER_SKILL_REFS = {
     "admin-agent": _ADMIN_ORCHESTRATOR_SKILL,
     "admin-result-writer": _ADMIN_RESULT_WRITER_SKILL,
-    "buyer-cps": "real-estate-admin/webforms",
+    "buyer-cps": "real-estate-admin/buyer-cps",
     "deal-matcher": _ADMIN_DEAL_MATCHER_SKILL,
     "closing-admin": "real-estate-admin/closing-admin",
     "cma": "cma",
@@ -98,7 +100,8 @@ _ADMIN_WORKER_SKILL_REFS = {
 # Canonical listing flow (stage index == deal currentStage == registry to_stage):
 #   0 Pre-CMA · 1 CMA / Evaluation · 2 Listing Intake · 3 SkySlope & Matrix Prep
 #   4 Marketing Go · 5 Listing Live · 6 Accepted Offer · 7 Condition Removal · 8 Closed
-# Buyer flow: 0 Offer Prep · 1 Accepted · 2 Conditions · 3 Subjects Off.
+# Buyer flow: 0 Client Onboarding · 1 Offer Prep · 2 Accepted · 3 Conditions ·
+# 4 Subjects Off / closing admin.
 # Only skills that exist under cli/skills/real-estate-admin are wired. Stage 0
 # (Pre-CMA) has no auto-launch yet — its setup/verification work is manual until
 # the pre-cma-dashboard-setup / lofty-crm-client-contacts skills ship.
@@ -126,7 +129,10 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "side": "listing",
         "to_stage": 1,
         "priority": 90,
-        "skill_args": {"mode": "seller_evaluation"},
+        "skill_args": {
+            "mode": "seller_evaluation",
+            "requiredArtifactKinds": ["cma_report"],
+        },
     },
     {
         "name": "Listing Intake: Collect MLC info",
@@ -141,7 +147,11 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "name": "Listing Intake: Prepare MLC documents",
         "trigger": "stage_entry",
         "skill": "real-estate-admin/mlc",
-        "skill_args": {"mode": "documents"},
+        "skill_args": {
+            "mode": "documents",
+            "requiredArtifactKinds": ["mlc_pdf"],
+            "requiresLiveFormsProvider": True,
+        },
         "side": "listing",
         "to_stage": 2,
         "priority": 85,
@@ -291,10 +301,15 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "Buyer Offer Prep: Prepare CPS draft",
         "trigger": "stage_entry",
-        "skill": "real-estate-admin/webforms",
-        "skill_args": {"mode": "draft", "sendPolicy": "draft_only"},
+        "skill": "real-estate-admin/buyer-cps",
+        "skill_args": {
+            "mode": "draft",
+            "sendPolicy": "draft_only",
+            "requiredArtifactKinds": ["cps_draft"],
+            "requiresLiveFormsProvider": True,
+        },
         "side": "buyer",
-        "to_stage": 0,
+        "to_stage": 1,
         "priority": 90,
         "approval_required": True,
     },
@@ -303,7 +318,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/deal-matcher",
         "side": "buyer",
-        "to_stage": 0,
+        "to_stage": 1,
         "priority": 75,
     },
     {
@@ -311,7 +326,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/offer-review",
         "side": "buyer",
-        "to_stage": 1,
+        "to_stage": 2,
         "priority": 90,
     },
     {
@@ -319,7 +334,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/subject-removal",
         "side": "buyer",
-        "to_stage": 2,
+        "to_stage": 3,
         "priority": 90,
     },
     {
@@ -333,7 +348,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
             "sendPolicy": "approval_required",
         },
         "side": "buyer",
-        "to_stage": 2,
+        "to_stage": 3,
         "priority": 70,
         "approval_required": True,
     },
@@ -342,7 +357,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/closing-admin",
         "side": "buyer",
-        "to_stage": 3,
+        "to_stage": 4,
         "priority": 90,
     },
 )
@@ -983,6 +998,204 @@ def _run_lookup(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row:
     return row
 
 
+def _run_semantic_mappings(row: sqlite3.Row) -> list[Mapping[str, Any]]:
+    """Collect bounded registry/run mappings that may describe document work."""
+    roots = [
+        _decode_json(_row_value(row, "skill_args_json")) or {},
+        _decode_json(_row_value(row, "payload_json")) or {},
+    ]
+    mappings: list[Mapping[str, Any]] = []
+    pending = [item for item in roots if isinstance(item, Mapping)]
+    while pending and len(mappings) < 12:
+        current = pending.pop(0)
+        mappings.append(current)
+        for key in ("nextTask", "next_task", "skillArgs", "skill_args", "args"):
+            nested = current.get(key)
+            if isinstance(nested, Mapping):
+                pending.append(nested)
+    return mappings
+
+
+def _semantic_string_values(
+    mappings: list[Mapping[str, Any]],
+    *keys: str,
+) -> set[str]:
+    values: set[str] = set()
+    for mapping in mappings:
+        for key in keys:
+            raw = mapping.get(key)
+            candidates = raw if isinstance(raw, (list, tuple, set)) else [raw]
+            for candidate in candidates:
+                text = str(candidate or "").strip().lower()
+                if text:
+                    values.add(text)
+    return values
+
+
+def _forms_document_type(row: sqlite3.Row) -> str | None:
+    """Classify licensed MLC/CPS creation from semantics, never one flag."""
+    mappings = _run_semantic_mappings(row)
+    skill = str(_row_value(row, "skill") or "").strip().lower().rstrip("/")
+    skill_leaf = skill.rsplit("/", 1)[-1]
+    name = str(_row_value(row, "name") or "").strip().lower()
+    modes = _semantic_string_values(mappings, "mode", "operation", "action")
+    artifact_kinds = _semantic_string_values(
+        mappings,
+        "requiredArtifactKinds",
+        "required_artifact_kinds",
+        "artifactKind",
+        "artifact_kind",
+        "kind",
+    )
+    form_codes = _semantic_string_values(
+        mappings,
+        "formCode",
+        "form_code",
+        "formCodes",
+        "form_codes",
+        "documentCode",
+        "document_code",
+        "documentCodes",
+        "document_codes",
+        "form",
+        "document",
+    )
+    explicitly_gated = any(
+        mapping.get("requiresLiveFormsProvider") is True
+        or mapping.get("requires_live_forms_provider") is True
+        for mapping in mappings
+    )
+    cps_marker = bool(
+        {"cps_draft", "cps-res", "cps", "cps-residential"}
+        .intersection(artifact_kinds | form_codes)
+    )
+    mlc_marker = bool({"mlc_pdf", "mlc"}.intersection(artifact_kinds | form_codes))
+
+    if skill_leaf in {"buyer-cps", "cps", "webforms"} or cps_marker:
+        return "cps"
+    if skill_leaf == "mlc":
+        if modes.intersection({"intake", "collect", "info"}) and not (
+            mlc_marker or explicitly_gated
+        ):
+            return None
+        return "mlc"
+    if mlc_marker:
+        return "mlc"
+    if re.search(r"\bcps\b", name) and re.search(
+        r"\b(?:draft|document|form|package|prepare|write)\b", name
+    ):
+        return "cps"
+    if re.search(r"\bmlc\b", name) and re.search(
+        r"\b(?:draft|document|form|package|prepare|write)\b", name
+    ):
+        return "mlc"
+    if explicitly_gated:
+        return "forms"
+    return None
+
+
+def forms_document_type_for_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> str | None:
+    """Return the semantic licensed-document type for one action run."""
+    return _forms_document_type(_run_lookup(conn, run_id))
+
+
+def required_forms_artifact_kind_for_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> str | None:
+    """Return exact-Beta evidence required by semantic MLC/CPS work."""
+    return {
+        "mlc": "mlc_pdf",
+        "cps": "cps_draft",
+    }.get(forms_document_type_for_run(conn, run_id) or "")
+
+
+def live_forms_provider_block_reason_for_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> str | None:
+    """Return the exact-Beta forms capability blocker for one document run."""
+    if not exact_realtor_beta_active():
+        return None
+    if not forms_document_type_for_run(conn, run_id):
+        return None
+    from elevate_cli.data.admin_setup import forms_provider_capability
+
+    capability = forms_provider_capability(conn)
+    if capability.get("available") is True:
+        return None
+    return str(capability.get("message") or capability.get("reason") or "")
+
+
+def park_run_for_live_forms_provider(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    """Park an MLC/CPS run without issuing a callback token or cron job."""
+    reason = live_forms_provider_block_reason_for_run(conn, run_id)
+    if not reason:
+        return _row_to_run(_select_action_run_with_registry(conn, run_id))
+    row = _run_lookup(conn, run_id)
+    now = now_iso()
+    payload = _decode_json(row["payload_json"]) or {}
+    if not isinstance(payload, dict):
+        payload = {"prior": payload}
+    from elevate_cli.data.admin_setup import forms_provider_capability
+
+    capability = forms_provider_capability(conn)
+    document_type = forms_document_type_for_run(conn, run_id)
+    required_artifact_kind = required_forms_artifact_kind_for_run(conn, run_id)
+    payload["requiresLiveFormsProvider"] = True
+    payload["formsDocumentType"] = document_type
+    payload["requiredArtifactKind"] = required_artifact_kind
+    payload["formsProviderCapability"] = capability
+    payload["dispatchBlocked"] = {
+        "message": reason,
+        "actor": actor,
+        "recordedAt": now,
+    }
+    human_prompt = {
+        "title": "Licensed forms provider required",
+        "message": reason,
+        "requiredFields": [
+            "Complete the MLC or CPS in the licensed forms provider, then attach the reviewed PDF."
+        ],
+        "kind": "forms_provider",
+        "capabilityReason": capability.get("reason"),
+        "formsDocumentType": document_type,
+        "requiredArtifactKind": required_artifact_kind,
+        "manualCompletion": {
+            "method": "manual_reviewed_pdf",
+            "requiresHumanReview": True,
+            "endpoint": f"/api/deals/{row['deal_id']}/runs/{run_id}/manual-reviewed-document",
+        },
+        "runId": run_id,
+        "dealId": row["deal_id"],
+    }
+    conn.execute(
+        """
+        UPDATE admin_action_runs
+        SET status='waiting_human', cron_job_id=NULL, callback_token_hash=NULL,
+            started_at=NULL, completed_at=NULL, error_message=?, payload_json=?,
+            human_prompt_json=?, updated_at=?
+        WHERE id=?
+        """,
+        (
+            reason,
+            _encode_json(payload),
+            _encode_json(human_prompt),
+            now,
+            run_id,
+        ),
+    )
+    return _row_to_run(_select_action_run_with_registry(conn, run_id))
+
+
 def _row_to_spawn_action(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["registry_id"],
@@ -1042,6 +1255,14 @@ def _agent_run_context_for_prompt(conn: sqlite3.Connection, deal_id: str) -> dic
         flow = context.get("dealFlow") or {}
         gate = flow.get("gate") or {}
         province_guide = context.get("provinceGuide") or {}
+        stage_documents = context.get("stageDocuments") or {}
+        stage_document_rows = stage_documents.get("stages") or {}
+        current_stage = deal.get("currentStage")
+        current_stage_documents = (
+            stage_document_rows.get(str(current_stage), [])
+            if isinstance(stage_document_rows, Mapping)
+            else []
+        )
         return {
             "source": "operational:deal_context",
             "deal": {
@@ -1105,6 +1326,13 @@ def _agent_run_context_for_prompt(conn: sqlite3.Connection, deal_id: str) -> dic
                 "coverage": province_guide.get("coverage") or {},
                 "forms": province_guide.get("forms") or [],
             },
+            "currentStageDocuments": {
+                "province": stage_documents.get("province"),
+                "side": stage_documents.get("side"),
+                "stage": current_stage,
+                "documents": current_stage_documents,
+                "coverage": stage_documents.get("coverage") or {},
+            },
             "agentGuideMemory": context.get("agentGuideMemory") or {},
             "attachments": [
                 _non_empty_mapping(
@@ -1154,6 +1382,33 @@ def dispatch_action_run_to_cron(
             "actor": actor,
             "recordedAt": now,
         }
+        if exact_realtor_beta_active():
+            human_prompt = {
+                "title": "Admin setup required",
+                "message": setup_block,
+                "requiredFields": [
+                    "Complete the missing Admin Setup items, then retry this task."
+                ],
+                "kind": "admin_setup",
+                "runId": run_id,
+                "dealId": row["deal_id"],
+            }
+            conn.execute(
+                """
+                UPDATE admin_action_runs
+                SET status='waiting_human', error_message=?, payload_json=?,
+                    human_prompt_json=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    setup_block,
+                    _encode_json(payload),
+                    _encode_json(human_prompt),
+                    now,
+                    run_id,
+                ),
+            )
+            return _row_to_run(_select_action_run_with_registry(conn, run_id))
         conn.execute(
             """
             UPDATE admin_action_runs
@@ -1165,6 +1420,9 @@ def dispatch_action_run_to_cron(
         return _row_to_run(_select_action_run_with_registry(conn, run_id))
 
     payload.pop("dispatchBlocked", None)
+    forms_provider_block = live_forms_provider_block_reason_for_run(conn, run_id)
+    if forms_provider_block:
+        return park_run_for_live_forms_provider(conn, run_id, actor=actor)
     token, token_hash = _new_callback_token()
     conn.execute(
         """
@@ -1225,7 +1483,7 @@ def drain_queued_action_runs(
     """Dispatch queued Admin action runs into cron."""
     if limit < 1:
         raise ValueError("limit must be >= 1")
-    if _admin_setup_dispatch_block_reason(conn):
+    if _admin_setup_dispatch_block_reason(conn) and not exact_realtor_beta_active():
         return []
     rows = conn.execute(
         """
@@ -1376,6 +1634,104 @@ def mark_stale_action_runs(
         updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (row["id"],)).fetchone()
         recovered.append(_row_to_run(updated))
     return recovered
+
+
+def record_action_run_worker_exit(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    cron_job_id: str | None = None,
+    success: bool,
+    error: str | None = None,
+    actor: str = "cron-scheduler",
+    max_retries: int = 2,
+) -> dict[str, Any]:
+    """Recover an Admin run when its cron worker exits without a callback.
+
+    The result callback is the only proof that the worker wrote its artifacts
+    and operational updates.  A cron session ending while the matching run is
+    still ``running`` therefore cannot be treated as completion.  Re-queue a
+    fresh worker immediately (up to ``max_retries``), then fail visibly.  A
+    late exit from an older cron job cannot disturb a newer retry because the
+    current ``cron_job_id`` must still match.
+    """
+    if max_retries < 0:
+        raise ValueError("max_retries must be >= 0")
+    row = _run_lookup(conn, run_id)
+    if row["status"] != "running":
+        return _row_to_run(_select_action_run_with_registry(conn, run_id))
+    current_cron_job_id = str(_row_value(row, "cron_job_id") or "")
+    if cron_job_id and current_cron_job_id != str(cron_job_id):
+        return _row_to_run(_select_action_run_with_registry(conn, run_id))
+
+    now = now_iso()
+    payload = _decode_json(row["payload_json"]) or {}
+    if not isinstance(payload, dict):
+        payload = {"prior": payload}
+    prior_recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
+    attempts = int(prior_recovery.get("attempts") or 0)
+    reason = str(error or "").strip()
+    if not reason:
+        reason = (
+            "Worker exited successfully without the required result callback"
+            if success
+            else "Worker exited without the required result callback"
+        )
+
+    if attempts < max_retries:
+        attempts += 1
+        payload["recovery"] = {
+            "event": "worker_exit_without_callback_requeued",
+            "actor": actor,
+            "attempts": attempts,
+            "maxRetries": max_retries,
+            "retryable": True,
+            "cronJobId": current_cron_job_id or None,
+            "lastError": reason,
+            "recordedAt": now,
+        }
+        conn.execute(
+            """
+            UPDATE admin_action_runs
+            SET status='queued', cron_job_id=NULL, started_at=NULL,
+                result_idempotency_key=NULL, result_json=NULL,
+                callback_token_hash=NULL, error_message=NULL, completed_at=NULL,
+                payload_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (_encode_json(payload), now, run_id),
+        )
+        _request_agent_worker_wake(
+            reason=f"admin-run-missing-callback:{run_id}",
+            actor=actor,
+        )
+    else:
+        message = (
+            "Admin action worker exited without a result callback"
+            + (f" after {attempts} recovery re-queue(s)" if attempts else "")
+            + f": {reason}"
+        )
+        payload["recovery"] = {
+            "event": "worker_exit_without_callback_failed",
+            "actor": actor,
+            "attempts": attempts,
+            "maxRetries": max_retries,
+            "retryable": True,
+            "cronJobId": current_cron_job_id or None,
+            "lastError": reason,
+            "recordedAt": now,
+        }
+        conn.execute(
+            """
+            UPDATE admin_action_runs
+            SET status='failed', error_message=?, payload_json=?,
+                updated_at=?, completed_at=?
+            WHERE id=?
+            """,
+            (message, _encode_json(payload), now, now, run_id),
+        )
+
+    return _row_to_run(_select_action_run_with_registry(conn, run_id))
 
 
 def approve_action_run(
@@ -1710,12 +2066,20 @@ def _spawn_cron_job(
         ]
         if skill_args:
             prompt_lines.append(f"Skill args: {json.dumps(skill_args, default=str)}")
+            required_artifact_kinds = skill_args.get("requiredArtifactKinds")
+            if required_artifact_kinds:
+                prompt_lines.append(
+                    "Result contract: status=succeeded requires verified artifact kind(s): "
+                    + ", ".join(str(kind) for kind in required_artifact_kinds)
+                    + ". If those artifacts cannot be produced, callback with waiting_human or failed; never claim completion."
+                )
         if agent_context:
             prompt_lines.extend(
                 [
                     "",
                     "Injected source-of-truth context from the operational data store. Treat this as the run's working memory.",
                     "Use agentGuideMemory for province guide/reference/checklist/form material.",
+                    "Use currentStageDocuments as the authoritative province-aware document set for this deal stage.",
                     "Use sourcePath values when the full local guide file is needed.",
                     json.dumps(agent_context, indent=2, default=str),
                 ]

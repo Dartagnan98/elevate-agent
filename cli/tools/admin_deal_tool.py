@@ -19,11 +19,20 @@ from typing import Any
 
 from tools.registry import registry, tool_error, tool_result
 
-# Honest, non-"skill" actor: an in-session agent action with the realtor present.
-# (The "skill:" prefix triggers the unattended-run protection that blocks
-# approval-gated cells; in a live session the agent finalizes with the user, so
-# it uses an agent-level actor. Policy on approval cells lives in the skills.)
-_ACTOR = "agent:admin_deal"
+# This remains an automated tool call even when it happens in a live session.
+# Human approvals must be recorded through a human UI action; a model must not
+# turn its own statement that the realtor approved into an approval receipt.
+_ACTOR = "skill:admin_deal"
+
+
+def _protected_checklist_field(value: Any) -> bool:
+    field = str(value or "").strip()
+    return (
+        field.startswith("workflow_stage_") and field.endswith("_complete")
+    ) or field in {
+        "workflow_listing_description_approved",
+        "workflow_jeff_photo_review",
+    }
 
 
 def _parse_bool(value: Any, *, default: bool = False) -> bool:
@@ -102,10 +111,29 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 cells = args.get("cells")
                 applied: dict[str, Any] = {}
                 if isinstance(cells, dict) and cells:
-                    for raw_field, raw_value in cells.items():
-                        cell = str(raw_field or "").strip()
-                        if not cell:
-                            continue
+                    normalized_cells = [
+                        (str(raw_field or "").strip(), raw_value)
+                        for raw_field, raw_value in cells.items()
+                        if str(raw_field or "").strip()
+                    ]
+                    protected = next(
+                        (
+                            cell
+                            for cell, raw_value in normalized_cells
+                            if _protected_checklist_field(cell) and _parse_bool(raw_value)
+                        ),
+                        None,
+                    )
+                    if protected:
+                        return tool_result(
+                            success=False,
+                            error="human_approval_required",
+                            message=(
+                                f"{protected} is approval-gated and cannot be completed by an agent tool. "
+                                "Ask the realtor to record the approval in the deal UI."
+                            ),
+                        )
+                    for cell, raw_value in normalized_cells:
                         set_deal_toggle(conn, deal_id, field=cell, value=raw_value, actor=_ACTOR)
                         applied[cell] = raw_value
                     if not applied:
@@ -117,6 +145,15 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                             "set_checklist requires 'field' (a checklist/workflow id) or a 'cells' map"
                         )
                     value = args.get("value", True)
+                    if _protected_checklist_field(field) and _parse_bool(value):
+                        return tool_result(
+                            success=False,
+                            error="human_approval_required",
+                            message=(
+                                f"{field} is approval-gated and cannot be completed by an agent tool. "
+                                "Ask the realtor to record the approval in the deal UI."
+                            ),
+                        )
                     set_deal_toggle(conn, deal_id, field=field, value=value, actor=_ACTOR)
                     applied[field] = value
                 ctx = get_deal_context(conn, deal_id)
@@ -126,6 +163,25 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 fields = args.get("fields")
                 if not isinstance(fields, dict) or not fields:
                     return tool_error("set_fields requires a non-empty 'fields' object")
+                protected = next(
+                    (
+                        str(key)
+                        for key, value in fields.items()
+                        if str(key).startswith("workflow_")
+                        and _protected_checklist_field(key)
+                        and _parse_bool(value)
+                    ),
+                    None,
+                )
+                if protected:
+                    return tool_result(
+                        success=False,
+                        error="human_approval_required",
+                        message=(
+                            f"{protected} is approval-gated and cannot be completed by an agent tool. "
+                            "Ask the realtor to record the approval in the deal UI."
+                        ),
+                    )
                 # A gate's required "fields" mix named deal columns (listPrice,
                 # listingAddress, dates) with workflow_* cells stored as toggles.
                 # Route each automatically so the agent can pass either kind.
@@ -164,23 +220,29 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 ctx = get_deal_context(conn, deal_id)
                 gate = ((ctx.get("dealFlow") or {}).get("gate") or {})
                 next_stage = gate.get("nextStage")
-                force = _parse_bool(args.get("force"))
+                if _parse_bool(args.get("force")):
+                    return tool_result(
+                        success=False,
+                        error="human_gate_override_required",
+                        message="admin_deal cannot force a stage move; resolve the gate or use the human deal UI.",
+                        gate=_gate_brief(ctx),
+                    )
                 if next_stage is None:
                     return tool_result(
                         success=False,
                         message="deal is already at the final stage",
                         gate=_gate_brief(ctx),
                     )
-                if not force and not gate.get("canAdvance"):
+                if not gate.get("canAdvance"):
                     return tool_result(
                         success=False,
-                        message="phase gate is blocked — resolve the missing items first, or pass force=true",
+                        message="phase gate is blocked — resolve the missing items first",
                         gate=_gate_brief(ctx),
                     )
                 move_deal_stage(
                     conn, deal_id,
                     to_stage=int(next_stage), actor=_ACTOR,
-                    force=force, gate_checked=not force,
+                    force=False, gate_checked=True,
                 )
                 ctx = get_deal_context(conn, deal_id)
                 return tool_result(success=True, advanced=True, gate=_gate_brief(ctx))
@@ -194,9 +256,10 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
 
                 run_id = str(args.get("run_id") or "").strip()
                 skill_filter = str(args.get("skill") or "").strip().lower()
+                runs = list_action_runs(conn, deal_id=deal_id)
                 if not run_id:
                     active = [
-                        r for r in list_action_runs(conn, deal_id=deal_id)
+                        r for r in runs
                         if r.get("status") in {"running", "queued", "waiting_human", "waiting_external"}
                     ]
                     if skill_filter:
@@ -213,7 +276,24 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                         )
                     run_id = active[0]["id"]
                 status = str(args.get("status") or "succeeded").strip()
-                record_run_result(
+                selected_run = next((run for run in runs if str(run.get("id")) == run_id), None)
+                if selected_run is None:
+                    return tool_error(f"action run {run_id!r} was not found on this deal")
+                if (
+                    selected_run.get("status") in {"waiting_human", "waiting_external"}
+                    and status in {"succeeded", "completed", "skipped"}
+                ):
+                    return tool_result(
+                        success=False,
+                        error="human_action_required",
+                        message=(
+                            f"run {run_id} is {selected_run.get('status')} and cannot be terminally "
+                            "completed by an agent tool; use its dedicated human approval or manual-document action"
+                        ),
+                        runId=run_id,
+                        status=selected_run.get("status"),
+                    )
+                persisted = record_run_result(
                     conn, deal_id, run_id,
                     status=status,
                     idempotency_key=args.get("idempotency_key") or args.get("idempotencyKey"),
@@ -223,17 +303,40 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                     actor=_ACTOR,
                 )
                 ctx = get_deal_context(conn, deal_id)
-                return tool_result(success=True, completedRun=run_id, status=status, gate=_gate_brief(ctx))
+                persisted_status = str(persisted.get("status") or "")
+                completed = persisted_status in {"succeeded", "completed"}
+                prompt = persisted.get("humanPrompt") or {}
+                return tool_result(
+                    success=completed,
+                    completedRun=run_id if completed else None,
+                    runId=run_id,
+                    requestedStatus=status,
+                    status=persisted_status,
+                    taskCompleted=completed,
+                    message=(
+                        None
+                        if completed
+                        else prompt.get("message")
+                        or persisted.get("errorMessage")
+                        or f"run remains {persisted_status or 'incomplete'}"
+                    ),
+                    gate=_gate_brief(ctx),
+                )
 
             if action == "move":
                 to_stage = args.get("to_stage")
                 if to_stage is None:
                     return tool_error("move requires 'to_stage'")
-                force = _parse_bool(args.get("force"))
+                if _parse_bool(args.get("force")):
+                    return tool_result(
+                        success=False,
+                        error="human_gate_override_required",
+                        message="admin_deal cannot force a stage move; resolve the gate or use the human deal UI.",
+                    )
                 move_deal_stage(
                     conn, deal_id,
                     to_stage=int(to_stage), actor=_ACTOR,
-                    force=force, gate_checked=not force,
+                    force=False, gate_checked=False,
                 )
                 ctx = get_deal_context(conn, deal_id)
                 return tool_result(success=True, movedTo=int(to_stage), gate=_gate_brief(ctx))
@@ -270,7 +373,7 @@ ADMIN_DEAL_SCHEMA = {
             "the background result callback. Resolves the deal's active run automatically "
             "(or pass run_id / skill).\n"
             "- advance: move the card to the next stage when the gate is clear.\n"
-            "- move: move to an explicit stage (use force=true to override the gate).\n\n"
+            "- move: move to an explicit stage only when the phase gate permits it.\n\n"
             "A deal that entered a stage on its own has a pending run that BLOCKS the gate "
             "until done — use complete_run to close it, not force. Every write returns the "
             "updated gate. Approval-gated cells (stage-complete, listing-description-approved, "
@@ -301,7 +404,6 @@ ADMIN_DEAL_SCHEMA = {
                 "human_prompt": {"type": "object", "description": "complete_run: {title, message, requiredFields} when status is waiting_human."},
                 "idempotency_key": {"type": "string", "description": "complete_run: stable key so retries don't duplicate."},
                 "to_stage": {"type": "integer", "minimum": 0, "maximum": 10, "description": "move: target stage index."},
-                "force": {"type": "boolean", "description": "advance/move: override the phase gate. Default false."},
             },
             "required": ["action", "deal_id"],
         },

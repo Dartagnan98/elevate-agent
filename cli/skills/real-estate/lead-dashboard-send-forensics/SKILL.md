@@ -142,7 +142,7 @@ Use this only when the user explicitly asks to change an unsent Lead Board draft
    - macOS system `python3` may be 3.9 and fail on newer type-hint syntax from the app bundle.
    - Use:
      ```bash
-     /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12
+     /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B
      ```
    - Import `/Applications/Elevate.app/Contents/Resources/cli` onto `sys.path`, then use `elevate_cli.outreach_db.connect()` for the same Postgres-backed compatibility layer as the app.
 

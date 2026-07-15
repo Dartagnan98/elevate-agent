@@ -40,22 +40,55 @@ describe("admin deal UI recovery wiring", () => {
     expect(board).toContain('loading ? "Retrying..." : "Retry"');
   });
 
-  it("does not claim offer or listing kit success after a failed HTTP response", () => {
+  it("does not claim offer-kit success after a failed HTTP response", () => {
     const offerKit = source("../components/offer-kit-wizard.tsx");
+
+    expect(offerKit).toContain("await runKitRequests");
+    expect(offerKit).toContain("await requireKitResponse");
+    expect(offerKit).toContain('role="alert"');
+    expect(offerKit).toContain('aria-live="polite"');
+    expect(offerKit).toContain("setBuiltMsg(\"\")");
+  });
+
+  it("excludes the local offer-kit generator from exact Realtor Beta", () => {
+    const offerKit = source("../components/offer-kit-wizard.tsx");
+
+    expect(offerKit).toContain("api.getAdminSetup()");
+    expect(offerKit).toContain(
+      'setup.capabilities?.formsProvider === undefined ? "stable" : "beta"',
+    );
+    expect(offerKit).toContain(
+      'offerKitPolicy === "stable" ? StableStep4',
+    );
+    expect(offerKit).toContain("CPS creation is paused in this Beta");
+    expect(offerKit).toContain("Elevate will not generate a CPS from local templates");
+    expect(offerKit).toContain("Deal details saved · provider PDF required");
+  });
+
+  it("excludes local onboarding-form generation and stale outputs from Beta", () => {
+    const onboarding = source("../components/onboarding-panel.tsx");
+
+    expect(onboarding).toContain("api.getAdminSetup()");
+    expect(onboarding).toContain(
+      'setup.capabilities?.formsProvider === undefined ? "stable" : "beta"',
+    );
+    expect(onboarding).toContain('documentPolicy === "stable" ? (');
+    expect(onboarding).toContain("Onboarding form generation is paused in this Beta");
+    expect(onboarding).toContain(
+      "Elevate will not open, regenerate, approve, or send stale local forms",
+    );
+    expect(onboarding).toContain("PROVIDER REQUIRED");
+  });
+
+  it("keeps the listing kit truthful while provider routes are unavailable", () => {
     const listingKit = source("../components/listing-kit-wizard.tsx");
 
-    for (const wizard of [offerKit, listingKit]) {
-      expect(wizard).toContain("await runKitRequests");
-      expect(wizard).toContain("await requireKitResponse");
-      expect(wizard).toContain('role="alert"');
-      expect(wizard).toContain('aria-live="polite"');
-      expect(wizard).toContain("setBuiltMsg(\"\")");
-    }
-    expect(listingKit).toContain(
-      "Listing package generation is not available yet",
-    );
-    expect(listingKit).not.toContain(
-      'setSendMsg(r.ok ? "Listing package dispatched',
-    );
+    expect(listingKit).toContain("Document creation and signing are paused");
+    expect(listingKit).toContain("Checklist saves automatically");
+    expect(listingKit).not.toContain("/listing-kit/");
+    expect(listingKit).not.toContain("/listing-kit-doc/");
+    expect(listingKit).not.toContain("/listing-sign");
+    expect(listingKit).not.toContain("/listing-pull-records");
+    expect(listingKit).not.toContain("Build Listing Package");
   });
 });

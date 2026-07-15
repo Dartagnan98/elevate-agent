@@ -47,7 +47,7 @@ Pitfall: `admin_deal(action='show')` may show `canAdvance=false` even when missi
 Current data access note: Admin dashboard operational data is Postgres-backed through the embedded Elevate data layer. Do not use old `sqlite3` / `operational.db` snippets unless you have explicitly verified a legacy checkout. For live data changes, first identify what is serving the visible dashboard. If the running process is the packaged app's own Python runtime running `elevate_cli.main dashboard --port 9120`, use that packaged Python runtime for data writes:
 
 ```bash
-/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 - <<'PY'
+/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B - <<'PY'
 from elevate_cli.data import connect
 # query/mutate live dashboard data here
 PY
@@ -67,13 +67,13 @@ rm -rf "$OVERLAY"
 mkdir -p "$(dirname "$OVERLAY")"
 /usr/bin/rsync -a --delete "$SRC_APP/" "$OVERLAY/"
 cp "$SRC_CHECKOUT/elevate_cli/admin_deal_flow.py" "$OVERLAY/elevate_cli/admin_deal_flow.py"
-PYTHONPATH="$OVERLAY" /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -m elevate_cli.main dashboard --port 9120 --host 127.0.0.1 --no-open --tui
+PYTHONPATH="$OVERLAY" /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B -m elevate_cli.main dashboard --port 9120 --host 127.0.0.1 --no-open --tui
 ```
 
 Verify imports and live data against the overlay before reporting success:
 
 ```bash
-PYTHONPATH="$OVERLAY" /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 - <<'PY'
+PYTHONPATH="$OVERLAY" /Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B - <<'PY'
 import elevate_cli.admin_deal_flow as f
 print(f.__file__)
 PY
@@ -1053,7 +1053,7 @@ Discovery pattern:
 PY=/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12
 # If a source checkout is definitely serving the dashboard, use:
 # cd <elevate-checkout>/cli && PY=.venv/bin/python
-$PY - <<'PY'
+$PY -B - <<'PY'
 from elevate_cli.data import connect
 names = ['matina', 'jennifer', 'leslie']
 with connect() as conn:
@@ -1079,7 +1079,7 @@ Pinning pattern:
 PY=/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12
 # If a source checkout is definitely serving the dashboard, use:
 # cd <elevate-checkout>/cli && PY=.venv/bin/python
-$PY - <<'PY'
+$PY -B - <<'PY'
 from elevate_cli.data import connect
 from elevate_cli.data.deals import promote_profile_to_admin_deal, set_deal_toggle, list_deals
 
@@ -1156,7 +1156,7 @@ Pitfalls:
 ```bash
 token=$(tr -d '\n' < ~/.elevate/dashboard-session-token)
 curl -fsS -H "X-Elevate-Session-Token: $token" http://127.0.0.1:9120/api/admin/deals -o /tmp/admin-deals.json
-/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 - /tmp/admin-deals.json <<'PY'
+/Applications/Elevate.app/Contents/Resources/runtime/python/bin/python3.12 -B - /tmp/admin-deals.json <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 items=data.get('items') or data.get('deals') or []
@@ -1290,4 +1290,3 @@ Do not run `npx eslint ...` from the repo root for targeted dashboard lint: it m
 - After registry route fixes, verify with `elevate_db` that no enabled Stage 1 listing `stage_entry` rows use `skill='real-estate-admin/cma-generator'` or `skill='cma'`, and return the exact row(s) changed. Do not run a CMA, send anything, or touch client-facing artifacts unless the realtor explicitly asks.
 - `cma` should consume the Pre-CMA handoff first.
 - `mlc` should trigger when a CMA/Evaluation card is moved into Listing Intake, but must still require the realtor approval before external signing send.
-

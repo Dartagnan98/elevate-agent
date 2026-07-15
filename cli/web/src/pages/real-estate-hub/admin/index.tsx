@@ -56,6 +56,7 @@ import type {
   DealAttachmentCreateRequest,
   DealContactCreateRequest,
   DealContext,
+  ManualReviewedRunDocumentRequest,
   ProvinceStageDocumentItem,
   SourceInboxProfileVerifier,
 } from "@/lib/api";
@@ -99,6 +100,7 @@ import {
 } from "@/pages/real-estate-hub/_shared/page-helpers";
 import { AdminDesignShell } from "./AdminDesignShell";
 import {
+  adminFormsProviderCardModel,
   adminOnboardingExitDelay,
   adminOnboardingSeedingStepState,
   canClaimAdminSetupReady,
@@ -167,6 +169,16 @@ const CANADIAN_PROVINCES: Array<{ code: string; label: string }> = [
 ];
 
 const PROVINCE_LABEL_BY_CODE = new Map(CANADIAN_PROVINCES.map(({ code, label }) => [code, label]));
+
+function provincePackLabel(coverage?: AdminProvinceGuideCoverage): string {
+  if (coverage?.referenceOnly) return "reference pack";
+  if (coverage?.hasTransactionGuide) return "full guide";
+  return coverage ? "reference" : "";
+}
+
+function provinceFormCountLabel(coverage: { forms: number; referenceOnly?: boolean }): string {
+  return `${coverage.forms} ${coverage.referenceOnly ? "form references" : "forms"}`;
+}
 
 type AdminStageLabel = {
   title: string;
@@ -1374,6 +1386,7 @@ function AdminOnboardingWizard({
   provinceCoverageError,
   onRetryProvinceCoverage,
   savedProvinceCode,
+  provinceOptions,
 }: {
   draft: AdminSetupDraft;
   updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
@@ -1388,6 +1401,7 @@ function AdminOnboardingWizard({
   provinceCoverageError: string | null;
   onRetryProvinceCoverage: () => void;
   savedProvinceCode: string;
+  provinceOptions: Array<{ code: string; label: string; supported: boolean }>;
 }) {
   const [stepIdx, setStepIdx] = useState(0);
   const [showMissing, setShowMissing] = useState(false);
@@ -1494,6 +1508,7 @@ function AdminOnboardingWizard({
                     provinceCoverageByCode={provinceCoverageByCode}
                     selectedProvinceCoverage={selectedProvinceCoverage}
                     savedProvinceCode={savedProvinceCode}
+                    provinceOptions={provinceOptions}
                     provinceCoverageLoading={provinceCoverageLoading}
                     provinceCoverageError={provinceCoverageError}
                     onRetryProvinceCoverage={onRetryProvinceCoverage}
@@ -1743,6 +1758,7 @@ function AdminOnboardingSeeding({
 type OnboardingConnectorAction =
   | { kind: "composio"; toolkitSlug: string; label: string }
   | { kind: "browser-use"; portalKey: "mls" | "compliance" | "showing"; label: string }
+  | { kind: "forms-provider"; label: "Connect & verify"; disabledReason: string }
   | { kind: "manual"; helpText: string };
 
 type OnboardingConnectorCard = {
@@ -1787,6 +1803,17 @@ const ONBOARDING_CONNECTOR_TEMPLATES: Record<
     icon: DatabaseIcon,
     action: { kind: "manual", helpText: "Tell the onboarding coach where your leads live and it'll set up the right sync." },
   },
+  forms_provider: {
+    title: "Forms provider",
+    question: "Which forms system does your brokerage use for MLC and CPS paperwork?",
+    helpText: "Name the provider during setup. Admin can run, but live document drafting remains paused until provider access is verified.",
+    icon: FileText,
+    action: {
+      kind: "forms-provider",
+      label: "Connect & verify",
+      disabledReason: "Automatic live forms verification is not available in this Beta build. MLC and CPS drafting stays manual instead of being reported as connected.",
+    },
+  },
   mls: {
     title: "MLS / board portal",
     question: "What's your MLS login URL? We'll log in and scan your dashboard.",
@@ -1811,14 +1838,19 @@ const ONBOARDING_CONNECTOR_TEMPLATES: Record<
 };
 
 function buildOnboardingConnectorCards(setup: AdminSetupSnapshot): OnboardingConnectorCard[] {
-  return unresolvedAdminSetupReadiness(setup).map((readiness) => {
-    const template = ONBOARDING_CONNECTOR_TEMPLATES[readiness.key];
+  const formsCard = adminFormsProviderCardModel(setup);
+  const cards: OnboardingConnectorCard[] = unresolvedAdminSetupReadiness(setup).map((readiness) => {
+    const template = readiness.key === "forms_provider" && !formsCard.exactBeta
+      ? undefined
+      : ONBOARDING_CONNECTOR_TEMPLATES[readiness.key];
     if (template) {
       return {
         key: readiness.key,
         ...template,
         question: readiness.detail || template.question,
-        helpText: readiness.action || template.helpText,
+        helpText: template.action.kind === "forms-provider"
+          ? `${readiness.action || template.helpText} ${template.action.disabledReason}`
+          : readiness.action || template.helpText,
         statusLabel: readiness.state.replaceAll("_", " "),
       };
     }
@@ -1835,6 +1867,24 @@ function buildOnboardingConnectorCards(setup: AdminSetupSnapshot): OnboardingCon
       },
     };
   });
+  if (formsCard.visible && !cards.some((card) => card.key === "forms_provider")) {
+    const template = ONBOARDING_CONNECTOR_TEMPLATES.forms_provider;
+    cards.push({
+      key: "forms_provider",
+      ...template,
+      question: formsCard.provider
+        ? `${formsCard.provider} is saved as your forms provider.`
+        : template.question,
+      helpText: formsCard.message,
+      statusLabel: formsCard.statusLabel,
+      action: {
+        kind: "forms-provider",
+        label: formsCard.buttonLabel,
+        disabledReason: formsCard.disabledReason,
+      },
+    });
+  }
+  return cards;
 }
 
 function AdminOnboardingConnectors({
@@ -2004,6 +2054,7 @@ function AdminOnboardingConnectors({
             const composioBusy = pendingComposioKey === card.key;
             const browserBusy = pendingBrowserKey === card.key;
             const busy = composioBusy || browserBusy;
+            const helpId = `admin-connector-${card.key}-help`;
             return (
               <div
                 key={card.key}
@@ -2020,7 +2071,7 @@ function AdminOnboardingConnectors({
                     </span>
                   </div>
                   <p className="mt-1 text-[13px] leading-5 text-foreground/80">{card.question}</p>
-                  <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{card.helpText}</p>
+                  <p id={helpId} className="mt-1 text-[12px] leading-5 text-muted-foreground">{card.helpText}</p>
 
                   {result && (
                     <div
@@ -2064,6 +2115,18 @@ function AdminOnboardingConnectors({
                       disabled={busy}
                     >
                       {browserBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      {card.action.label}
+                    </Button>
+                  )}
+                  {card.action.kind === "forms-provider" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled
+                      aria-describedby={helpId}
+                      title={card.action.disabledReason}
+                    >
+                      <Lock className="h-3.5 w-3.5" />
                       {card.action.label}
                     </Button>
                   )}
@@ -2275,6 +2338,7 @@ function OnboardingProvinceField({
   onRetryProvinceCoverage,
   required,
   invalid,
+  provinceOptions,
 }: {
   draft: AdminSetupDraft;
   updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
@@ -2286,6 +2350,7 @@ function OnboardingProvinceField({
   onRetryProvinceCoverage: () => void;
   required: boolean;
   invalid: boolean;
+  provinceOptions: Array<{ code: string; label: string; supported: boolean }>;
 }) {
   const [unlocked, setUnlocked] = useState(false);
   const locked = Boolean(savedProvinceCode) && !unlocked;
@@ -2340,11 +2405,13 @@ function OnboardingProvinceField({
           )}
         >
           <option value="">Select province</option>
-          {CANADIAN_PROVINCES.map(({ code, label }) => {
+          {provinceOptions.map(({ code, label, supported }) => {
             const coverage = provinceCoverageByCode.get(code);
-            const suffix = coverage?.hasTransactionGuide ? " — full guide" : coverage ? " — reference" : "";
+            const suffix = !supported
+              ? " — coming soon"
+              : coverage ? ` — ${provincePackLabel(coverage)}` : "";
             return (
-              <option key={code} value={code}>
+              <option key={code} value={code} disabled={!supported}>
                 {label}
                 {suffix}
               </option>
@@ -2355,14 +2422,14 @@ function OnboardingProvinceField({
       {selectedProvinceCoverage && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-            {selectedProvinceCoverage.hasTransactionGuide ? "full guide" : "reference"}
+            {provincePackLabel(selectedProvinceCoverage)}
           </span>
           <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
             {selectedProvinceCoverage.referencePages} pages
           </span>
           {selectedProvinceCoverage.forms > 0 && (
             <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-              {selectedProvinceCoverage.forms} forms
+              {provinceFormCountLabel(selectedProvinceCoverage)}
             </span>
           )}
           {selectedProvinceCoverage.checklists > 0 && (
@@ -2423,6 +2490,7 @@ export function AdminSetupLaunch({
   const [provinceCoverageError, setProvinceCoverageError] = useState<string | null>(null);
   const provinceCoverageRequestRef = useRef(0);
   const [provinceUnlocked, setProvinceUnlocked] = useState(false);
+  const [realtorBetaProvinceOnly, setRealtorBetaProvinceOnly] = useState(false);
   const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "seeding" | "connectors" | "form">(() =>
     forceOnboarding ? "welcome" : isBrandNewAdminSetup(setup) ? "gate" : "form",
   );
@@ -2462,6 +2530,7 @@ export function AdminSetupLaunch({
         throw new Error("Province guide coverage returned an invalid response.");
       }
       setProvinceCoverage(guides.items);
+      setRealtorBetaProvinceOnly(guides.realtorBeta === true);
     } catch (err) {
       if (provinceCoverageRequestRef.current === requestId) {
         setProvinceCoverageError(errorMessage(err, "Could not check province guides"));
@@ -2486,6 +2555,13 @@ export function AdminSetupLaunch({
   const provinceCoverageByCode = useMemo(
     () => new Map(provinceCoverage.map((item) => [item.province, item])),
     [provinceCoverage],
+  );
+  const provinceOptions = useMemo(
+    () => CANADIAN_PROVINCES.map((option) => ({
+      ...option,
+      supported: !realtorBetaProvinceOnly || option.code === "BC",
+    })),
+    [realtorBetaProvinceOnly],
   );
   const selectedProvinceCoverage = provinceCoverageByCode.get(draft.province.trim().toUpperCase());
   const selectedProvinceCoverageState = provinceGuideAvailability({
@@ -2583,6 +2659,10 @@ export function AdminSetupLaunch({
     [setup.readiness],
   );
   const verificationWarnings = setup.verificationWarnings ?? [];
+  const formsProviderCard = useMemo(
+    () => adminFormsProviderCardModel(setup),
+    [setup],
+  );
 
   if (phase === "gate") {
     return (
@@ -2613,6 +2693,7 @@ export function AdminSetupLaunch({
         provinceCoverageError={provinceCoverageError}
         onRetryProvinceCoverage={() => void loadProvinceCoverage()}
         savedProvinceCode={savedProvinceCode}
+        provinceOptions={provinceOptions}
       />
     );
   }
@@ -2766,11 +2847,13 @@ export function AdminSetupLaunch({
                 className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
               >
                 <option value="">Select province</option>
-                {CANADIAN_PROVINCES.map(({ code, label }) => {
+                {provinceOptions.map(({ code, label, supported }) => {
                   const coverage = provinceCoverageByCode.get(code);
-                  const suffix = coverage?.hasTransactionGuide ? " — full guide" : coverage ? " — reference" : "";
+                  const suffix = !supported
+                    ? " — coming soon"
+                    : coverage ? ` — ${provincePackLabel(coverage)}` : "";
                   return (
-                    <option key={code} value={code}>
+                    <option key={code} value={code} disabled={!supported}>
                       {label}
                       {suffix}
                     </option>
@@ -2781,14 +2864,14 @@ export function AdminSetupLaunch({
             {selectedProvinceCoverage && (
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-                  {selectedProvinceCoverage.hasTransactionGuide ? "full guide" : "reference"}
+                  {provincePackLabel(selectedProvinceCoverage)}
                 </span>
                 <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
                   {selectedProvinceCoverage.referencePages} pages
                 </span>
                 {selectedProvinceCoverage.forms > 0 && (
                   <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-                    {selectedProvinceCoverage.forms} forms
+                    {provinceFormCountLabel(selectedProvinceCoverage)}
                   </span>
                 )}
                 {selectedProvinceCoverage.checklists > 0 && (
@@ -2846,6 +2929,44 @@ export function AdminSetupLaunch({
           <AdminSetupField label="Commission / service notes" value={draft.commissionNotes} onChange={(v) => updateDraft("commissionNotes", v)} />
         </div>
       </div>
+
+      {formsProviderCard.visible && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-5 flex flex-col gap-4 rounded-md border border-warning/40 bg-warning/10 p-4 md:flex-row md:items-start md:justify-between"
+        >
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-warning/30 bg-background/70 text-warning">
+              <FileText className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[14px] font-medium text-foreground">{formsProviderCard.title}</span>
+                <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-warning">
+                  {formsProviderCard.statusLabel}
+                </span>
+              </div>
+              <p className="mt-1 text-[12.5px] leading-5 text-foreground/85">
+                {formsProviderCard.message}
+              </p>
+              <p id="forms-provider-verification-help" className="mt-1 text-[11.5px] leading-5 text-muted-foreground">
+                {formsProviderCard.disabledReason}
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={formsProviderCard.buttonDisabled}
+            aria-describedby="forms-provider-verification-help"
+            title={formsProviderCard.disabledReason}
+          >
+            <Lock className="h-3.5 w-3.5" />
+            {formsProviderCard.buttonLabel}
+          </Button>
+        </div>
+      )}
 
       <div className="pt-6 pb-2 border-t border-border">
         <div className="mb-1 text-[12px] font-semibold text-muted-foreground">Portal logins</div>
@@ -3758,6 +3879,131 @@ function adminIsReferralDeal(deal: AdminDeal | null): boolean {
     .some((value) => String(value).toLowerCase().includes("referral"));
 }
 
+function formsProviderArtifactKind(
+  run: AdminActionRun,
+): ManualReviewedRunDocumentRequest["kind"] | null {
+  const promptKind = run.humanPrompt?.requiredArtifactKind;
+  const payloadKind = run.payload?.requiredArtifactKind;
+  const kind = typeof promptKind === "string" ? promptKind : payloadKind;
+  return kind === "mlc_pdf" || kind === "cps_draft" ? kind : null;
+}
+
+function ManualFormsProviderCompletion({
+  busy,
+  onComplete,
+  run,
+}: {
+  busy: boolean;
+  onComplete: (body: ManualReviewedRunDocumentRequest) => Promise<void>;
+  run: AdminActionRun;
+}) {
+  const artifactKind = formsProviderArtifactKind(run);
+  const [file, setFile] = useState<File | null>(null);
+  const [reviewed, setReviewed] = useState(false);
+  const [summary, setSummary] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!file || !reviewed || !artifactKind || submitting || busy) return;
+    setError(null);
+    if (!file.name.toLowerCase().endsWith(".pdf") || file.size <= 5) {
+      setError("Choose a non-empty PDF exported from your licensed forms provider.");
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      setError("The reviewed PDF must be 25 MB or smaller.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const contentB64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("Could not read the selected PDF."));
+        reader.onload = () => {
+          const value = typeof reader.result === "string" ? reader.result : "";
+          const comma = value.indexOf(",");
+          if (comma < 0) reject(new Error("Could not encode the selected PDF."));
+          else resolve(value.slice(comma + 1));
+        };
+        reader.readAsDataURL(file);
+      });
+      await onComplete({
+        reviewed: true,
+        kind: artifactKind,
+        filename: file.name,
+        contentB64,
+        summary: summary.trim() || "Reviewed in the licensed forms provider.",
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not attach the reviewed PDF.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <form
+      className="mt-2 rounded-lg border border-primary/25 bg-background/60 p-3"
+      onSubmit={submit}
+    >
+      <div className="text-[0.78rem] font-medium text-foreground">
+        Finish with the reviewed provider PDF
+      </div>
+      <p className="mt-1 text-[0.72rem] leading-5 text-muted-foreground">
+        Complete this form in your licensed provider, review the exported PDF, then attach it here.
+        Elevate records your review and closes this task without claiming it generated the form.
+      </p>
+      <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <input
+          accept="application/pdf,.pdf"
+          className="min-h-10 rounded-md border border-border bg-background px-2 py-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+          type="file"
+        />
+        <input
+          className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          onChange={(event) => setSummary(event.target.value)}
+          placeholder="Review note (optional)"
+          value={summary}
+        />
+      </div>
+      <label className="mt-2 flex items-start gap-2 text-[0.72rem] leading-5 text-foreground">
+        <input
+          checked={reviewed}
+          className="mt-1"
+          disabled={busy || submitting}
+          onChange={(event) => setReviewed(event.target.checked)}
+          type="checkbox"
+        />
+        I reviewed this PDF and confirm it is the correct MLC/CPS document for this deal.
+      </label>
+      {error && <div className="mt-2 text-[0.72rem] text-destructive">{error}</div>}
+      {!artifactKind && (
+        <div className="mt-2 text-[0.72rem] text-destructive">
+          This task is missing its required document kind. Refresh the deal before attaching.
+        </div>
+      )}
+      <Button
+        className="mt-2"
+        disabled={busy || submitting || !file || !reviewed || !artifactKind}
+        size="sm"
+        type="submit"
+      >
+        {submitting ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <FileCheck2 className="h-3.5 w-3.5" />
+        )}
+        Attach reviewed PDF and complete
+      </Button>
+    </form>
+  );
+}
+
 function AdminDealContextSection({
   context,
   loading,
@@ -3767,6 +4013,7 @@ function AdminDealContextSection({
   onUpdateFields,
   onAddAttachment,
   onAddContact,
+  onCompleteManualRun,
   onApproveRun,
   onCancelRun,
 }: {
@@ -3778,6 +4025,10 @@ function AdminDealContextSection({
   onUpdateFields: (fields: Record<string, unknown>) => Promise<void>;
   onAddAttachment: (body: DealAttachmentCreateRequest) => Promise<void>;
   onAddContact: (body: DealContactCreateRequest) => Promise<void>;
+  onCompleteManualRun: (
+    runId: string,
+    body: ManualReviewedRunDocumentRequest,
+  ) => Promise<void>;
   onApproveRun: (runId: string) => Promise<void>;
   onCancelRun: (runId: string) => Promise<void>;
 }) {
@@ -3911,18 +4162,20 @@ function AdminDealContextSection({
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  <Badge variant="outline">{provinceGuide.coverage.forms} forms</Badge>
+                  <Badge variant="outline">{provinceFormCountLabel(provinceGuide.coverage)}</Badge>
                   <Badge variant="outline">{provinceGuide.coverage.referencePages} guides</Badge>
                   <Badge variant="outline">{provinceGuide.coverage.checklists} checklists</Badge>
                   {provinceGuide.coverage.hasTransactionGuide && (
-                    <Badge variant="success">transaction guide</Badge>
+                    <Badge variant="success">
+                      {provinceGuide.coverage.referenceOnly ? "reference pack" : "transaction guide"}
+                    </Badge>
                   )}
                 </div>
               </div>
               {provinceGuide.pages.length > 0 && (
                 <div className="mt-2">
                   <div className="font-mono-ui mb-1 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-                    Transaction guides
+                    {provinceGuide.coverage.referenceOnly ? "Reference guidance" : "Transaction guides"}
                   </div>
                   <ul className="flex flex-col gap-1">
                     {provinceGuide.pages.slice(0, 6).map((page) => (
@@ -4335,16 +4588,28 @@ function AdminDealContextSection({
                 <Badge variant="warning">{pendingHumanRuns.length}</Badge>
               </div>
               <div className="mt-2 space-y-2">
-                {pendingHumanRuns.map((run) => (
-                  <AdminRunDecisionRow
-                    key={run.id}
-                    compact
-                    busyRun={busy ? { id: "__busy__", action: "approve" } : approvalBusyRun}
-                    run={run}
-                    onApprove={() => void resolvePendingRun(run, true)}
-                    onCancel={() => void resolvePendingRun(run, false)}
-                  />
-                ))}
+                {pendingHumanRuns.map((run) => {
+                  const formsProviderRun = run.humanPrompt?.kind === "forms_provider";
+                  return (
+                    <div key={run.id}>
+                      <AdminRunDecisionRow
+                        compact
+                        busyRun={busy ? { id: "__busy__", action: "approve" } : approvalBusyRun}
+                        hideApprove={formsProviderRun}
+                        run={run}
+                        onApprove={() => void resolvePendingRun(run, true)}
+                        onCancel={() => void resolvePendingRun(run, false)}
+                      />
+                      {formsProviderRun && (
+                        <ManualFormsProviderCompletion
+                          busy={busy}
+                          onComplete={(body) => onCompleteManualRun(run.id, body)}
+                          run={run}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -4625,6 +4890,12 @@ function AdminCardDetailPanel({
                 await reloadDealContext();
               })
             }
+            onCompleteManualRun={(runId, body) =>
+              runDealAction(async () => {
+                await api.completeManualReviewedRun(card.id, runId, body);
+                await reloadDealContext();
+              })
+            }
             onApproveRun={(runId) =>
               runDealAction(async () => {
                 await api.approveAdminActionRun(runId, { approved: true, runNow: true });
@@ -4677,6 +4948,7 @@ function NewDealDialog({
   const [setupProvince, setSetupProvince] = useState("");
   const [provinceOverride, setProvinceOverride] = useState(false);
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
+  const [realtorBetaProvinceOnly, setRealtorBetaProvinceOnly] = useState(false);
   const [contactId, setContactId] = useState<string | null>(null);
   const [contactQuery, setContactQuery] = useState("");
   const [contacts, setContacts] = useState<AdminContact[]>([]);
@@ -4756,6 +5028,7 @@ function NewDealDialog({
         if (cancelled) return;
         if ("items" in guides) {
           setProvinceCoverage(guides.items);
+          setRealtorBetaProvinceOnly(guides.realtorBeta === true);
         }
       })
       .catch(() => {
@@ -4765,6 +5038,13 @@ function NewDealDialog({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!realtorBetaProvinceOnly) return;
+    setProvince("BC");
+    setSetupProvince("BC");
+    setProvinceOverride(false);
+  }, [realtorBetaProvinceOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5019,9 +5299,12 @@ function NewDealDialog({
                 <option value="">Select province</option>
                 {CANADIAN_PROVINCES.map(({ code, label }) => {
                   const coverage = provinceCoverageByCode.get(code);
-                  const suffix = coverage?.hasTransactionGuide ? " - full guide" : coverage ? " - reference" : "";
+                  const supported = !realtorBetaProvinceOnly || code === "BC";
+                  const suffix = !supported
+                    ? " - coming soon"
+                    : coverage ? ` - ${provincePackLabel(coverage)}` : "";
                   return (
-                    <option key={code} value={code}>
+                    <option key={code} value={code} disabled={!supported}>
                       {label}
                       {suffix}
                     </option>
@@ -5032,14 +5315,14 @@ function NewDealDialog({
             {selectedProvinceCoverage && (
               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-                  {selectedProvinceCoverage.hasTransactionGuide ? "full guide" : "reference"}
+                  {provincePackLabel(selectedProvinceCoverage)}
                 </span>
                 <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
                   {selectedProvinceCoverage.referencePages} pages
                 </span>
                 {selectedProvinceCoverage.forms > 0 && (
                   <span className="font-mono-ui rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wider text-muted-foreground">
-                    {selectedProvinceCoverage.forms} forms
+                    {provinceFormCountLabel(selectedProvinceCoverage)}
                   </span>
                 )}
               </div>
@@ -5640,6 +5923,7 @@ function AdminKanbanBoard() {
 // AdminDesignShell can render the same coach without the legacy page tree.
 export function computeCoachInitialQuestion(snap: AdminSetupSnapshot | null): string {
     if (!snap) return "Loading your setup snapshot — one sec.";
+    const formsProviderCard = adminFormsProviderCardModel(snap);
     const province = (snap.profile?.province || "").toUpperCase();
     const pct = snap.completionPct ?? 0;
     const itemByKey = new Map(snap.items.map((item) => [item.key, item]));
@@ -5652,6 +5936,9 @@ export function computeCoachInitialQuestion(snap: AdminSetupSnapshot | null): st
       if (!isReadyStatus) continue;
       const provider = (item.provider || "").trim();
       const label = provider ? `${item.label} (${provider})` : item.label;
+      if (item.key === "forms_provider" && formsProviderCard.visible) {
+        continue;
+      }
       if (missingKeys.has(item.key)) {
         needsVerificationBits.push(label);
       } else {
@@ -5680,12 +5967,25 @@ export function computeCoachInitialQuestion(snap: AdminSetupSnapshot | null): st
           `These count as missing until Elevation runs a verification ping; usually clears on its own once a sync runs.`,
       );
     }
+    if (formsProviderCard.visible) {
+      lines.push(
+        snap.complete
+          ? `Admin is ready for non-document work. Document drafting is paused: ${formsProviderCard.message}`
+          : `Forms access is not live yet: ${formsProviderCard.message}`,
+      );
+    }
     if (notPicked.length > 0) {
       const first = notPicked[0];
       lines.push(`Not picked yet — ${notPicked.join(", ")}.`);
       lines.push(`Want to knock out ${first} first?`);
     } else if (needsVerificationBits.length > 0) {
-      lines.push(`Nothing left to pick — once the pending health-checks clear, you're 100%.`);
+      lines.push(
+        formsProviderCard.visible
+          ? "Nothing else is left to pick. Pending account checks can clear onboarding, but MLC and CPS drafting will remain paused until forms access is live."
+          : "Nothing left to pick — once the pending health-checks clear, you're 100%.",
+      );
+    } else if (formsProviderCard.visible) {
+      lines.push("Onboarding can finish now; MLC and CPS work will wait for manual forms access instead of claiming a live connection.");
     } else {
       lines.push(`Everything required is in. Anything else you want to tighten up?`);
     }

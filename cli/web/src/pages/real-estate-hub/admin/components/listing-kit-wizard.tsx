@@ -1,13 +1,11 @@
 // Listing Kit wizard (listing/seller side) — the listing-side twin of the buyer
 // Offer Kit wizard. 4 steps: Property & Records -> Listing Terms & Schedule A ->
-// Forms -> Build & Sign. Selections persist to deals.extra_toggles_json via
-// setAdminDealToggle (bare keys), and Build/Generate/Send hit the listing-kit
-// backend endpoints (mirrors the offer-kit endpoints). Self-contained: uses raw
-// fetch for the kit endpoints so it doesn't depend on api.ts additions (which
-// keeps it deployable independently). Render from deal-modal for listing deals.
+// Forms -> Provider Handoff. Selections persist to deals.extra_toggles_json via
+// setAdminDealToggle (bare keys). Document generation and signing stay visibly
+// paused until the licensed forms-provider path is verified; this component
+// must never advertise success through routes that do not exist.
 import { useState, useCallback } from "react";
 import { api } from "../../../../lib/api";
-import { kitErrorMessage, requireKitResponse, runKitRequests } from "./kit-http";
 
 type AnyObj = Record<string, any>;
 
@@ -19,7 +17,7 @@ const INK = "#182848";
 const MUTED = "#6b7280";
 const BORDER = "#e3e6eb";
 
-const STEPS = ["Property", "Listing Terms", "Forms", "Build & Sign"];
+const STEPS = ["Property", "Listing Terms", "Forms", "Provider Handoff"];
 
 const LISTING_TYPES: { id: string; label: string }[] = [
   { id: "residential", label: "Residential (Freehold)" },
@@ -77,8 +75,6 @@ export default function ListingKitWizard({
   const [manualCollapse, setManualCollapse] = useState<boolean | null>(null);
   const collapsed = manualCollapse !== null ? manualCollapse : (currentStage ?? 0) >= 5;
   const setCollapsed = setManualCollapse;
-  const tok = () => (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
-  const [kitError, setKitError] = useState("");
 
   // ── Schedule A clause selection (Step 2) ──
   const savedClauses: string[] = Array.isArray(extra.scheduleAClauses) ? (extra.scheduleAClauses as string[]) : [];
@@ -107,26 +103,8 @@ export default function ListingKitWizard({
     api.setAdminDealToggle(dealId, "listingUmbrella", u).then(() => onUpdate?.()).catch(() => {});
   }, [dealId, onUpdate]);
 
-  // ── record pull (Step 1) ──
-  const [pulling, setPulling] = useState(false);
+  // ── property records (Step 1) ──
   const recordsPulled = !!(extra.pid || extra.legalDescription || extra.legal);
-  const pullStatus = (extra.recordsPullStatus as string) || "";
-  const pullRecords = useCallback(async () => {
-    setPulling(true); setKitError("");
-    try {
-      const response = await fetch(`/api/admin/deals/${dealId}/listing-pull-records`, {
-        method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
-      });
-      await requireKitResponse(response, "Could not start the listing-record pull");
-    } catch (error) {
-      setPulling(false);
-      setKitError(kitErrorMessage(error, "Listing records could not be pulled. This connection may not be available yet."));
-      return;
-    }
-    let n = 0;
-    const poll = setInterval(() => { n += 1; onUpdate?.(); if (n > 30) { clearInterval(poll); setPulling(false); } }, 6000);
-  }, [dealId, onUpdate]);
-  const busy = pulling || pullStatus === "pulling";
 
   // ── terms (Step 2) — save any term to a bare key the MLC/Schedule-A fill read ──
   const saveField = useCallback((key: string, value: string) => {
@@ -141,78 +119,6 @@ export default function ListingKitWizard({
     if (id === "mlc") return;
     setKitForms((p) => { const next = { ...p, [id]: !(p[id] ?? LISTING_FORM_DEFAULTS[id] ?? true) }; api.setAdminDealToggle(dealId, "listingKitForms", next as any).catch(() => {}); return next; });
   };
-  const [building, setBuilding] = useState(false);
-  const [builtMsg, setBuiltMsg] = useState("");
-  const builtDocs: AnyObj[] = ((extra as AnyObj).listingKit?.documents) || [];
-  const [expandedKit] = useState<string | null>(null);
-  const [genBusy, setGenBusy] = useState<string | null>(null);
-
-  const buildKit = useCallback(async () => {
-    setBuilding(true); setBuiltMsg(""); setKitError("");
-    try {
-      await api.setAdminDealToggle(dealId, "scheduleAClauses", Array.from(selected) as any);
-      await api.setAdminDealToggle(dealId, "scheduleACustomClauses", custom as any);
-      const enabled = LISTING_FORMS.filter((f) => f.required || (kitForms[f.id] ?? LISTING_FORM_DEFAULTS[f.id] ?? true)).map((f) => f.id);
-      await runKitRequests([
-        {
-          request: () => fetch(`/api/admin/deals/${dealId}/listing-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }),
-          fallback: "Listing package generation is not available yet",
-        },
-        ...enabled.map((id) => ({
-          request: () => fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${id}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }),
-          fallback: `Could not generate ${LISTING_FORMS.find((form) => form.id === id)?.label || id}`,
-        })),
-      ]);
-      setBuiltMsg(`✓ Built ${enabled.length} documents into the listing package`);
-      onUpdate?.();
-    } catch (error) {
-      setBuiltMsg("");
-      setKitError(kitErrorMessage(error, "The listing package could not be built. A verified province document pack is required."));
-    } finally { setBuilding(false); }
-  }, [dealId, kitForms, onUpdate, selected, custom]);
-
-  const openKitDoc = useCallback((docId: string, download = false) => {
-    const o = window.location.origin;
-    const ext = o.includes("127.0.0.1") ? o.replace("127.0.0.1", "localhost") : o.replace("localhost", "127.0.0.1");
-    window.open(`${ext}/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank", "noopener,noreferrer");
-  }, [dealId]);
-  const approveKitDoc = useCallback(async (docId: string, status: string) => {
-    setKitError("");
-    try {
-      const response = await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/approve`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ status }) });
-      await requireKitResponse(response, "Could not update document approval");
-      onUpdate?.();
-    } catch (error) {
-      setKitError(kitErrorMessage(error, "The listing document approval could not be saved."));
-    }
-  }, [dealId, onUpdate]);
-  const generateKitDoc = useCallback(async (docId: string) => {
-    setGenBusy(docId); setKitError("");
-    try {
-      const response = await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
-      await requireKitResponse(response, "Listing document generation is not available yet");
-      onUpdate?.();
-    } catch (error) {
-      setKitError(kitErrorMessage(error, "The listing PDF could not be generated. A verified province document pack is required."));
-    }
-    finally { setGenBusy(null); }
-  }, [dealId, onUpdate]);
-  // Draft-first send to sellers (mirrors onboarding-sign on the buyer side).
-  const [sendMsg, setSendMsg] = useState("");
-  const [sending, setSending] = useState(false);
-  const sendForSign = useCallback(async () => {
-    setSending(true); setSendMsg(""); setKitError("");
-    try {
-      const r = await fetch(`/api/admin/deals/${dealId}/listing-sign`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
-      await requireKitResponse(r, "Could not dispatch the listing package");
-      setSendMsg("Listing package dispatched — you'll get a Review & approve card with the Preview before anything sends to the sellers.");
-      onUpdate?.();
-    } catch (error) {
-      setSendMsg("");
-      setKitError(kitErrorMessage(error, "The listing package could not be dispatched. Nothing was sent."));
-    } finally { setSending(false); }
-  }, [dealId, onUpdate]);
-
   const mls = (extra.mlsNumber as string) || "";
   const fv = (k: string) => (extra[k] as string) || "";
 
@@ -285,15 +191,12 @@ export default function ListingKitWizard({
         </div>
       </div>
       <div style={panel}>
-        <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Pull property records</div>
-        <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 12px" }}>One pull grabs the LTSA title (PID + legal), BC Assessment value &amp; lot size, and zoning — so the MLC and MLS sheet fill themselves.</div>
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
-          <div><label style={{ display: "block", fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 4 }}>PROPERTY ADDRESS</label>
-            <input defaultValue={address || ""} style={{ fontSize: 15, padding: "9px 12px", borderRadius: 8, border: `1px solid ${BORDER}`, color: INK, width: 340 }} /></div>
-          <button type="button" onClick={pullRecords} disabled={busy} style={{ padding: "10px 18px", borderRadius: 8, fontWeight: 700, fontSize: 14, cursor: busy ? "default" : "pointer", border: "none", background: busy ? "#9aa6bd" : NAVY, color: "#fff" }}>{busy ? "Pulling…" : "Pull title, assessment & zoning"}</button>
+        <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Property records</div>
+        <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 12px" }}>
+          Review the facts already stored on the deal. If anything is missing, enter it in the Transaction file below. Automated LTSA, assessment, and zoning pull is not connected in this Beta.
         </div>
-        <div style={{ display: "inline-block", background: busy ? "#eef2f9" : recordsPulled ? "#e7f4ec" : "#fdf0e9", color: busy ? NAVY : recordsPulled ? GREEN : ORANGE, fontWeight: 700, fontSize: 13, padding: "8px 14px", borderRadius: 8, marginBottom: 12 }}>
-          {busy ? "Pulling from LTSA + BC Assessment + CityMap…" : recordsPulled ? "✓ Pulled · LTSA title + BC Assessment + CityMap zoning" : "Not pulled yet — pull above"}
+        <div style={{ display: "inline-block", background: recordsPulled ? "#e7f4ec" : "#fdf0e9", color: recordsPulled ? GREEN : ORANGE, fontWeight: 700, fontSize: 13, padding: "8px 14px", borderRadius: 8, marginBottom: 12 }}>
+          {recordsPulled ? "✓ Property records are on the deal" : "Property records need manual entry"}
         </div>
         <div style={{ display: "grid", gap: 10 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
@@ -364,7 +267,7 @@ export default function ListingKitWizard({
   const Step3 = (
     <div style={panel}>
       <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Forms for this listing · {LISTING_TYPES.find((t) => t.id === umbrella)?.label}</div>
-      <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 4px" }}>The standard forms for this property type are pre-checked. Untick anything that doesn't apply, or add your own.</div>
+      <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 4px" }}>Reference checklist only. Confirm the current required forms and versions in the licensed provider before preparing the package.</div>
       <div>
         {formsFor(umbrella).map((f) => (
           <div key={f.id} style={{ padding: "12px 0", borderTop: "1px solid #eef0f3", display: "flex", gap: 12, alignItems: "center" }}>
@@ -377,12 +280,11 @@ export default function ListingKitWizard({
     </div>
   );
 
-  // ── Step 4: Build & Sign ──
-  const kitBtn: React.CSSProperties = { fontSize: 12, padding: "5px 13px", borderRadius: 7, border: `1px solid #d4d8de`, background: "#fff", color: INK, cursor: "pointer", fontWeight: 600 };
+  // ── Step 4: Provider handoff ──
   const Step4 = (
     <div style={panel}>
-      <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Documents in the listing package</div>
-      <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 14px" }}>Toggle which forms build. The MLC is always included. Add your own for anything outside the standard set.</div>
+      <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Listing-package checklist</div>
+      <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 14px" }}>Choose the forms you expect to prepare. The MLC remains required; this saves the checklist to the deal.</div>
       <div style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 4 }}>STANDARD FORMS</div>
       <div>
         {LISTING_FORMS.map((f) => {
@@ -400,39 +302,12 @@ export default function ListingKitWizard({
           );
         })}
       </div>
-
-      {builtDocs.length > 0 && (
-        <div style={{ marginTop: 18 }}>
-          <div style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 6 }}>BUILT DOCUMENTS · {builtDocs.filter((d) => d.ready).length} of {builtDocs.length} populated</div>
-          {builtDocs.map((d) => {
-            const approved = d.status === "approved", isOpen = expandedKit === d.id;
-            return (
-              <div key={d.id} style={{ borderTop: "1px solid #eef0f3" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "11px 0", opacity: d.ready ? 1 : 0.6 }}>
-                  <div style={{ minWidth: 0 }}><div style={{ fontWeight: 600, color: INK, fontSize: 13 }}>{d.name}</div>
-                    <div style={{ fontSize: 11, color: approved ? BLUE : d.ready ? ORANGE : "#9aa0a6", marginTop: 2, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{approved ? "Approved" : d.ready ? "Draft ready" : "Awaiting template"}</div></div>
-                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                    <button type="button" onClick={() => generateKitDoc(d.id)} disabled={genBusy === d.id} style={kitBtn}>{genBusy === d.id ? "…" : "Generate"}</button>
-                    <button type="button" onClick={() => openKitDoc(d.id)} style={kitBtn}>Open</button>
-                    <button type="button" onClick={() => openKitDoc(d.id, true)} style={kitBtn}>Download</button>
-                    <button type="button" onClick={() => approveKitDoc(d.id, approved ? "draft" : "approved")} style={{ ...kitBtn, background: approved ? BLUE : NAVY, color: "#fff", borderColor: "transparent" }}>{approved ? "Approved ✓" : "Approve"}</button>
-                  </div>
-                </div>
-                {isOpen && <div />}
-              </div>
-            );
-          })}
-          <div style={{ marginTop: 16, background: "#f4f8f5", border: "1px solid #cfe6d8", borderRadius: 10, padding: "14px 16px" }}>
-            <div style={{ fontWeight: 700, color: "#1f5f3f", fontSize: 13.5 }}>Send to sellers for signature — review first</div>
-            <div style={{ fontSize: 12.5, color: "#34684c", marginTop: 4 }}>Builds one DigiSign envelope (MLC + Schedule A + DORTS + PNC + PDS + FINTRAC) for {sellerName || "the sellers"}. You review the filled Preview before anything sends — same draft-first flow as the buyer side.</div>
-            <div style={{ marginTop: 10 }}>
-              <button type="button" onClick={sendForSign} disabled={sending} style={{ fontSize: 12.5, fontWeight: 700, color: "#fff", background: GREEN, border: "none", borderRadius: 7, padding: "8px 14px", cursor: "pointer" }}>{sending ? "Dispatching…" : "Approve & send for signatures →"}</button>
-            </div>
-            {sendMsg && <div style={{ marginTop: 8, fontSize: 12, color: "#1f5f3f", fontWeight: 600 }}>{sendMsg}</div>}
-          </div>
+      <div role="status" aria-live="polite" style={{ marginTop: 18, background: "#fff6ed", border: "1px solid #edc9ad", borderRadius: 10, padding: "14px 16px" }}>
+        <div style={{ fontWeight: 700, color: "#7a3f20", fontSize: 13.5 }}>Document creation and signing are paused</div>
+        <div style={{ fontSize: 12.5, color: "#7a5039", marginTop: 4 }}>
+          Elevate has not verified a live licensed forms-provider connection in this Beta. Prepare the current MLC and related forms in your provider, review the PDF, then attach it to the waiting task. Elevate will not claim the package was built or sent here.
         </div>
-      )}
-      {builtMsg && <div style={{ marginTop: 12, color: GREEN, fontWeight: 700, fontSize: 14 }}>{builtMsg}</div>}
+      </div>
     </div>
   );
 
@@ -443,17 +318,16 @@ export default function ListingKitWizard({
       <div style={{ padding: "18px 22px 20px" }}>
         <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: 0.6, color: INK }}>BUILD LISTING KIT · STEP {step} OF 4</div>
         <div style={{ marginTop: 12 }}>{Stepper}</div>
-        {kitError && (
-          <div role="alert" aria-live="polite" style={{ margin: "12px 0", border: "1px solid #e4b5a5", background: "#fff4ef", color: "#7a321f", borderRadius: 9, padding: "11px 13px", fontSize: 13, fontWeight: 600 }}>
-            {kitError}
-          </div>
-        )}
         {step === 1 ? Step1 : step === 2 ? Step2 : step === 3 ? Step3 : Step4}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
           {step > 1 ? <button type="button" onClick={() => setStep((s) => s - 1)} style={{ ...navBtn, background: "#fff", color: INK, border: `1px solid ${BORDER}` }}>← Back</button> : <span />}
-          <button type="button" disabled={building} onClick={() => { if (step === 4) buildKit(); else setStep((s) => Math.min(4, s + 1)); }} style={{ ...navBtn, background: step === 4 ? GREEN : NAVY, color: "#fff", opacity: building ? 0.7 : 1 }}>
-            {step === 1 ? "Continue to Listing Terms →" : step === 2 ? "Continue to Forms →" : step === 3 ? "Continue to Build →" : building ? "Building…" : "Build Listing Package"}
-          </button>
+          {step < 4 ? (
+            <button type="button" onClick={() => setStep((s) => Math.min(4, s + 1))} style={{ ...navBtn, background: NAVY, color: "#fff" }}>
+              {step === 1 ? "Continue to Listing Terms →" : step === 2 ? "Continue to Forms →" : "Continue to Provider Handoff →"}
+            </button>
+          ) : (
+            <span role="status" style={{ color: GREEN, fontWeight: 700, fontSize: 13 }}>Checklist saves automatically</span>
+          )}
         </div>
       </div>
     </section>

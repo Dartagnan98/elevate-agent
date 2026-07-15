@@ -6,13 +6,17 @@ into ``data.deals`` (move_deal_stage, set_deal_toggle).
 
 from __future__ import annotations
 
-from pathlib import Path
+import base64
+import json
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from elevate_cli.data import (
+    approve_action_run,
+    complete_run_with_reviewed_manual_pdf,
     complete_admin_setup,
     connect,
     create_action,
@@ -26,10 +30,14 @@ from elevate_cli.data import (
     list_actions,
     move_deal_stage,
     mark_stale_action_runs,
+    promote_profile_to_admin_deal,
+    queue_action_run,
     record_date_trigger_firing,
+    record_run_result,
     set_deal_toggle,
     update_admin_setup,
 )
+from elevate_cli.data._util import now_iso
 from elevate_cli.data.connection import _reset_schema_cache
 
 
@@ -109,6 +117,43 @@ def _write_valid_pdf(path: Path, text: str = "Verified test artifact") -> Path:
     document.save(path)
     document.close()
     return path
+
+
+def _set_fresh_forms_provider_proof(conn, *, available: bool) -> None:
+    """Seed or revoke the identity-bound runtime proof used by exact Beta."""
+    get_admin_setup(conn)
+    provider = "WEBForms"
+    value: dict[str, object] = {"provider": provider}
+    if available:
+        checked_at = now_iso()
+        value["verification"] = {
+            "checkedAt": checked_at,
+            "verifiedBy": "forms_provider_task_receipt",
+            "signals": ["Licensed forms provider MLC/CPS lookup verified"],
+            "details": {
+                "sourceId": "forms-signing",
+                "receiptSchema": "elevate.forms-provider-proof.v1",
+                "taskReceiptId": "test-provider-task-receipt",
+                "probeKind": "licensed_forms_template_lookup",
+                "probeStatus": "succeeded",
+                "providerProof": True,
+                "providerIdentity": "webforms",
+                "lastCheckedAt": checked_at,
+                "providerLookup": {
+                    "mlcExactMatch": True,
+                    "cpsExactMatch": True,
+                    "matchedFormCodes": ["MLC", "CPS-res"],
+                },
+            },
+        }
+    conn.execute(
+        """
+        UPDATE admin_setup_items
+        SET status='configured', provider=?, value_json=?
+        WHERE key='forms_provider'
+        """,
+        (provider, json.dumps(value)),
+    )
 
 
 # ── Endpoint auth ────────────────────────────────────────────────────────
@@ -345,6 +390,651 @@ def test_admin_run_dispatch_waits_for_verified_admin_setup():
     assert "admin setup is required" in runs[0]["payload"]["dispatchBlocked"]["message"]
 
 
+def test_exact_beta_setup_blocked_run_becomes_visible_waiting_human(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Beta setup gated listing",
+            side="listing",
+            actor="human:test",
+            current_stage=0,
+        )
+        queued = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/marketing",
+            name="Beta setup gated action",
+            create_cron_job=False,
+            actor="human:test",
+        )
+        drain_queued_action_runs(conn, actor="test-worker")
+        run = next(
+            item
+            for item in list_action_runs(conn, deal_id=deal["id"])
+            if item["id"] == queued["id"]
+        )
+
+    assert run["status"] == "waiting_human"
+    assert run["cronJobId"] is None
+    assert run["humanPrompt"]["kind"] == "admin_setup"
+    assert "admin setup is required" in run["humanPrompt"]["message"]
+    assert run["errorMessage"] == run["humanPrompt"]["message"]
+
+
+def test_exact_beta_mlc_and_cps_park_without_cron_token_or_success_bypass(
+    monkeypatch,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+
+    def unexpected_spawn(**_kwargs):
+        raise AssertionError("live-provider-blocked runs must not create cron jobs")
+
+    monkeypatch.setattr(dispatch_data, "_spawn_cron_job", unexpected_spawn)
+    with connect() as conn:
+        listing = create_deal(
+            conn,
+            title="Beta MLC provider gate",
+            side="listing",
+            actor="human:test",
+            current_stage=2,
+        )
+        mlc_action = create_action(
+            conn,
+            name="Beta prepare MLC",
+            trigger="manual",
+            skill="real-estate-admin/mlc",
+            side="listing",
+            skill_args={
+                "mode": "documents",
+            },
+        )
+        mlc = next(
+            run
+            for run in evaluate_dispatch(
+                conn,
+                deal_id=listing["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if run["registryId"] == mlc_action["id"]
+        )
+        mlc_db = conn.execute(
+            "SELECT callback_token_hash FROM admin_action_runs WHERE id=?",
+            (mlc["id"],),
+        ).fetchone()
+
+        assert mlc["status"] == "waiting_human"
+        assert mlc["cronJobId"] is None
+        assert mlc_db["callback_token_hash"] is None
+        assert mlc["humanPrompt"]["kind"] == "forms_provider"
+        assert mlc["payload"]["requiresLiveFormsProvider"] is True
+        assert mlc["payload"]["formsProviderCapability"]["available"] is False
+
+        with pytest.raises(
+            PermissionError,
+            match="cannot terminally complete a run awaiting human action",
+        ):
+            record_run_result(
+                conn,
+                listing["id"],
+                mlc["id"],
+                status="succeeded",
+                idempotency_key="must-not-bypass-forms-gate",
+                artifacts=[],
+                actor="skill:test",
+            )
+        callback = next(
+            run for run in list_action_runs(conn, deal_id=listing["id"])
+            if run["id"] == mlc["id"]
+        )
+        assert callback["status"] == "waiting_human"
+        assert callback["result"] is None
+        assert conn.execute(
+            "SELECT COUNT(*) AS count FROM deal_attachments WHERE source_run_id=?",
+            (mlc["id"],),
+        ).fetchone()["count"] == 0
+
+        buyer = create_deal(
+            conn,
+            title="Beta CPS provider gate",
+            side="buyer",
+            actor="human:test",
+            current_stage=1,
+        )
+        cps_action = create_action(
+            conn,
+            name="Beta prepare CPS",
+            trigger="manual",
+            skill="real-estate-admin/buyer-cps",
+            side="buyer",
+            approval_required=True,
+        )
+        cps = next(
+            run
+            for run in evaluate_dispatch(
+                conn,
+                deal_id=buyer["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if run["registryId"] == cps_action["id"]
+        )
+        cps = approve_action_run(conn, cps["id"], actor="human:test")
+        cps_db = conn.execute(
+            "SELECT callback_token_hash FROM admin_action_runs WHERE id=?",
+            (cps["id"],),
+        ).fetchone()
+
+    assert cps["status"] == "waiting_human"
+    assert cps["cronJobId"] is None
+    assert cps_db["callback_token_hash"] is None
+    assert cps["humanPrompt"]["kind"] == "forms_provider"
+
+
+def test_exact_beta_writable_setup_receipt_cannot_unlock_provider_dispatch(
+    monkeypatch,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+    from elevate_cli.data.admin_setup import forms_provider_capability
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        dispatch_data,
+        "_spawn_cron_job",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("writable setup proof must not unlock dispatch")
+        ),
+    )
+
+    with connect() as conn:
+        _set_fresh_forms_provider_proof(conn, available=True)
+        capability = forms_provider_capability(conn)
+        assert capability["available"] is False
+
+        deal = create_deal(
+            conn,
+            title="Beta forms proof replay",
+            side="listing",
+            actor="human:test",
+            current_stage=2,
+        )
+        action = create_action(
+            conn,
+            name="Beta proof-bound document run",
+            trigger="manual",
+            skill="real-estate-admin/mlc",
+            side="listing",
+            skill_args={
+                "mode": "documents",
+            },
+        )
+        run = next(
+            item
+            for item in evaluate_dispatch(
+                conn,
+                deal_id=deal["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if item["registryId"] == action["id"]
+        )
+        assert run["status"] == "waiting_human"
+        assert run["cronJobId"] is None
+        assert run["humanPrompt"]["kind"] == "forms_provider"
+
+
+def test_exact_beta_forms_scaffold_status_cannot_mint_live_provider_proof(
+    monkeypatch,
+):
+    from elevate_cli.data.admin_setup import sync_admin_setup_runtime
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with connect() as conn:
+        setup = sync_admin_setup_runtime(
+            conn,
+            source_connectors={
+                "connectors": [
+                    {
+                        "id": "forms-signing",
+                        "label": "WEBForms",
+                        "sourceExists": True,
+                        "connected": True,
+                        "state": "connected",
+                        "lastCheckedAt": now_iso(),
+                    }
+                ]
+            },
+        )
+
+    forms_item = next(item for item in setup["items"] if item["key"] == "forms_provider")
+    assert forms_item["status"] == "configured"
+    assert forms_item["value"]["verification"]["details"]["providerProof"] is False
+    assert setup["capabilities"]["formsProvider"]["available"] is False
+    assert (
+        setup["capabilities"]["formsProvider"]["reason"]
+        == "live_forms_provider_not_verified"
+    )
+
+
+def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+
+    def unexpected_spawn(**_kwargs):
+        raise AssertionError("manual Option-B run must never dispatch a provider worker")
+
+    monkeypatch.setattr(dispatch_data, "_spawn_cron_job", unexpected_spawn)
+    reviewed_pdf = _write_valid_pdf(tmp_path / "reviewed-mlc.pdf", "Reviewed MLC")
+
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Manual reviewed MLC",
+            side="listing",
+            actor="human:test",
+            current_stage=2,
+        )
+        action = create_action(
+            conn,
+            name="Prepare MLC document without optional flags",
+            trigger="manual",
+            skill="real-estate-admin/mlc",
+            side="listing",
+            skill_args={"mode": "documents"},
+        )
+        run = next(
+            item
+            for item in evaluate_dispatch(
+                conn,
+                deal_id=deal["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if item["registryId"] == action["id"]
+        )
+        assert run["status"] == "waiting_human"
+        assert run["humanPrompt"]["requiredArtifactKind"] == "mlc_pdf"
+
+        with pytest.raises(PermissionError, match="human actor"):
+            complete_run_with_reviewed_manual_pdf(
+                conn,
+                deal["id"],
+                run["id"],
+                kind="mlc_pdf",
+                file_path=str(reviewed_pdf),
+                reviewed=True,
+                actor="skill:test",
+            )
+        with pytest.raises(ValueError, match="confirm that the PDF was reviewed"):
+            complete_run_with_reviewed_manual_pdf(
+                conn,
+                deal["id"],
+                run["id"],
+                kind="mlc_pdf",
+                file_path=str(reviewed_pdf),
+                reviewed=False,
+                actor="human:test",
+            )
+        with pytest.raises(ValueError, match="requires artifact kind mlc_pdf"):
+            complete_run_with_reviewed_manual_pdf(
+                conn,
+                deal["id"],
+                run["id"],
+                kind="cps_draft",
+                file_path=str(reviewed_pdf),
+                reviewed=True,
+                actor="human:test",
+            )
+
+        completed = complete_run_with_reviewed_manual_pdf(
+            conn,
+            deal["id"],
+            run["id"],
+            kind="mlc_pdf",
+            file_path=str(reviewed_pdf),
+            reviewed=True,
+            summary="Reviewed against the licensed provider record.",
+            actor="human:test",
+        )
+        replay = complete_run_with_reviewed_manual_pdf(
+            conn,
+            deal["id"],
+            run["id"],
+            kind="mlc_pdf",
+            file_path=str(reviewed_pdf),
+            reviewed=True,
+            actor="human:test",
+        )
+        attachment = conn.execute(
+            "SELECT * FROM deal_attachments WHERE source_run_id=?",
+            (run["id"],),
+        ).fetchone()
+        event = conn.execute(
+            "SELECT payload_json FROM deal_events WHERE deal_id=? AND kind='run_result' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (deal["id"],),
+        ).fetchone()
+
+    receipt = completed["result"]["manualFormsReviewReceipt"]
+    assert completed["status"] == "succeeded"
+    assert completed["cronJobId"] is None
+    assert completed["result"]["requiredArtifactKinds"] == ["mlc_pdf"]
+    assert receipt["schema"] == "elevate.manual-forms-review.v1"
+    assert receipt["providerDispatch"] is False
+    assert receipt["reviewedBy"] == "human:test"
+    assert len(receipt["sha256"]) == 64
+    assert attachment["kind"] == "mlc_pdf"
+    assert json.loads(event["payload_json"])["manualFormsReviewReceipt"]["sha256"] == receipt["sha256"]
+    assert replay["resultIdempotencyKey"] == completed["resultIdempotencyKey"]
+
+
+def test_exact_beta_ad_hoc_and_next_task_semantics_cannot_bypass_forms_gate(
+    monkeypatch,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+
+    def unexpected_spawn(**_kwargs):
+        raise AssertionError("semantic MLC/CPS child work must park before cron")
+
+    monkeypatch.setattr(dispatch_data, "_spawn_cron_job", unexpected_spawn)
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Semantic next-task gate",
+            side="buyer",
+            actor="human:test",
+            current_stage=1,
+        )
+        direct = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/buyer-cps",
+            name="Ad hoc offer draft",
+            create_cron_job=True,
+            actor="skill:test",
+        )
+        assert direct["status"] == "waiting_human"
+        assert direct["humanPrompt"]["requiredArtifactKind"] == "cps_draft"
+
+        source = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/marketing",
+            name="Safe parent task",
+            create_cron_job=False,
+            actor="skill:test",
+        )
+        record_run_result(
+            conn,
+            deal["id"],
+            source["id"],
+            status="succeeded",
+            idempotency_key="semantic-next-task-parent",
+            next_tasks=[
+                {
+                    "skill": "generic-document-worker",
+                    "name": "Prepare CPS form",
+                    "requiredArtifactKinds": ["cps_draft"],
+                    "runNow": True,
+                }
+            ],
+            actor="skill:test",
+        )
+        children = [
+            item
+            for item in list_action_runs(conn, deal_id=deal["id"])
+            if item["id"] not in {direct["id"], source["id"]}
+        ]
+
+    assert len(children) == 1
+    assert children[0]["status"] == "waiting_human"
+    assert children[0]["humanPrompt"]["requiredArtifactKind"] == "cps_draft"
+
+
+def test_manual_reviewed_pdf_endpoint_uploads_and_completes_parked_cps(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        dispatch_data,
+        "_spawn_cron_job",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("parked CPS must not dispatch")
+        ),
+    )
+    pdf = _write_valid_pdf(tmp_path / "provider-cps.pdf", "Reviewed CPS")
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Manual CPS endpoint",
+            side="buyer",
+            actor="human:test",
+            current_stage=1,
+        )
+        run = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/buyer-cps",
+            create_cron_job=True,
+            actor="human:test",
+        )
+
+    response = client.post(
+        f"/api/deals/{deal['id']}/runs/{run['id']}/manual-reviewed-document",
+        json={
+            "reviewed": True,
+            "kind": "cps_draft",
+            "filename": "provider-cps.pdf",
+            "contentB64": base64.b64encode(pdf.read_bytes()).decode("ascii"),
+            "summary": "Realtor reviewed provider export.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["result"]["manualFormsReviewReceipt"]["reviewedBy"] == "human:web"
+    assert body["result"]["manualFormsReviewReceipt"]["providerDispatch"] is False
+    assert Path(body["outputPath"]).is_file()
+
+
+def test_exact_beta_data_boundary_forces_bc_and_rejects_non_bc_promotions(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with connect() as conn:
+        with pytest.raises(ValueError, match="British Columbia"):
+            create_deal(
+                conn,
+                title="Alberta must fail",
+                side="listing",
+                actor="agent:test",
+                province="AB",
+                dispatch_initial_stage=False,
+            )
+        bc = create_deal(
+            conn,
+            title="Blank exact-Beta province becomes BC",
+            side="listing",
+            actor="agent:test",
+            province="",
+            dispatch_initial_stage=False,
+        )
+        with pytest.raises(ValueError, match="British Columbia"):
+            promote_profile_to_admin_deal(
+                conn,
+                profile_id="profile-ab",
+                side="buyer",
+                actor="agent:test",
+                province="AB",
+                profile_context={"emails": ["buyer@example.test"]},
+                dispatch_initial_stage=False,
+            )
+
+    assert bc["province"] == "BC"
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
+    with connect() as conn:
+        stable = create_deal(
+            conn,
+            title="Stable Alberta remains available",
+            side="listing",
+            actor="agent:test",
+            province="AB",
+            dispatch_initial_stage=False,
+        )
+    assert stable["province"] == "AB"
+
+
+def test_admin_profile_tool_cannot_bypass_exact_beta_bc_boundary(monkeypatch):
+    import elevate_cli.data as data_module
+    from tools.admin_profile_tool import _admin_profile_tool
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(data_module, "require_admin_setup_ready", lambda _conn: None)
+    monkeypatch.setattr(
+        data_module,
+        "get_admin_setup",
+        lambda _conn: {"profile": {"province": "BC"}},
+    )
+    result = _admin_profile_tool(
+        {
+            "profile_id": "tool-profile-ab",
+            "side": "buyer",
+            "province": "AB",
+            "profile_context": {"emails": ["buyer@example.test"]},
+        }
+    )
+
+    assert "British Columbia" in result
+    with connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM deals WHERE province='AB'"
+        ).fetchone()["count"]
+    assert count == 0
+
+
+def test_forms_provider_gate_leaves_cma_and_stable_dispatch_unchanged(monkeypatch):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        dispatch_data,
+        "_spawn_cron_job",
+        lambda **kwargs: f"cron-{kwargs['run_id']}",
+    )
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with connect() as conn:
+        listing = create_deal(
+            conn,
+            title="Beta CMA remains available",
+            side="listing",
+            actor="human:test",
+            current_stage=1,
+        )
+        cma_action = create_action(
+            conn,
+            name="Beta CMA manual",
+            trigger="manual",
+            skill="real-estate-admin/cma",
+            side="listing",
+        )
+        cma = next(
+            run
+            for run in evaluate_dispatch(
+                conn,
+                deal_id=listing["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if run["registryId"] == cma_action["id"]
+        )
+    assert cma["status"] == "running"
+    assert cma["cronJobId"]
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
+    with connect() as conn:
+        stable_listing = create_deal(
+            conn,
+            title="Stable MLC remains available",
+            side="listing",
+            actor="human:test",
+            current_stage=2,
+        )
+        stable_mlc_action = create_action(
+            conn,
+            name="Stable MLC manual",
+            trigger="manual",
+            skill="real-estate-admin/mlc",
+            side="listing",
+            skill_args={
+                "mode": "documents",
+                "requiresLiveFormsProvider": True,
+            },
+        )
+        stable_mlc = next(
+            run
+            for run in evaluate_dispatch(
+                conn,
+                deal_id=stable_listing["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if run["registryId"] == stable_mlc_action["id"]
+        )
+    assert stable_mlc["status"] == "running"
+    assert stable_mlc["cronJobId"]
+
+
 def test_stale_running_action_runs_requeue_then_fail_with_visible_error():
     stale_at = "2026-05-01T00:00:00+00:00"
     with connect() as conn:
@@ -407,6 +1097,244 @@ def test_stale_running_action_runs_requeue_then_fail_with_visible_error():
     assert "120 minute" in recovered[0]["errorMessage"]
     assert recovered[0]["payload"]["recovery"]["event"] == "stale_running_failed"
     assert recovered[0]["payload"]["recovery"]["attempts"] == 1
+
+
+def test_worker_exit_without_callback_requeues_immediately_then_fails_retryably(monkeypatch):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setattr(dispatch_data, "_request_agent_worker_wake", lambda **_kwargs: None)
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Missing callback",
+            side="buyer",
+            actor="human:test",
+            current_stage=1,
+        )
+        run = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/buyer-cps",
+            name="Draft CPS",
+            create_cron_job=False,
+            actor="human:test",
+        )
+        conn.execute(
+            "UPDATE admin_action_runs SET status='running', cron_job_id='cron-one' WHERE id=?",
+            (run["id"],),
+        )
+        recovered = dispatch_data.record_action_run_worker_exit(
+            conn,
+            run["id"],
+            cron_job_id="cron-one",
+            success=True,
+            actor="test-scheduler",
+            max_retries=1,
+        )
+
+    assert recovered["status"] == "queued"
+    assert recovered["payload"]["recovery"]["event"] == "worker_exit_without_callback_requeued"
+    assert recovered["payload"]["recovery"]["retryable"] is True
+    assert recovered["payload"]["recovery"]["attempts"] == 1
+
+    with connect() as conn:
+        conn.execute(
+            "UPDATE admin_action_runs SET status='running', cron_job_id='cron-two' WHERE id=?",
+            (run["id"],),
+        )
+        stale_exit = dispatch_data.record_action_run_worker_exit(
+            conn,
+            run["id"],
+            cron_job_id="cron-one",
+            success=False,
+            error="old worker failed late",
+            actor="test-scheduler",
+            max_retries=1,
+        )
+        assert stale_exit["status"] == "running"
+
+        failed = dispatch_data.record_action_run_worker_exit(
+            conn,
+            run["id"],
+            cron_job_id="cron-two",
+            success=False,
+            error="worker crashed",
+            actor="test-scheduler",
+            max_retries=1,
+        )
+
+    assert failed["status"] == "failed"
+    assert failed["payload"]["recovery"]["event"] == "worker_exit_without_callback_failed"
+    assert failed["payload"]["recovery"]["retryable"] is True
+    assert "worker crashed" in failed["errorMessage"]
+
+
+def test_agent_worker_uses_separate_conservative_stale_defaults(monkeypatch):
+    from elevate_cli.agent_worker import _config
+
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    config = _config({"agent_worker": {}})
+    assert config["stale_handoff_running_minutes"] == 120
+    assert config["stale_admin_running_minutes"] == 120
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
+    config = _config({"agent_worker": {}})
+    assert config["stale_handoff_running_minutes"] == 120
+    assert config["stale_admin_running_minutes"] == 120
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    config = _config({"agent_worker": {}})
+    assert config["stale_handoff_running_minutes"] == 180
+    assert config["stale_admin_running_minutes"] == 120
+
+    legacy = _config({"agent_worker": {"stale_running_minutes": 9}})
+    assert legacy["stale_handoff_running_minutes"] == 9
+    assert legacy["stale_admin_running_minutes"] == 9
+
+    split = _config(
+        {
+            "agent_worker": {
+                "stale_handoff_running_minutes": 240,
+                "stale_admin_running_minutes": 150,
+            }
+        }
+    )
+    assert split["stale_handoff_running_minutes"] == 240
+    assert split["stale_admin_running_minutes"] == 150
+
+
+def test_scheduler_missing_callback_recovery_is_exact_beta_only(monkeypatch):
+    from cron.scheduler import _record_admin_action_worker_exit
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setattr(dispatch_data, "_request_agent_worker_wake", lambda **_kwargs: None)
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Scheduler callback truth",
+            side="buyer",
+            actor="human:test",
+            current_stage=1,
+        )
+        run = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/buyer-cps",
+            name="Scheduler CPS run",
+            create_cron_job=False,
+            actor="human:test",
+        )
+        conn.execute(
+            "UPDATE admin_action_runs SET status='running', cron_job_id='admin-cron' WHERE id=?",
+            (run["id"],),
+        )
+    job = {
+        "id": "admin-cron",
+        "origin": {"source": "admin_hub", "run_id": run["id"]},
+    }
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
+    assert _record_admin_action_worker_exit(job, success=True, error=None) is None
+    with connect() as conn:
+        stable_run = next(
+            item
+            for item in list_action_runs(conn, deal_id=deal["id"])
+            if item["id"] == run["id"]
+        )
+    assert stable_run["status"] == "running"
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    message = _record_admin_action_worker_exit(job, success=True, error=None)
+    assert "retry 1/2 was queued" in str(message)
+    with connect() as conn:
+        beta_run = next(
+            item
+            for item in list_action_runs(conn, deal_id=deal["id"])
+            if item["id"] == run["id"]
+        )
+    assert beta_run["status"] == "queued"
+
+
+def test_scheduler_exit_hook_ignores_prior_recovery_after_successful_retry_callback(
+    monkeypatch,
+    tmp_path,
+):
+    from cron.scheduler import _record_admin_action_worker_exit
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(dispatch_data, "_request_agent_worker_wake", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        dispatch_data,
+        "_admin_setup_dispatch_block_reason",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        dispatch_data,
+        "_spawn_cron_job",
+        lambda **_kwargs: "admin-cron-retry",
+    )
+
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Successful callback after recovery",
+            side="buyer",
+            actor="human:test",
+            current_stage=1,
+        )
+        run = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/marketing",
+            name="Retry generic callback",
+            create_cron_job=False,
+            actor="human:test",
+        )
+        conn.execute(
+            "UPDATE admin_action_runs SET status='running', cron_job_id='admin-cron-first' WHERE id=?",
+            (run["id"],),
+        )
+
+    first_job = {
+        "id": "admin-cron-first",
+        "origin": {"source": "admin_hub", "run_id": run["id"]},
+    }
+    recovery_message = _record_admin_action_worker_exit(
+        first_job,
+        success=True,
+        error=None,
+    )
+    assert "retry 1/2 was queued" in str(recovery_message)
+
+    with connect() as conn:
+        retried = dispatch_data.dispatch_action_run_to_cron(
+            conn,
+            run["id"],
+            actor="test-worker",
+        )
+    assert retried["status"] == "running"
+    assert retried["cronJobId"] == "admin-cron-retry"
+
+    artifact = _write_valid_pdf(tmp_path / "retried-output.pdf", "Retried output")
+    with connect() as conn:
+        completed = record_run_result(
+            conn,
+            deal["id"],
+            run["id"],
+            status="succeeded",
+            idempotency_key="retry-callback-success",
+            artifacts=[{"kind": "supporting_document", "filePath": str(artifact)}],
+            actor="skill:test",
+        )
+    assert completed["status"] == "succeeded"
+    assert completed["payload"]["recovery"]["event"] == "worker_exit_without_callback_requeued"
+
+    retry_job = {
+        "id": "admin-cron-retry",
+        "origin": {"source": "admin_hub", "run_id": run["id"]},
+    }
+    assert _record_admin_action_worker_exit(retry_job, success=True, error=None) is None
 
 
 def test_same_stage_move_does_not_create_duplicate_action_run():
@@ -544,7 +1472,7 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
         "real-estate-admin/offer-review",
         "real-estate-admin/subject-removal",
         "real-estate-admin/closing-admin",
-        "real-estate-admin/webforms",
+        "real-estate-admin/buyer-cps",
     }.issubset(created_skills)
     created_names = {item["name"]: item for item in body["created"]}
     # Pre-CMA (stage 0) now auto-launches dashboard setup + CRM contact verification.
@@ -553,23 +1481,35 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     # CMA generates at stage 1, MLC intake/documents land at Listing Intake (stage 2).
     assert created_names["CMA: Generate evaluation"]["toStage"] == 1
     assert created_names["CMA: Generate evaluation"]["skill"] == "real-estate-admin/cma"
-    assert created_names["CMA: Generate evaluation"]["skillArgs"] == {"mode": "seller_evaluation"}
+    assert created_names["CMA: Generate evaluation"]["skillArgs"] == {
+        "mode": "seller_evaluation",
+        "requiredArtifactKinds": ["cma_report"],
+    }
     assert created_names["Listing Intake: Collect MLC info"]["skillArgs"] == {"mode": "intake"}
     assert created_names["Listing Intake: Collect MLC info"]["toStage"] == 2
-    assert created_names["Listing Intake: Prepare MLC documents"]["skillArgs"] == {"mode": "documents"}
+    assert created_names["Listing Intake: Prepare MLC documents"]["skillArgs"] == {
+        "mode": "documents",
+        "requiredArtifactKinds": ["mlc_pdf"],
+        "requiresLiveFormsProvider": True,
+    }
     # Matrix listing is drafted at SkySlope & Matrix Prep (3) and finished at Marketing Go (4).
     assert created_names["SkySlope & Matrix: Draft incomplete listing"]["skillArgs"] == {"mode": "draft"}
     assert created_names["SkySlope & Matrix: Draft incomplete listing"]["toStage"] == 3
     assert created_names["Marketing Go: Upload final photos to Matrix"]["skillArgs"] == {"mode": "photos"}
     assert created_names["Marketing Go: Upload final photos to Matrix"]["toStage"] == 4
     buyer_cps = created_names["Buyer Offer Prep: Prepare CPS draft"]
-    assert buyer_cps["skill"] == "real-estate-admin/webforms"
+    assert buyer_cps["skill"] == "real-estate-admin/buyer-cps"
     assert buyer_cps["side"] == "buyer"
-    assert buyer_cps["toStage"] == 0
+    assert buyer_cps["toStage"] == 1
     assert buyer_cps["approvalRequired"] is True
-    assert buyer_cps["skillArgs"] == {"mode": "draft", "sendPolicy": "draft_only"}
+    assert buyer_cps["skillArgs"] == {
+        "mode": "draft",
+        "sendPolicy": "draft_only",
+        "requiredArtifactKinds": ["cps_draft"],
+        "requiresLiveFormsProvider": True,
+    }
     # Buyer pipeline is wired across all four buyer stages.
-    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {0, 1, 2, 3}
+    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {1, 2, 3, 4}
     assert created_names["Buyer Accepted: Review offer package"]["skill"] == "real-estate-admin/offer-review"
     assert created_names["Buyer Subjects Off: Run closing admin"]["skill"] == "real-estate-admin/closing-admin"
     assert "gmail-doc-router" not in created_skills
@@ -615,9 +1555,49 @@ def test_seed_default_admin_actions_migrates_legacy_rows_in_place(client):
     assert migrated["toStage"] == 2
     assert migrated["priority"] == 85
     assert migrated["approvalRequired"] is False
-    assert migrated["skillArgs"] == {"mode": "documents"}
+    assert migrated["skillArgs"] == {
+        "mode": "documents",
+        "requiredArtifactKinds": ["mlc_pdf"],
+        "requiresLiveFormsProvider": True,
+    }
     # No stale "S-numbered" defaults survive the migration.
     assert not any(name.startswith("S1 ") or name.startswith("S9 ") for name in rows)
+
+
+def test_seed_default_admin_actions_migrates_buyer_cps_stage_and_skill_in_place(client):
+    with connect() as conn:
+        legacy = create_action(
+            conn,
+            name="Buyer Offer Prep: Prepare CPS draft",
+            trigger="stage_entry",
+            skill="real-estate-admin/webforms",
+            skill_args={"mode": "draft", "sendPolicy": "draft_only"},
+            side="buyer",
+            to_stage=0,
+            priority=90,
+            approval_required=True,
+        )
+
+    first = client.post("/api/admin/actions/defaults")
+    assert first.status_code == 200, first.text
+    updated = next(
+        item
+        for item in first.json()["updated"]
+        if item["name"] == "Buyer Offer Prep: Prepare CPS draft"
+    )
+    assert updated["id"] == legacy["id"]
+    assert updated["skill"] == "real-estate-admin/buyer-cps"
+    assert updated["toStage"] == 1
+    assert updated["skillArgs"] == {
+        "mode": "draft",
+        "sendPolicy": "draft_only",
+        "requiredArtifactKinds": ["cps_draft"],
+        "requiresLiveFormsProvider": True,
+    }
+
+    second = client.post("/api/admin/actions/defaults")
+    assert second.status_code == 200, second.text
+    assert second.json()["updated"] == []
 
 
 def test_seeded_defaults_launch_matrix_and_buyer_stages():
@@ -636,6 +1616,12 @@ def test_seeded_defaults_launch_matrix_and_buyer_stages():
     with connect() as conn:
         buyer = create_deal(conn, title="Buyer deal", side="buyer", actor="human:test", current_stage=0)
         move_deal_stage(conn, buyer["id"], to_stage=1, actor="human:test", force=True)
+        buyer_runs = list_action_runs(conn, deal_id=buyer["id"])
+    assert any(run["skill"] == "real-estate-admin/buyer-cps" for run in buyer_runs)
+    assert not any(run["skill"] == "real-estate-admin/offer-review" for run in buyer_runs)
+
+    with connect() as conn:
+        move_deal_stage(conn, buyer["id"], to_stage=2, actor="human:test", force=True)
         buyer_runs = list_action_runs(conn, deal_id=buyer["id"])
     assert any(run["skill"] == "real-estate-admin/offer-review" for run in buyer_runs)
 
@@ -798,6 +1784,8 @@ def test_dispatched_run_uses_configured_admin_telegram_lane(client, monkeypatch)
 
 
 def test_dispatched_run_prompt_injects_deal_flow_and_province_memory(tmp_path):
+    from elevate_cli.data.dispatch import _agent_run_context_for_prompt
+
     _complete_admin_setup()
     root = tmp_path / "exp-agent-centre"
     pages = root / "pages"
@@ -827,7 +1815,7 @@ def test_dispatched_run_prompt_injects_deal_flow_and_province_memory(tmp_path):
             side="listing",
             actor="human:test",
             province="BC",
-            current_stage=4,
+            current_stage=0,
         )
         create_action(
             conn,
@@ -835,10 +1823,14 @@ def test_dispatched_run_prompt_injects_deal_flow_and_province_memory(tmp_path):
             trigger="stage_entry",
             skill="seller-updates",
             side="listing",
-            to_stage=5,
+            to_stage=1,
         )
-        move_deal_stage(conn, deal["id"], to_stage=5, actor="human:test", force=True)
+        move_deal_stage(conn, deal["id"], to_stage=1, actor="human:test", force=True)
         run = list_action_runs(conn, deal_id=deal["id"])[0]
+        context = _agent_run_context_for_prompt(conn, deal["id"])
+
+    assert context["currentStageDocuments"]["stage"] == 1
+    assert context["currentStageDocuments"]["documents"][0]["code"] == "MLC"
 
     from cron.jobs import load_jobs
 
@@ -849,6 +1841,8 @@ def test_dispatched_run_prompt_injects_deal_flow_and_province_memory(tmp_path):
     assert "photoProcessing" in prompt
     assert "SkySlope" in prompt
     assert "agentGuideMemory" in prompt
+    assert "currentStageDocuments" in prompt
+    assert "Use currentStageDocuments as the authoritative province-aware document set" in prompt
     assert "BC Listings & Sales" in prompt
     assert "Transaction Guide" in prompt
     assert "Multiple Listing Contract" in prompt

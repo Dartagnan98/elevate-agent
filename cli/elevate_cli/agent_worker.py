@@ -21,6 +21,7 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback for local dev
     fcntl = None
 
+from elevate_constants import exact_realtor_beta_active
 from elevate_cli.config import load_config
 from elevate_cli.data.paths import data_root
 from elevate_cli.data._util import now_iso
@@ -89,11 +90,24 @@ def _config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else load_config()
     worker = cfg.get("agent_worker") if isinstance(cfg.get("agent_worker"), dict) else {}
     enabled = worker.get("enabled", True)
+    exact_beta = exact_realtor_beta_active()
+    legacy_stale_running_minutes = worker.get("stale_running_minutes")
+    default_handoff_stale_minutes = 180 if exact_beta else 120
+    default_admin_stale_minutes = 120
     return {
         "enabled": str(enabled).strip().lower() not in {"0", "false", "no", "off"},
         "max_handoffs_per_tick": _int_setting(worker.get("max_handoffs_per_tick"), 25),
         "max_admin_runs_per_tick": _int_setting(worker.get("max_admin_runs_per_tick"), 25),
-        "stale_running_minutes": _int_setting(worker.get("stale_running_minutes"), 120, minimum=1),
+        "stale_handoff_running_minutes": _int_setting(
+            worker.get("stale_handoff_running_minutes", legacy_stale_running_minutes),
+            default_handoff_stale_minutes,
+            minimum=1,
+        ),
+        "stale_admin_running_minutes": _int_setting(
+            worker.get("stale_admin_running_minutes", legacy_stale_running_minutes),
+            default_admin_stale_minutes,
+            minimum=1,
+        ),
         "heartbeat_interval_seconds": _int_setting(
             worker.get("heartbeat_interval_seconds"),
             30,
@@ -158,7 +172,8 @@ def _base_snapshot(state: str = "unknown", *, config: dict[str, Any] | None = No
         "limits": {
             "handoffs": worker["max_handoffs_per_tick"],
             "adminRuns": worker["max_admin_runs_per_tick"],
-            "staleRunningMinutes": worker["stale_running_minutes"],
+            "staleHandoffRunningMinutes": worker["stale_handoff_running_minutes"],
+            "staleAdminRunningMinutes": worker["stale_admin_running_minutes"],
         },
         "heartbeat": {
             "enabled": worker["enabled"],
@@ -355,13 +370,13 @@ def tick(
             stale_handoffs = mark_stale_agent_handoffs(
                 conn,
                 to_agent_id=scoped_agent_id,
-                max_running_minutes=worker["stale_running_minutes"],
+                max_running_minutes=worker["stale_handoff_running_minutes"],
                 actor=actor,
             )
             if scoped_agent_id is None:
                 stale_admin_runs = mark_stale_action_runs(
                     conn,
-                    max_running_minutes=worker["stale_running_minutes"],
+                    max_running_minutes=worker["stale_admin_running_minutes"],
                     actor=actor,
                 )
             if worker["max_handoffs_per_tick"]:

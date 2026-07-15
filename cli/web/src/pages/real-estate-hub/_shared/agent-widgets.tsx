@@ -545,12 +545,14 @@ export function AgentWorkerCard({
 export function AdminRunDecisionRow({
   busyRun,
   compact = false,
+  hideApprove = false,
   onApprove,
   onCancel,
   run,
 }: {
   busyRun: AdminRunBusy;
   compact?: boolean;
+  hideApprove?: boolean;
   onApprove: () => void;
   onCancel: () => void;
   run: AdminActionRun;
@@ -560,6 +562,7 @@ export function AdminRunDecisionRow({
   const requiredFields = adminRunRequiredFields(run);
   const delivery = adminRunDeliveryInfo(run);
   const busyAction = busyRun?.id === run.id ? busyRun.action : null;
+  const formsProviderBlocked = run.humanPrompt?.kind === "forms_provider";
   return (
     <div
       className={cn(
@@ -621,14 +624,16 @@ export function AdminRunDecisionRow({
               )}
               Needs revision
             </Button>
-            <Button size="sm" disabled={busyRun !== null} onClick={onApprove}>
-              {busyAction === "approve" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Check className="h-3.5 w-3.5" />
-              )}
-              Approve and run
-            </Button>
+            {!hideApprove && !formsProviderBlocked && (
+              <Button size="sm" disabled={busyRun !== null} onClick={onApprove}>
+                {busyAction === "approve" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Check className="h-3.5 w-3.5" />
+                )}
+                Approve and run
+              </Button>
+            )}
           </div>
         )}
       </div>
