@@ -43,6 +43,9 @@ type LicenseRow = {
   user_id: string;
   device_label: string | null;
   refresh_token_hash: string;
+  previous_refresh_token_hash: string | null;
+  previous_refresh_attempt_hash: string | null;
+  refresh_family_expires_at: string;
   revoked: boolean;
   last_used_at: string | null;
   created_at: string;
@@ -225,6 +228,8 @@ export type AtomicMembershipFailureStage =
   | "org_owner_after_org_insert"
   | "org_owner_after_membership_insert";
 let nextAtomicMembershipFailure: AtomicMembershipFailureStage | null = null;
+export type AtomicRefreshV2FailureStage = "after_rotation";
+let nextAtomicRefreshV2Failure: AtomicRefreshV2FailureStage | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -264,6 +269,7 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextAtomicLoginCodeFailure = null;
   nextMembershipOperationBarrier = null;
   nextAtomicMembershipFailure = null;
+  nextAtomicRefreshV2Failure = null;
   return activeDb;
 }
 
@@ -321,6 +327,10 @@ export function failNextAtomicMembership(stage: AtomicMembershipFailureStage): v
   nextAtomicMembershipFailure = stage;
 }
 
+export function failNextAtomicRefreshV2(stage: AtomicRefreshV2FailureStage): void {
+  nextAtomicRefreshV2Failure = stage;
+}
+
 export function failNextSupabasePatch(
   table: string,
   status = 500,
@@ -370,6 +380,10 @@ export async function makeUser(
 
 export function refreshHash(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function refreshFamilyExpiry(createdAt: string): string {
+  return new Date(Date.parse(createdAt) + 90 * 24 * 60 * 60 * 1000).toISOString();
 }
 
 export async function issueAccessToken(user: UserRow, license: LicenseRow): Promise<string> {
@@ -527,14 +541,22 @@ function insertRows(table: string, body: unknown): unknown {
   }
   if (table === "licenses") {
     const inserted = rows.map((row) => {
+      const createdAt = new Date().toISOString();
       const license: LicenseRow = {
         id: `license-${nextLicenseId++}`,
         user_id: String(row.user_id),
         refresh_token_hash: String(row.refresh_token_hash),
+        previous_refresh_token_hash:
+          (row.previous_refresh_token_hash as string | null | undefined) ?? null,
+        previous_refresh_attempt_hash:
+          (row.previous_refresh_attempt_hash as string | null | undefined) ?? null,
+        refresh_family_expires_at:
+          (row.refresh_family_expires_at as string | undefined) ??
+          refreshFamilyExpiry(createdAt),
         device_label: (row.device_label as string | null) ?? null,
         revoked: false,
         last_used_at: null,
-        created_at: new Date().toISOString(),
+        created_at: createdAt,
       };
       activeDb.licenses.push(license);
       return license;
@@ -674,12 +696,14 @@ function updateRows(
   if (table === "licenses") {
     const refreshTokenHash = readEq(filters, "refresh_token_hash");
     const revoked = readEq(filters, "revoked");
+    const familyExpiresAfter = readGreaterThan(filters, "refresh_family_expires_at");
     for (const license of activeDb.licenses) {
       if (
         matchesId(license.id) &&
         (!userId || license.user_id === userId) &&
         (!refreshTokenHash || license.refresh_token_hash === refreshTokenHash) &&
-        (!revoked || license.revoked === (revoked === "true"))
+        (!revoked || license.revoked === (revoked === "true")) &&
+        (!familyExpiresAfter || license.refresh_family_expires_at > familyExpiresAfter)
       ) {
         Object.assign(license, body);
         updated.push(license);
@@ -936,6 +960,85 @@ function upsertDiagnostics(body: unknown): void {
   }
 }
 
+function atomicLicenseRefreshV2(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const currentHash = String(input.p_current_refresh_token_hash || "");
+  const nextHash = String(input.p_next_refresh_token_hash || "");
+  const attemptHash = String(input.p_refresh_attempt_hash || "");
+  if (
+    !/^[0-9a-f]{64}$/.test(currentHash) ||
+    !/^[0-9a-f]{64}$/.test(nextHash) ||
+    !/^[0-9a-f]{64}$/.test(attemptHash) ||
+    currentHash === nextHash
+  ) {
+    return okJson({ message: "invalid refresh v2 token material" }, 400);
+  }
+
+  const license =
+    activeDb.licenses.find((candidate) => candidate.refresh_token_hash === currentHash) ??
+    activeDb.licenses.find(
+      (candidate) => candidate.previous_refresh_token_hash === currentHash,
+    );
+  if (!license || license.revoked) return okJson({ result: "invalid" });
+
+  const familyExpiry = Date.parse(license.refresh_family_expires_at);
+  if (!Number.isFinite(familyExpiry) || familyExpiry <= Date.now()) {
+    license.revoked = true;
+    return okJson({ result: "expired" });
+  }
+
+  const isFirstExecution = license.refresh_token_hash === currentHash;
+  if (isFirstExecution) {
+    if (
+      license.previous_refresh_token_hash === nextHash ||
+      activeDb.licenses.some(
+        (candidate) =>
+          candidate !== license &&
+          (candidate.refresh_token_hash === nextHash ||
+            candidate.previous_refresh_token_hash === nextHash),
+      )
+    ) {
+      license.revoked = true;
+      return okJson({ result: "conflict" });
+    }
+  } else if (
+    license.refresh_token_hash !== nextHash ||
+    license.previous_refresh_attempt_hash !== attemptHash
+  ) {
+    license.revoked = true;
+    return okJson({ result: "conflict" });
+  }
+
+  const user = activeDb.users.find((candidate) => candidate.id === license.user_id);
+  if (!user || !["active", "trialing"].includes(user.status)) {
+    license.revoked = true;
+    return okJson({ result: "inactive" });
+  }
+
+  const now = new Date().toISOString();
+  if (isFirstExecution) {
+    if (nextAtomicRefreshV2Failure === "after_rotation") {
+      nextAtomicRefreshV2Failure = null;
+      return okJson({ message: "injected refresh v2 failure after rotation" }, 500);
+    }
+    Object.assign(license, {
+      refresh_token_hash: nextHash,
+      previous_refresh_token_hash: currentHash,
+      previous_refresh_attempt_hash: attemptHash,
+      last_used_at: now,
+    });
+  } else {
+    license.last_used_at = now;
+  }
+
+  return okJson({
+    result: isFirstExecution ? "rotated" : "replay",
+    license_id: license.id,
+    user_id: user.id,
+    email: user.email,
+  });
+}
+
 function atomicDeviceApproval(body: unknown): Response {
   const input = (body || {}) as Record<string, unknown>;
   const grantId = String(input.p_grant_id || "");
@@ -994,6 +1097,9 @@ function atomicDeviceApproval(body: unknown): Response {
     id: `license-${nextLicenseId}`,
     user_id: userId,
     refresh_token_hash: refreshHashValue,
+    previous_refresh_token_hash: null,
+    previous_refresh_attempt_hash: null,
+    refresh_family_expires_at: refreshFamilyExpiry(new Date(now).toISOString()),
     device_label: grant.device_label ?? "linked-device",
     revoked: false,
     last_used_at: null,
@@ -1281,6 +1387,9 @@ function atomicInvitationAccept(body: unknown): Response {
     id: licenseId,
     user_id: user.id,
     refresh_token_hash: refreshHashValue,
+    previous_refresh_token_hash: null,
+    previous_refresh_attempt_hash: null,
+    refresh_family_expires_at: refreshFamilyExpiry(acceptedAt),
     device_label: "invite-accept",
     revoked: false,
     last_used_at: null,
@@ -1458,14 +1567,18 @@ function atomicLoginCodeRedeem(body: unknown): Response {
     return okJson({ message: "injected login-code failure after consume" }, 500);
   }
 
+  const licenseCreatedAt = new Date().toISOString();
   const license: LicenseRow = {
     id: licenseId,
     user_id: userId,
     refresh_token_hash: refreshHashValue,
+    previous_refresh_token_hash: null,
+    previous_refresh_attempt_hash: null,
+    refresh_family_expires_at: refreshFamilyExpiry(licenseCreatedAt),
     device_label: (input.p_device_label as string | null | undefined) || null,
     revoked: false,
     last_used_at: null,
-    created_at: new Date().toISOString(),
+    created_at: licenseCreatedAt,
   };
   if (
     activeDb.licenses.some(
@@ -1557,6 +1670,12 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
 
   if (url.pathname.includes("/rpc/check_rate_limit")) {
     return okJson({ allowed: true, remaining: 100, retry_after: 0 });
+  }
+
+  if (url.pathname.includes("/rpc/rotate_license_refresh_v2")) {
+    activeDb.calls.push({ table: "rotate_license_refresh_v2", method, body });
+    await waitForNamedRpcBarrier("rotate_license_refresh_v2");
+    return atomicLicenseRefreshV2(body);
   }
 
   if (url.pathname.includes("/rpc/approve_device_grant_atomic")) {
@@ -1682,14 +1801,19 @@ if (!globalThis.WebSocket) {
 }
 
 export function seedLicense(values: Partial<LicenseRow> & { user_id: string }): LicenseRow {
+  const createdAt = values.created_at || new Date().toISOString();
   const license: LicenseRow = {
     id: values.id || `license-${nextLicenseId++}`,
     user_id: values.user_id,
     device_label: values.device_label ?? null,
     refresh_token_hash: values.refresh_token_hash || refreshHash("refresh-token"),
+    previous_refresh_token_hash: values.previous_refresh_token_hash ?? null,
+    previous_refresh_attempt_hash: values.previous_refresh_attempt_hash ?? null,
+    refresh_family_expires_at:
+      values.refresh_family_expires_at || refreshFamilyExpiry(createdAt),
     revoked: values.revoked ?? false,
     last_used_at: values.last_used_at ?? null,
-    created_at: values.created_at || new Date().toISOString(),
+    created_at: createdAt,
   };
   activeDb.licenses.push(license);
   return license;

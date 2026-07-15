@@ -15,6 +15,7 @@ import {
   failNextAtomicDeviceApproval,
   failNextAtomicLoginCode,
   failNextAtomicMembership,
+  failNextAtomicRefreshV2,
   failNextSupabaseInsert,
   failNextSupabasePatch,
   failNextSupabaseSelect,
@@ -45,6 +46,30 @@ function patchStripeResource<T>(
 }
 
 type PostRoute = { POST: (req: Request) => Promise<Response> };
+
+const REFRESH_V2_B = Buffer.alloc(32, 0x42).toString("base64url");
+const REFRESH_V2_C = Buffer.alloc(32, 0x43).toString("base64url");
+const REFRESH_V2_D = Buffer.alloc(32, 0x44).toString("base64url");
+const REFRESH_V2_I = Buffer.alloc(32, 0x49).toString("base64url");
+const REFRESH_V2_J = Buffer.alloc(32, 0x4a).toString("base64url");
+
+function refreshV2Body(
+  current: string,
+  successor = REFRESH_V2_B,
+  attempt = REFRESH_V2_I,
+): Record<string, string> {
+  return {
+    refresh_token: current,
+    next_refresh_token: successor,
+    refresh_attempt_id: attempt,
+  };
+}
+
+function assertCredentialFree(body: Record<string, unknown>): void {
+  assert.equal("access_token" in body, false);
+  assert.equal("refresh_token" in body, false);
+  assert.equal("entitlement_assertion" in body, false);
+}
 
 async function requestDevLoginCode(
   route: PostRoute,
@@ -397,6 +422,8 @@ describe("hosted route handlers", () => {
     assert.equal(okBody.tier, "pro");
     assert.deepEqual(okBody.entitlements, ["real_estate_sales"]);
     assert.notEqual(activeLicense.refresh_token_hash, refreshHash("old-refresh"));
+    assert.equal(activeLicense.previous_refresh_token_hash, refreshHash("old-refresh"));
+    assert.equal(activeLicense.previous_refresh_attempt_hash, null);
     assert.equal(activeLicense.revoked, false);
     assertEntitlementEnvelope(okBody, {
       sub: active.id,
@@ -451,7 +478,7 @@ describe("hosted route handlers", () => {
     assert.equal("entitlement_assertion" in losers[0].body, false);
   });
 
-  it("license refresh rejects and revokes token families past their TTL", async () => {
+  it("legacy license refresh obeys the persisted absolute family deadline", async () => {
     const db = useFakeDb();
     const user = await makeUser({ id: "expired-refresh-user" });
     db.users.push(user);
@@ -459,7 +486,8 @@ describe("hosted route handlers", () => {
       id: "expired-refresh-license",
       user_id: user.id,
       refresh_token_hash: refreshHash("expired-refresh"),
-      created_at: new Date(Date.now() - 91 * 24 * 60 * 60 * 1000).toISOString(),
+      created_at: new Date().toISOString(),
+      refresh_family_expires_at: new Date(Date.now() - 1000).toISOString(),
     });
     const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
       "license/refresh",
@@ -477,6 +505,458 @@ describe("hosted route handlers", () => {
     assert.equal("entitlement_assertion" in body, false);
     assert.equal(license.revoked, true);
     assert.equal(license.refresh_token_hash, refreshHash("expired-refresh"));
+  });
+
+  it("refresh v2 requires paired canonical 32-byte base64url values", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-v2-contract-user" });
+    db.users.push(user);
+    const current = "refresh-v2-contract-current";
+    const license = seedLicense({
+      id: "refresh-v2-contract-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash(current),
+    });
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const canonicalFinalIndex = alphabet.indexOf(REFRESH_V2_B.at(-1) || "");
+    assert.equal(canonicalFinalIndex % 4, 0);
+    const badPaddingBits = `${REFRESH_V2_B.slice(0, -1)}${alphabet[canonicalFinalIndex + 1]}`;
+    assert.equal(
+      Buffer.from(badPaddingBits, "base64url").equals(
+        Buffer.from(REFRESH_V2_B, "base64url"),
+      ),
+      true,
+    );
+
+    const responses = await Promise.all([
+      route.POST(
+        jsonRequest("/api/license/refresh", {
+          refresh_token: current,
+          next_refresh_token: REFRESH_V2_B,
+        }),
+      ),
+      route.POST(
+        jsonRequest(
+          "/api/license/refresh",
+          refreshV2Body(current, badPaddingBits, REFRESH_V2_I),
+        ),
+      ),
+      route.POST(
+        jsonRequest(
+          "/api/license/refresh",
+          refreshV2Body(current, REFRESH_V2_B, badPaddingBits),
+        ),
+      ),
+    ]);
+
+    for (const response of responses) {
+      assert.equal(response.status, 400);
+      assert.deepEqual(await responseJson(response), { error: "bad request" });
+    }
+    assert.equal(
+      db.calls.filter((call) => call.table === "rotate_license_refresh_v2").length,
+      0,
+    );
+    assert.equal(license.refresh_token_hash, refreshHash(current));
+    assert.equal(license.previous_refresh_token_hash, null);
+    assert.equal(license.last_used_at, null);
+  });
+
+  it("refresh v2 rotates once and recovers a discarded response by exact retry", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({
+      id: "refresh-v2-recovery-user",
+      email: "refresh-v2-recovery@example.com",
+    });
+    db.users.push(user);
+    const current = "refresh-v2-recovery-current";
+    const license = seedLicense({
+      id: "refresh-v2-recovery-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash(current),
+    });
+    const familyExpiry = license.refresh_family_expires_at;
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    const firstResponse = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    const firstBody = await responseJson(firstResponse);
+    assert.equal(firstResponse.status, 200);
+    assert.equal(firstBody.refresh_token, REFRESH_V2_B);
+    assertEntitlementEnvelope(firstBody, {
+      sub: user.id,
+      license_id: license.id,
+      email: user.email,
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+    });
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(license.previous_refresh_token_hash, refreshHash(current));
+    assert.equal(license.previous_refresh_attempt_hash, refreshHash(REFRESH_V2_I));
+    assert.equal(license.refresh_family_expires_at, familyExpiry);
+
+    // Treat the first successful response as lost and send the durable A/B/I
+    // marker again. The refresh bearer is identical; access/assertion is new.
+    const retryResponse = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    const retryBody = await responseJson(retryResponse);
+    assert.equal(retryResponse.status, 200);
+    assert.equal(retryBody.refresh_token, REFRESH_V2_B);
+    assertEntitlementEnvelope(retryBody, {
+      sub: user.id,
+      license_id: license.id,
+      email: user.email,
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+    });
+    assert.notEqual(retryBody.entitlement_assertion, firstBody.entitlement_assertion);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(license.previous_refresh_token_hash, refreshHash(current));
+    assert.equal(license.previous_refresh_attempt_hash, refreshHash(REFRESH_V2_I));
+    assert.equal(license.revoked, false);
+  });
+
+  it("refresh v2 serializes identical concurrent requests as rotation plus replay", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-v2-identical-user" });
+    db.users.push(user);
+    const current = "refresh-v2-identical-current";
+    const license = seedLicense({
+      id: "refresh-v2-identical-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash(current),
+    });
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    barrierNextSupabaseRpcs("rotate_license_refresh_v2");
+    const responses = await Promise.all([
+      route.POST(jsonRequest("/api/license/refresh", refreshV2Body(current))),
+      route.POST(jsonRequest("/api/license/refresh", refreshV2Body(current))),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    assert.deepEqual(bodies.map((body) => body.refresh_token), [REFRESH_V2_B, REFRESH_V2_B]);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(license.previous_refresh_token_hash, refreshHash(current));
+    assert.equal(license.previous_refresh_attempt_hash, refreshHash(REFRESH_V2_I));
+    assert.equal(license.revoked, false);
+  });
+
+  it("refresh v2 makes a concurrent different B/I request credential-free and revokes", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-v2-different-race-user" });
+    db.users.push(user);
+    const current = "refresh-v2-different-race-current";
+    const license = seedLicense({
+      id: "refresh-v2-different-race-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash(current),
+    });
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    barrierNextSupabaseRpcs("rotate_license_refresh_v2");
+    const responses = await Promise.all([
+      route.POST(jsonRequest("/api/license/refresh", refreshV2Body(current))),
+      route.POST(
+        jsonRequest(
+          "/api/license/refresh",
+          refreshV2Body(current, REFRESH_V2_D, REFRESH_V2_J),
+        ),
+      ),
+    ]);
+    const results = await Promise.all(
+      responses.map(async (response) => ({ response, body: await responseJson(response) })),
+    );
+    const winner = results.find(({ response }) => response.status === 200);
+    const conflict = results.find(({ response }) => response.status === 401);
+
+    assert.ok(winner);
+    assert.ok(conflict);
+    assertCredentialFree(conflict.body);
+    assert.equal(license.revoked, true);
+    assert.ok(
+      [refreshHash(REFRESH_V2_B), refreshHash(REFRESH_V2_D)].includes(
+        license.refresh_token_hash,
+      ),
+    );
+    assert.equal(license.previous_refresh_token_hash, refreshHash(current));
+  });
+
+  it("refresh v2 revokes predecessor reuse when either B or I differs", async () => {
+    const route = await loadRoute<PostRoute>("license/refresh");
+    for (const scenario of [
+      { name: "successor", successor: REFRESH_V2_D, attempt: REFRESH_V2_I },
+      { name: "attempt", successor: REFRESH_V2_B, attempt: REFRESH_V2_J },
+    ]) {
+      const db = useFakeDb();
+      const user = await makeUser({ id: `refresh-v2-${scenario.name}-user` });
+      db.users.push(user);
+      const current = `refresh-v2-${scenario.name}-current`;
+      const license = seedLicense({
+        id: `refresh-v2-${scenario.name}-license`,
+        user_id: user.id,
+        refresh_token_hash: refreshHash(current),
+      });
+
+      const first = await route.POST(
+        jsonRequest("/api/license/refresh", refreshV2Body(current)),
+      );
+      assert.equal(first.status, 200);
+
+      const conflict = await route.POST(
+        jsonRequest(
+          "/api/license/refresh",
+          refreshV2Body(current, scenario.successor, scenario.attempt),
+        ),
+      );
+      const body = await responseJson(conflict);
+      assert.equal(conflict.status, 401);
+      assert.deepEqual(body, { error: "invalid or revoked refresh token" });
+      assertCredentialFree(body);
+      assert.equal(license.revoked, true);
+    }
+  });
+
+  it("refresh v2 never lets an A retry roll a later B to C rotation back", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-v2-later-user" });
+    db.users.push(user);
+    const current = "refresh-v2-later-current";
+    const license = seedLicense({
+      id: "refresh-v2-later-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash(current),
+    });
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    assert.equal(
+      (
+        await route.POST(jsonRequest("/api/license/refresh", refreshV2Body(current)))
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await route.POST(
+          jsonRequest(
+            "/api/license/refresh",
+            refreshV2Body(REFRESH_V2_B, REFRESH_V2_C, REFRESH_V2_J),
+          ),
+        )
+      ).status,
+      200,
+    );
+
+    const staleRetry = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    const staleBody = await responseJson(staleRetry);
+    assert.equal(staleRetry.status, 401);
+    assertCredentialFree(staleBody);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_C));
+    assert.equal(license.previous_refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(license.previous_refresh_attempt_hash, refreshHash(REFRESH_V2_J));
+    assert.equal(license.revoked, false);
+  });
+
+  it("refresh v2 enforces family expiry on first execution and exact replay", async () => {
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    const firstDb = useFakeDb();
+    const firstUser = await makeUser({ id: "refresh-v2-expired-first-user" });
+    firstDb.users.push(firstUser);
+    const firstCurrent = "refresh-v2-expired-first-current";
+    const firstLicense = seedLicense({
+      id: "refresh-v2-expired-first-license",
+      user_id: firstUser.id,
+      refresh_token_hash: refreshHash(firstCurrent),
+      refresh_family_expires_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    const firstResponse = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(firstCurrent)),
+    );
+    const firstBody = await responseJson(firstResponse);
+    assert.equal(firstResponse.status, 401);
+    assertCredentialFree(firstBody);
+    assert.equal(firstLicense.revoked, true);
+    assert.equal(firstLicense.refresh_token_hash, refreshHash(firstCurrent));
+
+    const replayDb = useFakeDb();
+    const replayUser = await makeUser({ id: "refresh-v2-expired-replay-user" });
+    replayDb.users.push(replayUser);
+    const replayCurrent = "refresh-v2-expired-replay-current";
+    const replayLicense = seedLicense({
+      id: "refresh-v2-expired-replay-license",
+      user_id: replayUser.id,
+      refresh_token_hash: refreshHash(replayCurrent),
+    });
+    assert.equal(
+      (
+        await route.POST(
+          jsonRequest("/api/license/refresh", refreshV2Body(replayCurrent)),
+        )
+      ).status,
+      200,
+    );
+    replayLicense.refresh_family_expires_at = new Date(Date.now() - 1000).toISOString();
+    const replayResponse = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(replayCurrent)),
+    );
+    const replayBody = await responseJson(replayResponse);
+    assert.equal(replayResponse.status, 401);
+    assertCredentialFree(replayBody);
+    assert.equal(replayLicense.revoked, true);
+    assert.equal(replayLicense.refresh_token_hash, refreshHash(REFRESH_V2_B));
+  });
+
+  it("refresh v2 rolls back an RPC failure and succeeds on the next first execution", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-v2-rollback-user" });
+    db.users.push(user);
+    const current = "refresh-v2-rollback-current";
+    const originalHash = refreshHash(current);
+    const license = seedLicense({
+      id: "refresh-v2-rollback-license",
+      user_id: user.id,
+      refresh_token_hash: originalHash,
+    });
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    failNextAtomicRefreshV2("after_rotation");
+    const failed = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    const failedBody = await responseJson(failed);
+    assert.equal(failed.status, 503);
+    assert.deepEqual(failedBody, { error: "license refresh unavailable" });
+    assertCredentialFree(failedBody);
+    assert.equal(license.refresh_token_hash, originalHash);
+    assert.equal(license.previous_refresh_token_hash, null);
+    assert.equal(license.previous_refresh_attempt_hash, null);
+    assert.equal(license.last_used_at, null);
+
+    const retry = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    assert.equal(retry.status, 200);
+    assert.equal((await responseJson(retry)).refresh_token, REFRESH_V2_B);
+  });
+
+  it("refresh v2 recovers after a post-RPC issuance failure", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "refresh-v2-post-rpc-user" });
+    db.users.push(user);
+    const current = "refresh-v2-post-rpc-current";
+    const license = seedLicense({
+      id: "refresh-v2-post-rpc-license",
+      user_id: user.id,
+      refresh_token_hash: refreshHash(current),
+    });
+    const route = await loadRoute<PostRoute>("license/refresh");
+
+    failNextSupabaseSelect("users");
+    const failed = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    const failedBody = await responseJson(failed);
+    assert.equal(failed.status, 503);
+    assert.deepEqual(failedBody, { error: "license issuance unavailable" });
+    assertCredentialFree(failedBody);
+    assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
+    assert.equal(license.previous_refresh_token_hash, refreshHash(current));
+
+    const retry = await route.POST(
+      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    );
+    const retryBody = await responseJson(retry);
+    assert.equal(retry.status, 200);
+    assert.equal(retryBody.refresh_token, REFRESH_V2_B);
+    assert.equal(license.revoked, false);
+  });
+
+  it("refresh v2 signer preflight performs zero database mutation or RPC", async () => {
+    const previousKey = process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64;
+    const previousConsoleError = console.error;
+    console.error = () => {};
+    try {
+      process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64 = "malformed signing key";
+      const db = useFakeDb();
+      const user = await makeUser({ id: "refresh-v2-preflight-user" });
+      db.users.push(user);
+      const current = "refresh-v2-preflight-current";
+      const license = seedLicense({
+        id: "refresh-v2-preflight-license",
+        user_id: user.id,
+        refresh_token_hash: refreshHash(current),
+      });
+      const route = await loadRoute<PostRoute>("license/refresh");
+
+      const response = await route.POST(
+        jsonRequest("/api/license/refresh", refreshV2Body(current)),
+      );
+      const body = await responseJson(response);
+      assert.equal(response.status, 503);
+      assert.deepEqual(body, { error: "license issuance unavailable" });
+      assertCredentialFree(body);
+      assert.equal(
+        db.calls.filter((call) => call.table === "rotate_license_refresh_v2").length,
+        0,
+      );
+      assert.equal(license.refresh_token_hash, refreshHash(current));
+      assert.equal(license.previous_refresh_token_hash, null);
+      assert.equal(license.last_used_at, null);
+    } finally {
+      if (previousKey === undefined) {
+        Reflect.deleteProperty(process.env, "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64");
+      } else {
+        process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64 = previousKey;
+      }
+      console.error = previousConsoleError;
+    }
+  });
+
+  it("refresh v2 refuses successors colliding with current or recovery hashes", async () => {
+    const route = await loadRoute<PostRoute>("license/refresh");
+    for (const collisionSlot of ["current", "previous"] as const) {
+      const db = useFakeDb();
+      const user = await makeUser({ id: `refresh-v2-collision-${collisionSlot}-user` });
+      db.users.push(user);
+      const current = `refresh-v2-collision-${collisionSlot}-source`;
+      const source = seedLicense({
+        id: `refresh-v2-collision-${collisionSlot}-source-license`,
+        user_id: user.id,
+        refresh_token_hash: refreshHash(current),
+      });
+      const other = seedLicense({
+        id: `refresh-v2-collision-${collisionSlot}-other-license`,
+        user_id: user.id,
+        refresh_token_hash:
+          collisionSlot === "current"
+            ? refreshHash(REFRESH_V2_B)
+            : refreshHash("refresh-v2-collision-other-current"),
+        previous_refresh_token_hash:
+          collisionSlot === "previous" ? refreshHash(REFRESH_V2_B) : null,
+        previous_refresh_attempt_hash:
+          collisionSlot === "previous" ? refreshHash(REFRESH_V2_J) : null,
+      });
+
+      const response = await route.POST(
+        jsonRequest("/api/license/refresh", refreshV2Body(current)),
+      );
+      const body = await responseJson(response);
+      assert.equal(response.status, 401);
+      assert.deepEqual(body, { error: "invalid or revoked refresh token" });
+      assertCredentialFree(body);
+      assert.equal(source.revoked, true);
+      assert.equal(source.refresh_token_hash, refreshHash(current));
+      assert.equal(source.previous_refresh_token_hash, null);
+      assert.equal(other.revoked, false);
+    }
   });
 
   it("license issuance fails closed before creating or rotating credentials", async () => {

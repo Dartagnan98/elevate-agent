@@ -36,6 +36,9 @@ export type StoreLicense = {
   user_id: string;
   device_label: string | null;
   refresh_token_hash: string;
+  previous_refresh_token_hash: string | null;
+  previous_refresh_attempt_hash: string | null;
+  refresh_family_expires_at: string;
   revoked: boolean;
   last_used_at: string | null;
   created_at: string;
@@ -182,14 +185,66 @@ export async function rotateLicenseRefreshToken(
     .from("licenses")
     .update({
       refresh_token_hash: nextHash,
+      previous_refresh_token_hash: expectedHash,
+      previous_refresh_attempt_hash: null,
       last_used_at: new Date().toISOString(),
     })
     .eq("id", licenseId)
     .eq("refresh_token_hash", expectedHash)
     .eq("revoked", false)
+    .gt("refresh_family_expires_at", new Date().toISOString())
     .select("id");
   if (error) throw error;
   return data?.length === 1;
+}
+
+export type RotateLicenseRefreshV2Result =
+  | {
+      result: "rotated" | "replay";
+      license_id: string;
+      user_id: string;
+      email: string;
+    }
+  | { result: "invalid" | "conflict" | "expired" | "inactive" };
+
+export async function rotateLicenseRefreshV2(input: {
+  currentRefreshTokenHash: string;
+  nextRefreshTokenHash: string;
+  refreshAttemptHash: string;
+}): Promise<RotateLicenseRefreshV2Result> {
+  const { data, error } = await supabase().rpc("rotate_license_refresh_v2", {
+    p_current_refresh_token_hash: input.currentRefreshTokenHash,
+    p_next_refresh_token_hash: input.nextRefreshTokenHash,
+    p_refresh_attempt_hash: input.refreshAttemptHash,
+  });
+  if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid refresh v2 rotation result");
+  }
+
+  const value = data as Record<string, unknown>;
+  if (value.result === "rotated" || value.result === "replay") {
+    if (
+      typeof value.license_id !== "string" ||
+      typeof value.user_id !== "string" ||
+      typeof value.email !== "string"
+    ) {
+      throw new Error("invalid refresh v2 rotation result");
+    }
+    return {
+      result: value.result,
+      license_id: value.license_id,
+      user_id: value.user_id,
+      email: value.email,
+    };
+  }
+  if (["invalid", "conflict", "expired", "inactive"].includes(String(value.result))) {
+    return {
+      result: value.result as "invalid" | "conflict" | "expired" | "inactive",
+    };
+  }
+  throw new Error("invalid refresh v2 rotation result");
 }
 
 export async function touchLicense(licenseId: string): Promise<void> {
