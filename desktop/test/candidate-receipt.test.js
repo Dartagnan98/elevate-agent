@@ -8,8 +8,10 @@ const test = require("node:test");
 const asar = require("@electron/asar");
 
 const {
+  CANDIDATE_RECEIPT_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
+  SOURCE_RECEIPT_SCHEMA_VERSION,
   archiveSuccessfulRelease,
   assertBundleManifest,
   assertCanonicalPackagedPermissions,
@@ -30,6 +32,7 @@ const {
   normalizeArchitecture,
   portableAsarDirectoryHash,
   preSignEvidencePath,
+  profileSnapshot,
   receiptId,
   runMacBuilders,
   sha256File,
@@ -42,6 +45,7 @@ const {
   validateZipEntries,
   writeImmutableReceipt,
 } = require("../scripts/candidate-receipt");
+const { BETA, STABLE } = require("../src/release-profile");
 
 function temporaryDirectory(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-candidate-test-"));
@@ -54,6 +58,58 @@ test("candidate IDs use canonical key ordering", () => {
   const right = { release: { channel: "beta", version: "1.2.67" }, schema_version: 1 };
   assert.equal(canonicalJson(left), canonicalJson(right));
   assert.equal(receiptId(left, "candidate_id"), receiptId(right, "candidate_id"));
+});
+
+test("candidate profile binds the Beta verifier ring without changing Stable", () => {
+  const beta = profileSnapshot(BETA);
+  const stable = profileSnapshot(STABLE);
+
+  assert.deepEqual(beta.entitlementAssertionAcceptedKeyIds, [
+    "ent-2026-07-a",
+    "ent-2026-07-b",
+  ]);
+  assert.equal(
+    beta.entitlementAssertionKeysetSha256,
+    "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c",
+  );
+  assert.equal(beta.entitlementAssertionSchema, 1);
+  assert.equal("entitlementAssertionAcceptedKeyIds" in stable, false);
+  assert.equal("entitlementAssertionKeysetSha256" in stable, false);
+  assert.equal(SOURCE_RECEIPT_SCHEMA_VERSION, 2);
+  assert.equal(CANDIDATE_RECEIPT_SCHEMA_VERSION, 2);
+});
+
+test("schema-v1 candidate artifacts are historical only, not promotion evidence", (t) => {
+  const root = temporaryDirectory(t);
+  const sourcePath = path.join(root, "candidate-source.json");
+  const source = {
+    schema_version: 1,
+    kind: "elevate-candidate-source",
+  };
+  source.source_receipt_id = receiptId(source, "source_receipt_id");
+  fs.writeFileSync(sourcePath, JSON.stringify(source));
+  assert.throws(
+    () => verifySourceReceipt({ receiptPath: sourcePath, repoRoot: root }),
+    /unsupported source receipt schema/,
+  );
+
+  const candidatePath = path.join(root, "candidate-receipt.json");
+  const candidate = {
+    schema_version: 1,
+    kind: "elevate-final-candidate",
+  };
+  candidate.candidate_id = receiptId(candidate, "candidate_id");
+  fs.writeFileSync(candidatePath, JSON.stringify(candidate));
+  assert.throws(
+    () => verifyCandidateReceipt({
+      receiptPath: candidatePath,
+      desktopRoot: root,
+      repoRoot: root,
+      requireApps: false,
+      requireSource: false,
+    }),
+    /unsupported final candidate receipt schema/,
+  );
 });
 
 test("global version must be newer than both Stable and Beta", () => {
@@ -532,7 +588,7 @@ test("tampering with an immutable candidate receipt invalidates its ID", (t) => 
   const root = temporaryDirectory(t);
   const receiptPath = path.join(root, "candidate-receipt.json");
   const receipt = {
-    schema_version: 1,
+    schema_version: CANDIDATE_RECEIPT_SCHEMA_VERSION,
     kind: "elevate-final-candidate",
     release: { version: "1.2.67", channel: "beta" },
     artifacts: {},
@@ -557,7 +613,7 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   const home = path.join(root, "home");
   const receiptPath = path.join(root, "candidate-receipt.json");
   const receipt = {
-    schema_version: 1,
+    schema_version: CANDIDATE_RECEIPT_SCHEMA_VERSION,
     kind: "elevate-final-candidate",
     source_receipt_id: "source-123",
     release: {
@@ -814,9 +870,14 @@ test("source verification rejects dirty or changed release inputs", (t) => {
   git(["add", "release-input.txt", ".gitignore"]);
   git(["commit", "-qm", "fixture"]);
   const receipt = {
-    schema_version: 1,
+    schema_version: SOURCE_RECEIPT_SCHEMA_VERSION,
+    kind: "elevate-candidate-source",
     git: { commit: git(["rev-parse", "HEAD"]), branch: git(["branch", "--show-current"]), clean: true },
-    release: { channel: "beta", version: "1.2.67" },
+    release: {
+      channel: "beta",
+      version: "1.2.67",
+      profile: profileSnapshot(BETA),
+    },
     inputs: { release_input: { kind: "file", ...fileRecord(input, root) } },
   };
   receipt.source_receipt_id = receiptId(receipt, "source_receipt_id");

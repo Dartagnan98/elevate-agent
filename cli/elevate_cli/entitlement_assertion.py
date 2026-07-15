@@ -26,12 +26,24 @@ ENTITLEMENT_ASSERTION_SCHEMA = 1
 ENTITLEMENT_ASSERTION_TYPE = "elevate-entitlement+jwt"
 ENTITLEMENT_ASSERTION_ISSUER = "https://api.elevationrealestatehq.com"
 ENTITLEMENT_ASSERTION_AUDIENCE = "elevate-realtor-beta"
+# The backend remains on A until the dual-key Beta has passed its adoption
+# gate.  This value is retained for fixture/signing compatibility; verifiers
+# trust the complete key ring below.
 ENTITLEMENT_ASSERTION_KID = "ent-2026-07-a"
 ENTITLEMENT_ASSERTION_PUBLIC_KEYS: dict[str, str] = {
     ENTITLEMENT_ASSERTION_KID: (
         "MCowBQYDK2VwAyEAexzoft6MmOXSkKHVJH4hBLgss5LN51wWaQ7bfUom1CQ="
     ),
+    "ent-2026-07-b": (
+        "MCowBQYDK2VwAyEA6ohPc76/T+8U0Wi+pK704Sc9a+dBBS77egvXHe8wYiA="
+    ),
 }
+ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS = tuple(
+    sorted(ENTITLEMENT_ASSERTION_PUBLIC_KEYS)
+)
+ENTITLEMENT_ASSERTION_KEYSET_SHA256 = (
+    "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c"
+)
 
 _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _TIER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -194,11 +206,64 @@ def _load_public_key(spki_der_base64: str) -> Ed25519PublicKey:
     return key
 
 
+def entitlement_assertion_keyset_sha256(public_keys: Mapping[str, str]) -> str:
+    """Fingerprint a canonical kid-to-SPKI entitlement verification ring."""
+    digest = hashlib.sha256()
+    digest.update(b"elevate-entitlement-keyset-v1\0")
+    key_ids = list(public_keys)
+    if any(not isinstance(kid, str) for kid in key_ids):
+        raise EntitlementAssertionError(
+            "The Realtor Beta entitlement verifier has an invalid key ring.",
+            code="beta_entitlement_verifier_unavailable",
+        )
+    for kid in sorted(key_ids):
+        spki_der_base64 = public_keys[kid]
+        if (
+            not isinstance(kid, str)
+            or not kid
+            or len(kid) > 128
+            or any(ord(char) < 0x20 for char in kid)
+            or not isinstance(spki_der_base64, str)
+        ):
+            raise EntitlementAssertionError(
+                "The Realtor Beta entitlement verifier has an invalid key ring.",
+                code="beta_entitlement_verifier_unavailable",
+            )
+        try:
+            der = base64.b64decode(spki_der_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise EntitlementAssertionError(
+                "The Realtor Beta entitlement verifier has an invalid key ring.",
+                code="beta_entitlement_verifier_unavailable",
+            ) from exc
+        canonical = base64.b64encode(der).decode("ascii")
+        if not hmac.compare_digest(canonical, spki_der_base64):
+            raise EntitlementAssertionError(
+                "The Realtor Beta entitlement verifier has a noncanonical key ring.",
+                code="beta_entitlement_verifier_unavailable",
+            )
+        digest.update(kid.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(canonical.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def verifier_ready() -> bool:
-    """Return whether the compiled production key can initialize safely."""
+    """Return whether the exact compiled production key ring initializes."""
     try:
-        _load_public_key(ENTITLEMENT_ASSERTION_PUBLIC_KEYS[ENTITLEMENT_ASSERTION_KID])
-    except (KeyError, EntitlementAssertionError):
+        if tuple(sorted(ENTITLEMENT_ASSERTION_PUBLIC_KEYS)) != (
+            ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS
+        ):
+            return False
+        if not hmac.compare_digest(
+            entitlement_assertion_keyset_sha256(ENTITLEMENT_ASSERTION_PUBLIC_KEYS),
+            ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+        ):
+            return False
+        for spki_der_base64 in ENTITLEMENT_ASSERTION_PUBLIC_KEYS.values():
+            _load_public_key(spki_der_base64)
+    except (EntitlementAssertionError, TypeError):
         return False
     return True
 
@@ -250,9 +315,9 @@ def verify_entitlement_assertion(
         )
     kid = header.get("kid")
     keys = ENTITLEMENT_ASSERTION_PUBLIC_KEYS if trusted_keys is None else trusted_keys
-    if trusted_keys is None and ENTITLEMENT_ASSERTION_KID not in keys:
+    if trusted_keys is None and not verifier_ready():
         raise EntitlementAssertionError(
-            "The Realtor Beta entitlement verifier has no production key.",
+            "The Realtor Beta entitlement verifier has no trusted production ring.",
             code="beta_entitlement_verifier_unavailable",
         )
     if not isinstance(kid, str) or kid not in keys:

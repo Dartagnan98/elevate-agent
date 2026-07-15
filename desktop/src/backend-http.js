@@ -59,6 +59,17 @@ async function requestJson(deps) {
   }
 }
 
+function exactStringArray(actual, expected) {
+  return (
+    Array.isArray(actual) &&
+    Array.isArray(expected) &&
+    actual.length === expected.length &&
+    actual.every(
+      (value, index) => typeof value === "string" && value === expected[index],
+    )
+  );
+}
+
 function betaRuntimeMatches(payload, expectedRuntime) {
   const receipt = payload && payload.beta_runtime;
   return Boolean(
@@ -69,7 +80,12 @@ function betaRuntimeMatches(payload, expectedRuntime) {
       receipt.providerPolicyVersion === expectedRuntime.providerPolicyVersion &&
       receipt.allowedModelsVersion === expectedRuntime.allowedModelsVersion &&
       receipt.entitlementAssertionSchema === expectedRuntime.entitlementAssertionSchema &&
-      receipt.entitlementAssertionKeyId === expectedRuntime.entitlementAssertionKeyId &&
+      exactStringArray(
+        receipt.entitlementAssertionAcceptedKeyIds,
+        expectedRuntime.entitlementAssertionAcceptedKeyIds,
+      ) &&
+      receipt.entitlementAssertionKeysetSha256 ===
+        expectedRuntime.entitlementAssertionKeysetSha256 &&
       receipt.entitlementVerifierReady === true &&
       receipt.allowedProvider === expectedRuntime.allowedProvider &&
       receipt.configuredProvider === expectedRuntime.allowedProvider &&
@@ -93,7 +109,12 @@ function betaRuntimeCompatible(payload, expectedRuntime) {
       receipt.providerPolicyVersion === expectedRuntime.providerPolicyVersion &&
       receipt.allowedModelsVersion === expectedRuntime.allowedModelsVersion &&
       receipt.entitlementAssertionSchema === expectedRuntime.entitlementAssertionSchema &&
-      receipt.entitlementAssertionKeyId === expectedRuntime.entitlementAssertionKeyId &&
+      exactStringArray(
+        receipt.entitlementAssertionAcceptedKeyIds,
+        expectedRuntime.entitlementAssertionAcceptedKeyIds,
+      ) &&
+      receipt.entitlementAssertionKeysetSha256 ===
+        expectedRuntime.entitlementAssertionKeysetSha256 &&
       receipt.entitlementVerifierReady === true &&
       receipt.allowedProvider === expectedRuntime.allowedProvider &&
       typeof receipt.configuredProvider === "string" &&

@@ -14,6 +14,7 @@ const { hashRuntimeCodeTree } = require("./runtime-code-hash");
 const {
   downloadAliasFileNames,
   releaseArtifactNames,
+  resolveReleaseProfile,
 } = require("../src/release-profile");
 
 const DESKTOP = path.resolve(__dirname, "..");
@@ -24,6 +25,8 @@ const WEB_BUILD_RECEIPT = path.join(DIST, "candidate-web.json");
 const CANDIDATE_RECEIPT = path.join(DIST, "candidate-receipt.json");
 const CHANNELS = new Set(["latest", "beta"]);
 const ARCHITECTURES = ["x64", "arm64"];
+const SOURCE_RECEIPT_SCHEMA_VERSION = 2;
+const CANDIDATE_RECEIPT_SCHEMA_VERSION = 2;
 const PRE_SIGN_EVIDENCE_SCHEMA_VERSION = 1;
 const PUBLIC_BASE_URL = "https://api.elevationrealestatehq.com/updates";
 const TRUSTED_APPLE_TEAM_ID = "G5TK395RYH";
@@ -616,11 +619,17 @@ function captureToolchain({ desktopRoot = DESKTOP, repoRoot = REPO } = {}) {
 }
 
 function profileSnapshot(profile) {
-  return Object.fromEntries([
+  const keys = [
     "channel", "productName", "appBundleName", "appId", "packageName", "artifactPrefix",
     "downloadAliasPrefix", "downloadAliasPrefixes", "protocolScheme",
     "elevateHomeName", "workspaceName", "preferredPort", "gatewayLabel",
-  ].map((key) => [key, profile[key]]));
+  ];
+  if (profile.isBeta) keys.push(
+    "entitlementAssertionSchema",
+    "entitlementAssertionAcceptedKeyIds",
+    "entitlementAssertionKeysetSha256",
+  );
+  return Object.fromEntries(keys.map((key) => [key, profile[key]]));
 }
 
 function assertPackagedMetadata(packageMetadata, release, expectedSourceReceiptId) {
@@ -760,6 +769,10 @@ function createSourceReceipt({
   inputs,
 } = {}) {
   if (!CHANNELS.has(channel)) throw new Error(`[candidate] unsupported channel: ${channel}`);
+  const expectedProfile = profileSnapshot(resolveReleaseProfile(channel));
+  if (canonicalJson(profileSnapshot(profile)) !== canonicalJson(expectedProfile)) {
+    throw new Error("[candidate] release profile does not match the selected channel");
+  }
   const git = currentGitState(repoRoot);
   if (!git.clean) throw new Error("[candidate] release worktree must be clean");
   const highestPublicVersion = assertGloballyNewVersion(version, publicFeeds);
@@ -770,7 +783,7 @@ function createSourceReceipt({
     throw new Error("[candidate] checkout changed while the source receipt was being created");
   }
   const receipt = {
-    schema_version: 1,
+    schema_version: SOURCE_RECEIPT_SCHEMA_VERSION,
     kind: "elevate-candidate-source",
     created_at: createdAt,
     git,
@@ -804,6 +817,12 @@ function verifySourceReceipt({
 } = {}) {
   if (!fs.existsSync(receiptPath)) throw new Error(`[candidate] missing source receipt: ${receiptPath}`);
   const receipt = readJson(receiptPath);
+  if (
+    receipt.schema_version !== SOURCE_RECEIPT_SCHEMA_VERSION ||
+    receipt.kind !== "elevate-candidate-source"
+  ) {
+    throw new Error("[candidate] unsupported source receipt schema");
+  }
   if (receiptId(receipt, "source_receipt_id") !== receipt.source_receipt_id) {
     throw new Error("[candidate] source receipt ID mismatch");
   }
@@ -817,6 +836,12 @@ function verifySourceReceipt({
   }
   if (channel && channel !== receipt.release.channel) throw new Error("[candidate] release channel drift");
   if (version && version !== receipt.release.version) throw new Error("[candidate] release version drift");
+  const expectedProfile = profileSnapshot(
+    resolveReleaseProfile(receipt.release.channel),
+  );
+  if (canonicalJson(receipt.release.profile) !== canonicalJson(expectedProfile)) {
+    throw new Error("[candidate] source receipt release profile drift");
+  }
   for (const [label, expected] of Object.entries(receipt.inputs || {})) {
     const absolute = path.join(repoRoot, expected.path);
     const actual = expected.kind === "tree"
@@ -1303,7 +1328,7 @@ function createFinalReceipt({
     arm64: collectAppSigningEvidence(path.join(desktopRoot, "dist", "mac-arm64", release.profile.appBundleName)),
   };
   const receipt = {
-    schema_version: 1,
+    schema_version: CANDIDATE_RECEIPT_SCHEMA_VERSION,
     kind: "elevate-final-candidate",
     created_at: createdAt,
     source_receipt_id: source.source_receipt_id,
@@ -1340,6 +1365,12 @@ function verifyCandidateReceipt({
 } = {}) {
   if (!fs.existsSync(receiptPath)) throw new Error(`[candidate] missing final receipt: ${receiptPath}`);
   const receipt = readJson(receiptPath);
+  if (
+    receipt.schema_version !== CANDIDATE_RECEIPT_SCHEMA_VERSION ||
+    receipt.kind !== "elevate-final-candidate"
+  ) {
+    throw new Error("[candidate] unsupported final candidate receipt schema");
+  }
   if (receiptId(receipt, "candidate_id") !== receipt.candidate_id) throw new Error("[candidate] candidate receipt ID mismatch");
   if (requireSource) {
     const source = verifySourceReceipt({
@@ -1695,10 +1726,12 @@ if (require.main === module) {
 
 module.exports = {
   ARCHITECTURES,
+  CANDIDATE_RECEIPT_SCHEMA_VERSION,
   CANDIDATE_RECEIPT,
   PRE_SIGN_EVIDENCE_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
+  SOURCE_RECEIPT_SCHEMA_VERSION,
   SOURCE_RECEIPT,
   SMOKE_EVIDENCE_SCHEMA_VERSION,
   TRUSTED_APPLE_TEAM_ID,
@@ -1729,6 +1762,7 @@ module.exports = {
   normalizeArchitecture,
   portableAsarDirectoryHash,
   preSignEvidencePath,
+  profileSnapshot,
   receiptId,
   runMacBuilders,
   sha256File,

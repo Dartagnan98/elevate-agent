@@ -125,17 +125,22 @@ def _beta_runtime_receipt(
     configured_provider, configured_model = _configured_primary(raw_config)
 
     entitlement_schema = 1
-    entitlement_key_id = "ent-2026-07-a"
+    entitlement_accepted_key_ids = ["ent-2026-07-a", "ent-2026-07-b"]
+    entitlement_keyset_sha256 = (
+        "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c"
+    )
     entitlement_verifier_ready = False
     try:
         from elevate_cli.entitlement_assertion import (
-            ENTITLEMENT_ASSERTION_KID,
+            ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS,
+            ENTITLEMENT_ASSERTION_KEYSET_SHA256,
             ENTITLEMENT_ASSERTION_SCHEMA,
             verifier_ready,
         )
 
         entitlement_schema = ENTITLEMENT_ASSERTION_SCHEMA
-        entitlement_key_id = ENTITLEMENT_ASSERTION_KID
+        entitlement_accepted_key_ids = list(ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS)
+        entitlement_keyset_sha256 = ENTITLEMENT_ASSERTION_KEYSET_SHA256
         entitlement_verifier_ready = verifier_ready()
     except Exception:
         entitlement_verifier_ready = False
@@ -177,7 +182,8 @@ def _beta_runtime_receipt(
         "providerPolicyVersion": BETA_PROVIDER_POLICY_VERSION,
         "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
         "entitlementAssertionSchema": entitlement_schema,
-        "entitlementAssertionKeyId": entitlement_key_id,
+        "entitlementAssertionAcceptedKeyIds": entitlement_accepted_key_ids,
+        "entitlementAssertionKeysetSha256": entitlement_keyset_sha256,
         "entitlementVerifierReady": entitlement_verifier_ready,
         "allowedProvider": BETA_ALLOWED_PROVIDER,
         "configuredProvider": configured_provider,

@@ -5,13 +5,17 @@ const test = require("node:test");
 
 const { backendCanServeApp, backendIsReady } = require("../src/backend-http");
 
+const ENTITLEMENT_KEYSET_SHA256 =
+  "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c";
+
 const EXPECTED_BETA_RUNTIME = Object.freeze({
   releaseChannel: "beta",
   elevateHome: "/Users/tester/.elevate-beta",
   providerPolicyVersion: "realtor-beta-codex-v1",
   allowedModelsVersion: "2026-07-14-v1",
   entitlementAssertionSchema: 1,
-  entitlementAssertionKeyId: "ent-2026-07-a",
+  entitlementAssertionAcceptedKeyIds: ["ent-2026-07-a", "ent-2026-07-b"],
+  entitlementAssertionKeysetSha256: ENTITLEMENT_KEYSET_SHA256,
   allowedProvider: "openai-codex",
   allowedModels: [
     "gpt-5.5",
@@ -32,7 +36,8 @@ function runtimeReceipt(overrides = {}) {
     providerPolicyVersion: "realtor-beta-codex-v1",
     allowedModelsVersion: "2026-07-14-v1",
     entitlementAssertionSchema: 1,
-    entitlementAssertionKeyId: "ent-2026-07-a",
+    entitlementAssertionAcceptedKeyIds: ["ent-2026-07-a", "ent-2026-07-b"],
+    entitlementAssertionKeysetSha256: ENTITLEMENT_KEYSET_SHA256,
     entitlementVerifierReady: true,
     allowedProvider: "openai-codex",
     configuredProvider: "openai-codex",
@@ -128,7 +133,21 @@ test("Beta readiness rejects the wrong entitlement verifier contract", async () 
     false,
   );
   assert.equal(
-    await ready(statusPayload(runtimeReceipt({ entitlementAssertionKeyId: "unknown-key" }))),
+    await ready(statusPayload(runtimeReceipt({
+      entitlementAssertionAcceptedKeyIds: ["ent-2026-07-a"],
+    }))),
+    false,
+  );
+  assert.equal(
+    await ready(statusPayload(runtimeReceipt({
+      entitlementAssertionAcceptedKeyIds: ["ent-2026-07-b", "ent-2026-07-a"],
+    }))),
+    false,
+  );
+  assert.equal(
+    await ready(statusPayload(runtimeReceipt({
+      entitlementAssertionKeysetSha256: "0".repeat(64),
+    }))),
     false,
   );
   assert.equal(
@@ -193,7 +212,15 @@ test("onboarding compatibility still rejects wrong channel, home, or policy", as
     false,
   );
   assert.equal(
-    await compatible(statusPayload(runtimeReceipt({ entitlementAssertionKeyId: "unknown-key" }))),
+    await compatible(statusPayload(runtimeReceipt({
+      entitlementAssertionAcceptedKeyIds: ["ent-2026-07-a"],
+    }))),
+    false,
+  );
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({
+      entitlementAssertionKeysetSha256: "0".repeat(64),
+    }))),
     false,
   );
   assert.equal(

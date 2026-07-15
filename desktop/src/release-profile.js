@@ -37,7 +37,12 @@ const BETA = Object.freeze({
   providerPolicyVersion: "realtor-beta-codex-v1",
   allowedModelsVersion: "2026-07-14-v1",
   entitlementAssertionSchema: 1,
-  entitlementAssertionKeyId: "ent-2026-07-a",
+  entitlementAssertionAcceptedKeyIds: Object.freeze([
+    "ent-2026-07-a",
+    "ent-2026-07-b",
+  ]),
+  entitlementAssertionKeysetSha256:
+    "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c",
   allowedProvider: "openai-codex",
   allowedModels: Object.freeze([
     "gpt-5.5",
@@ -105,7 +110,8 @@ function backendRuntimeExpectation({ profile, paths }) {
     providerPolicyVersion: profile.providerPolicyVersion,
     allowedModelsVersion: profile.allowedModelsVersion,
     entitlementAssertionSchema: profile.entitlementAssertionSchema,
-    entitlementAssertionKeyId: profile.entitlementAssertionKeyId,
+    entitlementAssertionAcceptedKeyIds: profile.entitlementAssertionAcceptedKeyIds,
+    entitlementAssertionKeysetSha256: profile.entitlementAssertionKeysetSha256,
     allowedProvider: profile.allowedProvider,
     allowedModels: profile.allowedModels,
   });

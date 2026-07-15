@@ -211,10 +211,17 @@ def _local_beta_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "LICENSE_FAIL_PATH",
         root / ".license_refresh_failures",
     )
+    test_keys = {assertion_mod.ENTITLEMENT_ASSERTION_KID: _TEST_PUBLIC_KEY}
+    monkeypatch.setattr(assertion_mod, "ENTITLEMENT_ASSERTION_PUBLIC_KEYS", test_keys)
     monkeypatch.setattr(
         assertion_mod,
-        "ENTITLEMENT_ASSERTION_PUBLIC_KEYS",
-        {assertion_mod.ENTITLEMENT_ASSERTION_KID: _TEST_PUBLIC_KEY},
+        "ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS",
+        tuple(sorted(test_keys)),
+    )
+    monkeypatch.setattr(
+        assertion_mod,
+        "ENTITLEMENT_ASSERTION_KEYSET_SHA256",
+        assertion_mod.entitlement_assertion_keyset_sha256(test_keys),
     )
 
 

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "accepted_key_ids": [
+    "ent-2026-07-a",
+    "ent-2026-07-b"
+  ],
+  "public_keys_spki_der_b64": {
+    "ent-2026-07-a": "MCowBQYDK2VwAyEAexzoft6MmOXSkKHVJH4hBLgss5LN51wWaQ7bfUom1CQ=",
+    "ent-2026-07-b": "MCowBQYDK2VwAyEA6ohPc76/T+8U0Wi+pK704Sc9a+dBBS77egvXHe8wYiA="
+  },
+  "keyset_sha256": "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c",
+  "future_key_public_spki_sha256": "aa10880ec07443522d3a3cf360ca1ec95b99b38cc077c0a94824d3f79cf0bb6d"
+}

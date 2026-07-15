@@ -58,7 +58,13 @@ def test_beta_runtime_receipt_reports_only_public_runtime_truth(tmp_path):
         "providerPolicyVersion": BETA_PROVIDER_POLICY_VERSION,
         "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
         "entitlementAssertionSchema": 1,
-        "entitlementAssertionKeyId": "ent-2026-07-a",
+        "entitlementAssertionAcceptedKeyIds": [
+            "ent-2026-07-a",
+            "ent-2026-07-b",
+        ],
+        "entitlementAssertionKeysetSha256": (
+            "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c"
+        ),
         "entitlementVerifierReady": True,
         "allowedProvider": BETA_ALLOWED_PROVIDER,
         "configuredProvider": BETA_ALLOWED_PROVIDER,
@@ -143,7 +149,13 @@ def test_status_adds_receipt_only_for_exact_lowercase_beta(monkeypatch, tmp_path
     assert payload["beta_runtime"]["runtimeReady"] is True
     assert payload["beta_runtime"]["releaseChannel"] == "beta"
     assert payload["beta_runtime"]["entitlementAssertionSchema"] == 1
-    assert payload["beta_runtime"]["entitlementAssertionKeyId"] == "ent-2026-07-a"
+    assert payload["beta_runtime"]["entitlementAssertionAcceptedKeyIds"] == [
+        "ent-2026-07-a",
+        "ent-2026-07-b",
+    ]
+    assert payload["beta_runtime"]["entitlementAssertionKeysetSha256"] == (
+        "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c"
+    )
     assert payload["beta_runtime"]["entitlementVerifierReady"] is True
 
 

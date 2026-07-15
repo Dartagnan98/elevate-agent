@@ -7,13 +7,17 @@ import json
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from elevate_cli.entitlement_assertion import (
+    ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS,
     ENTITLEMENT_ASSERTION_KID,
+    ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     ENTITLEMENT_ASSERTION_PUBLIC_KEYS,
     EntitlementAssertionError,
+    entitlement_assertion_keyset_sha256,
     token_binding_hash,
     verifier_ready,
     verify_entitlement_assertion,
@@ -27,13 +31,26 @@ FIXTURE_PATH = (
     / "fixtures"
     / "entitlement-assertion-v1.json"
 )
+KEYSET_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "entitlement-keyset-v1.json"
+)
 TEST_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
-TEST_PUBLIC_KEY = base64.b64encode(
-    TEST_PRIVATE_KEY.public_key().public_bytes(
-        Encoding.DER,
-        PublicFormat.SubjectPublicKeyInfo,
-    )
-).decode("ascii")
+TEST_B_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(33, 65)))
+
+
+def _public_spki(private_key: Ed25519PrivateKey) -> str:
+    return base64.b64encode(
+        private_key.public_key().public_bytes(
+            Encoding.DER,
+            PublicFormat.SubjectPublicKeyInfo,
+        )
+    ).decode("ascii")
+
+
+TEST_PUBLIC_KEY = _public_spki(TEST_PRIVATE_KEY)
+TEST_B_PUBLIC_KEY = _public_spki(TEST_B_PRIVATE_KEY)
 
 
 def _b64url(raw: bytes) -> str:
@@ -42,10 +59,12 @@ def _b64url(raw: bytes) -> str:
 
 def _signed_assertion(
     *,
+    private_key: Ed25519PrivateKey = TEST_PRIVATE_KEY,
     access_token: str = "access-token",
     refresh_token: str = "refresh-token",
     now: int = 2_000_000_000,
     header_overrides: dict | None = None,
+    protected_header_json: bytes | None = None,
     claim_overrides: dict | None = None,
 ) -> str:
     header = {
@@ -71,19 +90,32 @@ def _signed_assertion(
         "rth": token_binding_hash(refresh_token),
     }
     claims.update(claim_overrides or {})
-    protected = _b64url(json.dumps(header, separators=(",", ":")).encode())
+    protected = _b64url(
+        protected_header_json
+        if protected_header_json is not None
+        else json.dumps(header, separators=(",", ":")).encode()
+    )
     payload = _b64url(json.dumps(claims, separators=(",", ":")).encode())
     signing_input = f"{protected}.{payload}".encode("ascii")
-    return f"{protected}.{payload}.{_b64url(TEST_PRIVATE_KEY.sign(signing_input))}"
+    return f"{protected}.{payload}.{_b64url(private_key.sign(signing_input))}"
 
 
-def _verify(assertion: str, *, now: int = 2_000_000_100):
+def _verify(
+    assertion: str,
+    *,
+    now: int = 2_000_000_100,
+    trusted_keys: dict[str, str] | None = None,
+):
     return verify_entitlement_assertion(
         assertion,
         access_token="access-token",
         refresh_token="refresh-token",
         now=now,
-        trusted_keys={ENTITLEMENT_ASSERTION_KID: TEST_PUBLIC_KEY},
+        trusted_keys=(
+            {ENTITLEMENT_ASSERTION_KID: TEST_PUBLIC_KEY}
+            if trusted_keys is None
+            else trusted_keys
+        ),
     )
 
 
@@ -107,6 +139,68 @@ def test_backend_golden_fixture_verifies_cross_runtime() -> None:
         == fixture["production_public_key_spki_der_b64"]
     )
     assert verifier_ready() is True
+
+
+def test_production_key_ring_matches_cross_runtime_fixture() -> None:
+    fixture = json.loads(KEYSET_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+    assert list(ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS) == fixture[
+        "accepted_key_ids"
+    ]
+    assert ENTITLEMENT_ASSERTION_PUBLIC_KEYS == fixture[
+        "public_keys_spki_der_b64"
+    ]
+    assert ENTITLEMENT_ASSERTION_KEYSET_SHA256 == fixture["keyset_sha256"]
+    assert (
+        entitlement_assertion_keyset_sha256(ENTITLEMENT_ASSERTION_PUBLIC_KEYS)
+        == fixture["keyset_sha256"]
+    )
+
+
+def test_verifier_requires_the_complete_pinned_production_ring(monkeypatch) -> None:
+    import elevate_cli.entitlement_assertion as assertion_module
+
+    monkeypatch.setattr(
+        assertion_module,
+        "ENTITLEMENT_ASSERTION_PUBLIC_KEYS",
+        {ENTITLEMENT_ASSERTION_KID: TEST_PUBLIC_KEY},
+    )
+
+    assert verifier_ready() is False
+
+
+def test_verifier_rejects_malformed_and_non_ed25519_production_keys(
+    monkeypatch,
+) -> None:
+    import elevate_cli.entitlement_assertion as assertion_module
+
+    kid_a, kid_b = ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS
+    ec_public_key = base64.b64encode(
+        ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+            Encoding.DER,
+            PublicFormat.SubjectPublicKeyInfo,
+        )
+    ).decode("ascii")
+    non_ed_ring = {kid_a: TEST_PUBLIC_KEY, kid_b: ec_public_key}
+    monkeypatch.setattr(
+        assertion_module,
+        "ENTITLEMENT_ASSERTION_PUBLIC_KEYS",
+        non_ed_ring,
+    )
+    monkeypatch.setattr(
+        assertion_module,
+        "ENTITLEMENT_ASSERTION_KEYSET_SHA256",
+        entitlement_assertion_keyset_sha256(non_ed_ring),
+    )
+    assert verifier_ready() is False
+
+    malformed_ring = {kid_a: TEST_PUBLIC_KEY, kid_b: "not-base64"}
+    monkeypatch.setattr(
+        assertion_module,
+        "ENTITLEMENT_ASSERTION_PUBLIC_KEYS",
+        malformed_ring,
+    )
+    assert verifier_ready() is False
 
 
 def test_missing_production_key_is_typed_verifier_unavailable(monkeypatch) -> None:
@@ -143,6 +237,37 @@ def test_rejects_unknown_keys_and_algorithm_confusion(
         _verify(_signed_assertion(header_overrides=header_overrides))
 
     assert exc_info.value.code == expected_code
+
+
+def test_routes_b_by_kid_and_rejects_cross_key_signatures() -> None:
+    kid_b = ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS[1]
+    trusted_keys = {
+        ENTITLEMENT_ASSERTION_KID: TEST_PUBLIC_KEY,
+        kid_b: TEST_B_PUBLIC_KEY,
+    }
+    assertion_b = _signed_assertion(
+        private_key=TEST_B_PRIVATE_KEY,
+        header_overrides={"kid": kid_b},
+    )
+
+    assert _verify(assertion_b, trusted_keys=trusted_keys).license_id == "license-1"
+
+    mislabeled = _signed_assertion(header_overrides={"kid": kid_b})
+    with pytest.raises(EntitlementAssertionError) as exc_info:
+        _verify(mislabeled, trusted_keys=trusted_keys)
+    assert exc_info.value.code == "beta_entitlement_signature_invalid"
+
+
+def test_rejects_escaped_duplicate_protected_header_kid() -> None:
+    duplicate_header = (
+        b'{"alg":"EdDSA","typ":"elevate-entitlement+jwt",'
+        b'"kid":"ent-2026-07-a","k\\u0069d":"ent-2026-07-b"}'
+    )
+
+    with pytest.raises(EntitlementAssertionError) as exc_info:
+        _verify(_signed_assertion(protected_header_json=duplicate_header))
+
+    assert exc_info.value.code == "beta_entitlement_assertion_malformed"
 
 
 @pytest.mark.parametrize(
