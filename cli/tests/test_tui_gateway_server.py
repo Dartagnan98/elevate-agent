@@ -2581,7 +2581,7 @@ def test_context_overflow_reset_clears_replay_but_preserves_terminal_receipt(
     )
     assert duplicate["inserted"] is False
     assert duplicate["status"] == "error"
-    reset.assert_called_once_with("sid", session)
+    reset.assert_called_once_with("sid", session, allow_running=True)
     db.close()
 
 

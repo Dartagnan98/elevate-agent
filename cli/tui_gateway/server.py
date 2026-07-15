@@ -132,6 +132,425 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+
+
+class _ResumeReservation:
+    """Single-flight ownership for one canonical persisted conversation.
+
+    The reservation is intentionally small: callers wait for publication with
+    a bounded deadline and never while holding the registry lock. The
+    reservation itself stays registered until construction succeeds or is
+    cleaned up, preventing a second cold actor from appearing during that
+    window.
+    """
+
+    def __init__(self, aliases: set[str]):
+        self.aliases = set(aliases)
+        self.error: str | None = None
+        self.published = threading.Event()
+        self.session: dict | None = None
+        self.sid: str | None = None
+
+
+class _SessionResetRejected(RuntimeError):
+    """A live session cannot safely begin an externally requested reset."""
+
+
+_session_registry_lock = threading.RLock()
+_session_aliases: dict[str, str] = {}
+_resume_reservations: dict[str, _ResumeReservation] = {}
+_RESUME_RESERVATION_WAIT_S = 15.0
+
+
+def _session_registry_ids(*values, identity: dict | None = None) -> set[str]:
+    aliases = {
+        str(value).strip()
+        for value in values
+        if isinstance(value, str) and str(value).strip()
+    }
+    if isinstance(identity, dict):
+        for field in (
+            "requested_session_id",
+            "lineage_root_id",
+            "active_session_id",
+        ):
+            value = identity.get(field)
+            if isinstance(value, str) and value.strip():
+                aliases.add(value.strip())
+    return aliases
+
+
+def _pin_registered_session(sid: str, session: dict) -> bool:
+    """Keep a live actor attached while resume prepares its response."""
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        history_lock = session.setdefault("history_lock", threading.Lock())
+    with history_lock:
+        with _session_registry_lock:
+            if (
+                _sessions.get(sid) is not session
+                or session.get("registry_resetting")
+            ):
+                return False
+            pins = int(session.get("registry_resume_pins", 0)) + 1
+            session["registry_resume_pins"] = pins
+            released = session.get("registry_resume_pins_released")
+            if released is None:
+                released = threading.Event()
+                session["registry_resume_pins_released"] = released
+            released.clear()
+            return True
+
+
+def _unpin_registered_session(session: dict) -> None:
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        return
+    with history_lock:
+        pins = max(0, int(session.get("registry_resume_pins", 0)) - 1)
+        session["registry_resume_pins"] = pins
+        if pins == 0:
+            deferred_sid = session.pop("registry_deferred_remove_sid", None)
+            if deferred_sid:
+                with _session_registry_lock:
+                    if _sessions.get(str(deferred_sid)) is session:
+                        _sessions.pop(str(deferred_sid), None)
+                    for alias, mapped_sid in list(_session_aliases.items()):
+                        if mapped_sid == deferred_sid:
+                            _session_aliases.pop(alias, None)
+                session.pop("registry_aliases", None)
+            released = session.get("registry_resume_pins_released")
+            if released is not None:
+                released.set()
+
+
+def _session_response_failure(sid: str, session: dict) -> str | None:
+    """Validate a pinned actor at the response linearization point."""
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        return "session actor has no lifecycle lock"
+    with history_lock:
+        with _session_registry_lock:
+            error = str(session.get("agent_error") or "").strip()
+            if _sessions.get(sid) is not session:
+                return error or "session actor closed before response"
+            if error:
+                return error
+            if session.get("registry_resetting"):
+                return "session context changed before response"
+    return None
+
+
+def _find_registered_session_locked(
+    aliases: set[str],
+) -> tuple[str, dict] | None:
+    """Return one live actor for *aliases* while the registry lock is held."""
+    matches: dict[str, dict] = {}
+    for alias in aliases:
+        sid = _session_aliases.get(alias)
+        session = _sessions.get(sid or "")
+        if session is not None and not session.get("registry_resetting"):
+            matches[str(sid)] = session
+        elif sid:
+            _session_aliases.pop(alias, None)
+    if len(matches) > 1:
+        raise RuntimeError("canonical session aliases point to multiple live actors")
+
+    for sid, session in list(_sessions.items()):
+        if session.get("registry_resetting"):
+            continue
+        session_ids = _session_registry_ids(
+            session.get("session_key"),
+            identity={
+                "requested_session_id": session.get("requested_session_id"),
+                "lineage_root_id": session.get("lineage_root_id"),
+                "active_session_id": session.get("active_session_id"),
+            },
+        )
+        stored_aliases = session.get("registry_aliases")
+        if isinstance(stored_aliases, (set, frozenset, list, tuple)):
+            session_ids.update(
+                str(value).strip()
+                for value in stored_aliases
+                if isinstance(value, str) and value.strip()
+            )
+        if aliases.intersection(session_ids):
+            matches[sid] = session
+    if len(matches) > 1:
+        raise RuntimeError("canonical identity matches multiple live actors")
+
+    if not matches:
+        return None
+    sid, session = next(iter(matches.items()))
+    session_ids = _session_registry_ids(
+        session.get("session_key"),
+        identity={
+            "requested_session_id": session.get("requested_session_id"),
+            "lineage_root_id": session.get("lineage_root_id"),
+            "active_session_id": session.get("active_session_id"),
+        },
+    )
+    stored_aliases = session.get("registry_aliases")
+    if isinstance(stored_aliases, (set, frozenset, list, tuple)):
+        session_ids.update(
+            str(value).strip()
+            for value in stored_aliases
+            if isinstance(value, str) and value.strip()
+        )
+    combined = session_ids | aliases
+    for alias in combined:
+        mapped = _session_aliases.get(alias)
+        if mapped and mapped != sid and mapped in _sessions:
+            raise RuntimeError("canonical alias is owned by another live actor")
+        reservation = _resume_reservations.get(alias)
+        if (
+            reservation is not None
+            and reservation.session is not None
+            and reservation.session is not session
+        ):
+            raise RuntimeError("canonical alias is owned by another reservation")
+        if reservation is not None and reservation.session is None:
+            raise RuntimeError("canonical alias is still being hydrated")
+    session["registry_aliases"] = combined
+    for alias in combined:
+        _session_aliases[alias] = sid
+    return sid, session
+
+
+def _reserve_resumed_session(
+    aliases: set[str],
+) -> tuple[str, tuple[str, dict] | _ResumeReservation]:
+    """Find a live actor, join its reservation, or become the cold owner."""
+    with _session_registry_lock:
+        existing = _find_registered_session_locked(aliases)
+        if existing is not None:
+            return "live", existing
+
+        reservations = {
+            reservation
+            for alias in aliases
+            if (reservation := _resume_reservations.get(alias)) is not None
+        }
+        if len(reservations) > 1:
+            # Two reservations resolving to the same canonical identity means
+            # identity publication raced or drifted.  Do not guess a winner.
+            raise RuntimeError("conflicting session resume reservations")
+        if reservations:
+            reservation = next(iter(reservations))
+            reservation.aliases.update(aliases)
+            for alias in aliases:
+                _resume_reservations[alias] = reservation
+            return "wait", reservation
+
+        reservation = _ResumeReservation(aliases)
+        for alias in aliases:
+            _resume_reservations[alias] = reservation
+        return "owner", reservation
+
+
+def _extend_resume_reservation(
+    reservation: _ResumeReservation, aliases: set[str]
+) -> None:
+    """Bind aliases discovered during lineage hydration to the same owner."""
+    with _session_registry_lock:
+        for alias in aliases:
+            live_sid = _session_aliases.get(alias)
+            if live_sid and live_sid in _sessions:
+                raise RuntimeError("session identity became live during resume")
+            other = _resume_reservations.get(alias)
+            if other is not None and other is not reservation:
+                raise RuntimeError("session identity is already resuming")
+        reservation.aliases.update(aliases)
+        for alias in aliases:
+            _resume_reservations[alias] = reservation
+
+
+def _publish_resume_reservation(
+    reservation: _ResumeReservation,
+    sid: str,
+    session: dict,
+    *,
+    signal: bool = True,
+) -> None:
+    """Publish the shared session without releasing construction ownership."""
+    with _session_registry_lock:
+        existing_session = _sessions.get(sid)
+        if existing_session is not None and existing_session is not session:
+            raise RuntimeError("gateway session id is already live")
+        for alias in reservation.aliases:
+            other = _resume_reservations.get(alias)
+            if other is not reservation:
+                raise RuntimeError("session resume reservation was superseded")
+            live_sid = _session_aliases.get(alias)
+            if live_sid and live_sid != sid and live_sid in _sessions:
+                raise RuntimeError("session actor was already published")
+        session.pop("registry_resetting", None)
+        session["registry_aliases"] = set(reservation.aliases)
+        _sessions[sid] = session
+        for alias in reservation.aliases:
+            _session_aliases[alias] = sid
+        reservation.sid = sid
+        reservation.session = session
+    if signal:
+        reservation.published.set()
+
+
+def _begin_session_registry_reset(
+    sid: str,
+    session: dict,
+) -> _ResumeReservation:
+    """Atomically fence a live actor while its in-memory context is replaced."""
+    with _session_registry_lock:
+        if _sessions.get(sid) is not session:
+            raise RuntimeError("session closed before context reset")
+        aliases = _session_registry_ids(session.get("session_key"))
+        stored_aliases = session.get("registry_aliases")
+        if isinstance(stored_aliases, (set, frozenset, list, tuple)):
+            aliases.update(
+                str(value).strip()
+                for value in stored_aliases
+                if isinstance(value, str) and value.strip()
+            )
+        aliases.update(
+            alias for alias, mapped_sid in _session_aliases.items() if mapped_sid == sid
+        )
+        for alias in aliases:
+            other = _resume_reservations.get(alias)
+            if other is not None:
+                raise RuntimeError("session is already being rebuilt")
+        reservation = _ResumeReservation(aliases)
+        reservation.sid = sid
+        reservation.session = session
+        session["registry_resetting"] = True
+        session.pop("registry_aliases", None)
+        for alias in aliases:
+            if _session_aliases.get(alias) == sid:
+                _session_aliases.pop(alias, None)
+            _resume_reservations[alias] = reservation
+        return reservation
+
+
+def _complete_resume_reservation(reservation: _ResumeReservation) -> None:
+    """Linearize a fully built actor, or fail if it stopped being live."""
+    with _session_registry_lock:
+        sid = reservation.sid
+        session = reservation.session
+        is_live = bool(sid and session is not None and _sessions.get(sid) is session)
+        if not is_live:
+            raise RuntimeError("session closed before actor initialization completed")
+        if any(
+            _resume_reservations.get(alias) is not reservation
+            for alias in reservation.aliases
+        ):
+            raise RuntimeError("session actor reservation was lost before completion")
+        if any(
+            (mapped := _session_aliases.get(alias))
+            and mapped != sid
+            and mapped in _sessions
+            for alias in reservation.aliases
+        ):
+            raise RuntimeError("session actor alias changed before completion")
+        for alias in tuple(reservation.aliases):
+            _resume_reservations.pop(alias, None)
+            _session_aliases[alias] = str(sid)
+        session["registry_aliases"] = set(reservation.aliases)
+    reservation.published.set()
+
+
+def _fail_resume_reservation(
+    reservation: _ResumeReservation,
+    message: str,
+    *,
+    remove_session: bool,
+) -> None:
+    """Fail closed and make every reserved identity retryable."""
+    sid = reservation.sid
+    session = reservation.session
+    agent_ready = None
+
+    def _transition() -> None:
+        nonlocal agent_ready
+        with _session_registry_lock:
+            reservation.error = message
+            is_live = bool(sid and session is not None and _sessions.get(sid) is session)
+            if session is not None:
+                session["agent_error"] = message
+                agent_ready = session.get("agent_ready")
+            if remove_session and is_live:
+                if int(session.get("registry_resume_pins", 0)) > 0:
+                    session["registry_resetting"] = True
+                    session["registry_deferred_remove_sid"] = str(sid)
+                else:
+                    _sessions.pop(str(sid), None)
+            elif session is not None and not remove_session:
+                session.pop("registry_resetting", None)
+            for alias in tuple(reservation.aliases):
+                if _resume_reservations.get(alias) is reservation:
+                    _resume_reservations.pop(alias, None)
+                if sid and _session_aliases.get(alias) == sid:
+                    _session_aliases.pop(alias, None)
+
+    history_lock = session.get("history_lock") if session is not None else None
+    if history_lock is None:
+        _transition()
+    else:
+        with history_lock:
+            _transition()
+    if agent_ready is not None:
+        agent_ready.set()
+    reservation.published.set()
+
+
+def _drop_session_registry_identity(
+    sid: str,
+    session: dict,
+    *,
+    remove_session: bool,
+    reason: str,
+) -> dict | None:
+    """Remove all aliases/reservations owned by a closing or reset actor."""
+    wake: list[_ResumeReservation] = []
+    agent_ready = None
+    with _session_registry_lock:
+        if remove_session:
+            if _sessions.get(sid) is not session:
+                return None
+            _sessions.pop(sid, None)
+            session["agent_error"] = reason
+            agent_ready = session.get("agent_ready")
+        aliases = _session_registry_ids(session.get("session_key"))
+        stored_aliases = session.pop("registry_aliases", None)
+        if isinstance(stored_aliases, (set, frozenset, list, tuple)):
+            aliases.update(
+                str(value).strip()
+                for value in stored_aliases
+                if isinstance(value, str) and value.strip()
+            )
+        aliases.update(
+            alias for alias, mapped_sid in _session_aliases.items() if mapped_sid == sid
+        )
+        reservations = {
+            reservation
+            for reservation in _resume_reservations.values()
+            if reservation.sid == sid or reservation.session is session
+        }
+        for reservation in reservations:
+            reservation.error = reason
+            aliases.update(reservation.aliases)
+            wake.append(reservation)
+        for alias in aliases:
+            if _session_aliases.get(alias) == sid:
+                _session_aliases.pop(alias, None)
+            reservation = _resume_reservations.get(alias)
+            if reservation in reservations:
+                _resume_reservations.pop(alias, None)
+    for reservation in wake:
+        reservation.published.set()
+    if agent_ready is not None:
+        agent_ready.set()
+    return session
+
+
 # Per-session event ring buffer cap. Enough to cover ~10 minutes of a
 # busy agent turn (tool calls, deltas, subagent events) without blowing
 # memory across many parallel sessions. Older events fall off — the
@@ -468,9 +887,18 @@ def _db_unavailable_error(rid, *, code: int):
 
 
 def _session_identity_for(db, session_id: str) -> dict:
-    try:
-        identity = db.resolve_canonical_session_identity(session_id)
-    except Exception:
+    resolver = getattr(db, "resolve_canonical_session_identity", None)
+    if callable(resolver):
+        # SessionDB performs its own authoritative-store -> SQLite fallback.
+        # If that final canonical lookup fails, actor ownership must fail
+        # closed; fabricating physical-id identity could publish two actors for
+        # root and active aliases in the same lineage.
+        identity = resolver(session_id)
+        if not isinstance(identity, dict):
+            raise RuntimeError("canonical session identity was not a mapping")
+    else:
+        # Compatibility for legacy/read-only test doubles which predate the
+        # canonical identity API.
         identity = {
             "requested_session_id": session_id,
             "lineage_root_id": session_id,
@@ -1182,14 +1610,35 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     return _err(rid, 5032, err) if err else None
 
 
+def _session_agent_is_ready(session: dict) -> bool:
+    """True only after the actor and all of its gateway wiring are usable."""
+    if session.get("agent_error") or session.get("agent") is None:
+        return False
+    ready = session.get("agent_ready")
+    return ready is None or bool(ready.is_set())
+
+
 def _sess_nowait(params, rid):
-    s = _sessions.get(params.get("session_id") or "")
-    return (s, None) if s else (None, _err(rid, 4001, "session not found"))
+    sid = params.get("session_id") or ""
+    session = _sessions.get(sid)
+    if session is None:
+        return None, _err(rid, 4001, "session not found")
+    if session.get("registry_resetting"):
+        return None, _err(rid, 5032, "session context is rebuilding; retry")
+    return session, None
 
 
 def _sess(params, rid):
-    s, err = _sess_nowait(params, rid)
-    return (None, err) if err else (s, _wait_agent(s, rid))
+    sid = params.get("session_id") or ""
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return None, err
+    err = _wait_agent(session, rid)
+    if err:
+        return None, err
+    if session.get("registry_resetting") or _sessions.get(sid) is not session:
+        return None, _err(rid, 5032, "session context changed; retry")
+    return session, None
 
 
 def _normalize_completion_path(path_part: str) -> str:
@@ -2583,7 +3032,13 @@ def _apply_personality_to_session(
     try:
         info = _reset_session_agent(sid, session)
         return True, info
+    except _SessionResetRejected:
+        raise
     except Exception:
+        with _session_registry_lock:
+            still_live = _sessions.get(sid) is session
+        if not still_live:
+            raise
         if session.get("agent"):
             agent = session["agent"]
             agent.ephemeral_system_prompt = new_prompt or None
@@ -2765,35 +3220,117 @@ def _release_agent_memory(agent, *, ended: bool) -> None:
         logger.debug("agent memory release failed: %s", exc)
 
 
-def _reset_session_agent(sid: str, session: dict) -> dict:
-    tokens = _set_session_context(session["session_key"])
+def _reset_session_agent(
+    sid: str,
+    session: dict,
+    *,
+    allow_running: bool = False,
+) -> dict:
+    """Replace one actor while fencing prompt admission for its whole rebuild.
+
+    External callers must never reset an in-flight turn. Context-overflow
+    recovery is the sole exception: it runs from the turn's terminal ``finally``
+    and preserves the running latch until that caller performs normal idle
+    cleanup.
+    """
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        raise _SessionResetRejected("session is missing its admission lock")
+    pin_deadline = time.monotonic() + _RESUME_RESERVATION_WAIT_S
+    while True:
+        with history_lock:
+            if _sessions.get(sid) is not session:
+                raise _SessionResetRejected("session is no longer active")
+            if session.get("registry_resetting"):
+                raise _SessionResetRejected("session context is already rebuilding")
+            was_running = bool(session.get("running"))
+            if was_running and not allow_running:
+                raise _SessionResetRejected(
+                    "session busy - interrupt the current turn before resetting context"
+                )
+            if int(session.get("registry_resume_pins", 0)) == 0:
+                try:
+                    # Lock order is always history -> registry. No registry
+                    # helper waits for history, so admission cannot deadlock.
+                    reset_reservation = _begin_session_registry_reset(sid, session)
+                except RuntimeError as exc:
+                    raise _SessionResetRejected(str(exc)) from exc
+                break
+            pins_released = session.get("registry_resume_pins_released")
+        remaining = pin_deadline - time.monotonic()
+        if (
+            pins_released is None
+            or remaining <= 0
+            or not pins_released.wait(timeout=remaining)
+        ):
+            raise _SessionResetRejected(
+                "session resume attachment did not finish before context reset"
+            )
+
+    old_agent = session.get("agent")
+    new_agent = None
     try:
-        new_agent = _make_agent(
-            sid, session["session_key"], session_id=session["session_key"]
+        tokens = _set_session_context(session["session_key"])
+        try:
+            new_agent = _make_agent(
+                sid, session["session_key"], session_id=session["session_key"]
+            )
+        finally:
+            _clear_session_context(tokens)
+        session["agent"] = new_agent
+        session.pop("agent_base_ephemeral", None)
+        session.pop("agent_lane_id", None)
+        session["attached_images"] = []
+        session["attached_videos"] = []
+        session["attached_files"] = []
+        session["edit_snapshots"] = {}
+        session["image_counter"] = 0
+        session["running"] = was_running if allow_running else False
+        session["show_reasoning"] = _load_show_reasoning()
+        session["tool_progress_mode"] = _load_tool_progress_mode()
+        session["tool_started_at"] = {}
+        session["running_tools"] = {}
+        with history_lock:
+            session["history"] = []
+            session["history_version"] = int(session.get("history_version", 0)) + 1
+        _publish_resume_reservation(
+            reset_reservation,
+            sid,
+            session,
+            signal=False,
         )
-    finally:
-        _clear_session_context(tokens)
-    # Close the outgoing agent's memory connections before dropping it, or each
-    # reset orphans its holographic Postgres connection (-> "too many clients").
-    _old_agent = session.get("agent")
-    if _old_agent is not None and _old_agent is not new_agent:
-        _release_agent_memory(_old_agent, ended=False)
-    session["agent"] = new_agent
-    session.pop("agent_base_ephemeral", None)
-    session.pop("agent_lane_id", None)
-    session["attached_images"] = []
-    session["attached_videos"] = []
-    session["attached_files"] = []
-    session["edit_snapshots"] = {}
-    session["image_counter"] = 0
-    session["running"] = False
-    session["show_reasoning"] = _load_show_reasoning()
-    session["tool_progress_mode"] = _load_tool_progress_mode()
-    session["tool_started_at"] = {}
-    session["running_tools"] = {}
-    with session["history_lock"]:
-        session["history"] = []
-        session["history_version"] = int(session.get("history_version", 0)) + 1
+        _complete_resume_reservation(reset_reservation)
+    except Exception:
+        session["agent"] = None
+        _fail_resume_reservation(
+            reset_reservation,
+            "session context reset failed",
+            remove_session=True,
+        )
+        worker = session.get("slash_worker")
+        session["slash_worker"] = None
+        if worker is not None:
+            try:
+                worker.close()
+            except Exception:
+                pass
+        try:
+            from tools.approval import unregister_gateway_notify
+
+            unregister_gateway_notify(session["session_key"])
+        except Exception:
+            pass
+        if new_agent is not None and new_agent is not old_agent:
+            _release_agent_memory(new_agent, ended=False)
+        if old_agent is not None:
+            _release_agent_memory(old_agent, ended=False)
+        session["agent_memory_released"] = True
+        raise
+    # Close the outgoing agent's memory connections only after the replacement
+    # is published; a failed reset removes the actor so a later resume hydrates
+    # the already-reset durable transcript instead of reviving stale context.
+    if old_agent is not None and old_agent is not new_agent:
+        _release_agent_memory(old_agent, ended=False)
     info = _session_info(new_agent)
     _emit("session.info", sid, info)
     _restart_slash_worker(session)
@@ -2810,7 +3347,7 @@ def _reset_tui_context_overflow_session(sid: str, session: dict, db) -> None:
         [],
         preserve_prompt_receipts=True,
     )
-    _reset_session_agent(sid, session)
+    _reset_session_agent(sid, session, allow_running=True)
 
 
 def _make_agent(
@@ -2848,9 +3385,20 @@ def _make_agent(
     )
 
 
-def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
-    _sessions[sid] = {
+def _init_session(
+    sid: str,
+    key: str,
+    agent,
+    history: list,
+    cols: int = 80,
+    *,
+    reservation: _ResumeReservation,
+):
+    ready = threading.Event()
+    session = {
         "agent": agent,
+        "agent_error": None,
+        "agent_ready": ready,
         "session_key": key,
         "history": history,
         "history_lock": threading.Lock(),
@@ -2872,7 +3420,14 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     }
     # Pin async event emissions to whichever transport created the
     # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
-    _bind_session_transport(_sessions[sid], current_transport() or _stdio_transport)
+    _bind_session_transport(session, current_transport() or _stdio_transport)
+    _publish_resume_reservation(
+        reservation,
+        sid,
+        session,
+        signal=False,
+    )
+    notify_registered = False
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
@@ -2881,11 +3436,36 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
             lambda data: _emit_approval_request(sid, data),
             approval_store=_get_db(),
         )
+        notify_registered = True
         load_permanent_allowlist()
     except Exception:
         pass
-    _wire_callbacks(sid)
-    _emit("session.info", sid, _session_info(agent))
+    response_pinned = False
+    try:
+        _wire_callbacks(sid)
+        _emit("session.info", sid, _session_info(agent))
+        if not _pin_registered_session(sid, session):
+            raise RuntimeError("session closed before branch response")
+        response_pinned = True
+        _complete_resume_reservation(reservation)
+    except Exception as exc:
+        # Direct RPCs may already be waiting on the published branch actor.
+        # Wake them with the concrete wiring failure before registry cleanup
+        # removes the actor and makes a later cold retry possible.
+        session["agent_error"] = str(exc)
+        ready.set()
+        if notify_registered:
+            try:
+                from tools.approval import unregister_gateway_notify
+
+                unregister_gateway_notify(key)
+            except Exception:
+                pass
+        if response_pinned:
+            _unpin_registered_session(session)
+        raise
+    ready.set()
+    return session
 
 
 def _new_session_key() -> str:
@@ -3390,54 +3970,90 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
     cols = int(params.get("cols", 80))
+    try:
+        create_disposition, create_owner = _reserve_resumed_session({key})
+    except RuntimeError as exc:
+        return _err(rid, 5032, f"session creation coordination failed: {exc}")
+    if create_disposition != "owner" or not isinstance(
+        create_owner, _ResumeReservation
+    ):
+        return _err(rid, 5032, "new session identity is already in use; retry")
+    create_reservation = create_owner
 
     # A returned persisted_session_id is a durability promise. Commit and read
     # back the existing SessionDB row before exposing either identity or the
     # in-memory gateway session to callers.
     db = _get_db()
     if db is None:
+        _fail_resume_reservation(
+            create_reservation,
+            "session database unavailable",
+            remove_session=False,
+        )
         return _db_unavailable_error(rid, code=5006)
     try:
         db.create_session(key, source="tui", model=_resolve_model())
         persisted = db.get_session(key)
     except Exception as exc:
         logger.warning("session.create persistence failed: %s", exc)
+        _fail_resume_reservation(
+            create_reservation,
+            str(exc),
+            remove_session=False,
+        )
         return _err(rid, 5006, f"session persistence failed: {exc}")
     if not isinstance(persisted, dict) or persisted.get("id") != key:
+        _fail_resume_reservation(
+            create_reservation,
+            "durable row missing",
+            remove_session=False,
+        )
         return _err(rid, 5006, "session persistence failed: durable row missing")
 
-    _enable_gateway_prompts()
-
-    ready = threading.Event()
-
-    _sessions[sid] = {
-        "agent": None,
-        "agent_error": None,
-        "agent_ready": ready,
-        "attached_images": [],
-        "attached_videos": [],
-        "attached_files": [],
-        "cols": cols,
-        "edit_snapshots": {},
-        "events": collections.deque(maxlen=_EVENT_RING_MAXLEN),
-        "events_lock": threading.Lock(),
-        "events_seq": 0,
-        "history": [],
-        "history_lock": threading.Lock(),
-        "history_version": 0,
-        "image_counter": 0,
-        "running": False,
-        "session_key": key,
-        "show_reasoning": _load_show_reasoning(),
-        "slash_worker": None,
-        "tool_progress_mode": _load_tool_progress_mode(),
-        "tool_started_at": {},
-    }
-    _bind_session_transport(_sessions[sid], current_transport() or _stdio_transport)
+    try:
+        _enable_gateway_prompts()
+        ready = threading.Event()
+        session = {
+            "agent": None,
+            "agent_error": None,
+            "agent_ready": ready,
+            "attached_images": [],
+            "attached_videos": [],
+            "attached_files": [],
+            "cols": cols,
+            "edit_snapshots": {},
+            "events": collections.deque(maxlen=_EVENT_RING_MAXLEN),
+            "events_lock": threading.Lock(),
+            "events_seq": 0,
+            "history": [],
+            "history_lock": threading.Lock(),
+            "history_version": 0,
+            "image_counter": 0,
+            "requested_session_id": key,
+            "lineage_root_id": key,
+            "active_session_id": key,
+            "running": False,
+            "session_key": key,
+            "show_reasoning": _load_show_reasoning(),
+            "slash_worker": None,
+            "tool_progress_mode": _load_tool_progress_mode(),
+            "tool_started_at": {},
+        }
+        _bind_session_transport(session, current_transport() or _stdio_transport)
+        _publish_resume_reservation(create_reservation, sid, session)
+        if not _pin_registered_session(sid, session):
+            raise RuntimeError("session closed before creation response")
+    except Exception as exc:
+        _fail_resume_reservation(
+            create_reservation,
+            str(exc),
+            remove_session=True,
+        )
+        return _err(rid, 5032, f"session creation publication failed: {exc}")
 
     def _build() -> None:
-        session = _sessions.get(sid)
-        if session is None:
+        live_session = _sessions.get(sid)
+        if live_session is not session:
             # session.close ran before the build thread got scheduled.
             ready.set()
             return
@@ -3453,6 +4069,7 @@ def _(rid, params: dict) -> dict:
         # leaking a subprocess and a global notify registration.
         worker = None
         notify_registered = False
+        build_succeeded = False
         try:
             tokens = _set_session_context(key)
             try:
@@ -3489,6 +4106,8 @@ def _(rid, params: dict) -> dict:
                 info["config_warning"] = cfg_warn
                 logger.warning(cfg_warn)
             _emit("session.info", sid, info)
+            _complete_resume_reservation(create_reservation)
+            build_succeeded = True
         except Exception as e:
             session["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
@@ -3499,6 +4118,7 @@ def _(rid, params: dict) -> dict:
             # the global notify registration ourselves — session.close
             # couldn't see them at the time it ran.
             if _sessions.get(sid) is not session:
+                _release_agent_memory(session.get("agent"), ended=False)
                 if worker is not None:
                     try:
                         worker.close()
@@ -3511,9 +4131,39 @@ def _(rid, params: dict) -> dict:
                         unregister_gateway_notify(key)
                     except Exception:
                         pass
+                _fail_resume_reservation(
+                    create_reservation,
+                    "session closed during agent initialization",
+                    remove_session=False,
+                )
+            elif not build_succeeded:
+                if notify_registered:
+                    try:
+                        from tools.approval import unregister_gateway_notify
+
+                        unregister_gateway_notify(key)
+                    except Exception:
+                        pass
+                _release_agent_memory(session.get("agent"), ended=False)
+                _fail_resume_reservation(
+                    create_reservation,
+                    str(session.get("agent_error") or "agent initialization failed"),
+                    remove_session=True,
+                )
             ready.set()
 
-    threading.Thread(target=_build, daemon=True).start()
+    try:
+        threading.Thread(target=_build, daemon=True).start()
+    except Exception as exc:
+        session["agent_error"] = str(exc)
+        ready.set()
+        _fail_resume_reservation(
+            create_reservation,
+            str(exc),
+            remove_session=True,
+        )
+        _unpin_registered_session(session)
+        return _err(rid, 5032, f"agent initialization could not start: {exc}")
 
     # The durable root row was verified above and has no lineage to resolve, so
     # its canonical identity is deterministic without another lineage query.
@@ -3525,21 +4175,26 @@ def _(rid, params: dict) -> dict:
         "is_compression_tip": True,
     }
 
-    return _ok(
-        rid,
-        {
-            "session_id": sid,
-            "persisted_session_id": key,
-            **identity_payload,
-            "show_reasoning": _load_show_reasoning(),
-            "info": {
-                "model": _resolve_model(),
-                "tools": {},
-                "skills": {},
-                "cwd": _terminal_cwd(),
+    try:
+        if failure := _session_response_failure(sid, session):
+            return _err(rid, 5032, failure)
+        return _ok(
+            rid,
+            {
+                "session_id": sid,
+                "persisted_session_id": key,
+                **identity_payload,
+                "show_reasoning": _load_show_reasoning(),
+                "info": {
+                    "model": _resolve_model(),
+                    "tools": {},
+                    "skills": {},
+                    "cwd": _terminal_cwd(),
+                },
             },
-        },
-    )
+        )
+    finally:
+        _unpin_registered_session(session)
 
 
 @method("session.list")
@@ -3614,36 +4269,14 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5006, str(e))
 
 
-@method("session.resume")
-def _(rid, params: dict) -> dict:
-    target = params.get("session_id", "")
-    if not target:
-        return _err(rid, 4006, "session_id required")
-    include_messages = params.get("include_messages", True)
-    include_messages = not (
-        include_messages is False
-        or (isinstance(include_messages, str) and include_messages.lower() == "false")
-    )
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5000)
-    resolved = getattr(db, "resolve_session_id", lambda value: value)(target)
-    if resolved:
-        target = resolved
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
-    identity_payload = _session_identity_for(db, target)
-    active_target = str(identity_payload.get("active_session_id") or target)
+def _prepare_session_resume(target: str, found: dict) -> tuple:
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     new_transport = current_transport() or _stdio_transport
     parent_session_id = (
-        str(found.get("parent_session_id") or "") if isinstance(found, dict) else ""
+        str(found.get("parent_session_id") or "")
+        if isinstance(found, dict)
+        else ""
     )
     (
         child_replay_events,
@@ -3666,68 +4299,228 @@ def _(rid, params: dict) -> dict:
         parent_session_id,
         child_replay_running,
     )
-    for existing_sid, existing_session in list(_sessions.items()):
-        existing_key = existing_session.get("session_key")
-        if existing_key not in {target, active_target}:
-            continue
-        # Snapshot the event ring AND attach the new transport under the
-        # same lock that write_json takes. This is the no-duplicate
-        # contract: while we hold events_lock, no concurrent emit can
-        # both append-to-ring and write-to-transport. After we release,
-        # every new emit goes to the new transport AND is excluded from
-        # the snapshot — so the resuming client gets each event exactly
-        # once, via replay or live, never both. Attaching ADDS to the
-        # session's transport fan-out — previously this REPLACED the
-        # transport, which starved every other live viewer of the same
-        # session (the open chat went deaf mid-turn whenever a second
-        # surface resumed it; only re-attaching stole the stream back).
-        replay_events: list[dict] = []
-        replay_seq = 0
-        running_tools: list[dict] = []
-        ring = existing_session.get("events")
-        events_lock = existing_session.get("events_lock")
-        if ring is not None and events_lock is not None:
-            with events_lock:
-                _bind_session_transport(existing_session, new_transport)
-                replay_events = list(ring)
-                replay_seq = int(existing_session.get("events_seq", 0))
-                rt = existing_session.get("running_tools")
-                if isinstance(rt, dict):
-                    running_tools = [dict(v) for v in rt.values()]
-        else:
-            # Legacy sessions created before the ring existed — bind
-            # transport without the snapshot; replay just stays empty.
+    return (
+        sid,
+        new_transport,
+        child_replay_events,
+        child_replay_seq,
+        child_replay_running,
+        live_subagent,
+    )
+
+
+def _live_session_resume_response(
+    rid,
+    *,
+    db,
+    existing_sid: str,
+    existing_session: dict,
+    new_transport,
+    child_replay_events: list[dict],
+    child_replay_seq: int,
+    child_replay_running: bool,
+    live_subagent,
+    include_messages: bool,
+    active_target: str,
+    target: str,
+) -> dict:
+    existing_key = existing_session.get("session_key")
+    # Snapshot the event ring AND attach the new transport under the same lock
+    # that write_json takes. This keeps replay and live delivery disjoint while
+    # adding (never replacing) the new viewer transport.
+    replay_events: list[dict] = []
+    replay_seq = 0
+    running_tools: list[dict] = []
+    ring = existing_session.get("events")
+    events_lock = existing_session.get("events_lock")
+    if ring is not None and events_lock is not None:
+        with events_lock:
             _bind_session_transport(existing_session, new_transport)
-        if child_replay_events:
-            replay_events.extend(child_replay_events)
-            replay_events.sort(key=_event_ts)
-            replay_seq = max(replay_seq, child_replay_seq)
-        if not existing_session.get("running"):
+            replay_events = list(ring)
+            replay_seq = int(existing_session.get("events_seq", 0))
+            rt = existing_session.get("running_tools")
+            if isinstance(rt, dict):
+                running_tools = [dict(value) for value in rt.values()]
+    else:
+        _bind_session_transport(existing_session, new_transport)
+    if child_replay_events:
+        replay_events.extend(child_replay_events)
+        replay_events.sort(key=_event_ts)
+        replay_seq = max(replay_seq, child_replay_seq)
+    if (
+        _session_agent_is_ready(existing_session)
+        and not existing_session.get("running")
+    ):
+        try:
             _recover_pending_prompt(existing_sid, existing_session)
-        with existing_session.get("history_lock", threading.Lock()):
-            history = list(existing_session.get("history", []))
-        messages = _history_to_messages(history) if include_messages else None
-        persisted_key = str(existing_key or active_target or target)
+        except Exception:
+            logger.exception("pending prompt recovery failed session=%s", existing_key)
+    with existing_session.get("history_lock", threading.Lock()):
+        history = list(existing_session.get("history", []))
+    messages = _history_to_messages(history) if include_messages else None
+    persisted_key = str(existing_key or active_target or target)
+    try:
         existing_identity = _session_identity_for(db, persisted_key)
-        result = {
-            "session_id": existing_sid,
-            "resumed": persisted_key,
-            "persisted_session_id": persisted_key,
-            **existing_identity,
-            "message_count": len(messages) if messages is not None else len(history),
-            "agent_ready": bool(existing_session.get("agent")),
-            "info": _light_session_info(existing_session.get("agent")),
-            "running": bool(existing_session.get("running") or child_replay_running),
-            "replay_events": replay_events,
-            "replay_seq": replay_seq,
-            "running_tools": running_tools,
-            "show_reasoning": bool(existing_session.get("show_reasoning", False)),
-        }
-        if live_subagent is not None:
-            result["live_subagent"] = live_subagent
-        if messages is not None:
-            result["messages"] = messages
-        return _ok(rid, result)
+    except Exception as exc:
+        return _err(rid, 5032, f"session identity resolution failed: {exc}")
+    result = {
+        "session_id": existing_sid,
+        "resumed": persisted_key,
+        "persisted_session_id": persisted_key,
+        **existing_identity,
+        "message_count": len(messages) if messages is not None else len(history),
+        "agent_ready": _session_agent_is_ready(existing_session),
+        "info": _light_session_info(existing_session.get("agent")),
+        "running": bool(existing_session.get("running") or child_replay_running),
+        "replay_events": replay_events,
+        "replay_seq": replay_seq,
+        "running_tools": running_tools,
+        "show_reasoning": bool(existing_session.get("show_reasoning", False)),
+    }
+    if live_subagent is not None:
+        result["live_subagent"] = live_subagent
+    if messages is not None:
+        result["messages"] = messages
+    if failure := _session_response_failure(existing_sid, existing_session):
+        return _err(rid, 5032, failure)
+    return _ok(rid, result)
+
+
+@method("session.resume")
+def _session_resume(rid, params: dict) -> dict:
+    actor_retry_value = params.get("_actor_lifecycle_retry", 0)
+    actor_retry = actor_retry_value if isinstance(actor_retry_value, int) else 0
+    target = params.get("session_id", "")
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    include_messages = params.get("include_messages", True)
+    include_messages = not (
+        include_messages is False
+        or (isinstance(include_messages, str) and include_messages.lower() == "false")
+    )
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5000)
+    resolved = getattr(db, "resolve_session_id", lambda value: value)(target)
+    if resolved:
+        target = resolved
+    found = db.get_session(target)
+    if not found:
+        found = db.get_session_by_title(target)
+        if found:
+            target = found["id"]
+        else:
+            return _err(rid, 4007, "session not found")
+    try:
+        identity_payload = _session_identity_for(db, target)
+    except Exception as exc:
+        return _err(rid, 5032, f"session identity resolution failed: {exc}")
+    active_target = str(identity_payload.get("active_session_id") or target)
+    resume_aliases = _session_registry_ids(
+        target,
+        active_target,
+        identity=identity_payload,
+    )
+    try:
+        resume_disposition, resume_owner = _reserve_resumed_session(resume_aliases)
+    except RuntimeError as exc:
+        return _err(rid, 5032, f"session resume coordination failed: {exc}")
+
+    reservation: _ResumeReservation | None = None
+    existing_match: tuple[str, dict] | None = None
+    owns_resume_reservation = resume_disposition == "owner"
+    if resume_disposition == "live":
+        if not isinstance(resume_owner, tuple):
+            return _err(rid, 5032, "session resume registry returned invalid state")
+        existing_match = resume_owner
+    else:
+        if not isinstance(resume_owner, _ResumeReservation):
+            return _err(rid, 5032, "session resume registry returned invalid owner")
+        reservation = resume_owner
+        if resume_disposition == "wait":
+            if not reservation.published.wait(timeout=_RESUME_RESERVATION_WAIT_S):
+                return _err(
+                    rid,
+                    5032,
+                    "session resume coordination timed out; retry without creating "
+                    "a new session",
+                )
+            if reservation.error:
+                return _err(
+                    rid,
+                    5032,
+                    f"session resume failed: {reservation.error}",
+                )
+            try:
+                with _session_registry_lock:
+                    existing_match = _find_registered_session_locked(resume_aliases)
+            except RuntimeError as exc:
+                return _err(
+                    rid,
+                    5032,
+                    f"session resume publication conflicted: {exc}",
+                )
+            if existing_match is None:
+                return _err(
+                    rid,
+                    5032,
+                    "session resume publication was lost; retry without creating "
+                    "a new session",
+                )
+    if existing_match is not None:
+        existing_sid, existing_session = existing_match
+        if not _pin_registered_session(existing_sid, existing_session):
+            if actor_retry < 1:
+                retry_params = dict(params)
+                retry_params["_actor_lifecycle_retry"] = actor_retry + 1
+                return _session_resume(rid, retry_params)
+            return _err(rid, 5032, "session changed during resume; retry")
+        try:
+            try:
+                (
+                    _unused_sid,
+                    new_transport,
+                    child_replay_events,
+                    child_replay_seq,
+                    child_replay_running,
+                    live_subagent,
+                ) = _prepare_session_resume(target, found)
+            except Exception as exc:
+                return _err(rid, 5000, f"resume setup failed: {exc}")
+            return _live_session_resume_response(
+                rid,
+                db=db,
+                existing_sid=existing_sid,
+                existing_session=existing_session,
+                new_transport=new_transport,
+                child_replay_events=child_replay_events,
+                child_replay_seq=child_replay_seq,
+                child_replay_running=child_replay_running,
+                live_subagent=live_subagent,
+                include_messages=include_messages,
+                active_target=active_target,
+                target=target,
+            )
+        finally:
+            _unpin_registered_session(existing_session)
+
+    try:
+        (
+            sid,
+            new_transport,
+            child_replay_events,
+            child_replay_seq,
+            child_replay_running,
+            live_subagent,
+        ) = _prepare_session_resume(target, found)
+    except Exception as exc:
+        if owns_resume_reservation and reservation is not None:
+            _fail_resume_reservation(
+                reservation,
+                str(exc),
+                remove_session=False,
+            )
+        return _err(rid, 5000, f"resume setup failed: {exc}")
 
     recoverable_prompt = None
     try:
@@ -3774,6 +4567,12 @@ def _(rid, params: dict) -> dict:
                 target, _resume_row.get("compaction_cursor"),
             )
         identity_payload = _session_identity_for(db, target)
+        resume_aliases.update(
+            _session_registry_ids(target, identity=identity_payload)
+        )
+        if reservation is None:
+            raise RuntimeError("cold resume lost its actor reservation")
+        _extend_resume_reservation(reservation, resume_aliases)
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
         get_recoverable = getattr(db, "get_recoverable_prompt_receipt", None)
@@ -3781,6 +4580,12 @@ def _(rid, params: dict) -> dict:
             recoverable_prompt = get_recoverable(target)
         messages = _history_to_messages(history) if include_messages else None
     except Exception as e:
+        if reservation is not None:
+            _fail_resume_reservation(
+                reservation,
+                str(e),
+                remove_session=False,
+            )
         return _err(rid, 5000, f"resume failed: {e}")
 
     ready = threading.Event()
@@ -3800,6 +4605,9 @@ def _(rid, params: dict) -> dict:
         "history_lock": threading.Lock(),
         "history_version": 0,
         "image_counter": 0,
+        "requested_session_id": identity_payload.get("requested_session_id"),
+        "lineage_root_id": identity_payload.get("lineage_root_id"),
+        "active_session_id": identity_payload.get("active_session_id"),
         "running": False,
         "session_key": target,
         "show_reasoning": _load_show_reasoning(),
@@ -3807,12 +4615,26 @@ def _(rid, params: dict) -> dict:
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
     }
-    _bind_session_transport(session, current_transport() or _stdio_transport)
-    _sessions[sid] = session
+    _bind_session_transport(session, new_transport)
+    try:
+        if reservation is None:
+            raise RuntimeError("cold resume lost its actor reservation")
+        _publish_resume_reservation(reservation, sid, session)
+        if not _pin_registered_session(sid, session):
+            raise RuntimeError("session closed before resume response")
+    except Exception as exc:
+        if reservation is not None:
+            _fail_resume_reservation(
+                reservation,
+                str(exc),
+                remove_session=True,
+            )
+        return _err(rid, 5032, f"session resume publication failed: {exc}")
 
     def _build() -> None:
         worker = None
         notify_registered = False
+        build_succeeded = False
         try:
             tokens = _set_session_context(target)
             try:
@@ -3821,12 +4643,12 @@ def _(rid, params: dict) -> dict:
                 _clear_session_context(tokens)
 
             if _sessions.get(sid) is not session:
+                _release_agent_memory(agent, ended=False)
                 return
 
             _release_agent_memory(session.get("agent"), ended=False)
             session["agent"] = agent
             _emit("session.info", sid, _light_session_info(agent))
-            ready.set()
 
             try:
                 worker = _SlashWorker(target, getattr(agent, "model", _resolve_model()))
@@ -3852,12 +4674,20 @@ def _(rid, params: dict) -> dict:
 
             _wire_callbacks(sid)
             _emit("session.info", sid, _session_info(agent))
-            _recover_pending_prompt(sid, session)
+            if reservation is not None:
+                _complete_resume_reservation(reservation)
+            build_succeeded = True
+            ready.set()
+            try:
+                _recover_pending_prompt(sid, session)
+            except Exception:
+                logger.exception("pending prompt recovery failed session=%s", target)
         except Exception as e:
             session["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             if _sessions.get(sid) is not session:
+                _release_agent_memory(session.get("agent"), ended=False)
                 if worker is not None:
                     try:
                         worker.close()
@@ -3870,31 +4700,73 @@ def _(rid, params: dict) -> dict:
                         unregister_gateway_notify(target)
                     except Exception:
                         pass
+                if reservation is not None:
+                    _fail_resume_reservation(
+                        reservation,
+                        "session closed during agent initialization",
+                        remove_session=False,
+                    )
+            elif not build_succeeded and reservation is not None:
+                if worker is not None:
+                    try:
+                        worker.close()
+                    except Exception:
+                        pass
+                if notify_registered:
+                    try:
+                        from tools.approval import unregister_gateway_notify
+
+                        unregister_gateway_notify(target)
+                    except Exception:
+                        pass
+                _release_agent_memory(session.get("agent"), ended=False)
+                _fail_resume_reservation(
+                    reservation,
+                    str(session.get("agent_error") or "agent initialization failed"),
+                    remove_session=True,
+                )
             ready.set()
 
-    threading.Thread(target=_build, daemon=True).start()
+    try:
+        threading.Thread(target=_build, daemon=True).start()
+    except Exception as exc:
+        session["agent_error"] = str(exc)
+        ready.set()
+        if reservation is not None:
+            _fail_resume_reservation(
+                reservation,
+                str(exc),
+                remove_session=True,
+            )
+        _unpin_registered_session(session)
+        return _err(rid, 5032, f"agent initialization could not start: {exc}")
 
-    result = {
-        "session_id": sid,
-        "resumed": target,
-        "persisted_session_id": target,
-        **identity_payload,
-        "message_count": len(messages) if messages is not None else len(history),
-        "agent_ready": False,
-        "info": _light_session_info(),
-        "running": bool(
-            session.get("running") or child_replay_running or recoverable_prompt
-        ),
-        "replay_events": child_replay_events,
-        "replay_seq": child_replay_seq,
-        "running_tools": [],
-        "show_reasoning": bool(session.get("show_reasoning", False)),
-    }
-    if live_subagent is not None:
-        result["live_subagent"] = live_subagent
-    if messages is not None:
-        result["messages"] = messages
-    return _ok(rid, result)
+    try:
+        result = {
+            "session_id": sid,
+            "resumed": target,
+            "persisted_session_id": target,
+            **identity_payload,
+            "message_count": len(messages) if messages is not None else len(history),
+            "agent_ready": False,
+            "info": _light_session_info(),
+            "running": bool(
+                session.get("running") or child_replay_running or recoverable_prompt
+            ),
+            "replay_events": child_replay_events,
+            "replay_seq": child_replay_seq,
+            "running_tools": [],
+            "show_reasoning": bool(session.get("show_reasoning", False)),
+        }
+        if live_subagent is not None:
+            result["live_subagent"] = live_subagent
+        if messages is not None:
+            result["messages"] = messages
+        if failure := _session_response_failure(sid, session):
+            return _err(rid, 5032, failure)
+        return _ok(rid, result)
+    finally:
+        _unpin_registered_session(session)
 
 
 @method("session.title")
@@ -4025,26 +4897,63 @@ def _(rid, params: dict) -> dict:
     session = _sessions.get(sid)
     if not session:
         return _ok(rid, {"closed": False})
-    if session.get("running") and not force:
-        # UI navigation is a detach, not a kill. Keep the server-side session
-        # alive so the client can switch away and reattach by persisted id while
-        # the turn keeps running. Explicit force=true remains available for hard
-        # cleanup/interrupt flows.
-        return _ok(
-            rid,
-            {
-                "closed": False,
-                "detached": True,
-                "running": True,
-                "persisted_session_id": session.get("session_key"),
-            },
+    if not force:
+        def _detach_live() -> dict:
+            return _ok(
+                rid,
+                {
+                    "closed": False,
+                    "detached": True,
+                    "running": bool(session.get("running")),
+                    "persisted_session_id": session.get("session_key"),
+                },
+            )
+
+        history_lock = session.get("history_lock")
+        if history_lock is None:
+            # Legacy actors predate atomic prompt admission but must preserve
+            # the established navigation contract for already-running turns.
+            if session.get("running"):
+                return _detach_live()
+            session = _drop_session_registry_identity(
+                sid,
+                session,
+                remove_session=True,
+                reason="session closed",
+            )
+        else:
+            # Prompt admission uses this same lock. Exactly one side wins:
+            # prompt sets running and this detaches, or close removes the actor
+            # and prompt's in-lock identity check rejects the orphan. Lock order
+            # stays history -> registry via the drop helper.
+            with history_lock:
+                if _sessions.get(sid) is not session:
+                    return _ok(rid, {"closed": False})
+                if session.get("running") or int(
+                    session.get("registry_resume_pins", 0)
+                ):
+                    return _detach_live()
+                session = _drop_session_registry_identity(
+                    sid,
+                    session,
+                    remove_session=True,
+                    reason="session closed",
+                )
+    else:
+        # force=true is explicit teardown and may interrupt an in-flight actor;
+        # generation/effect fencing for forced closes is intentionally separate.
+        session = _drop_session_registry_identity(
+            sid,
+            session,
+            remove_session=True,
+            reason="session closed",
         )
-    session = _sessions.pop(sid, None)
     if not session:
         return _ok(rid, {"closed": False})
     # Genuine session end — run end-of-session hooks AND close the memory
     # connection so the holographic Postgres connection isn't orphaned.
     _release_agent_memory(session.get("agent"), ended=True)
+    session["agent_memory_released"] = True
     try:
         from tools.approval import unregister_gateway_notify
 
@@ -4074,6 +4983,15 @@ def _(rid, params: dict) -> dict:
     if not history:
         return _err(rid, 4008, "nothing to branch — send a message first")
     new_key = _new_session_key()
+    try:
+        branch_disposition, branch_owner = _reserve_resumed_session({new_key})
+    except RuntimeError as exc:
+        return _err(rid, 5032, f"branch coordination failed: {exc}")
+    if branch_disposition != "owner" or not isinstance(
+        branch_owner, _ResumeReservation
+    ):
+        return _err(rid, 5032, "new branch identity is already in use; retry")
+    branch_reservation = branch_owner
     branch_name = params.get("name", "")
     try:
         if branch_name:
@@ -4096,20 +5014,51 @@ def _(rid, params: dict) -> dict:
             )
         db.set_session_title(new_key, title)
     except Exception as e:
+        _fail_resume_reservation(
+            branch_reservation,
+            str(e),
+            remove_session=False,
+        )
         return _err(rid, 5008, f"branch failed: {e}")
     new_sid = uuid.uuid4().hex[:8]
+    agent = None
+    branch_session = None
     try:
         tokens = _set_session_context(new_key)
         try:
             agent = _make_agent(new_sid, new_key, session_id=new_key)
         finally:
             _clear_session_context(tokens)
-        _init_session(
-            new_sid, new_key, agent, list(history), cols=session.get("cols", 80)
+        branch_session = _init_session(
+            new_sid,
+            new_key,
+            agent,
+            list(history),
+            cols=session.get("cols", 80),
+            reservation=branch_reservation,
         )
     except Exception as e:
+        published_session = branch_reservation.session
+        already_released = bool(
+            isinstance(published_session, dict)
+            and published_session.get("agent_memory_released")
+            and published_session.get("agent") is agent
+        )
+        if agent is not None and not already_released:
+            _release_agent_memory(agent, ended=False)
+        _fail_resume_reservation(
+            branch_reservation,
+            str(e),
+            remove_session=True,
+        )
         return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
+    try:
+        if failure := _session_response_failure(new_sid, branch_session):
+            return _err(rid, 5032, failure)
+        return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
+    finally:
+        if branch_session is not None:
+            _unpin_registered_session(branch_session)
 
 
 @method("session.interrupt")
@@ -5728,6 +6677,17 @@ def _(rid, params: dict) -> dict:
     receipt_inserted = False
     reclaim_owner_id = None
     with session["history_lock"]:
+        # `_sess` can return immediately before a reset claims this actor. The
+        # reset claims the same history lock before setting registry_resetting,
+        # so this is the atomic admission point: no receipt, claim, or worker
+        # may be created for a rebuilding or already-removed actor. Read the
+        # registry directly here (without taking its lock) to preserve the sole
+        # history -> registry lock order used by reset ownership.
+        if (
+            session.get("registry_resetting")
+            or _sessions.get(sid) is not session
+        ):
+            return _err(rid, 5032, "session context changed; retry the prompt")
         last_ack = session.get("last_prompt_ack")
         if (
             isinstance(last_ack, dict)
@@ -6392,7 +7352,13 @@ def _(rid, params: dict) -> dict:
                     turn_latency_ms = int(
                         max(0.0, time.monotonic() - turn_started_at) * 1000
                     )
-                    _mark_session_idle(session)
+                    # A context-overflow turn must keep ownership until its
+                    # replacement actor has claimed the reset fence. Releasing
+                    # running here would admit a new prompt before the finally
+                    # block resets context, allowing that new turn's agent to
+                    # be replaced underneath it.
+                    if not reset_context_after_turn:
+                        _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
                 terminal_frame_pending = has_followup
                 if followup_rounds > 0 and not has_followup:
