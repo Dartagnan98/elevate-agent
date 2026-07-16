@@ -22,6 +22,10 @@ const {
   fetchPublicFeeds,
   TRUSTED_APPLE_TEAM_ID,
 } = require(path.join(ROOT, "scripts", "candidate-receipt.js"));
+const {
+  DEFAULT_EVIDENCE_PATH: BETA_SOURCE_SAFETY_EVIDENCE,
+  validateBetaSourceSafetyEvidence,
+} = require(path.join(ROOT, "scripts", "beta-source-safety-gate.js"));
 const releaseProfile = resolveReleaseProfile(RELEASE_CHANNEL);
 const stableProfile = resolveReleaseProfile("latest");
 const effectiveBuild = createBuilderConfig();
@@ -266,7 +270,34 @@ record(
 );
 
 const gitStatus = output("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: REPO });
-record("release worktree is clean", gitStatus.ok && gitStatus.stdout.trim() === "", gitStatus.stdout.trim() || "clean");
+const releaseWorktreeClean = gitStatus.ok && gitStatus.stdout.trim() === "";
+record("release worktree is clean", releaseWorktreeClean, gitStatus.stdout.trim() || "clean");
+
+let betaSourceSafety = null;
+if (releaseProfile.isBeta) {
+  if (!releaseWorktreeClean) {
+    record("Beta source safety suites pass", false, "skipped until the checkout is clean");
+  } else {
+    fs.rmSync(BETA_SOURCE_SAFETY_EVIDENCE, { force: true });
+    const safetyGate = output(
+      process.execPath,
+      [path.join(ROOT, "scripts", "beta-source-safety-gate.js")],
+      { timeout: 90 * 60_000 },
+    );
+    let detail = safetyGate.ok ? "evidence missing" : summarizeProbe(safetyGate, "passed").detail;
+    if (safetyGate.ok && fs.existsSync(BETA_SOURCE_SAFETY_EVIDENCE)) {
+      try {
+        betaSourceSafety = JSON.parse(fs.readFileSync(BETA_SOURCE_SAFETY_EVIDENCE, "utf8"));
+        validateBetaSourceSafetyEvidence(betaSourceSafety, { requireClean: true });
+        detail = `${betaSourceSafety.suites.length} suites / ${betaSourceSafety.manifest_id}`;
+      } catch (error) {
+        detail = error?.message || String(error);
+        betaSourceSafety = null;
+      }
+    }
+    record("Beta source safety suites pass", safetyGate.ok && Boolean(betaSourceSafety), detail);
+  }
+}
 
 record("xcrun available", commandExists("xcrun", ["--version"]));
 record("codesign available", commandAvailable("codesign"));
@@ -332,6 +363,7 @@ if (checks.every((check) => check.ok)) {
       version: packageJson.version,
       profile: releaseProfile,
       publicFeeds,
+      sourceSafety: betaSourceSafety,
     });
     record("immutable candidate source contract written", true, sourceReceipt.source_receipt_id);
   } catch (error) {

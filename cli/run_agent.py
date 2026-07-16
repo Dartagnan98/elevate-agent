@@ -15066,24 +15066,55 @@ class AIAgent:
         return None
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
-                     tool_call_id: Optional[str] = None, messages: list = None) -> str:
+                     tool_call_id: Optional[str] = None, messages: list = None,
+                     return_outcome: bool = False):
         """Invoke a single tool and return the result string. No display logic.
 
         Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
         tools. Used by the concurrent execution path; the sequential path retains
         its own inline invocation for backward-compatible display handling.
         """
+        from model_tools import (
+            ToolDispatchOutcome,
+            exact_beta_tool_containment_active,
+            exact_beta_tool_preflight_block,
+        )
+
+        beta_block = exact_beta_tool_preflight_block(
+            function_name,
+            function_args,
+            session_id=self.session_id or "",
+            tool_call_id=tool_call_id,
+        )
+        if beta_block is not None:
+            return (
+                ToolDispatchOutcome(
+                    result=beta_block,
+                    started=False,
+                    block_reason="beta_preflight_block",
+                )
+                if return_outcome
+                else beta_block
+            )
+        exact_beta = exact_beta_tool_containment_active()
+
         # Check plugin hooks for a block directive before executing anything.
         block_message: Optional[str] = None
-        try:
-            from elevate_cli.plugins import get_pre_tool_call_block_message
-            block_message = get_pre_tool_call_block_message(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            pass
+        if not exact_beta:
+            try:
+                from elevate_cli.plugins import get_pre_tool_call_block_message
+                block_message = get_pre_tool_call_block_message(
+                    function_name, function_args, task_id=effective_task_id or "",
+                )
+            except Exception:
+                pass
         if block_message is not None:
-            return json.dumps({"error": block_message}, ensure_ascii=False)
+            result = json.dumps({"error": block_message}, ensure_ascii=False)
+            return (
+                ToolDispatchOutcome(result, False, "plugin_block")
+                if return_outcome
+                else result
+            )
 
         # Plan mode (read-only): block state-changing tools at the runtime, not
         # just via the system prompt. This is the concurrent execution path;
@@ -15096,7 +15127,12 @@ class AIAgent:
         except Exception:
             _plan_msg = None
         if _plan_msg is not None:
-            return json.dumps({"error": _plan_msg}, ensure_ascii=False)
+            result = json.dumps({"error": _plan_msg}, ensure_ascii=False)
+            return (
+                ToolDispatchOutcome(result, False, "plan_mode_block")
+                if return_outcome
+                else result
+            )
 
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
@@ -15153,12 +15189,19 @@ class AIAgent:
         elif function_name == "delegate_task":
             return self._dispatch_delegate_task(function_args)
         else:
+            dispatch_kwargs = {
+                "tool_call_id": tool_call_id,
+                "session_id": getattr(self, "session_id", "") or "",
+                "enabled_tools": (
+                    list(self.valid_tool_names) if self.valid_tool_names else None
+                ),
+                "skip_pre_tool_call_hook": True,
+            }
+            if return_outcome:
+                dispatch_kwargs["return_outcome"] = True
             return handle_function_call(
                 function_name, function_args, effective_task_id,
-                tool_call_id=tool_call_id,
-                session_id=self.session_id or "",
-                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
-                skip_pre_tool_call_hook=True,
+                **dispatch_kwargs,
             )
 
     @staticmethod
@@ -15278,6 +15321,23 @@ class AIAgent:
                 return
             parsed_calls.append((tool_call, function_name, function_args))
 
+        from model_tools import (
+            exact_beta_tool_containment_active,
+            exact_beta_tool_preflight_block,
+        )
+
+        exact_beta = exact_beta_tool_containment_active()
+
+        beta_preflight_errors = [
+            exact_beta_tool_preflight_block(
+                function_name,
+                function_args,
+                session_id=getattr(self, "session_id", "") or "",
+                tool_call_id=tool_call.id,
+            )
+            for tool_call, function_name, function_args in parsed_calls
+        ]
+
         # Linearize every concurrent effect admission in deterministic model
         # order before starting any handler.  Stop can split this list into a
         # winning prefix and cancelled suffix, but no later-index worker can
@@ -15293,6 +15353,8 @@ class AIAgent:
             for index, (tool_call, function_name, _function_args) in enumerate(
                 parsed_calls
             ):
+                if beta_preflight_errors[index] is not None:
+                    continue
                 if not admission_open:
                     break
                 try:
@@ -15312,13 +15374,16 @@ class AIAgent:
 
         artifact_baselines_by_call: Dict[str, Dict[str, Dict[str, Any]]] = {}
         preexecution_errors: list[Optional[str]] = [
-            (
+            beta_preflight_errors[index]
+            or (
                 f"[Tool execution cancelled — {function_name} was skipped "
                 "due to user interrupt]"
                 if skip_all_due_interrupt
                 else None
             )
-            for _tool_call, function_name, _function_args in parsed_calls
+            for index, (_tool_call, function_name, _function_args) in enumerate(
+                parsed_calls
+            )
         ]
         checkpointed_workdirs: set[str] = set()
         blocked_checkpoint_workdirs: set[str] = set()
@@ -15327,6 +15392,12 @@ class AIAgent:
         ):
             permit = effect_permits[index]
             if permit is None:
+                artifact_baselines_by_call[tool_call.id] = {}
+                continue
+
+            # Exact Beta's currently permitted tools are read-only, and its
+            # physical start is not known until the immutable registry outcome.
+            if exact_beta:
                 artifact_baselines_by_call[tool_call.id] = {}
                 continue
 
@@ -15429,8 +15500,8 @@ class AIAgent:
 
         # Touch activity before launching workers so the gateway knows
         # we're executing tools (not stuck).
-        self._current_tool = ", ".join(winning_tool_names) or None
-        if winning_tool_names:
+        if winning_tool_names and not exact_beta:
+            self._current_tool = ", ".join(winning_tool_names)
             self._touch_activity(
                 f"executing {len(winning_tool_names)} tools concurrently: "
                 + ", ".join(winning_tool_names)
@@ -15480,6 +15551,8 @@ class AIAgent:
                     from agent.turn_fence import current_turn_publish_allowed
 
                     if (
+                        not exact_beta
+                        and
                         current_turn_publish_allowed()
                         and self.tool_progress_callback
                     ):
@@ -15495,6 +15568,8 @@ class AIAgent:
                             function_args,
                         )
                     if (
+                        not exact_beta
+                        and
                         current_turn_publish_allowed()
                         and self.tool_start_callback
                     ):
@@ -15505,13 +15580,16 @@ class AIAgent:
                             function_name,
                             function_args,
                         )
+                    invoke_kwargs = {"messages": messages}
+                    if exact_beta:
+                        invoke_kwargs["return_outcome"] = True
                     try:
                         result = self._invoke_tool(
                             function_name,
                             function_args,
                             effective_task_id,
                             tool_call.id,
-                            messages=messages,
+                            **invoke_kwargs,
                         )
                     except TypeError as type_error:
                         # Backwards compatibility for tests/subclasses/stubs
@@ -15531,12 +15609,23 @@ class AIAgent:
             except Exception as tool_error:
                 result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
+            from model_tools import ToolDispatchOutcome
+
+            if exact_beta and isinstance(result, ToolDispatchOutcome):
+                dispatch_started = result.started
+                result = result.result
+            else:
+                # Exact Beta fails closed if a legacy override or test stub
+                # drops the immutable physical-start outcome.
+                dispatch_started = (
+                    active_turn_permit is not None and not exact_beta
+                )
             duration = time.time() - start
             result_text = _multimodal_text_summary(result)
             is_error, _ = _detect_tool_failure(function_name, result_text)
-            if is_error:
+            if dispatch_started and is_error:
                 logger.info("tool %s failed (%.2fs): %s", function_name, duration, result_text[:200])
-            else:
+            elif dispatch_started:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result_text))
             results[index] = (
                 function_name,
@@ -15545,6 +15634,7 @@ class AIAgent:
                 duration,
                 is_error,
                 active_turn_permit,
+                dispatch_started,
             )
             # Tear down worker-tid tracking.  Clear any interrupt bit we may
             # have set so the next task scheduled onto this recycled tid
@@ -15648,6 +15738,7 @@ class AIAgent:
                 function_args = args
                 is_error = True
                 active_turn_permit = None
+                dispatch_started = False
             else:
                 (
                     function_name,
@@ -15656,7 +15747,9 @@ class AIAgent:
                     tool_duration,
                     is_error,
                     active_turn_permit,
+                    dispatch_started,
                 ) = r
+            physically_started = dispatch_started
 
             function_result_text = _multimodal_text_summary(function_result)
             detected_failure, failure_suffix = _detect_tool_failure(
@@ -15664,7 +15757,7 @@ class AIAgent:
                 function_result_text,
             )
             batch_outcomes = getattr(self, "_last_tool_batch_outcomes", None)
-            if isinstance(batch_outcomes, list):
+            if physically_started and isinstance(batch_outcomes, list):
                 batch_outcomes.append(
                     (
                         function_name,
@@ -15675,14 +15768,64 @@ class AIAgent:
                         artifact_baselines_by_call.get(tc.id, {}),
                     )
                 )
+            elif (
+                not physically_started
+                and detected_failure
+                and isinstance(batch_outcomes, list)
+            ):
+                # A rejected call has no physical verifier effects, but it is
+                # still a logical failure the final-answer truth ledger must
+                # retain so the model cannot claim it completed the action.
+                batch_outcomes.append(
+                    (
+                        function_name,
+                        function_args,
+                        True,
+                        failure_suffix or " [not started]",
+                        function_result_text,
+                        {},
+                    )
+                )
 
-            if is_error:
+            if physically_started and is_error:
                 result_preview = function_result_text[:200] if len(function_result_text) > 200 else function_result_text
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
             from agent.turn_fence import current_turn_publish_allowed
 
-            if current_turn_publish_allowed() and self.tool_progress_callback:
+            if physically_started and exact_beta:
+                self._current_tool = function_name
+                self._touch_activity(f"executing tool: {function_name}")
+                if (
+                    current_turn_publish_allowed()
+                    and self.tool_progress_callback
+                ):
+                    preview = _build_tool_preview(function_name, function_args)
+                    self._invoke_generation_callback(
+                        "tool_progress_callback",
+                        self.tool_progress_callback,
+                        "tool.started",
+                        function_name,
+                        preview,
+                        function_args,
+                    )
+                if (
+                    current_turn_publish_allowed()
+                    and self.tool_start_callback
+                ):
+                    self._invoke_generation_callback(
+                        "tool_start_callback",
+                        self.tool_start_callback,
+                        tc.id,
+                        function_name,
+                        function_args,
+                    )
+
+            if (
+                physically_started
+                and current_turn_publish_allowed()
+                and self.tool_progress_callback
+            ):
                 self._invoke_generation_callback(
                     "tool_progress_callback",
                     self.tool_progress_callback,
@@ -15694,15 +15837,15 @@ class AIAgent:
                     is_error=is_error,
                 )
 
-            if self.verbose_logging:
+            if physically_started and self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result_text)} chars): {function_result_text}")
 
             # Print cute message per tool
-            if self._should_emit_quiet_tool_messages():
+            if physically_started and self._should_emit_quiet_tool_messages():
                 cute_msg = _get_cute_tool_message_impl(name, args, tool_duration, result=function_result)
                 self._safe_print(f"  {cute_msg}")
-            elif not self.quiet_mode:
+            elif physically_started and not self.quiet_mode:
                 marker = "❌" if is_error else "✅"
                 outcome = "failed" if is_error else "completed"
                 if self.verbose_logging:
@@ -15712,10 +15855,17 @@ class AIAgent:
                     response_preview = function_result_text[:self.log_prefix_chars] + "..." if len(function_result_text) > self.log_prefix_chars else function_result_text
                     print(f"  {marker} Tool {i+1} {outcome} in {tool_duration:.2f}s - {response_preview}")
 
-            self._current_tool = None
-            self._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
+            if physically_started:
+                self._current_tool = None
+                self._touch_activity(
+                    f"tool completed: {name} ({tool_duration:.1f}s)"
+                )
 
-            if current_turn_publish_allowed() and self.tool_complete_callback:
+            if (
+                physically_started
+                and current_turn_publish_allowed()
+                and self.tool_complete_callback
+            ):
                 self._invoke_generation_callback(
                     "tool_complete_callback",
                     self.tool_complete_callback,
@@ -15725,7 +15875,7 @@ class AIAgent:
                     function_result,
                 )
 
-            if not _is_multimodal_tool_result(function_result):
+            if physically_started and not _is_multimodal_tool_result(function_result):
                 if not isinstance(function_result, str):
                     function_result = function_result_text
                 function_result = maybe_persist_tool_result(
@@ -15735,7 +15885,11 @@ class AIAgent:
                     env=get_active_env(effective_task_id),
                 )
 
-            subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
+            subdir_hints = (
+                self._subdirectory_hints.check_tool_call(name, args)
+                if physically_started
+                else ""
+            )
             if subdir_hints:
                 if _is_multimodal_tool_result(function_result):
                     _append_subdir_hint_to_multimodal(function_result, subdir_hints)
@@ -15938,21 +16092,35 @@ class AIAgent:
 
             function_name = tool_call.function.name
 
-            # Check plugin hooks for a block directive before executing.
-            _block_msg: Optional[str] = None
-            action_fingerprint = _tool_action_fingerprint(
+            from model_tools import (
+                exact_beta_tool_containment_active,
+                exact_beta_tool_preflight_block,
+            )
+
+            beta_preflight_result = exact_beta_tool_preflight_block(
                 function_name,
                 function_args,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call.id,
             )
-            if action_fingerprint in seen_action_fingerprints:
-                _block_msg = (
-                    "duplicate tool action was suppressed for safety. The "
-                    "first matching call ran; this call did not execute. "
-                    "Retry this exact action in a later tool batch only if it "
-                    "must run again."
+            _block_msg: Optional[str] = beta_preflight_result
+            exact_beta = exact_beta_tool_containment_active()
+
+            # Check plugin hooks for a block directive before executing.
+            if _block_msg is None:
+                action_fingerprint = _tool_action_fingerprint(
+                    function_name,
+                    function_args,
                 )
-            elif action_fingerprint is not None:
-                seen_action_fingerprints.add(action_fingerprint)
+                if action_fingerprint in seen_action_fingerprints:
+                    _block_msg = (
+                        "duplicate tool action was suppressed for safety. The "
+                        "first matching call ran; this call did not execute. "
+                        "Retry this exact action in a later tool batch only if it "
+                        "must run again."
+                    )
+                elif action_fingerprint is not None:
+                    seen_action_fingerprints.add(action_fingerprint)
 
             if _block_msg is None and function_name == "delegate_task":
                 delegate_calls_seen += 1
@@ -15967,34 +16135,36 @@ class AIAgent:
             # registry/MCP handlers, delegate_task, and exact-terminal receipt
             # code) executes only when this permit wins.  The fence lock is no
             # longer held while any of that code runs.
+            from agent.turn_fence import current_turn_publish_allowed
+
             active_turn_permit = None
-            try:
-                from agent.turn_fence import (
-                    TurnCancelled,
-                    acquire_current_turn_permit,
-                    current_turn_publish_allowed,
-                )
-
-                active_turn_permit = acquire_current_turn_permit(
-                    "tool",
-                    {
-                        "tool_call_id": tool_call.id,
-                        "tool_name": function_name,
-                    },
-                )
-                # The cleanup stack is local to this sequential call and is
-                # closed by its caller's try/finally.  Registration happens
-                # immediately after acquisition, closing the exception window
-                # before plugin policy, callbacks, or handlers run.
-                permit_cleanup.callback(active_turn_permit.release)
-            except TurnCancelled:
-                # The retained batch permit authorizes terminal bookkeeping
-                # for calls whose effect permits lost.  Preserve strict tool
-                # role ordering without starting any physical handler.
-                _append_cancelled_suffix(i - 1, "cancellation won admission")
-                return
-
             if _block_msg is None:
+                try:
+                    from agent.turn_fence import (
+                        TurnCancelled,
+                        acquire_current_turn_permit,
+                    )
+
+                    active_turn_permit = acquire_current_turn_permit(
+                        "tool",
+                        {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": function_name,
+                        },
+                    )
+                    # The cleanup stack is local to this sequential call and is
+                    # closed by its caller's try/finally.  Registration happens
+                    # immediately after acquisition, closing the exception window
+                    # before plugin policy, callbacks, or handlers run.
+                    permit_cleanup.callback(active_turn_permit.release)
+                except TurnCancelled:
+                    # The retained batch permit authorizes terminal bookkeeping
+                    # for calls whose effect permits lost.  Preserve strict tool
+                    # role ordering without starting any physical handler.
+                    _append_cancelled_suffix(i - 1, "cancellation won admission")
+                    return
+
+            if _block_msg is None and not exact_beta:
                 try:
                     from elevate_cli.plugins import get_pre_tool_call_block_message
                     _block_msg = get_pre_tool_call_block_message(
@@ -16015,6 +16185,11 @@ class AIAgent:
                 except Exception:
                     pass
 
+            # Exact Beta cannot equate admission with physical execution.  It
+            # remains blocked to all observers until the registry returns the
+            # immutable ToolDispatchOutcome below.
+            _execution_blocked = _block_msg is not None or exact_beta
+
             if not self.quiet_mode:
                 args_str = json.dumps(function_args, ensure_ascii=False)
                 if self.verbose_logging:
@@ -16024,14 +16199,14 @@ class AIAgent:
                     args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
                     print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
 
-            if _block_msg is None:
+            if not _execution_blocked:
                 self._current_tool = function_name
                 self._touch_activity(f"executing tool: {function_name}")
 
             # Set activity callback for long-running tool execution (terminal
             # commands, etc.) so the gateway's inactivity monitor doesn't kill
             # the agent while a command is running.
-            if _block_msg is None:
+            if not _execution_blocked:
                 try:
                     from tools.environments.base import set_activity_callback
                     set_activity_callback(self._touch_activity)
@@ -16039,7 +16214,7 @@ class AIAgent:
                     pass
 
             if (
-                _block_msg is None
+                not _execution_blocked
                 and current_turn_publish_allowed()
                 and self.tool_progress_callback
             ):
@@ -16054,7 +16229,7 @@ class AIAgent:
                 )
 
             if (
-                _block_msg is None
+                not _execution_blocked
                 and current_turn_publish_allowed()
                 and self.tool_start_callback
             ):
@@ -16067,7 +16242,7 @@ class AIAgent:
                 )
 
             # Checkpoint: snapshot working dir before file-mutating tools
-            if _block_msg is None and function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
+            if not _execution_blocked and function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
                 try:
                     file_path = function_args.get("path", "")
                     if file_path:
@@ -16092,7 +16267,7 @@ class AIAgent:
                     _block_msg = f"required checkpoint failed: {exc}"
 
             # Checkpoint before destructive terminal commands
-            if _block_msg is None and function_name == "terminal" and self._checkpoint_mgr.enabled:
+            if not _execution_blocked and function_name == "terminal" and self._checkpoint_mgr.enabled:
                 try:
                     cmd = function_args.get("command", "")
                     if _is_destructive_command(cmd):
@@ -16116,7 +16291,9 @@ class AIAgent:
                         blocked_checkpoint_workdirs.add(str(cwd))
                     _block_msg = f"required checkpoint failed: {exc}"
 
-            if _block_msg is None:
+            _execution_blocked = _block_msg is not None or exact_beta
+
+            if not _execution_blocked:
                 # Reset cadence only after every required checkpoint has
                 # completed and the handler will actually start.
                 if function_name == "memory":
@@ -16130,16 +16307,49 @@ class AIAgent:
                     function_args,
                     getattr(self, "_active_action_user_message", None),
                 )
-                if _block_msg is None
+                if not _execution_blocked
                 else {}
             )
 
             tool_start_time = time.time()
 
-            if _block_msg is not None:
+            if beta_preflight_result is not None:
+                function_result = beta_preflight_result
+                tool_duration = 0.0
+            elif _block_msg is not None:
                 # Tool blocked by plugin policy — return error without executing.
                 function_result = json.dumps({"error": _block_msg}, ensure_ascii=False)
                 tool_duration = 0.0
+            elif exact_beta:
+                from model_tools import ToolDispatchOutcome
+
+                try:
+                    dispatch_outcome = self._invoke_tool(
+                        function_name,
+                        function_args,
+                        effective_task_id,
+                        tool_call.id,
+                        messages=messages,
+                        return_outcome=True,
+                    )
+                except Exception as tool_error:
+                    dispatch_outcome = None
+                    function_result = (
+                        f"Error executing tool '{function_name}': {tool_error}"
+                    )
+                    logger.error(
+                        "_invoke_tool raised for %s: %s",
+                        function_name,
+                        tool_error,
+                        exc_info=True,
+                    )
+                if isinstance(dispatch_outcome, ToolDispatchOutcome):
+                    function_result = dispatch_outcome.result
+                    _execution_blocked = not dispatch_outcome.started
+                else:
+                    # Legacy/raw results are not physical-start proof in Beta.
+                    _execution_blocked = True
+                tool_duration = time.time() - tool_start_time
             elif function_name == "todo":
                 from tools.todo_tool import todo_tool as _todo_tool
                 function_result = _todo_tool(
@@ -16320,6 +16530,34 @@ class AIAgent:
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
 
+            if exact_beta and not _execution_blocked:
+                self._current_tool = function_name
+                self._touch_activity(f"executing tool: {function_name}")
+                if (
+                    current_turn_publish_allowed()
+                    and self.tool_progress_callback
+                ):
+                    preview = _build_tool_preview(function_name, function_args)
+                    self._invoke_generation_callback(
+                        "tool_progress_callback",
+                        self.tool_progress_callback,
+                        "tool.started",
+                        function_name,
+                        preview,
+                        function_args,
+                    )
+                if (
+                    current_turn_publish_allowed()
+                    and self.tool_start_callback
+                ):
+                    self._invoke_generation_callback(
+                        "tool_start_callback",
+                        self.tool_start_callback,
+                        tool_call.id,
+                        function_name,
+                        function_args,
+                    )
+
             function_result_text = _multimodal_text_summary(function_result)
             result_preview = function_result_text if self.verbose_logging else (
                 function_result_text[:200]
@@ -16334,7 +16572,7 @@ class AIAgent:
                 function_result_text,
             )
             batch_outcomes = getattr(self, "_last_tool_batch_outcomes", None)
-            if isinstance(batch_outcomes, list):
+            if not _execution_blocked and isinstance(batch_outcomes, list):
                 batch_outcomes.append(
                     (
                         function_name,
@@ -16345,9 +16583,27 @@ class AIAgent:
                         artifact_baselines,
                     )
                 )
-            if _is_error_result:
+            elif (
+                _execution_blocked
+                and _is_error_result
+                and isinstance(batch_outcomes, list)
+            ):
+                # Record only the logical non-start failure.  Callbacks,
+                # persistence, mutation verifiers, and local-context trackers
+                # remain gated on physical start below.
+                batch_outcomes.append(
+                    (
+                        function_name,
+                        function_args,
+                        True,
+                        _failure_suffix or " [not started]",
+                        function_result_text,
+                        {},
+                    )
+                )
+            if not _execution_blocked and _is_error_result:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
-            else:
+            elif not _execution_blocked:
                 logger.info(
                     "tool %s completed (%.2fs, %d chars)",
                     function_name,
@@ -16357,7 +16613,11 @@ class AIAgent:
 
             from agent.turn_fence import current_turn_publish_allowed
 
-            if current_turn_publish_allowed() and self.tool_progress_callback:
+            if (
+                not _execution_blocked
+                and current_turn_publish_allowed()
+                and self.tool_progress_callback
+            ):
                 self._invoke_generation_callback(
                     "tool_progress_callback",
                     self.tool_progress_callback,
@@ -16369,14 +16629,21 @@ class AIAgent:
                     is_error=_is_error_result,
                 )
 
-            self._current_tool = None
-            self._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s)")
+            if not _execution_blocked:
+                self._current_tool = None
+                self._touch_activity(
+                    f"tool completed: {function_name} ({tool_duration:.1f}s)"
+                )
 
-            if self.verbose_logging:
+            if not _execution_blocked and self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result_text)} chars): {function_result_text}")
 
-            if current_turn_publish_allowed() and self.tool_complete_callback:
+            if (
+                not _execution_blocked
+                and current_turn_publish_allowed()
+                and self.tool_complete_callback
+            ):
                 self._invoke_generation_callback(
                     "tool_complete_callback",
                     self.tool_complete_callback,
@@ -16386,7 +16653,7 @@ class AIAgent:
                     function_result,
                 )
 
-            if not _is_multimodal_tool_result(function_result):
+            if not _execution_blocked and not _is_multimodal_tool_result(function_result):
                 if not isinstance(function_result, str):
                     function_result = function_result_text
                 function_result = maybe_persist_tool_result(
@@ -16397,7 +16664,14 @@ class AIAgent:
                 )
 
             # Discover subdirectory context files from tool arguments
-            subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
+            subdir_hints = (
+                self._subdirectory_hints.check_tool_call(
+                    function_name,
+                    function_args,
+                )
+                if not _execution_blocked
+                else ""
+            )
             if subdir_hints:
                 if _is_multimodal_tool_result(function_result):
                     _append_subdir_hint_to_multimodal(function_result, subdir_hints)
@@ -16415,9 +16689,10 @@ class AIAgent:
             # The model-visible result, any overflow persistence, batch
             # evidence, and per-tool steer projection belong to the same
             # operation as the handler.  Only now may cancellation quiesce.
-            active_turn_permit.release()
+            if active_turn_permit is not None:
+                active_turn_permit.release()
 
-            if not self.quiet_mode:
+            if not _execution_blocked and not self.quiet_mode:
                 marker = "❌" if _is_error_result else "✅"
                 outcome = "failed" if _is_error_result else "completed"
                 if self.verbose_logging:

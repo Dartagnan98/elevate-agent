@@ -65,10 +65,37 @@ describe("Realtor Beta forms-provider Option B UI", () => {
       provider: "",
       title: "Forms provider",
       statusLabel: "provider needed",
-      buttonLabel: "Connect & verify",
+      buttonLabel: "Finish provider setup",
       buttonDisabled: true,
     });
-    expect(card.disabledReason).toContain("not available in this Beta build");
+    expect(card.disabledReason).toContain("Add the provider login URL");
+  });
+
+  it("exposes only the backend-validated HTTPS handoff URL as the provider CTA", () => {
+    const setup = setupSnapshot({
+      profile: { ...setupSnapshot().profile, formsProvider: "WEBForms" },
+      capabilities: {
+        formsProvider: {
+          available: false,
+          coordination: {
+            ready: true,
+            provider: "WEBForms",
+            loginUrl: "https://forms.example.test/login",
+            accountEmail: null,
+            sessionMode: "existing_session",
+            storesPassword: false,
+            completionMethod: "manual_reviewed_pdf",
+          },
+        },
+      },
+    });
+
+    expect(adminFormsProviderCardModel(setup)).toMatchObject({
+      buttonLabel: "Open provider",
+      buttonDisabled: false,
+      loginUrl: "https://forms.example.test/login",
+      coordinationReady: true,
+    });
   });
 
   it("lets global Admin onboarding finish while document drafting stays visibly paused", () => {
@@ -167,16 +194,17 @@ describe("Realtor Beta forms-provider Option B UI", () => {
       "utf8",
     );
 
-    expect(page).not.toContain("formsLoginUrl");
-    expect(page).not.toContain("formsLoginEmail");
+    expect(page).toContain("formsLoginUrl");
+    expect(page).toContain("formsAccountEmail");
+    expect(page).toContain("formsSessionMode");
     expect(page).not.toContain("formsLoginPassword");
-    expect(page).not.toContain("save its login details");
+    expect(page).toContain("Never enter a forms password");
     expect(setupSource).not.toContain("playbooks.forms");
     expect(setupSource).not.toContain("browserPlaybooks.forms");
     expect(page).toContain('kind: "forms-provider"');
-    expect(page).toContain('label: "Connect & verify"');
+    expect(page).toContain('label: "Finish provider setup"');
     expect(page).toContain("disabledReason");
     expect(shell).toContain("Admin is ready. Document drafting is paused.");
-    expect(shell).toContain("MLC and CPS tasks will wait for manual completion");
+    expect(shell).toContain("Provider-required BC document tasks will wait for manual completion");
   });
 });

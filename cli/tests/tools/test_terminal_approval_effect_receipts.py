@@ -223,7 +223,7 @@ def test_nonzero_exit_code_persists_truthful_failed_receipt(
     ]
 
 
-def test_sessiondb_backed_terminal_claims_executes_and_receipts_once(
+def test_sessiondb_backed_terminal_is_hard_denied_before_receipt_in_exact_beta(
     monkeypatch,
     tmp_path,
 ):
@@ -317,35 +317,27 @@ def test_sessiondb_backed_terminal_claims_executes_and_receipts_once(
 
     try:
         first = invoke()
-        assert first["exit_code"] == 0
-        assert first["output"] == "listing"
-        assert executions == [command]
-        receipts = db._conn.execute("SELECT * FROM approval_effect_receipts").fetchall()
-        assert len(receipts) == 1
-        assert receipts[0]["status"] == "succeeded"
-        assert receipts[0]["session_id"] == "session-real-effect"
-        assert receipts[0]["invocation_id"] == invocation_id
-        assert receipts[0]["result_digest"] is not None
-        assert receipts[0]["failure_code"] is None
-        first_claim_id = receipts[0]["claim_id"]
-
-        # The same invocation may create another reviewed request, but the
-        # durable invocation uniqueness constraint prevents a second claim or
-        # a second command execution.
-        duplicate = invoke()
-        assert duplicate["status"] == "blocked"
-        assert executions == [command]
+        assert first["shadow_status"] == "effect_policy_block"
+        assert executions == []
         assert (
             db._conn.execute(
                 "SELECT COUNT(*) FROM approval_effect_receipts"
             ).fetchone()[0]
-            == 1
+            == 0
         )
-        assert db.get_approval_effect_receipt(first_claim_id)["status"] == ("succeeded")
 
-        # Simulate a process restart with a new logical boot. A completed
-        # receipt remains the invocation authority; it is not reopened by
-        # startup cleanup or a newly approved request.
+        # Replays and process restarts cannot turn the unavailable Beta shell
+        # into an approved invocation or create a misleading receipt.
+        duplicate = invoke()
+        assert duplicate["shadow_status"] == "effect_policy_block"
+        assert executions == []
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM approval_effect_receipts"
+            ).fetchone()[0]
+            == 0
+        )
+
         old_boot = approval._APPROVAL_BOOT_ID
         db._conn.execute(
             "UPDATE state_meta SET value = ? WHERE key = 'approval_grants.active_boot'",
@@ -375,15 +367,14 @@ def test_sessiondb_backed_terminal_claims_executes_and_receipts_once(
         )
 
         after_restart = invoke()
-        assert after_restart["status"] == "blocked"
-        assert executions == [command]
+        assert after_restart["shadow_status"] == "effect_policy_block"
+        assert executions == []
         assert (
             db._conn.execute(
                 "SELECT COUNT(*) FROM approval_effect_receipts"
             ).fetchone()[0]
-            == 1
+            == 0
         )
-        assert db.get_approval_effect_receipt(first_claim_id)["status"] == ("succeeded")
     finally:
         approval.unregister_gateway_notify(session_key)
         approval.clear_session(session_key)
@@ -391,7 +382,7 @@ def test_sessiondb_backed_terminal_claims_executes_and_receipts_once(
         clear_session_vars(session_tokens)
 
 
-def test_sessiondb_backed_terminal_nonzero_exit_receipts_failed(
+def test_sessiondb_backed_terminal_failure_path_is_inert_in_exact_beta(
     monkeypatch,
     tmp_path,
 ):
@@ -458,10 +449,8 @@ def test_sessiondb_backed_terminal_nonzero_exit_receipts_failed(
                 )
             )
         receipt = db._conn.execute("SELECT * FROM approval_effect_receipts").fetchone()
-        assert result["exit_code"] == 2
-        assert receipt["status"] == "failed"
-        assert receipt["failure_code"] == "command_exit_nonzero"
-        assert receipt["result_digest"] is not None
+        assert result["shadow_status"] == "effect_policy_block"
+        assert receipt is None
     finally:
         approval.unregister_gateway_notify(session_key)
         approval.clear_session(session_key)

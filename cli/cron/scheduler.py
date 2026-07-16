@@ -44,6 +44,7 @@ from elevate_cli._subprocess_compat import windows_hide_flags
 from elevate_cli.config import load_config, _expand_env_vars
 from elevate_cli.env_loader import load_elevate_dotenv
 from elevate_time import now as _hermes_now
+from cron.execution_policy import scheduled_execution_disabled_reason
 
 logger = logging.getLogger(__name__)
 
@@ -2010,6 +2011,24 @@ def run_job(
     lives inside ``_run_job_impl``'s frame. If omitted, ``_run_job_impl``
     falls back to generating one internally for non-cron callers.
     """
+    disabled_reason = scheduled_execution_disabled_reason()
+    if disabled_reason:
+        job_id = str(job.get("id") or "unknown")
+        job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
+        logger.info("Job '%s' not started: %s", job_id, disabled_reason)
+        output = f"""# Cron Job: {job_name}
+
+**Job ID:** {job_id}
+**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+**Status:** disabled
+
+{disabled_reason}
+
+No agent, script, provider, tool, session, or delivery was started.
+"""
+        return False, output, "", disabled_reason
+
     job_id = job["id"]
     with _job_profile_context(job_id, job.get("profile")):
         return _run_job_impl(job, session_id=session_id)
@@ -2990,6 +3009,11 @@ def tick(verbose: bool = True, adapters=None, loop=None, on_delivered=None) -> i
     Returns:
         Number of jobs executed (0 if another tick is already running)
     """
+    disabled_reason = scheduled_execution_disabled_reason()
+    if disabled_reason:
+        logger.info("Cron tick skipped before due-job discovery: %s", disabled_reason)
+        return 0
+
     lock_dir, lock_file = _get_lock_paths()
     lock_dir.mkdir(parents=True, exist_ok=True)
 

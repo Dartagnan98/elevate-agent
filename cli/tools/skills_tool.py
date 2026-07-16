@@ -78,6 +78,7 @@ from elevate_constants import (
 )
 import os
 import re
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
@@ -174,6 +175,7 @@ _REMOTE_ENV_BACKENDS = frozenset(
     {"docker", "singularity", "modal", "ssh", "daytona", "vercel_sandbox"}
 )
 _secret_capture_callback = None
+_secret_capture_callback_tls = threading.local()
 
 
 # Skills retired by the 1.2.22 cortextOS scrub — their bodies were nativized
@@ -263,6 +265,15 @@ _INJECTION_PATTERNS: list = [
 def set_secret_capture_callback(callback) -> None:
     global _secret_capture_callback
     _secret_capture_callback = callback
+    _secret_capture_callback_tls.callback = callback
+
+
+def _get_secret_capture_callback():
+    return getattr(
+        _secret_capture_callback_tls,
+        "callback",
+        _secret_capture_callback,
+    )
 
 
 def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
@@ -428,7 +439,8 @@ def _capture_required_environment_variables(
             "gateway_setup_hint": _gateway_setup_hint(),
         }
 
-    if _secret_capture_callback is None:
+    secret_capture_callback = _get_secret_capture_callback()
+    if secret_capture_callback is None:
         return {
             "missing_names": missing_names,
             "setup_skipped": False,
@@ -446,7 +458,7 @@ def _capture_required_environment_variables(
             metadata["required_for"] = entry["required_for"]
 
         try:
-            callback_result = _secret_capture_callback(
+            callback_result = secret_capture_callback(
                 entry["name"],
                 entry["prompt"],
                 metadata,

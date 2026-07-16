@@ -1088,7 +1088,7 @@ const PROVIDER_SUGGESTIONS = {
   fintrac: ["Fintracker", "Manual FIN# capture", "OneID", "Treefort"],
 } as const;
 
-type OnboardingFieldType = "text" | "textarea" | "province" | "email" | "password" | "url";
+type OnboardingFieldType = "text" | "textarea" | "province" | "email" | "password" | "url" | "forms-session";
 
 type OnboardingField = {
   key: keyof AdminSetupDraft;
@@ -1180,6 +1180,9 @@ const WIZARD_STEPS: OnboardingStep[] = [
     subtitle: "How paperwork moves: form filler, signing, and compliance review.",
     fields: [
       { key: "formsProvider", label: "Forms provider", placeholder: "WEBForms / TransactionDesk", suggestions: PROVIDER_SUGGESTIONS.forms, listId: "onboard-forms" },
+      { key: "formsLoginUrl", label: "Forms login URL", placeholder: "https://webforms.ca", type: "url", helper: "Saved as a handoff link only; Elevation Beta does not claim a provider connection." },
+      { key: "formsSessionMode", label: "How will you open it?", type: "forms-session", helper: "Choose an existing signed-in browser session or identify the account by email. No forms password is stored." },
+      { key: "formsAccountEmail", label: "Forms account email", placeholder: "you@brokerage.com", type: "email", helper: "Required only when you choose account email. Never enter a password here.", optional: true },
       { key: "signingProvider", label: "Signing provider", placeholder: "DigiSign / DocuSign", suggestions: PROVIDER_SUGGESTIONS.signing, listId: "onboard-signing" },
       { key: "complianceProvider", label: "Compliance platform", placeholder: "SkySlope / Lone Wolf", suggestions: PROVIDER_SUGGESTIONS.compliance, listId: "onboard-compliance" },
     ],
@@ -1549,6 +1552,26 @@ function AdminOnboardingWizard({
                   </label>
                 );
               }
+              if (field.type === "forms-session") {
+                return (
+                  <label key={field.key} className="block min-w-0">
+                    <span className="mb-1.5 flex items-center gap-2 text-[12px] font-medium text-muted-foreground">
+                      {field.label}
+                      <span className="font-mono-ui text-[9px] uppercase tracking-wider text-muted-foreground/80">Required</span>
+                    </span>
+                    <select
+                      value={draft.formsSessionMode}
+                      onChange={(event) => updateDraft("formsSessionMode", event.target.value)}
+                      data-onboarding-field="formsSessionMode"
+                      className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                    >
+                      <option value="existing_session">Use my existing signed-in browser session</option>
+                      <option value="account_email">Use this account email (no password)</option>
+                    </select>
+                    {field.helper && <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">{field.helper}</span>}
+                  </label>
+                );
+              }
               return (
                 <div key={field.key} className={cn("min-w-0", field.fullWidth && "md:col-span-2")}>
                   <AdminSetupField
@@ -1758,7 +1781,7 @@ function AdminOnboardingSeeding({
 type OnboardingConnectorAction =
   | { kind: "composio"; toolkitSlug: string; label: string }
   | { kind: "browser-use"; portalKey: "mls" | "compliance" | "showing"; label: string }
-  | { kind: "forms-provider"; label: "Connect & verify"; disabledReason: string }
+  | { kind: "forms-provider"; label: "Open provider" | "Finish provider setup"; disabledReason: string; loginUrl?: string }
   | { kind: "manual"; helpText: string };
 
 type OnboardingConnectorCard = {
@@ -1810,8 +1833,8 @@ const ONBOARDING_CONNECTOR_TEMPLATES: Record<
     icon: FileText,
     action: {
       kind: "forms-provider",
-      label: "Connect & verify",
-      disabledReason: "Automatic live forms verification is not available in this Beta build. MLC and CPS drafting stays manual instead of being reported as connected.",
+      label: "Finish provider setup",
+      disabledReason: "Add a provider URL and choose an existing session or account email. Elevation never stores the forms password.",
     },
   },
   mls: {
@@ -1881,6 +1904,7 @@ function buildOnboardingConnectorCards(setup: AdminSetupSnapshot): OnboardingCon
         kind: "forms-provider",
         label: formsCard.buttonLabel,
         disabledReason: formsCard.disabledReason,
+        loginUrl: formsCard.loginUrl || undefined,
       },
     });
   }
@@ -2122,11 +2146,16 @@ function AdminOnboardingConnectors({
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled
+                      disabled={!card.action.loginUrl}
+                      onClick={() => {
+                        if (card.action.kind === "forms-provider" && card.action.loginUrl) {
+                          window.open(card.action.loginUrl, "_blank", "noopener,noreferrer");
+                        }
+                      }}
                       aria-describedby={helpId}
                       title={card.action.disabledReason}
                     >
-                      <Lock className="h-3.5 w-3.5" />
+                      {card.action.loginUrl ? <ExternalLink className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
                       {card.action.label}
                     </Button>
                   )}
@@ -2920,6 +2949,20 @@ export function AdminSetupLaunch({
           <AdminSetupField label="CRM" value={draft.crmProvider} onChange={(v) => updateDraft("crmProvider", v)} placeholder="Lofty, kvCORE, BoldTrail..." suggestions={PROVIDER_SUGGESTIONS.crm} listId="provider-crm" />
           <AdminSetupField label="MLS / board portal" value={draft.mlsProvider} onChange={(v) => updateDraft("mlsProvider", v)} placeholder="Matrix, Xposure, Paragon..." suggestions={PROVIDER_SUGGESTIONS.mls} listId="provider-mls" />
           <AdminSetupField label="Forms provider" value={draft.formsProvider} onChange={(v) => updateDraft("formsProvider", v)} placeholder="WEBForms / TransactionDesk" suggestions={PROVIDER_SUGGESTIONS.forms} listId="provider-forms" />
+          <AdminSetupField label="Forms login URL" value={draft.formsLoginUrl} onChange={(v) => updateDraft("formsLoginUrl", v)} placeholder="https://webforms.ca" type="url" helper="Handoff link only; this does not verify live provider access." />
+          <AdminSetupField label="Forms account email" value={draft.formsAccountEmail} onChange={(v) => updateDraft("formsAccountEmail", v)} placeholder="you@brokerage.com" type="email" helper="Optional when you use an existing browser session. Never enter a forms password." />
+          <label className="block min-w-0">
+            <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">Forms access handoff</span>
+            <select
+              value={draft.formsSessionMode}
+              onChange={(event) => updateDraft("formsSessionMode", event.target.value)}
+              className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            >
+              <option value="existing_session">Use existing signed-in browser session</option>
+              <option value="account_email">Use account email (no password)</option>
+            </select>
+            <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">Elevation stores no forms-provider password or token.</span>
+          </label>
           <AdminSetupField label="Signing provider" value={draft.signingProvider} onChange={(v) => updateDraft("signingProvider", v)} placeholder="DigiSign / DocuSign" suggestions={PROVIDER_SUGGESTIONS.signing} listId="provider-signing" />
           <AdminSetupField label="Compliance platform" value={draft.complianceProvider} onChange={(v) => updateDraft("complianceProvider", v)} placeholder="SkySlope / Lone Wolf" suggestions={PROVIDER_SUGGESTIONS.compliance} listId="provider-compliance" />
           <AdminSetupField label="Showing platform" value={draft.showingProvider} onChange={(v) => updateDraft("showingProvider", v)} placeholder="ShowingTime / BrokerBay" suggestions={PROVIDER_SUGGESTIONS.showing} listId="provider-showing" />
@@ -2959,10 +3002,15 @@ export function AdminSetupLaunch({
             size="sm"
             variant="outline"
             disabled={formsProviderCard.buttonDisabled}
+            onClick={() => {
+              if (formsProviderCard.loginUrl) {
+                window.open(formsProviderCard.loginUrl, "_blank", "noopener,noreferrer");
+              }
+            }}
             aria-describedby="forms-provider-verification-help"
             title={formsProviderCard.disabledReason}
           >
-            <Lock className="h-3.5 w-3.5" />
+            {formsProviderCard.loginUrl ? <ExternalLink className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
             {formsProviderCard.buttonLabel}
           </Button>
         </div>
@@ -3885,28 +3933,54 @@ function formsProviderArtifactKind(
   const promptKind = run.humanPrompt?.requiredArtifactKind;
   const payloadKind = run.payload?.requiredArtifactKind;
   const kind = typeof promptKind === "string" ? promptKind : payloadKind;
-  return kind === "mlc_pdf" || kind === "cps_draft" ? kind : null;
+  return kind === "mlc_pdf" || kind === "cps_draft" || kind === "provider_form_pdf"
+    ? kind
+    : null;
+}
+
+function normalizedManualDocumentReference(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function sha256Hex(file: File): Promise<string> {
+  const digest = await window.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function ManualFormsProviderCompletion({
   busy,
+  deal,
   onComplete,
   run,
 }: {
   busy: boolean;
+  deal: AdminDeal;
   onComplete: (body: ManualReviewedRunDocumentRequest) => Promise<void>;
   run: AdminActionRun;
 }) {
   const artifactKind = formsProviderArtifactKind(run);
+  const formCode = String(run.humanPrompt?.formCode || run.payload?.formCode || "").trim();
+  const formTitle = String(run.humanPrompt?.formTitle || run.payload?.formTitle || formCode).trim();
+  const coordination = run.humanPrompt?.providerCoordination;
+  const coordinationRecord = coordination && typeof coordination === "object"
+    ? coordination as Record<string, unknown>
+    : {};
   const [file, setFile] = useState<File | null>(null);
   const [reviewed, setReviewed] = useState(false);
+  const [provider] = useState(String(coordinationRecord.provider || ""));
+  const [reviewerName, setReviewerName] = useState("");
+  const [sourceReceiptId, setSourceReceiptId] = useState("");
+  const [versionStatus, setVersionStatus] = useState<"verified" | "unverified">("unverified");
+  const [documentVersion, setDocumentVersion] = useState("");
+  const [effectiveDate, setEffectiveDate] = useState("");
+  const [versionVerifiedAt, setVersionVerifiedAt] = useState(() => new Date().toISOString().slice(0, 16));
   const [summary, setSummary] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!file || !reviewed || !artifactKind || submitting || busy) return;
+    if (!file || !reviewed || !artifactKind || !formCode || submitting || busy) return;
     setError(null);
     if (!file.name.toLowerCase().endsWith(".pdf") || file.size <= 5) {
       setError("Choose a non-empty PDF exported from your licensed forms provider.");
@@ -3916,8 +3990,21 @@ function ManualFormsProviderCompletion({
       setError("The reviewed PDF must be 25 MB or smaller.");
       return;
     }
+    if (!provider.trim() || !reviewerName.trim() || !sourceReceiptId.trim()) {
+      setError("Provider, named reviewer, and manual export reference are required.");
+      return;
+    }
+    if (versionStatus === "verified" && !documentVersion.trim() && !effectiveDate) {
+      setError("A verified version claim needs a document version or effective date.");
+      return;
+    }
+    if (versionStatus === "verified" && !versionVerifiedAt) {
+      setError("Record when the version/effective date was checked.");
+      return;
+    }
     setSubmitting(true);
     try {
+      const artifactSha256 = await sha256Hex(file);
       const contentB64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onerror = () => reject(new Error("Could not read the selected PDF."));
@@ -3929,12 +4016,41 @@ function ManualFormsProviderCompletion({
         };
         reader.readAsDataURL(file);
       });
+      const dealReference = normalizedManualDocumentReference(
+        deal.listingAddress || deal.title,
+      );
+      const normalizedVerifiedAt = versionStatus === "verified"
+        ? new Date(versionVerifiedAt).toISOString()
+        : null;
       await onComplete({
         reviewed: true,
         kind: artifactKind,
+        formCode,
+        provider: provider.trim(),
+        reviewerName: reviewerName.trim(),
+        versionStatus,
+        documentVersion: documentVersion.trim() || null,
+        effectiveDate: effectiveDate || null,
+        versionVerifiedAt: normalizedVerifiedAt,
+        sourceReceipt: {
+          schema: "elevate.manual-provider-export-claim.v1",
+          sourceVerified: false,
+          receiptId: sourceReceiptId.trim(),
+          dealId: run.dealId,
+          taskId: run.id,
+          formCode,
+          provider: provider.trim(),
+          reviewerName: reviewerName.trim(),
+          artifactSha256,
+          dealReference,
+          versionStatus,
+          documentVersion: documentVersion.trim() || null,
+          effectiveDate: effectiveDate || null,
+          versionVerifiedAt: normalizedVerifiedAt,
+        },
         filename: file.name,
         contentB64,
-        summary: summary.trim() || "Reviewed in the licensed forms provider.",
+        summary: summary.trim() || "Human-reviewed manual provider export; provider origin not authenticated.",
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not attach the reviewed PDF.");
@@ -3949,12 +4065,71 @@ function ManualFormsProviderCompletion({
       onSubmit={submit}
     >
       <div className="text-[0.78rem] font-medium text-foreground">
-        Finish with the reviewed provider PDF
+        Finish {formCode || "this form"} with a reviewed PDF
       </div>
       <p className="mt-1 text-[0.72rem] leading-5 text-muted-foreground">
-        Complete this form in your licensed provider, review the exported PDF, then attach it here.
-        Elevate records your review and closes this task without claiming it generated the form.
+        Complete {formTitle || "the exact task-bound form"} in your licensed provider, review the PDF,
+        then attach it here. Elevation records a local manual export claim; it does not authenticate
+        provider origin, verify the catalog is current, or claim it generated the form.
       </p>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <input
+          className="h-10 rounded-md border border-border bg-muted/40 px-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          placeholder="Configured forms provider"
+          readOnly
+          aria-label="Configured forms provider"
+          value={provider}
+        />
+        <input
+          className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          onChange={(event) => setReviewerName(event.target.value)}
+          placeholder="Named reviewer (full name)"
+          value={reviewerName}
+        />
+        <input
+          className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground sm:col-span-2"
+          disabled={busy || submitting}
+          onChange={(event) => setSourceReceiptId(event.target.value)}
+          placeholder="Manual export reference (provider export ID, envelope ID, or dated file reference)"
+          value={sourceReceiptId}
+        />
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <select
+          className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          onChange={(event) => setVersionStatus(event.target.value as "verified" | "unverified")}
+          value={versionStatus}
+        >
+          <option value="unverified">Version explicitly unverified</option>
+          <option value="verified">Version/effective date checked</option>
+        </select>
+        <input
+          className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          onChange={(event) => setDocumentVersion(event.target.value)}
+          placeholder="Document version (optional when unverified)"
+          value={documentVersion}
+        />
+        <input
+          className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground"
+          disabled={busy || submitting}
+          onChange={(event) => setEffectiveDate(event.target.value)}
+          type="date"
+          value={effectiveDate}
+        />
+        {versionStatus === "verified" && (
+          <input
+            className="h-10 rounded-md border border-border bg-background px-2 text-[0.76rem] text-foreground"
+            disabled={busy || submitting}
+            onChange={(event) => setVersionVerifiedAt(event.target.value)}
+            type="datetime-local"
+            value={versionVerifiedAt}
+          />
+        )}
+      </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <input
           accept="application/pdf,.pdf"
@@ -3979,7 +4154,8 @@ function ManualFormsProviderCompletion({
           onChange={(event) => setReviewed(event.target.checked)}
           type="checkbox"
         />
-        I reviewed this PDF and confirm it is the correct MLC/CPS document for this deal.
+        I reviewed this PDF and confirm it identifies {formCode || "the required form"} and this deal.
+        I understand this manual claim does not verify provider origin or current-version readiness.
       </label>
       {error && <div className="mt-2 text-[0.72rem] text-destructive">{error}</div>}
       {!artifactKind && (
@@ -3989,7 +4165,7 @@ function ManualFormsProviderCompletion({
       )}
       <Button
         className="mt-2"
-        disabled={busy || submitting || !file || !reviewed || !artifactKind}
+        disabled={busy || submitting || !file || !reviewed || !artifactKind || !formCode || !provider.trim() || !reviewerName.trim() || !sourceReceiptId.trim()}
         size="sm"
         type="submit"
       >
@@ -4603,6 +4779,7 @@ function AdminDealContextSection({
                       {formsProviderRun && (
                         <ManualFormsProviderCompletion
                           busy={busy}
+                          deal={context.deal}
                           onComplete={(body) => onCompleteManualRun(run.id, body)}
                           run={run}
                         />
@@ -5981,11 +6158,11 @@ export function computeCoachInitialQuestion(snap: AdminSetupSnapshot | null): st
     } else if (needsVerificationBits.length > 0) {
       lines.push(
         formsProviderCard.visible
-          ? "Nothing else is left to pick. Pending account checks can clear onboarding, but MLC and CPS drafting will remain paused until forms access is live."
+          ? "Nothing else is left to pick. Pending account checks can clear onboarding, but provider-required BC document work will remain paused until forms access is live."
           : "Nothing left to pick — once the pending health-checks clear, you're 100%.",
       );
     } else if (formsProviderCard.visible) {
-      lines.push("Onboarding can finish now; MLC and CPS work will wait for manual forms access instead of claiming a live connection.");
+      lines.push("Onboarding can finish now; provider-required BC document work will wait for manual forms access instead of claiming a live connection.");
     } else {
       lines.push(`Everything required is in. Anything else you want to tighten up?`);
     }

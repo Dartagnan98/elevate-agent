@@ -488,7 +488,30 @@ export interface DealAttachmentCreateRequest {
 
 export interface ManualReviewedRunDocumentRequest {
   reviewed: true;
-  kind: "mlc_pdf" | "cps_draft";
+  kind: "mlc_pdf" | "cps_draft" | "provider_form_pdf";
+  formCode: string;
+  provider: string;
+  reviewerName: string;
+  versionStatus: "verified" | "unverified";
+  documentVersion?: string | null;
+  effectiveDate?: string | null;
+  versionVerifiedAt?: string | null;
+  sourceReceipt: {
+    schema: "elevate.manual-provider-export-claim.v1";
+    sourceVerified: false;
+    receiptId: string;
+    dealId: string;
+    taskId: string;
+    formCode: string;
+    provider: string;
+    reviewerName: string;
+    artifactSha256: string;
+    dealReference: string;
+    versionStatus: "verified" | "unverified";
+    documentVersion: string | null;
+    effectiveDate: string | null;
+    versionVerifiedAt: string | null;
+  };
   filename?: string | null;
   contentB64?: string | null;
   filePath?: string | null;
@@ -913,6 +936,15 @@ export interface AdminSetupSnapshot {
       available: boolean;
       reason?: string | null;
       message?: string | null;
+      coordination?: {
+        ready: boolean;
+        provider?: string | null;
+        loginUrl?: string | null;
+        accountEmail?: string | null;
+        sessionMode?: "existing_session" | "account_email" | null;
+        storesPassword: false;
+        completionMethod: "manual_reviewed_pdf";
+      };
     };
   };
 }

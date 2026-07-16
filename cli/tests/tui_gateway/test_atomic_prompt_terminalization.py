@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import types
 
 import pytest
@@ -136,6 +137,240 @@ def _assistant_result(text: str, status: str, kwargs: dict) -> dict:
     return result
 
 
+def _wait_until(predicate, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+class _InterruptIgnoringAgent(_ResultAgent):
+    def __init__(self, started: threading.Event, release: threading.Event):
+        self.started = started
+        self.release = release
+        self.interrupt_calls = 0
+        super().__init__(self._result)
+
+    def interrupt(self):
+        self.interrupt_calls += 1
+
+    def _result(self, _prompt, _history, kwargs):
+        self.started.set()
+        assert self.release.wait(timeout=3)
+        return _assistant_result("late success", "complete", kwargs)
+
+
+class _LateCallbackAgent(_InterruptIgnoringAgent):
+    def __init__(
+        self,
+        started: threading.Event,
+        release: threading.Event,
+        callback_attempted: threading.Event,
+    ):
+        self.callback_attempted = callback_attempted
+        super().__init__(started, release)
+
+    def run_conversation(
+        self,
+        prompt,
+        conversation_history=None,
+        stream_callback=None,
+        **kwargs,
+    ):
+        from agent.turn_fence import acquire_current_turn_permit
+
+        self.calls += 1
+        with acquire_current_turn_permit("test_late_tool_callback"):
+            self.started.set()
+            assert self.release.wait(timeout=3)
+        self.callback_attempted.set()
+        # Deliberately ignore cancellation: the gateway callback boundary must
+        # reject both late model output and a late tool completion on its own.
+        if stream_callback is not None:
+            stream_callback("late callback")
+        self.tool_complete_callback(
+            "late-tool",
+            "terminal",
+            {"command": "echo too-late"},
+            "late tool result",
+        )
+        return _assistant_result("late success", "complete", kwargs)
+
+
+class _TerminalSealedBackgroundAgent(_ResultAgent):
+    def __init__(self, permit_acquired: threading.Event):
+        self.permit_acquired = permit_acquired
+        self.permit = None
+        super().__init__(lambda *_args: None)
+
+    def run_conversation(self, prompt, conversation_history=None, **kwargs):
+        from agent.turn_fence import (
+            acquire_current_turn_background_permit,
+            current_turn_binding,
+        )
+
+        self.calls += 1
+        self.permit = acquire_current_turn_background_permit("memory_prefetch")
+        self.permit.__enter__()
+        self.permit_acquired.set()
+        binding = current_turn_binding()
+        assert binding is not None
+        fence, token = binding
+        sealed = fence.seal_terminal(token, terminal_status="completed")
+        assert sealed["terminal_committed"] is True
+        return _assistant_result("durable answer", "complete", kwargs)
+
+
+def _install_scoped_process_registry(monkeypatch):
+    killed = []
+    fake_registry = types.ModuleType("tools.process_registry")
+    fake_registry.process_registry = types.SimpleNamespace(
+        kill_all=lambda *, session_key: killed.append(session_key) or 1
+    )
+    monkeypatch.setitem(__import__("sys").modules, "tools.process_registry", fake_registry)
+    return killed
+
+
+def test_stop_keeps_interrupt_ignoring_worker_busy_until_interrupted_terminal(
+    monkeypatch, tmp_path
+):
+    real_thread = threading.Thread
+    started = threading.Event()
+    release = threading.Event()
+    agent = _InterruptIgnoringAgent(started, release)
+    db, live, emitted = _configure(monkeypatch, tmp_path, agent)
+    monkeypatch.setattr(server.threading, "Thread", real_thread)
+    killed = _install_scoped_process_registry(monkeypatch)
+    try:
+        submitted = _submit("turn-stop-fence")
+        assert submitted["result"]["status"] == "streaming"
+        assert started.wait(timeout=3)
+
+        stopped = server.handle_request(
+            {
+                "id": "stop-fenced-turn",
+                "method": "session.stop",
+                "params": {"session_id": "sid"},
+            }
+        )
+        assert stopped["result"] == {
+            "status": "stopping",
+            "interrupted": True,
+            "killed": 1,
+            "quiesced": False,
+            "running": True,
+        }
+        assert killed == ["atomic-session"]
+        assert live["running"] is True
+        assert _submit("turn-must-wait")["error"]["code"] == 4009
+
+        release.set()
+        assert _wait_until(lambda: live["running"] is False)
+        receipt = db.get_prompt_receipt("atomic-session", "turn-stop-fence")
+        assert receipt["status"] == "interrupted"
+        assert receipt["terminal_payload"]["status"] == "interrupted"
+        completes = [payload for event, _sid, payload in emitted if event == "message.complete"]
+        assert len(completes) == 1
+        assert completes[0]["status"] == "interrupted"
+        assert completes[0]["text"] == server._INTERRUPTED_BEFORE_RESPONSE_MESSAGE
+        assert agent.interrupt_calls == 1
+    finally:
+        release.set()
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+def test_stop_suppresses_late_tool_callback_until_permit_quiesces(
+    monkeypatch, tmp_path
+):
+    real_thread = threading.Thread
+    started = threading.Event()
+    release = threading.Event()
+    callback_attempted = threading.Event()
+    agent = _LateCallbackAgent(started, release, callback_attempted)
+    db, live, emitted = _configure(monkeypatch, tmp_path, agent)
+    monkeypatch.setattr(server.threading, "Thread", real_thread)
+    _install_scoped_process_registry(monkeypatch)
+    try:
+        assert _submit("turn-late-callback")["result"]["status"] == "streaming"
+        assert started.wait(timeout=3)
+        stopped = server.handle_request(
+            {
+                "id": "stop-late-callback",
+                "method": "session.stop",
+                "params": {"session_id": "sid"},
+            }
+        )
+        assert stopped["result"]["status"] == "stopping"
+        assert live["running"] is True
+
+        release.set()
+        assert callback_attempted.wait(timeout=3)
+        assert _wait_until(lambda: live["running"] is False)
+        assert not any(
+            event == "message.delta"
+            and isinstance(payload, dict)
+            and payload.get("text") == "late callback"
+            for event, _sid, payload in emitted
+        )
+        assert not any(
+            event == "tool.complete"
+            and isinstance(payload, dict)
+            and payload.get("tool_id") == "late-tool"
+            for event, _sid, payload in emitted
+        )
+        assert db.get_prompt_receipt(
+            "atomic-session", "turn-late-callback"
+        )["status"] == "interrupted"
+    finally:
+        release.set()
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+def test_terminal_complete_waits_for_sealed_background_permit_quiescence(
+    monkeypatch, tmp_path
+):
+    real_thread = threading.Thread
+    permit_acquired = threading.Event()
+    agent = _TerminalSealedBackgroundAgent(permit_acquired)
+    db, live, emitted = _configure(monkeypatch, tmp_path, agent)
+    monkeypatch.setattr(server.threading, "Thread", real_thread)
+    try:
+        assert _submit("turn-background-permit")["result"]["status"] == "streaming"
+        assert permit_acquired.wait(timeout=3)
+        assert _wait_until(
+            lambda: live["turn_fence"].snapshot()["worker_active"] is False
+        )
+        assert live["turn_fence"].snapshot()["in_flight_permits"] == 1
+        assert live["running"] is True
+        assert not any(event == "message.complete" for event, _sid, _p in emitted)
+        assert _submit("turn-blocked-by-background")["error"] == {
+            "code": 4009,
+            "message": "session busy",
+        }
+
+        agent.permit.release()
+        assert _wait_until(lambda: live["running"] is False)
+        completes = [
+            payload
+            for event, _sid, payload in emitted
+            if event == "message.complete"
+        ]
+        assert len(completes) == 1
+        assert completes[0]["status"] == "complete"
+        assert db.get_prompt_receipt(
+            "atomic-session", "turn-background-permit"
+        )["status"] == "complete"
+    finally:
+        if agent.permit is not None:
+            agent.permit.release()
+        server._sessions.pop("sid", None)
+        db.close()
+
+
 def test_terminal_commit_precedes_complete_and_idle(monkeypatch, tmp_path):
     agent = _ResultAgent(
         lambda _prompt, _history, kwargs: _assistant_result(
@@ -157,14 +392,16 @@ def test_terminal_commit_precedes_complete_and_idle(monkeypatch, tmp_path):
             receipt = db.get_prompt_receipt("atomic-session", "turn-order")
             assert receipt["status"] == "complete"
             assert receipt["terminal_payload"] == payload
+            assert live["running"] is False
             order.append("message.complete")
         emitted.append((event, sid, payload))
         return True
 
     def _idle(session, **kwargs):
         assert db.get_prompt_receipt("atomic-session", "turn-order")["status"] == "complete"
+        result = real_idle(session, **kwargs)
         order.append("idle")
-        return real_idle(session, **kwargs)
+        return result
 
     db.terminalize_prompt_receipt_with_assistant = _terminalize
     monkeypatch.setattr(server, "_emit", _emit)
@@ -540,6 +777,15 @@ def test_followup_receipt_terminalizes_only_final_reminted_assistant(
     monkeypatch, tmp_path
 ):
     def _result(_prompt, history, kwargs):
+        from agent.turn_fence import (
+            acquire_current_turn_permit,
+            seal_current_turn_terminal,
+        )
+
+        with acquire_current_turn_permit("followup_model"):
+            pass
+        inner_terminal = seal_current_turn_terminal("completed")
+        assert inner_terminal["terminal_committed"] is False
         if not history:
             return {
                 "completed": True,
@@ -567,7 +813,7 @@ def test_followup_receipt_terminalizes_only_final_reminted_assistant(
         }
 
     agent = _ResultAgent(_result)
-    db, _live, emitted = _configure(monkeypatch, tmp_path, agent)
+    db, live, emitted = _configure(monkeypatch, tmp_path, agent)
     import agent.title_generator as title_generator
 
     monkeypatch.setattr(title_generator, "maybe_auto_title", lambda *_a, **_k: None)
@@ -586,6 +832,8 @@ def test_followup_receipt_terminalizes_only_final_reminted_assistant(
         assert receipt["terminal_message_id"] == completes[1]["message_id"]
         assert receipt["terminal_payload"] == completes[1]
         assert agent.calls == 2
+        assert live["turn_fence"].snapshot()["terminal_committed"] is True
+        assert live["turn_fence"].snapshot()["quiesced"] is True
     finally:
         server._sessions.pop("sid", None)
         db.close()
@@ -622,6 +870,7 @@ def test_context_overflow_commits_before_reset_and_holds_running_fence(
 
     def _emit(event, sid, payload=None, **_kwargs):
         if event == "message.complete":
+            assert live["running"] is False
             order.append("message.complete")
         emitted.append((event, sid, payload))
         return True
@@ -635,8 +884,9 @@ def test_context_overflow_commits_before_reset_and_holds_running_fence(
         order.append("context-reset")
 
     def _idle(session, **kwargs):
+        result = real_idle(session, **kwargs)
         order.append("idle")
-        return real_idle(session, **kwargs)
+        return result
 
     db.terminalize_prompt_receipt_with_assistant = _terminalize
     monkeypatch.setattr(server, "_emit", _emit)
@@ -646,8 +896,8 @@ def test_context_overflow_commits_before_reset_and_holds_running_fence(
         _submit("turn-overflow")
         assert order == [
             "durable-terminal",
-            "message.complete",
             "context-reset",
+            "message.complete",
             "idle",
         ]
         assert live["running"] is False

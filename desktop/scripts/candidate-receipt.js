@@ -11,6 +11,9 @@ const { StringDecoder } = require("node:string_decoder");
 const yaml = require("js-yaml");
 const { sanitizeFileName } = require("builder-util/out/filename");
 const asar = require("@electron/asar");
+const {
+  validateBetaSourceSafetyEvidence,
+} = require("./beta-source-safety-gate");
 const { hashRuntimeCodeTree } = require("./runtime-code-hash");
 const {
   downloadAliasFileNames,
@@ -623,6 +626,7 @@ function sourceInputs({ repoRoot = REPO, desktopRoot = DESKTOP } = {}) {
     "desktop/entitlements.mac.plist",
     "desktop/src/release-profile.js",
     "desktop/scripts/candidate-receipt.js",
+    "desktop/scripts/beta-source-safety-gate.js",
     "desktop/scripts/preflight-apple-release.js",
     "desktop/scripts/merge-mac-feed.js",
     "desktop/scripts/finalize-mac-dist.js",
@@ -837,6 +841,7 @@ function createSourceReceipt({
   version,
   profile,
   publicFeeds,
+  sourceSafety,
   repoRoot = REPO,
   desktopRoot = DESKTOP,
   outputPath = SOURCE_RECEIPT,
@@ -851,6 +856,12 @@ function createSourceReceipt({
   }
   const git = currentGitState(repoRoot);
   if (!git.clean) throw new Error("[candidate] release worktree must be clean");
+  const validatedSourceSafety = channel === "beta"
+    ? validateBetaSourceSafetyEvidence(sourceSafety, { expectedGit: git, requireClean: true })
+    : null;
+  if (channel !== "beta" && sourceSafety != null) {
+    throw new Error("[candidate] Beta source safety evidence cannot be attached to Stable");
+  }
   const highestPublicVersion = assertGloballyNewVersion(version, publicFeeds);
   const resolvedInputs = inputs || sourceInputs({ repoRoot, desktopRoot });
   const resolvedToolchain = toolchain || captureToolchain({ repoRoot, desktopRoot });
@@ -874,6 +885,7 @@ function createSourceReceipt({
     },
     inputs: resolvedInputs,
     toolchain: resolvedToolchain,
+    ...(validatedSourceSafety ? { source_safety: validatedSourceSafety } : {}),
     public_feeds: publicFeeds,
     highest_public_version: highestPublicVersion,
     rollback_target: publicFeeds[channel] || null,
@@ -917,6 +929,11 @@ function verifySourceReceipt({
   );
   if (canonicalJson(receipt.release.profile) !== canonicalJson(expectedProfile)) {
     throw new Error("[candidate] source receipt release profile drift");
+  }
+  if (receipt.release.channel === "beta") {
+    validateBetaSourceSafetyEvidence(receipt.source_safety, { expectedGit: git, requireClean: true });
+  } else if (receipt.source_safety != null) {
+    throw new Error("[candidate] Stable source receipt contains Beta source safety evidence");
   }
   for (const [label, expected] of Object.entries(receipt.inputs || {})) {
     const absolute = path.join(repoRoot, expected.path);

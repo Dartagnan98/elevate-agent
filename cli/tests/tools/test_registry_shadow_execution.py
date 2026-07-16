@@ -173,6 +173,150 @@ def test_denied_authorization_is_observed_but_not_enforced() -> None:
     assert outcome.prepared.authorization.reason == "effect_not_allowed"
 
 
+@pytest.mark.parametrize(
+    ("effects", "expected_reason"),
+    [
+        ({"write_external:crm"}, "effect_not_allowed"),
+        (None, "unknown_effect"),
+    ],
+)
+def test_exact_beta_denied_nonterminal_blocks_before_handler(
+    monkeypatch,
+    effects,
+    expected_reason,
+) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "writer",
+        "core",
+        _schema("writer"),
+        lambda args: calls.append(args) or "unexpected",
+        effects=effects,
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    outcome = registry.execute_shadow(
+        "writer",
+        {"record": "123"},
+        context=_context("call-beta-writer"),
+        execution_policy=_policy(ExecutionPolicyMode.READ_ONLY),
+    )
+
+    assert outcome.started is False
+    assert calls == []
+    assert outcome.prepared.authorization.reason == expected_reason
+    assert json.loads(outcome.result)["shadow_status"] == "effect_policy_block"
+
+
+def test_exact_beta_allowed_nonterminal_starts_once(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "reader",
+        "core",
+        _schema("reader"),
+        lambda args: calls.append(args) or "read-result",
+        effects={"read:deals"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    outcome = registry.execute_shadow(
+        "reader",
+        {"deal": "123"},
+        context=_context("call-beta-reader"),
+        execution_policy=_policy(ExecutionPolicyMode.READ_ONLY),
+    )
+
+    assert outcome.started is True
+    assert outcome.result == "read-result"
+    assert calls == [{"deal": "123"}]
+
+
+def test_exact_beta_legacy_dispatch_denies_without_current_policy(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "legacy_writer",
+        "core",
+        _schema("legacy_writer"),
+        lambda args: calls.append(args) or "unexpected",
+        effects={"write_local:draft"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    result = json.loads(registry.dispatch("legacy_writer", {"value": 1}))
+
+    assert result["shadow_status"] == "legacy_dispatch_block"
+    assert calls == []
+
+
+def test_exact_beta_legacy_dispatch_blocks_even_with_allowing_policy(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "legacy_reader",
+        "core",
+        _schema("legacy_reader"),
+        lambda args: calls.append(args) or "read-result",
+        effects={"read"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    token = set_current_execution_policy(_policy(ExecutionPolicyMode.READ_ONLY))
+    try:
+        result = registry.dispatch("legacy_reader", {"value": 1})
+    finally:
+        reset_current_execution_policy(token)
+
+    assert json.loads(result)["shadow_status"] == "legacy_dispatch_block"
+    assert calls == []
+
+
+def test_stable_legacy_dispatch_retains_handler_execution(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "stable_reader",
+        "core",
+        _schema("stable_reader"),
+        lambda args: calls.append(args) or "stable-read-result",
+        effects={"read"},
+    )
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+
+    result = registry.dispatch("stable_reader", {"value": 1})
+
+    assert result == "stable-read-result"
+    assert calls == [{"value": 1}]
+
+
+def test_plugin_context_cannot_bypass_exact_beta_legacy_dispatch(monkeypatch) -> None:
+    from elevate_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from tools.registry import registry as global_registry
+
+    tool_name = "plugin_legacy_beta_probe"
+    calls = []
+    global_registry.register(
+        tool_name,
+        "core",
+        _schema(tool_name),
+        lambda args: calls.append(args) or "unexpected",
+        effects={"read"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    context = PluginContext(
+        PluginManifest(name="legacy-dispatch-probe", source="user"),
+        PluginManager(),
+    )
+    try:
+        result = json.loads(context.dispatch_tool(tool_name, {"value": 1}))
+    finally:
+        global_registry.deregister(tool_name)
+
+    assert result["shadow_status"] == "legacy_dispatch_block"
+    assert calls == []
+
+
 def test_exact_beta_terminal_denial_blocks_before_handler(monkeypatch) -> None:
     registry = ToolRegistry()
     calls = []
@@ -195,6 +339,36 @@ def test_exact_beta_terminal_denial_blocks_before_handler(monkeypatch) -> None:
     assert outcome.started is False
     assert calls == []
     assert json.loads(outcome.result)["shadow_status"] == "effect_policy_block"
+
+
+def test_exact_beta_allowed_terminal_is_hard_denied_at_registry_start(
+    monkeypatch,
+) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "terminal",
+        "terminal",
+        _schema("terminal"),
+        lambda args, **kwargs: calls.append((args, kwargs)) or "unexpected",
+        effects={"read"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    outcome = registry.execute_shadow(
+        "terminal",
+        {"command": "ls"},
+        context=_context("call-beta-terminal-read"),
+        execution_policy=_policy(ExecutionPolicyMode.READ_ONLY),
+    )
+
+    assert outcome.prepared.authorization.allowed is True
+    assert outcome.started is False
+    assert calls == []
+    assert json.loads(outcome.result) == {
+        "error": "Terminal is unavailable in Realtor Beta.",
+        "shadow_status": "effect_policy_block",
+    }
 
 
 def test_exact_beta_terminal_unknown_effect_blocks_before_handler(monkeypatch) -> None:

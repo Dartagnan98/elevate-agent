@@ -1100,9 +1100,10 @@ def test_subagent_complete_normalizes_terminal_wire_status(
     assert payload["error"] == "detail"
 
 
-def test_config_set_yolo_toggles_session_scope():
+def test_config_set_yolo_toggles_session_scope(monkeypatch):
     from tools.approval import clear_session, is_session_yolo_enabled
 
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
     server._sessions["sid"] = _session()
     try:
         resp_on = server.handle_request(
@@ -1485,6 +1486,8 @@ def test_config_set_model_uses_live_switch_path(monkeypatch):
 
 
 def test_config_set_model_global_persists(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
+
     class _Agent:
         provider = "openrouter"
         model = "old/model"
@@ -1545,6 +1548,8 @@ def test_config_set_model_syncs_inference_provider_env(monkeypatch):
     trying openrouter because the env-var-backed resolvers still saw the old
     provider.
     """
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
 
     class _Agent:
         provider = "openrouter"
@@ -4271,15 +4276,18 @@ def test_interrupt_clears_multiple_own_pending():
             server._answers.pop(key, None)
 
 
-def test_session_stop_forces_idle_and_kills_processes(monkeypatch):
+def test_session_stop_stays_busy_and_scopes_process_termination(monkeypatch):
     calls = {"interrupt": 0}
+    kill_scopes = []
 
     class _Agent:
         def interrupt(self):
             calls["interrupt"] += 1
 
     fake_registry = types.ModuleType("tools.process_registry")
-    fake_registry.process_registry = types.SimpleNamespace(kill_all=lambda: 2)
+    fake_registry.process_registry = types.SimpleNamespace(
+        kill_all=lambda *, session_key: kill_scopes.append(session_key) or 2
+    )
     monkeypatch.setitem(sys.modules, "tools.process_registry", fake_registry)
 
     server._sessions["sid"] = _session(
@@ -4304,15 +4312,139 @@ def test_session_stop_forces_idle_and_kills_processes(monkeypatch):
         )
 
         assert resp["result"] == {
-            "status": "stopped",
+            "status": "stopping",
             "interrupted": True,
             "killed": 2,
+            "quiesced": False,
+            "running": True,
         }
         assert calls["interrupt"] == 1
-        assert server._sessions["sid"]["running"] is False
-        assert server._sessions["sid"]["running_tools"] == {}
-        assert server._sessions["sid"]["events"] == []
+        assert kill_scopes == [server._sessions["sid"]["session_key"]]
+        assert server._sessions["sid"]["running"] is True
+        assert server._sessions["sid"]["running_tools"] == {
+            "tool-1": {"tool_id": "tool-1", "name": "shell"}
+        }
+        assert [event["type"] for event in server._sessions["sid"]["events"]] == [
+            "message.start",
+            "tool.start",
+        ]
     finally:
+        server._sessions.pop("sid", None)
+
+
+def test_session_stop_does_not_kill_sibling_sharing_default_task_id(monkeypatch):
+    class _ScopedRegistry:
+        def __init__(self):
+            self.processes = {
+                "process-a": {
+                    "task_id": "default",
+                    "session_key": "session-a",
+                    "killed": False,
+                },
+                "process-b": {
+                    "task_id": "default",
+                    "session_key": "session-b",
+                    "killed": False,
+                },
+            }
+
+        def kill_all(self, *, session_key):
+            killed = 0
+            for process in self.processes.values():
+                if process["session_key"] != session_key:
+                    continue
+                process["killed"] = True
+                killed += 1
+            return killed
+
+    registry = _ScopedRegistry()
+    fake_registry = types.ModuleType("tools.process_registry")
+    fake_registry.process_registry = registry
+    monkeypatch.setitem(sys.modules, "tools.process_registry", fake_registry)
+    server._sessions["sid-a"] = _session(
+        session_key="session-a",
+        running=True,
+        agent=types.SimpleNamespace(interrupt=lambda: None),
+    )
+    server._sessions["sid-b"] = _session(
+        session_key="session-b",
+        running=True,
+        agent=types.SimpleNamespace(interrupt=lambda: None),
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "stop-a",
+                "method": "session.stop",
+                "params": {"session_id": "sid-a"},
+            }
+        )
+
+        assert resp["result"]["killed"] == 1
+        assert resp["result"]["status"] == "stopping"
+        assert registry.processes["process-a"]["killed"] is True
+        assert registry.processes["process-b"]["killed"] is False
+        assert server._sessions["sid-b"]["running"] is True
+    finally:
+        server._sessions.pop("sid-a", None)
+        server._sessions.pop("sid-b", None)
+
+
+def test_session_stop_serializes_with_prompt_turn_admission(monkeypatch):
+    from agent.turn_fence import TurnFence
+
+    history_lock = threading.Lock()
+    history_lock.acquire()
+    fence = TurnFence()
+    interrupted = threading.Event()
+    fake_registry = types.ModuleType("tools.process_registry")
+    fake_registry.process_registry = types.SimpleNamespace(
+        kill_all=lambda *, session_key: 0
+    )
+    monkeypatch.setitem(sys.modules, "tools.process_registry", fake_registry)
+    session = _session(
+        agent=types.SimpleNamespace(interrupt=interrupted.set),
+        history_lock=history_lock,
+        running=False,
+        turn_fence=fence,
+        turn_token=None,
+    )
+    server._sessions["sid"] = session
+    response = {}
+
+    def _stop():
+        response.update(
+            server.handle_request(
+                {
+                    "id": "stop-admission-race",
+                    "method": "session.stop",
+                    "params": {"session_id": "sid"},
+                }
+            )
+        )
+
+    stop_thread = threading.Thread(target=_stop)
+    stop_thread.start()
+    try:
+        token = fence.begin_turn("racing-prompt", "tui-prompt-worker")
+        session["turn_token"] = token
+        session["running"] = True
+        history_lock.release()
+        stop_thread.join(timeout=3)
+
+        assert stop_thread.is_alive() is False
+        assert response["result"]["status"] == "stopping"
+        assert response["result"]["running"] is True
+        assert fence.snapshot()["cancelled"] is True
+        assert interrupted.is_set()
+    finally:
+        if history_lock.locked():
+            history_lock.release()
+        if stop_thread.is_alive():
+            stop_thread.join(timeout=3)
+        if fence.snapshot()["worker_active"]:
+            fence.abandon_admission(token, reason="test cleanup")
         server._sessions.pop("sid", None)
 
 

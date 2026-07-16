@@ -7,8 +7,10 @@ into ``data.deals`` (move_deal_stage, set_deal_toggle).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -108,6 +110,28 @@ def _complete_admin_setup():
         complete_admin_setup(conn)
 
 
+def _configure_test_forms_provider(conn) -> None:
+    get_admin_setup(conn)
+    conn.execute(
+        "UPDATE admin_setup_items SET status='configured', provider=?, value_json=? "
+        "WHERE key='forms_provider'",
+        (
+            "test",
+            json.dumps(
+                {
+                    "provider": "test",
+                    "playbook": {
+                        "provider": "test",
+                        "loginUrl": "https://forms.example.test/login",
+                        "accountEmail": None,
+                        "sessionMode": "existing_session",
+                    },
+                }
+            ),
+        ),
+    )
+
+
 def _write_valid_pdf(path: Path, text: str = "Verified test artifact") -> Path:
     import fitz
 
@@ -117,6 +141,87 @@ def _write_valid_pdf(path: Path, text: str = "Verified test artifact") -> Path:
     document.save(path)
     document.close()
     return path
+
+
+def _document_reference(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _manual_export_claim(
+    *,
+    pdf: Path,
+    deal_id: str,
+    run_id: str,
+    form_code: str,
+    deal_reference: str,
+    provider: str = "test",
+    reviewer_name: str = "Test Realtor",
+    receipt_id: str = "manual-export-test-1",
+    version_status: str = "unverified",
+    document_version: str | None = None,
+    effective_date: str | None = None,
+    version_verified_at: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema": "elevate.manual-provider-export-claim.v1",
+        "sourceVerified": False,
+        "receiptId": receipt_id,
+        "dealId": deal_id,
+        "taskId": run_id,
+        "formCode": form_code,
+        "provider": provider,
+        "reviewerName": reviewer_name,
+        "artifactSha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+        "dealReference": _document_reference(deal_reference),
+        "versionStatus": version_status,
+        "documentVersion": document_version,
+        "effectiveDate": effective_date,
+        "versionVerifiedAt": version_verified_at,
+    }
+
+
+def _manual_completion_kwargs(
+    *,
+    pdf: Path,
+    deal: dict,
+    run: dict,
+    kind: str,
+    form_code: str,
+    **receipt_overrides,
+) -> dict[str, object]:
+    provider = str(receipt_overrides.pop("provider", "test"))
+    reviewer_name = str(receipt_overrides.pop("reviewer_name", "Test Realtor"))
+    version_status = str(receipt_overrides.pop("version_status", "unverified"))
+    document_version = receipt_overrides.pop("document_version", None)
+    effective_date = receipt_overrides.pop("effective_date", None)
+    version_verified_at = receipt_overrides.pop("version_verified_at", None)
+    receipt = _manual_export_claim(
+        pdf=pdf,
+        deal_id=deal["id"],
+        run_id=run["id"],
+        form_code=form_code,
+        deal_reference=deal.get("listingAddress") or deal["title"],
+        provider=provider,
+        reviewer_name=reviewer_name,
+        version_status=version_status,
+        document_version=document_version,
+        effective_date=effective_date,
+        version_verified_at=version_verified_at,
+        **receipt_overrides,
+    )
+    return {
+        "kind": kind,
+        "file_path": str(pdf),
+        "reviewed": True,
+        "form_code": form_code,
+        "provider": provider,
+        "reviewer_name": reviewer_name,
+        "version_status": version_status,
+        "document_version": document_version,
+        "effective_date": effective_date,
+        "version_verified_at": version_verified_at,
+        "source_receipt": receipt,
+    }
 
 
 def _set_fresh_forms_provider_proof(conn, *, available: bool) -> None:
@@ -623,13 +728,170 @@ def test_exact_beta_forms_scaffold_status_cannot_mint_live_provider_proof(
         )
 
     forms_item = next(item for item in setup["items"] if item["key"] == "forms_provider")
-    assert forms_item["status"] == "configured"
-    assert forms_item["value"]["verification"]["details"]["providerProof"] is False
+    assert forms_item["status"] == "missing"
+    assert forms_item.get("value") is None
     assert setup["capabilities"]["formsProvider"]["available"] is False
+    assert setup["capabilities"]["formsProvider"]["coordination"]["ready"] is False
     assert (
         setup["capabilities"]["formsProvider"]["reason"]
         == "live_forms_provider_not_verified"
     )
+
+
+def test_exact_beta_forms_provider_playbook_is_password_free_and_cta_safe(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with connect() as conn:
+        setup = update_admin_setup(
+            conn,
+            items=[
+                {
+                    "key": "forms_provider",
+                    "status": "configured",
+                    "provider": "WEBForms",
+                    "value": {
+                        "provider": "WEBForms",
+                        "playbook": {
+                            "provider": "WEBForms",
+                            "loginUrl": "https://forms.example.test/login?from=beta#ignored",
+                            "accountEmail": " REALTOR@EXAMPLE.COM ",
+                            "sessionMode": "account_email",
+                        },
+                    },
+                }
+            ],
+        )
+
+    item = next(row for row in setup["items"] if row["key"] == "forms_provider")
+    playbook = item["value"]["playbook"]
+    assert playbook == {
+        "provider": "WEBForms",
+        "loginUrl": "https://forms.example.test/login?from=beta",
+        "accountEmail": "realtor@example.com",
+        "sessionMode": "account_email",
+    }
+    coordination = setup["capabilities"]["formsProvider"]["coordination"]
+    assert coordination["ready"] is True
+    assert coordination["loginUrl"] == playbook["loginUrl"]
+    assert coordination["storesPassword"] is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "http://forms.example.test/login",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "javascript:alert(1)",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://user:pass@forms.example.test/login",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://127.0.0.1/login",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://192.168.1.5/login",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://forms.example.test:8443/login",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://forms.example.test/login",
+                "accountEmail": "realtor@example.com",
+                "sessionMode": "existing_session",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://forms.example.test/login",
+                "sessionMode": "account_email",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://forms.example.test/login",
+                "sessionMode": "existing_session",
+                "password": "do-not-store",
+            },
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://forms.example.test/login",
+                "sessionMode": "existing_session",
+            },
+            "credentials": [{"password": "nested-smuggle"}],
+        },
+        {
+            "provider": "WEBForms",
+            "playbook": {
+                "provider": "WEBForms",
+                "loginUrl": "https://forms.example.test/login",
+                "sessionMode": "existing_session",
+                "unexpected": "value",
+            },
+        },
+    ],
+)
+def test_exact_beta_forms_provider_playbook_rejects_unsafe_or_ambiguous_input(
+    monkeypatch,
+    value,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with connect() as conn:
+        with pytest.raises(ValueError):
+            update_admin_setup(
+                conn,
+                items=[
+                    {
+                        "key": "forms_provider",
+                        "status": "configured",
+                        "provider": "WEBForms",
+                        "value": value,
+                    }
+                ],
+            )
 
 
 def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
@@ -649,15 +911,20 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
         raise AssertionError("manual Option-B run must never dispatch a provider worker")
 
     monkeypatch.setattr(dispatch_data, "_spawn_cron_job", unexpected_spawn)
-    reviewed_pdf = _write_valid_pdf(tmp_path / "reviewed-mlc.pdf", "Reviewed MLC")
+    reviewed_pdf = _write_valid_pdf(
+        tmp_path / "reviewed-mlc.pdf",
+        "Multiple Listing Contract — 101 Exact Deal Street, Kamloops BC",
+    )
 
     with connect() as conn:
+        _configure_test_forms_provider(conn)
         deal = create_deal(
             conn,
             title="Manual reviewed MLC",
             side="listing",
             actor="human:test",
             current_stage=2,
+            listing_address="101 Exact Deal Street, Kamloops BC",
         )
         action = create_action(
             conn,
@@ -680,15 +947,21 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
         )
         assert run["status"] == "waiting_human"
         assert run["humanPrompt"]["requiredArtifactKind"] == "mlc_pdf"
+        assert run["humanPrompt"]["formCode"] == "MLC"
+        valid_kwargs = _manual_completion_kwargs(
+            pdf=reviewed_pdf,
+            deal=deal,
+            run=run,
+            kind="mlc_pdf",
+            form_code="MLC",
+        )
 
         with pytest.raises(PermissionError, match="human actor"):
             complete_run_with_reviewed_manual_pdf(
                 conn,
                 deal["id"],
                 run["id"],
-                kind="mlc_pdf",
-                file_path=str(reviewed_pdf),
-                reviewed=True,
+                **valid_kwargs,
                 actor="skill:test",
             )
         with pytest.raises(ValueError, match="confirm that the PDF was reviewed"):
@@ -696,9 +969,7 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
                 conn,
                 deal["id"],
                 run["id"],
-                kind="mlc_pdf",
-                file_path=str(reviewed_pdf),
-                reviewed=False,
+                **{**valid_kwargs, "reviewed": False},
                 actor="human:test",
             )
         with pytest.raises(ValueError, match="requires artifact kind mlc_pdf"):
@@ -706,9 +977,7 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
                 conn,
                 deal["id"],
                 run["id"],
-                kind="cps_draft",
-                file_path=str(reviewed_pdf),
-                reviewed=True,
+                **{**valid_kwargs, "kind": "cps_draft"},
                 actor="human:test",
             )
 
@@ -716,9 +985,7 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
             conn,
             deal["id"],
             run["id"],
-            kind="mlc_pdf",
-            file_path=str(reviewed_pdf),
-            reviewed=True,
+            **valid_kwargs,
             summary="Reviewed against the licensed provider record.",
             actor="human:test",
         )
@@ -726,9 +993,7 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
             conn,
             deal["id"],
             run["id"],
-            kind="mlc_pdf",
-            file_path=str(reviewed_pdf),
-            reviewed=True,
+            **valid_kwargs,
             actor="human:test",
         )
         attachment = conn.execute(
@@ -740,16 +1005,28 @@ def test_exact_beta_manual_reviewed_pdf_closes_parked_semantic_run(
             "ORDER BY created_at DESC LIMIT 1",
             (deal["id"],),
         ).fetchone()
+        persisted_deal = conn.execute(
+            "SELECT extra_toggles_json FROM deals WHERE id=?", (deal["id"],)
+        ).fetchone()
 
     receipt = completed["result"]["manualFormsReviewReceipt"]
     assert completed["status"] == "succeeded"
     assert completed["cronJobId"] is None
     assert completed["result"]["requiredArtifactKinds"] == ["mlc_pdf"]
-    assert receipt["schema"] == "elevate.manual-forms-review.v1"
+    assert receipt["schema"] == "elevate.manual-forms-review.v2"
     assert receipt["providerDispatch"] is False
+    assert receipt["sourceVerified"] is False
+    assert receipt["catalogCurrentVersionVerified"] is False
+    assert receipt["dealId"] == deal["id"]
+    assert receipt["taskId"] == run["id"]
+    assert receipt["formCode"] == "MLC"
+    assert receipt["reviewerName"] == "Test Realtor"
     assert receipt["reviewedBy"] == "human:test"
     assert len(receipt["sha256"]) == 64
     assert attachment["kind"] == "mlc_pdf"
+    assert not (json.loads(persisted_deal["extra_toggles_json"] or "{}") or {}).get(
+        "workflow_stage_2_complete"
+    )
     assert json.loads(event["payload_json"])["manualFormsReviewReceipt"]["sha256"] == receipt["sha256"]
     assert replay["resultIdempotencyKey"] == completed["resultIdempotencyKey"]
 
@@ -824,6 +1101,222 @@ def test_exact_beta_ad_hoc_and_next_task_semantics_cannot_bypass_forms_gate(
     assert children[0]["humanPrompt"]["requiredArtifactKind"] == "cps_draft"
 
 
+def test_exact_beta_manual_provider_claim_rejects_unrelated_wrong_form_wrong_deal_and_stale_receipts(
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(dispatch_data, "_admin_setup_dispatch_block_reason", lambda _conn: None)
+    monkeypatch.setattr(
+        dispatch_data,
+        "_spawn_cron_job",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provider-form coordination must park before cron")
+        ),
+    )
+    address = "303 Correct Property Road, Kamloops BC"
+    with connect() as conn:
+        _configure_test_forms_provider(conn)
+        deal = create_deal(
+            conn,
+            title="Same Client Portfolio",
+            side="listing",
+            actor="human:test",
+            current_stage=2,
+            listing_address=address,
+        )
+        action = create_action(
+            conn,
+            name="Prepare exact MLC",
+            trigger="manual",
+            skill="real-estate-admin/mlc",
+            side="listing",
+            skill_args={"mode": "documents", "formCode": "MLC"},
+        )
+        run = next(
+            item
+            for item in evaluate_dispatch(
+                conn,
+                deal_id=deal["id"],
+                trigger="manual",
+                actor="human:test",
+                create_cron_jobs=True,
+            )
+            if item["registryId"] == action["id"]
+        )
+
+        random_pdf = _write_valid_pdf(
+            tmp_path / "random.pdf",
+            f"Quarterly market report for {address}",
+        )
+        wrong_form_pdf = _write_valid_pdf(
+            tmp_path / "wrong-form.pdf",
+            f"Contract of Purchase and Sale for {address}",
+        )
+        wrong_deal_pdf = _write_valid_pdf(
+            tmp_path / "wrong-deal.pdf",
+            "Multiple Listing Contract for 999 Other Property Road, Kamloops BC — Same Client Portfolio",
+        )
+        correct_pdf = _write_valid_pdf(
+            tmp_path / "correct.pdf",
+            f"Multiple Listing Contract for {address}",
+        )
+
+        for pdf, message in (
+            (random_pdf, "does not identify the task-bound form MLC"),
+            (wrong_form_pdf, "does not identify the task-bound form MLC"),
+            (wrong_deal_pdf, "does not identify this deal"),
+        ):
+            with pytest.raises(ValueError, match=message):
+                complete_run_with_reviewed_manual_pdf(
+                    conn,
+                    deal["id"],
+                    run["id"],
+                    **_manual_completion_kwargs(
+                        pdf=pdf,
+                        deal=deal,
+                        run=run,
+                        kind="mlc_pdf",
+                        form_code="MLC",
+                    ),
+                    actor="human:test",
+                )
+
+        receipt_mismatch = _manual_completion_kwargs(
+            pdf=correct_pdf,
+            deal=deal,
+            run=run,
+            kind="mlc_pdf",
+            form_code="MLC",
+        )
+        receipt_mismatch["source_receipt"] = {
+            **receipt_mismatch["source_receipt"],
+            "artifactSha256": "0" * 64,
+        }
+        with pytest.raises(ValueError, match="source receipt mismatch for artifactSha256"):
+            complete_run_with_reviewed_manual_pdf(
+                conn,
+                deal["id"],
+                run["id"],
+                **receipt_mismatch,
+                actor="human:test",
+            )
+
+        stale = _manual_completion_kwargs(
+            pdf=correct_pdf,
+            deal=deal,
+            run=run,
+            kind="mlc_pdf",
+            form_code="MLC",
+            version_status="verified",
+            document_version="2024.1",
+            version_verified_at=(
+                datetime.now(timezone.utc) - timedelta(days=31)
+            ).isoformat(),
+        )
+        with pytest.raises(ValueError, match="verification is stale"):
+            complete_run_with_reviewed_manual_pdf(
+                conn,
+                deal["id"],
+                run["id"],
+                **stale,
+                actor="human:test",
+            )
+
+        unverified_with_claim = _manual_completion_kwargs(
+            pdf=correct_pdf,
+            deal=deal,
+            run=run,
+            kind="mlc_pdf",
+            form_code="MLC",
+            version_status="unverified",
+            version_verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+        with pytest.raises(ValueError, match="unverified version must not claim"):
+            complete_run_with_reviewed_manual_pdf(
+                conn,
+                deal["id"],
+                run["id"],
+                **unverified_with_claim,
+                actor="human:test",
+            )
+
+
+@pytest.mark.parametrize(
+    ("form_code", "form_title"),
+    [
+        ("BAEC", "Buyer Agency Exclusive Contract"),
+        ("DORTS", "Disclosure of Representation in Trading Services"),
+        ("PNC", "Privacy Notice and Consent"),
+    ],
+)
+def test_exact_beta_task_bound_manual_completion_supports_onboarding_forms(
+    monkeypatch,
+    tmp_path,
+    form_code,
+    form_title,
+):
+    from elevate_cli.data import dispatch as dispatch_data
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(dispatch_data, "_admin_setup_dispatch_block_reason", lambda _conn: None)
+    monkeypatch.setattr(
+        dispatch_data,
+        "_spawn_cron_job",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provider-form coordination must park before cron")
+        ),
+    )
+    title = f"Alex Client — {form_code} onboarding"
+    pdf = _write_valid_pdf(tmp_path / f"{form_code}.pdf", f"{form_title} — {title}")
+    with connect() as conn:
+        _configure_test_forms_provider(conn)
+        deal = create_deal(
+            conn,
+            title=title,
+            side="buyer",
+            actor="human:test",
+            current_stage=0,
+        )
+        run = queue_action_run(
+            conn,
+            deal_id=deal["id"],
+            skill="real-estate-admin/admin-agent",
+            name=f"Coordinate {form_code}",
+            payload={
+                "formCode": form_code,
+                "requiresLiveFormsProvider": True,
+                "requiredArtifactKinds": ["provider_form_pdf"],
+            },
+            create_cron_job=True,
+            actor="human:test",
+        )
+        assert run["status"] == "waiting_human"
+        assert run["humanPrompt"]["formCode"] == form_code
+        completed = complete_run_with_reviewed_manual_pdf(
+            conn,
+            deal["id"],
+            run["id"],
+            **_manual_completion_kwargs(
+                pdf=pdf,
+                deal=deal,
+                run=run,
+                kind="provider_form_pdf",
+                form_code=form_code,
+                receipt_id=f"manual-{form_code}-export",
+            ),
+            actor="human:test",
+        )
+
+    assert completed["status"] == "succeeded"
+    receipt = completed["result"]["manualFormsReviewReceipt"]
+    assert receipt["formCode"] == form_code
+    assert receipt["sourceVerified"] is False
+    assert receipt["versionStatus"] == "unverified"
+
+
 def test_manual_reviewed_pdf_endpoint_uploads_and_completes_parked_cps(
     client,
     monkeypatch,
@@ -844,7 +1337,10 @@ def test_manual_reviewed_pdf_endpoint_uploads_and_completes_parked_cps(
             AssertionError("parked CPS must not dispatch")
         ),
     )
-    pdf = _write_valid_pdf(tmp_path / "provider-cps.pdf", "Reviewed CPS")
+    pdf = _write_valid_pdf(
+        tmp_path / "provider-cps.pdf",
+        "Contract of Purchase and Sale — 202 Bound Offer Avenue, Kamloops BC",
+    )
     with connect() as conn:
         deal = create_deal(
             conn,
@@ -852,6 +1348,7 @@ def test_manual_reviewed_pdf_endpoint_uploads_and_completes_parked_cps(
             side="buyer",
             actor="human:test",
             current_stage=1,
+            listing_address="202 Bound Offer Avenue, Kamloops BC",
         )
         run = queue_action_run(
             conn,
@@ -860,12 +1357,24 @@ def test_manual_reviewed_pdf_endpoint_uploads_and_completes_parked_cps(
             create_cron_job=True,
             actor="human:test",
         )
+    source_receipt = _manual_export_claim(
+        pdf=pdf,
+        deal_id=deal["id"],
+        run_id=run["id"],
+        form_code="CPS-res",
+        deal_reference=deal["listingAddress"],
+    )
 
     response = client.post(
         f"/api/deals/{deal['id']}/runs/{run['id']}/manual-reviewed-document",
         json={
             "reviewed": True,
             "kind": "cps_draft",
+            "formCode": "CPS-res",
+            "provider": "test",
+            "reviewerName": "Test Realtor",
+            "versionStatus": "unverified",
+            "sourceReceipt": source_receipt,
             "filename": "provider-cps.pdf",
             "contentB64": base64.b64encode(pdf.read_bytes()).decode("ascii"),
             "summary": "Realtor reviewed provider export.",

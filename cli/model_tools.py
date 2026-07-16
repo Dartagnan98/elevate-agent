@@ -27,9 +27,15 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import ToolCallContext, discover_builtin_tools, registry
+from tools.registry import (
+    PreparedToolCall,
+    ToolCallContext,
+    discover_builtin_tools,
+    registry,
+)
 from toolsets import resolve_toolset, validate_toolset
 
 # Memo for get_tool_definitions(). Building the list resolves toolsets, runs
@@ -57,6 +63,30 @@ _TOOL_DEFS_CACHE_LOCK = threading.Lock()
 # intents probe fails transiently so the tool doesn't flap in and out of
 # the tools array (each flap busts the prompt-cache prefix).
 _LAST_GOOD_DISCORD_SCHEMA: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDispatchOutcome:
+    """Internal physical-start truth carried beyond the legacy string API."""
+
+    result: Any
+    started: bool
+    block_reason: str = ""
+
+
+def _dispatch_return(
+    result: Any,
+    *,
+    started: bool,
+    block_reason: str = "",
+    return_outcome: bool = False,
+):
+    outcome = ToolDispatchOutcome(
+        result=result,
+        started=bool(started),
+        block_reason=str(block_reason or ""),
+    )
+    return outcome if return_outcome else result
 try:
     _TOOL_DEFS_TTL_S = float(os.getenv("ELEVATE_TOOL_DEFS_TTL_S", "600"))
 except ValueError:
@@ -287,6 +317,13 @@ _LEGACY_TOOLSET_MAP = {
     "tts_tools": ["text_to_speech"],
 }
 
+# Shell execution is not a safe read primitive.  The legacy terminal effect
+# classifier necessarily accepts command strings and cannot prove executable
+# identity, PATH integrity, symlink targets, or every write-capable flag.  Keep
+# the full terminal harness available to Stable, but do not expose or dispatch
+# it inside the exact Realtor Beta accepted-turn boundary.
+_EXACT_BETA_HARD_DENIED_TOOLS = frozenset({"terminal"})
+
 
 # =============================================================================
 # get_tool_definitions  (the main schema provider)
@@ -310,10 +347,12 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    exact_beta = _exact_beta_registry_enforcement_active()
     cache_key = (
         tuple(sorted(enabled_toolsets)) if enabled_toolsets is not None else None,
         tuple(sorted(disabled_toolsets)) if disabled_toolsets else None,
         bool(quiet_mode),
+        exact_beta,
         _tool_defs_config_mtime_ns(),
     )
     with _TOOL_DEFS_CACHE_LOCK:
@@ -346,11 +385,16 @@ def get_tool_definitions(
                 if not quiet_mode:
                     print(f"⚠️  Unknown toolset: {toolset_name}")
 
-    elif disabled_toolsets:
+    else:
         from toolsets import get_all_toolsets
         for ts_name in get_all_toolsets():
             tools_to_include.update(resolve_toolset(ts_name))
 
+    # Disabled toolsets are always subtractive, including when the caller also
+    # supplied an enabled allowlist. Cron uses both: its platform allowlist plus
+    # explicit bans for messaging/clarify/cronjob. Treating these branches as
+    # mutually exclusive silently re-advertised the banned tools.
+    if disabled_toolsets:
         for toolset_name in disabled_toolsets:
             if validate_toolset(toolset_name):
                 resolved = resolve_toolset(toolset_name)
@@ -365,10 +409,6 @@ def get_tool_definitions(
             else:
                 if not quiet_mode:
                     print(f"⚠️  Unknown toolset: {toolset_name}")
-    else:
-        from toolsets import get_all_toolsets
-        for ts_name in get_all_toolsets():
-            tools_to_include.update(resolve_toolset(ts_name))
 
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()
@@ -378,6 +418,22 @@ def get_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+
+    # Exact Realtor Beta is deny-by-default. Undeclared tools resolve to the
+    # explicit ``unknown`` effect and cannot be authorized by any cohort
+    # policy, so do not advertise them to the model. The dispatcher still
+    # rejects stale or fabricated calls as defense in depth.
+    if exact_beta:
+        filtered_tools = [
+            tool
+            for tool in filtered_tools
+            if (
+                tool["function"]["name"] not in _EXACT_BETA_HARD_DENIED_TOOLS
+                and registry.get_effect_metadata(tool["function"]["name"])[
+                    "declared"
+                ]
+            )
+        ]
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
@@ -795,9 +851,7 @@ def _coerce_boolean(value: str):
     return value
 
 
-def _exact_beta_terminal_call(function_name: str) -> bool:
-    if function_name != "terminal":
-        return False
+def _exact_beta_registry_enforcement_active() -> bool:
     try:
         from elevate_cli.beta_provider_policy import beta_provider_policy_active
 
@@ -806,16 +860,123 @@ def _exact_beta_terminal_call(function_name: str) -> bool:
         return os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
 
 
-def _beta_terminal_context_block(detail: str) -> str:
+def _beta_registry_context_block(function_name: str, detail: str) -> str:
     return json.dumps(
         {
             "error": (
-                "Terminal effect blocked because its durable invocation "
-                f"identity is {detail}. No command was run."
+                f"Tool '{function_name}' blocked because its durable invocation "
+                f"identity is {detail}. No handler was run."
             ),
             "shadow_status": "effect_context_block",
         }
     )
+
+
+def _beta_registry_policy_block(function_name: str, reason: str) -> str:
+    return json.dumps(
+        {
+            "error": (
+                f"Tool '{function_name}' blocked by the accepted-turn effect "
+                f"policy: {reason}. No handler was run."
+            ),
+            "shadow_status": "effect_policy_block",
+        }
+    )
+
+
+def _prepare_exact_beta_registry_call(
+    function_name: str,
+    function_args: Dict[str, Any],
+    *,
+    handler_kwargs: Dict[str, Any],
+    session_id: Optional[str],
+    tool_call_id: Optional[str],
+) -> Tuple[Optional[PreparedToolCall], Optional[str]]:
+    """Freeze an exact-Beta registry call before any observer can run."""
+    if not _exact_beta_registry_enforcement_active():
+        return None, None
+    if function_name in _EXACT_BETA_HARD_DENIED_TOOLS:
+        return None, _beta_registry_policy_block(
+            function_name,
+            "this shell surface is not available in Realtor Beta",
+        )
+
+    from tools.approval import (
+        ExecutionPolicy,
+        get_current_execution_policy,
+        get_current_execution_policy_revision,
+    )
+
+    policy = get_current_execution_policy()
+    revision = get_current_execution_policy_revision()
+    durable_session_id = session_id.strip() if isinstance(session_id, str) else ""
+    durable_invocation_id = (
+        tool_call_id.strip() if isinstance(tool_call_id, str) else ""
+    )
+    if (
+        not isinstance(policy, ExecutionPolicy)
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+        or not durable_session_id
+        or not durable_invocation_id
+    ):
+        return None, _beta_registry_context_block(function_name, "unavailable")
+
+    try:
+        context = ToolCallContext(
+            session_id=durable_session_id,
+            invocation_id=durable_invocation_id,
+            accepted_turn_id=policy.accepted_turn_id,
+            policy_revision=revision,
+        )
+        prepared = registry.prepare_shadow(
+            function_name,
+            function_args,
+            context=context,
+            execution_policy=policy,
+            handler_kwargs=handler_kwargs,
+        )
+    except (TypeError, ValueError):
+        return None, _beta_registry_context_block(function_name, "invalid")
+
+    if not prepared.authorization.allowed:
+        return None, _beta_registry_policy_block(
+            function_name,
+            prepared.authorization.reason,
+        )
+    if prepared.preparation_error is not None:
+        return None, _beta_registry_context_block(function_name, "invalid")
+    return prepared, None
+
+
+def exact_beta_tool_preflight_block(
+    function_name: str,
+    function_args: Dict[str, Any],
+    *,
+    session_id: Optional[str],
+    tool_call_id: Optional[str],
+) -> Optional[str]:
+    """Return a fail-closed Beta block before agent/plugin side effects.
+
+    Agent-owned tools such as ``todo`` and ``delegate_task`` are registered
+    without typed effects today.  Calling this gate before their direct
+    branches therefore blocks stale or hallucinated invocations just like an
+    undeclared registry handler.
+    """
+    _prepared, block = _prepare_exact_beta_registry_call(
+        function_name,
+        function_args,
+        handler_kwargs={},
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
+    return block
+
+
+def exact_beta_tool_containment_active() -> bool:
+    """Public release gate for callers that own pre/post tool observers."""
+    return _exact_beta_registry_enforcement_active()
 
 
 def _dispatch_model_registry_call(
@@ -825,7 +986,8 @@ def _dispatch_model_registry_call(
     handler_kwargs: Dict[str, Any],
     session_id: Optional[str],
     tool_call_id: Optional[str],
-) -> Any:
+    prepared_call: Optional[PreparedToolCall] = None,
+) -> Tuple[Any, bool]:
     """Use the observational atomic path only with a complete durable identity."""
     from tools.approval import (
         ExecutionPolicy,
@@ -854,15 +1016,40 @@ def _dispatch_model_registry_call(
             "registry shadow fallback: missing durable identity fields=%s",
             ",".join(missing),
         )
-        if _exact_beta_terminal_call(function_name):
-            return _beta_terminal_context_block("unavailable")
-        return registry.dispatch(function_name, function_args, **handler_kwargs)
+        if _exact_beta_registry_enforcement_active():
+            return _beta_registry_context_block(function_name, "unavailable"), True
+        return registry.dispatch(function_name, function_args, **handler_kwargs), False
+
+    if _exact_beta_registry_enforcement_active():
+        if prepared_call is None:
+            return _beta_registry_context_block(function_name, "unprepared"), True
+        if (
+            prepared_call.tool_name != function_name
+            or prepared_call.execution_policy is not policy
+            or prepared_call.context.policy_revision != revision
+            or prepared_call.context.session_id != durable_session_id
+            or prepared_call.context.invocation_id != durable_invocation_id
+        ):
+            return _beta_registry_context_block(function_name, "stale"), True
+        outcome = registry.execute_prepared_shadow(prepared_call)
+        authorization = outcome.prepared.authorization
+        if getattr(outcome, "execution_error", None):
+            logger.info(
+                "registry shadow handler failed after start: status=%s",
+                outcome.execution_error,
+            )
+        if not outcome.started:
+            logger.info(
+                "registry shadow start blocked: reason=%s",
+                authorization.reason,
+            )
+        return outcome.result, not outcome.started
 
     # Hallucinated or stale tool names retain the exact legacy unknown-tool
     # payload. Atomic shadow status is internal metadata, not model output.
     if registry.get_entry(function_name) is None:
         logger.debug("registry shadow fallback: tool registration unavailable")
-        return registry.dispatch(function_name, function_args, **handler_kwargs)
+        return registry.dispatch(function_name, function_args, **handler_kwargs), False
 
     try:
         context = ToolCallContext(
@@ -873,9 +1060,9 @@ def _dispatch_model_registry_call(
         )
     except (TypeError, ValueError):
         logger.debug("registry shadow fallback: invalid durable identity")
-        if _exact_beta_terminal_call(function_name):
-            return _beta_terminal_context_block("invalid")
-        return registry.dispatch(function_name, function_args, **handler_kwargs)
+        if _exact_beta_registry_enforcement_active():
+            return _beta_registry_context_block(function_name, "invalid"), True
+        return registry.dispatch(function_name, function_args, **handler_kwargs), False
 
     outcome = registry.execute_shadow(
         function_name,
@@ -896,7 +1083,7 @@ def _dispatch_model_registry_call(
             outcome.started,
         )
     else:
-        enforced = _exact_beta_terminal_call(function_name) and not outcome.started
+        enforced = _exact_beta_registry_enforcement_active() and not outcome.started
         logger.info(
             "registry shadow authorization observed: allowed=false reason=%s "
             "started=%s enforcement=%s",
@@ -904,7 +1091,7 @@ def _dispatch_model_registry_call(
             outcome.started,
             str(enforced).lower(),
         )
-    return outcome.result
+    return outcome.result, False
 
 
 def handle_function_call(
@@ -916,7 +1103,8 @@ def handle_function_call(
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
-) -> str:
+    return_outcome: bool = False,
+):
     """
     Main function call dispatcher that routes calls to the tool registry.
 
@@ -938,12 +1126,53 @@ def handle_function_call(
 
     try:
         if function_name in _AGENT_LOOP_TOOLS:
-            return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
+            return _dispatch_return(
+                json.dumps(
+                    {"error": f"{function_name} must be handled by the agent loop"}
+                ),
+                started=False,
+                block_reason="agent_loop_only",
+                return_outcome=return_outcome,
+            )
 
-        # Check plugin hooks for a block directive (unless caller already
-        # checked — e.g. run_agent._invoke_tool passes skip=True to
-        # avoid double-firing the hook).
-        if not skip_pre_tool_call_hook:
+        if function_name == "execute_code":
+            # Prefer the caller-provided list so subagents can't overwrite
+            # the parent's tool set via the process-global.
+            sandbox_enabled = (
+                enabled_tools
+                if enabled_tools is not None
+                else _last_resolved_tool_names
+            )
+            handler_kwargs = {
+                "task_id": task_id,
+                "enabled_tools": sandbox_enabled,
+            }
+        else:
+            handler_kwargs = {
+                "task_id": task_id,
+                "user_task": user_task,
+            }
+
+        prepared_call, beta_preflight_block = _prepare_exact_beta_registry_call(
+            function_name,
+            function_args,
+            handler_kwargs=handler_kwargs,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+        if beta_preflight_block is not None:
+            return _dispatch_return(
+                beta_preflight_block,
+                started=False,
+                block_reason="beta_preflight_block",
+                return_outcome=return_outcome,
+            )
+
+        exact_beta = _exact_beta_registry_enforcement_active()
+
+        # Exact Beta keeps unclassified plugin hooks out of the physical tool
+        # boundary. Stable preserves the legacy hook ordering unchanged.
+        if not exact_beta and not skip_pre_tool_call_hook:
             block_message: Optional[str] = None
             try:
                 from elevate_cli.plugins import get_pre_tool_call_block_message
@@ -958,8 +1187,13 @@ def handle_function_call(
                 pass
 
             if block_message is not None:
-                return json.dumps({"error": block_message}, ensure_ascii=False)
-        else:
+                return _dispatch_return(
+                    json.dumps({"error": block_message}, ensure_ascii=False),
+                    started=False,
+                    block_reason="plugin_block",
+                    return_outcome=return_outcome,
+                )
+        elif not exact_beta:
             # Still fire the hook for observers — just don't check for blocking
             # (the caller already did that).
             try:
@@ -977,37 +1211,34 @@ def handle_function_call(
 
         # Notify the read-loop tracker when a non-read/search tool runs,
         # so the *consecutive* counter resets (reads after other work are fine).
-        if function_name not in _READ_SEARCH_TOOLS:
+        if not exact_beta and function_name not in _READ_SEARCH_TOOLS:
             try:
                 from tools.file_tools import notify_other_tool_call
                 notify_other_tool_call(task_id or "default")
             except Exception:
                 pass  # file_tools may not be loaded yet
 
-        if function_name == "execute_code":
-            # Prefer the caller-provided list so subagents can't overwrite
-            # the parent's tool set via the process-global.
-            sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-            result = _dispatch_model_registry_call(
-                function_name,
-                function_args,
-                handler_kwargs={
-                    "task_id": task_id,
-                    "enabled_tools": sandbox_enabled,
-                },
-                session_id=session_id,
-                tool_call_id=tool_call_id,
+        result, dispatch_blocked = _dispatch_model_registry_call(
+            function_name,
+            function_args,
+            handler_kwargs=handler_kwargs,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            prepared_call=prepared_call,
+        )
+        if dispatch_blocked:
+            return _dispatch_return(
+                result,
+                started=False,
+                block_reason="registry_start_blocked",
+                return_outcome=return_outcome,
             )
-        else:
-            result = _dispatch_model_registry_call(
-                function_name,
-                function_args,
-                handler_kwargs={
-                    "task_id": task_id,
-                    "user_task": user_task,
-                },
-                session_id=session_id,
-                tool_call_id=tool_call_id,
+
+        if exact_beta:
+            return _dispatch_return(
+                result,
+                started=True,
+                return_outcome=return_outcome,
             )
 
         try:
@@ -1048,12 +1279,21 @@ def handle_function_call(
         except Exception:
             pass
 
-        return result
+        return _dispatch_return(
+            result,
+            started=True,
+            return_outcome=return_outcome,
+        )
 
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
         logger.error(error_msg)
-        return json.dumps({"error": error_msg}, ensure_ascii=False)
+        return _dispatch_return(
+            json.dumps({"error": error_msg}, ensure_ascii=False),
+            started=False,
+            block_reason="dispatcher_exception",
+            return_outcome=return_outcome,
+        )
 
 
 # =============================================================================

@@ -185,6 +185,14 @@ class _RunResultBody(BaseModel):
 class _ManualReviewedRunDocumentBody(BaseModel):
     reviewed: bool = False
     kind: str
+    formCode: str
+    provider: str
+    reviewerName: str
+    versionStatus: str
+    sourceReceipt: Dict[str, Any]
+    documentVersion: Optional[str] = None
+    effectiveDate: Optional[str] = None
+    versionVerifiedAt: Optional[str] = None
     filename: Optional[str] = None
     contentB64: Optional[str] = None
     filePath: Optional[str] = None
@@ -435,7 +443,7 @@ def _require_exact_beta_forms_provider_for_local_document_mutation() -> None:
                 "This exact-Beta route uses mutable local reference templates and is disabled. "
                 "Complete the form in the licensed provider and attach the reviewed PDF."
             ),
-            "manualCompletion": "Attach the reviewed PDF to the parked MLC/CPS task.",
+            "manualCompletion": "Attach the reviewed PDF and manual export claim to the exact parked provider-form task.",
         },
     )
 
@@ -1769,7 +1777,7 @@ def create_admin_deals_router(
         run_id: str,
         body: _ManualReviewedRunDocumentBody,
     ):
-        """Complete a parked MLC/CPS run with one realtor-reviewed PDF."""
+        """Complete one task-bound provider-form run with reviewed evidence."""
         uploaded_path: Path | None = None
         completed = False
         try:
@@ -1804,6 +1812,14 @@ def create_admin_deals_router(
                     kind=body.kind,
                     file_path=file_path,
                     reviewed=body.reviewed,
+                    form_code=body.formCode,
+                    provider=body.provider,
+                    reviewer_name=body.reviewerName,
+                    version_status=body.versionStatus,
+                    source_receipt=body.sourceReceipt,
+                    document_version=body.documentVersion,
+                    effective_date=body.effectiveDate,
+                    version_verified_at=body.versionVerifiedAt,
                     summary=body.summary,
                     actor=web_actor,
                 )

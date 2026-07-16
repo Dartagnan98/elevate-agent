@@ -28,6 +28,12 @@ from agent.result_outcome import (
     agent_result_pending,
     agent_result_succeeded,
 )
+from agent.turn_fence import (
+    TurnBusy,
+    TurnCancelled,
+    TurnFence,
+    bind_turn_fence,
+)
 from elevate_constants import exact_realtor_beta_active, get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -560,6 +566,7 @@ _EVENT_RING_MAXLEN = 1000
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
+_pending_lock = threading.RLock()
 _db = None
 _db_error: str | None = None
 _PROMPT_EXECUTION_OWNER = f"{os.getpid()}:{uuid.uuid4().hex}"
@@ -1805,15 +1812,34 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
-def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
+def _block(
+    event: str,
+    sid: str,
+    payload: dict,
+    timeout: int = 300,
+    *,
+    turn_fence: TurnFence | None = None,
+    turn_token=None,
+) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
-    _pending[rid] = (sid, ev)
-    payload["request_id"] = rid
+    # Register atomically with Stop's pending-request sweep.  If cancellation
+    # already won, never create a blocking callback.  If registration wins,
+    # Stop's subsequent sweep observes and releases this exact request.
+    with _pending_lock:
+        if (
+            isinstance(turn_fence, TurnFence)
+            and turn_token is not None
+            and not turn_fence.can_publish(turn_token)
+        ):
+            return ""
+        _pending[rid] = (sid, ev)
+        payload["request_id"] = rid
     _emit(event, sid, payload)
     ev.wait(timeout=timeout)
-    _pending.pop(rid, None)
-    return _answers.pop(rid, "")
+    with _pending_lock:
+        _pending.pop(rid, None)
+        return _answers.pop(rid, "")
 
 
 def _clear_pending(sid: str | None = None) -> None:
@@ -1825,10 +1851,11 @@ def _clear_pending(sid: str | None = None) -> None:
     sessions sharing the same tui_gateway process.  When *sid* is
     None, every pending prompt is released (used during shutdown).
     """
-    for rid, (owner_sid, ev) in list(_pending.items()):
-        if sid is None or owner_sid == sid:
-            _answers[rid] = ""
-            ev.set()
+    with _pending_lock:
+        for rid, (owner_sid, ev) in list(_pending.items()):
+            if sid is None or owner_sid == sid:
+                _answers[rid] = ""
+                ev.set()
 
 
 # ── Agent factory ────────────────────────────────────────────────────
@@ -2898,6 +2925,8 @@ def _agent_cbs(
     correlation_id: str = "",
     parent_correlation_id: str = "",
     relation: str = "",
+    turn_fence: TurnFence | None = None,
+    turn_token=None,
 ) -> dict:
     def _progress(event_type, name=None, preview=None, args=None, **kwargs):
         # A delegated child carries the origin it captured when it was spawned.
@@ -2956,7 +2985,11 @@ def _agent_cbs(
         ),
         error_callback=lambda text: _emit("error", sid, {"message": str(text)}),
         clarify_callback=lambda q, c: _block(
-            "clarify.request", sid, {"question": q, "choices": c}
+            "clarify.request",
+            sid,
+            {"question": q, "choices": c},
+            turn_fence=turn_fence,
+            turn_token=turn_token,
         ),
     )
 
@@ -2968,6 +3001,8 @@ def _bind_agent_turn_callbacks(
     correlation_id: str,
     parent_correlation_id: str = "",
     relation: str = "",
+    turn_fence: TurnFence | None = None,
+    turn_token=None,
 ) -> None:
     """Bind reusable agent callbacks to one accepted turn's immutable root."""
     callbacks = _agent_cbs(
@@ -2975,13 +3010,84 @@ def _bind_agent_turn_callbacks(
         correlation_id=correlation_id,
         parent_correlation_id=parent_correlation_id,
         relation=relation,
+        turn_fence=turn_fence,
+        turn_token=turn_token,
     )
     for attr in (
         "tool_start_callback",
         "tool_complete_callback",
         "tool_progress_callback",
+        "clarify_callback",
     ):
-        setattr(agent, attr, callbacks[attr])
+        callback = callbacks[attr]
+
+        def _guarded_callback(
+            *args,
+            _callback=callback,
+            **kwargs,
+        ):
+            if (
+                isinstance(turn_fence, TurnFence)
+                and turn_token is not None
+                and not turn_fence.can_publish(turn_token)
+            ):
+                return None
+            return _callback(*args, **kwargs)
+
+        setattr(agent, attr, _guarded_callback)
+    # Sudo and skill-secret prompts are registered at the tool layer rather
+    # than as AIAgent attributes.  Bind exact-turn callbacks on the worker
+    # thread so Stop cannot create a late blocking request or route it through
+    # a sibling actor's callback.
+    try:
+        from tools.terminal_tool import set_sudo_password_callback
+
+        set_sudo_password_callback(
+            lambda: _block(
+                "sudo.request",
+                sid,
+                {},
+                timeout=120,
+                turn_fence=turn_fence,
+                turn_token=turn_token,
+            )
+        )
+    except Exception:
+        pass
+
+    try:
+        from tools.skills_tool import set_secret_capture_callback
+
+        def _turn_secret_cb(env_var, prompt, metadata=None):
+            payload = {"prompt": prompt, "env_var": env_var}
+            if metadata:
+                payload["metadata"] = metadata
+            value = _block(
+                "secret.request",
+                sid,
+                payload,
+                turn_fence=turn_fence,
+                turn_token=turn_token,
+            )
+            if not value:
+                return {
+                    "success": True,
+                    "stored_as": env_var,
+                    "validated": False,
+                    "skipped": True,
+                    "message": "skipped",
+                }
+            from elevate_cli.config import save_env_value_secure
+
+            return {
+                **save_env_value_secure(env_var, value),
+                "skipped": False,
+                "message": "ok",
+            }
+
+        set_secret_capture_callback(_turn_secret_cb)
+    except Exception:
+        pass
     # delegate_tool captures these fields when it creates child callbacks, so
     # a child finishing after another turn starts still reports its origin.
     agent._elevate_turn_correlation_id = correlation_id
@@ -3503,6 +3609,8 @@ def _init_session(
         "history_lock": threading.Lock(),
         "history_version": 0,
         "running": False,
+        "turn_fence": TurnFence(),
+        "turn_token": None,
         "attached_images": [],
         "attached_videos": [],
         "attached_files": [],
@@ -4132,6 +4240,8 @@ def _(rid, params: dict) -> dict:
             "lineage_root_id": key,
             "active_session_id": key,
             "running": False,
+            "turn_fence": TurnFence(),
+            "turn_token": None,
             "session_key": key,
             "show_reasoning": _load_show_reasoning(),
             "slash_worker": None,
@@ -4708,6 +4818,8 @@ def _session_resume(rid, params: dict) -> dict:
         "lineage_root_id": identity_payload.get("lineage_root_id"),
         "active_session_id": identity_payload.get("active_session_id"),
         "running": False,
+        "turn_fence": TurnFence(),
+        "turn_token": None,
         "session_key": target,
         "show_reasoning": _load_show_reasoning(),
         "slash_worker": None,
@@ -4989,10 +5101,50 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5011, str(e))
 
 
+def _release_closed_session_resources(session: dict) -> None:
+    """Release resources after the actor identity is no longer reachable."""
+    if not session.get("agent_memory_released"):
+        _release_agent_memory(session.get("agent"), ended=True)
+        session["agent_memory_released"] = True
+    try:
+        from tools.approval import unregister_gateway_notify
+
+        unregister_gateway_notify(session["session_key"])
+    except Exception:
+        pass
+    try:
+        worker = session.get("slash_worker")
+        if worker:
+            worker.close()
+            session["slash_worker"] = None
+    except Exception:
+        pass
+
+
+def _finalize_session_close(
+    sid: str,
+    session: dict,
+    *,
+    reason: str = "session closed",
+) -> bool:
+    """Remove and release one already-quiescent live actor exactly once."""
+    removed = _drop_session_registry_identity(
+        sid,
+        session,
+        remove_session=True,
+        reason=reason,
+    )
+    if not removed:
+        return False
+    _release_closed_session_resources(removed)
+    return True
+
+
 @method("session.close")
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
     force = params.get("force") is True
+    registry_removed = False
     session = _sessions.get(sid)
     if not session:
         return _ok(rid, {"closed": False})
@@ -5020,6 +5172,7 @@ def _(rid, params: dict) -> dict:
                 remove_session=True,
                 reason="session closed",
             )
+            registry_removed = bool(session)
         else:
             # Prompt admission uses this same lock. Exactly one side wins:
             # prompt sets running and this detaches, or close removes the actor
@@ -5038,34 +5191,45 @@ def _(rid, params: dict) -> dict:
                     remove_session=True,
                     reason="session closed",
                 )
+                registry_removed = bool(session)
     else:
-        # force=true is explicit teardown and may interrupt an in-flight actor;
-        # generation/effect fencing for forced closes is intentionally separate.
-        session = _drop_session_registry_identity(
-            sid,
+        # A forced close is still not allowed to orphan a live actor.  Mark it
+        # close-after-turn and use the same fenced, session-scoped Stop path.
+        # The worker projects its durable terminal truth before deferred
+        # teardown removes the registry identity and releases memory.
+        stop_result = _request_session_stop(
+            str(sid or ""),
             session,
-            remove_session=True,
-            reason="session closed",
+            reason="session_force_closed",
+            stage="force_close",
+            close_after_turn=True,
         )
+        if not stop_result.get("quiesced"):
+            return _ok(
+                rid,
+                {
+                    "closed": False,
+                    "closing": True,
+                    "running": bool(stop_result.get("running")),
+                    "status": stop_result.get("status"),
+                    "persisted_session_id": session.get("session_key"),
+                },
+            )
     if not session:
         return _ok(rid, {"closed": False})
-    # Genuine session end — run end-of-session hooks AND close the memory
-    # connection so the holographic Postgres connection isn't orphaned.
-    _release_agent_memory(session.get("agent"), ended=True)
-    session["agent_memory_released"] = True
-    try:
-        from tools.approval import unregister_gateway_notify
-
-        unregister_gateway_notify(session["session_key"])
-    except Exception:
-        pass
-    try:
-        worker = session.get("slash_worker")
-        if worker:
-            worker.close()
-    except Exception:
-        pass
-    return _ok(rid, {"closed": True})
+    if registry_removed:
+        _release_closed_session_resources(session)
+        return _ok(rid, {"closed": True})
+    return _ok(
+        rid,
+        {
+            "closed": _finalize_session_close(
+                str(sid or ""),
+                session,
+                reason="session closed",
+            )
+        },
+    )
 
 
 @method("session.branch")
@@ -5160,63 +5324,67 @@ def _(rid, params: dict) -> dict:
             _unpin_registered_session(branch_session)
 
 
-@method("session.interrupt")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    was_running = bool(session.get("running"))
-    if hasattr(session["agent"], "interrupt"):
-        session["agent"].interrupt()
-    # Scope the pending-prompt release to THIS session.  A global
-    # _clear_pending() would collaterally cancel clarify/sudo/secret
-    # prompts on unrelated sessions sharing the same tui_gateway
-    # process, silently resolving them to empty strings.
-    _clear_pending(params.get("session_id", ""))
-    try:
-        from tools.approval import resolve_gateway_approval
+def _request_session_stop(
+    sid: str,
+    session: dict,
+    *,
+    reason: str = "session_stopped",
+    stage: str = "stop",
+    close_after_turn: bool = False,
+) -> dict:
+    """Cancel one accepted turn without projecting false terminal state.
 
-        resolve_gateway_approval(
-            session["session_key"],
-            "deny",
-            resolve_all=True,
-            reason="session_interrupted",
-        )
-    except Exception:
-        pass
-    if was_running:
-        payload = {
-            "stage": "interrupt",
-            "friction_kind": "user_abandoned",
-            "attempt_count": 1,
-            "friction_count": 1,
-            "outcome": "interrupted",
-            "abandoned": True,
-        }
-        _record_backend_event(
-            "experience.friction_detected",
-            str(params.get("session_id") or ""),
-            payload,
-            severity="warning",
-        )
-        _record_backend_event(
-            "experience.abandoned",
-            str(params.get("session_id") or ""),
-            payload,
-            severity="warning",
-        )
-    return _ok(rid, {"status": "interrupted"})
-
-
-@method("session.stop")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    was_running = bool(session.get("running"))
+    Every user-facing stop entry point must pass through this primitive.  It
+    linearizes cancellation against prompt admission, scopes process and
+    approval cleanup to the actor, and reports quiescence without clearing the
+    live session.  The prompt worker remains the sole owner of terminal receipt
+    projection and of the final ``running=False`` transition.
+    """
     interrupted = False
     killed = 0
-    if hasattr(session["agent"], "interrupt"):
+    fence_snapshot = None
+    turn_fence = session.get("turn_fence")
+    turn_token = session.get("turn_token")
+    history_lock = session.get("history_lock")
+    if history_lock is not None:
+        history_lock.acquire()
+    try:
+        # Serialize Stop against prompt admission's running/token publication.
+        # Once a submit has admitted a generation under this lock, Stop must
+        # observe and cancel that exact generation rather than report a stale
+        # idle session while the worker starts immediately afterward.
+        was_running = bool(session.get("running"))
+        turn_fence = session.get("turn_fence")
+        turn_token = session.get("turn_token")
+        if close_after_turn:
+            session["close_after_turn"] = True
+        if isinstance(turn_fence, TurnFence):
+            try:
+                fence_snapshot = turn_fence.request_cancel(
+                    turn_token,
+                    reason=reason,
+                    close_requested=close_after_turn,
+                )
+            except (TurnCancelled, RuntimeError):
+                logger.exception(
+                    "%s could not cancel exact turn session=%s",
+                    stage,
+                    session.get("session_key"),
+                )
+                fence_snapshot = turn_fence.snapshot()
+    finally:
+        if history_lock is not None:
+            history_lock.release()
+    terminal_already_won = bool(
+        isinstance(fence_snapshot, dict)
+        and fence_snapshot.get("terminal_committed")
+        and not fence_snapshot.get("cancelled")
+    )
+    if (
+        was_running
+        and not terminal_already_won
+        and hasattr(session["agent"], "interrupt")
+    ):
         try:
             session["agent"].interrupt()
             interrupted = True
@@ -5225,10 +5393,15 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.process_registry import process_registry
 
-        killed = process_registry.kill_all()
+        process_scope = str(session.get("session_key") or "")
+        if process_scope:
+            killed = process_registry.kill_all(session_key=process_scope)
     except Exception:
         pass
-    _clear_pending(params.get("session_id", ""))
+    # Scope the pending-prompt release to THIS session.  A global
+    # _clear_pending() would collaterally cancel clarify/sudo/secret prompts on
+    # unrelated sessions sharing the gateway process.
+    _clear_pending(sid)
     try:
         from tools.approval import resolve_gateway_approval
 
@@ -5236,40 +5409,83 @@ def _(rid, params: dict) -> dict:
             session["session_key"],
             "deny",
             resolve_all=True,
-            reason="session_stopped",
+            reason=reason,
         )
     except Exception:
         pass
     if was_running:
         payload = {
-            "stage": "stop",
+            "stage": stage,
             "friction_kind": "user_abandoned",
             "attempt_count": 1,
             "friction_count": 1,
-            "outcome": "stopped",
+            "outcome": "finishing" if terminal_already_won else "stopping",
             "abandoned": True,
         }
         _record_backend_event(
             "experience.friction_detected",
-            str(params.get("session_id") or ""),
+            sid,
             payload,
             severity="warning",
         )
         _record_backend_event(
             "experience.abandoned",
-            str(params.get("session_id") or ""),
+            sid,
             payload,
             severity="warning",
         )
-    _mark_session_idle(session)
+    if isinstance(turn_fence, TurnFence):
+        # Cancellation and cooperative worker exit can complete while the
+        # Stop RPC is resolving. Report the current fence truth, not the stale
+        # snapshot captured before interrupt/process cleanup.
+        fence_snapshot = turn_fence.snapshot()
+    fence_quiesced = bool(
+        fence_snapshot.get("quiesced")
+        if isinstance(fence_snapshot, dict)
+        else not was_running
+    )
+    running_now = bool(session.get("running"))
+    quiesced = fence_quiesced and not running_now
+    status = (
+        "stopped"
+        if quiesced and not running_now
+        else "finishing"
+        if terminal_already_won
+        else "stopping"
+    )
+    return {
+        "status": status,
+        "interrupted": interrupted,
+        "killed": killed,
+        "quiesced": quiesced,
+        "running": running_now,
+    }
+
+
+@method("session.interrupt")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    sid = str(params.get("session_id") or "")
     return _ok(
         rid,
-        {
-            "status": "stopped",
-            "interrupted": interrupted,
-            "killed": killed,
-        },
+        _request_session_stop(
+            sid,
+            session,
+            reason="session_interrupted",
+            stage="interrupt",
+        ),
     )
+
+
+@method("session.stop")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    sid = str(params.get("session_id") or "")
+    return _ok(rid, _request_session_stop(sid, session))
 
 
 # ── Delegation: subagent tree observability + controls ───────────────
@@ -6917,8 +7133,35 @@ def _make_async_delegate_sink(
     return _sink
 
 
-def _mark_session_idle(session: dict, *, clear_replay: bool = True) -> None:
-    """Release the dashboard running latch once the visible turn is complete."""
+def _turn_fence_for_session(session: dict) -> TurnFence:
+    """Return the one process-local turn fence owned by this live actor."""
+    fence = session.get("turn_fence")
+    if isinstance(fence, TurnFence):
+        return fence
+    # Legacy/test actors can predate the field. ``setdefault`` keeps the first
+    # object installed if two callers arrive together under the GIL.
+    candidate = TurnFence()
+    fence = session.setdefault("turn_fence", candidate)
+    if not isinstance(fence, TurnFence):
+        raise RuntimeError("session turn fence is invalid")
+    session.setdefault("turn_token", None)
+    return fence
+
+
+def _mark_session_idle(
+    session: dict,
+    *,
+    clear_replay: bool = True,
+    on_idle=None,
+) -> bool:
+    """Release the running latch only after the exact turn has quiesced."""
+    fence = session.get("turn_fence")
+    if isinstance(fence, TurnFence) and not fence.snapshot().get("quiesced"):
+        # Stop/Close may request cancellation while a provider or tool worker
+        # still owns a permit. Keep prompt admission closed until that worker
+        # exits and the fence reaches a real quiescent state.
+        session["running"] = True
+        return False
     if clear_replay:
         events_lock = session.get("events_lock")
         events = session.get("events")
@@ -6931,16 +7174,27 @@ def _mark_session_idle(session: dict, *, clear_replay: bool = True) -> None:
     lock = session.get("history_lock")
     if lock is None:
         session["running"] = False
+        session["turn_token"] = None
         session["running_tools"] = {}
         session["idle_since"] = time.monotonic()
-        return
+        if on_idle is not None:
+            on_idle()
+        return True
     with lock:
         session["running"] = False
+        session["turn_token"] = None
         session["running_tools"] = {}
         # Stamp when this turn went idle so the delegate re-wake watcher can
         # require a SUSTAINED quiet window before it speaks — never pouncing
         # in the microsecond gap between a user's back-to-back turns.
         session["idle_since"] = time.monotonic()
+        if on_idle is not None:
+            # Prompt admission owns this same history lock. Projecting the
+            # terminal event before releasing it guarantees that a client can
+            # only act on message.complete once the next generation is truly
+            # admissible; a racing submit waits here, then enters cleanly.
+            on_idle()
+    return True
 
 
 _DEBUG_TRACE_SECRET_KEYS = {
@@ -7056,6 +7310,8 @@ def _(rid, params: dict) -> dict:
     session_key = str(session.get("session_key") or sid)
     claim_key = (session_key, turn_ids["user"])
     receipt_inserted = False
+    turn_fence = _turn_fence_for_session(session)
+    turn_token = None
     with session["history_lock"]:
         # `_sess` can return immediately before a reset claims this actor. The
         # reset claims the same history lock before setting registry_resetting,
@@ -7313,6 +7569,19 @@ def _(rid, params: dict) -> dict:
             canonical_payload = receipt.get("payload")
             if not isinstance(canonical_payload, dict):
                 return _err(rid, 5009, "prompt persistence failed: invalid receipt payload")
+            try:
+                turn_token = turn_fence.begin_turn(
+                    turn_ids["user"],
+                    _PROMPT_EXECUTION_OWNER,
+                )
+            except TurnBusy:
+                snapshot = turn_fence.snapshot()
+                return _err(
+                    rid,
+                    4009,
+                    f"session busy ({snapshot.get('state') or 'running'})",
+                )
+            session["turn_token"] = turn_token
             _active_prompt_claims[claim_key] = {
                 "message_id": turn_ids["assistant"],
                 "text": receipt_text,
@@ -7371,7 +7640,10 @@ def _(rid, params: dict) -> dict:
         session_tokens = []
         terminalized = False
         terminalization_failed = False
-        session_released = False
+        terminal_payload_for_projection = None
+        turn_binding = None
+        turn_binding_entered = False
+        turn_worker_bound = False
         turn_started_at = None
         turn_usage_before = None
         turn_usage_after = None
@@ -7380,10 +7652,11 @@ def _(rid, params: dict) -> dict:
         turn_usage_error_type = ""
         reset_context_after_turn = False
         context_reset_warning = None
+        auto_title_payload = None
 
         def _finalize_terminal(payload: dict) -> bool:
             nonlocal receipt_terminal_status
-            nonlocal session_released
+            nonlocal terminal_payload_for_projection
             nonlocal terminalization_failed
             nonlocal terminalized
 
@@ -7395,6 +7668,26 @@ def _(rid, params: dict) -> dict:
             receipt_terminal_status = str(
                 terminal_payload.get("status") or "error"
             )
+            # Custom/test agents may not seal their own terminal result like
+            # AIAgent does.  Seal here as the gateway backstop so Stop and the
+            # durable terminal commit still have one ordering decision.  If
+            # cancellation won that race, never persist a success-shaped late
+            # return from an interrupt-ignoring worker.
+            fence_terminal = turn_fence.snapshot()
+            if not fence_terminal.get("terminal_committed"):
+                fence_terminal = turn_fence.seal_terminal(
+                    turn_token,
+                    terminal_status=receipt_terminal_status,
+                )
+            if fence_terminal.get("cancelled"):
+                terminal_payload.update(
+                    {
+                        "status": "interrupted",
+                        "text": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                    }
+                )
+                terminal_payload.pop("rendered", None)
+                receipt_terminal_status = "interrupted"
             try:
                 committed = _commit_prompt_terminal_outcome(
                     db,
@@ -7436,14 +7729,22 @@ def _(rid, params: dict) -> dict:
                 return False
 
             terminalized = True
+            terminal_payload_for_projection = terminal_payload
             session.pop("prompt_outcome_unknown", None)
-            _emit("message.complete", sid, terminal_payload)
-            if not reset_context_after_turn:
-                _mark_session_idle(session, clear_replay=False)
-                session_released = True
             return True
 
         try:
+            if turn_token is None:
+                raise RuntimeError("prompt turn was not admitted")
+            turn_fence.bind_worker(turn_token)
+            turn_worker_bound = True
+            turn_binding = bind_turn_fence(
+                turn_fence,
+                turn_token,
+                defer_terminal_seal=True,
+            )
+            turn_binding.__enter__()
+            turn_binding_entered = True
             claimed = db.claim_prompt_receipt(
                 session_key,
                 receipt_user_id,
@@ -7530,6 +7831,8 @@ def _(rid, params: dict) -> dict:
                 correlation_id=receipt_user_id,
                 parent_correlation_id=receipt_parent_correlation_id,
                 relation=receipt_relation,
+                turn_fence=turn_fence,
+                turn_token=turn_token,
             )
             turn_usage_before = _get_usage(agent)
             # Wire the async-delegation sink so top-level delegate_task calls
@@ -7664,9 +7967,27 @@ def _(rid, params: dict) -> dict:
             status = "complete"
 
             while True:
+                # A Stop can win after an intermediate continuation frame was
+                # projected but before the next agent round begins.  Do not
+                # invoke the agent again once cancellation owns the turn.
+                if (
+                    followup_rounds > 0
+                    and turn_token is not None
+                    and turn_fence.is_cancelled(turn_token)
+                ):
+                    _finalize_terminal(
+                        {
+                            "text": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                            "status": "interrupted",
+                            "message_id": turn_ids["assistant"],
+                        }
+                    )
+                    break
                 streamer = make_stream_renderer(cols)
 
                 def _stream(delta, _streamer=streamer):
+                    if turn_token is None or not turn_fence.can_publish(turn_token):
+                        return
                     payload = {"text": delta, "message_id": turn_ids["assistant"]}
                     if _streamer and (r := _streamer.feed(delta)) is not None:
                         payload["rendered"] = r
@@ -7691,6 +8012,25 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
+                # The fence, not a cooperative provider/agent return value,
+                # owns cancellation truth. An interrupt-ignoring worker may
+                # return a success-shaped payload after Stop; never let that
+                # late result terminalize the accepted prompt as complete.
+                if turn_token is not None and turn_fence.is_cancelled(turn_token):
+                    cancelled_result = dict(result) if isinstance(result, dict) else {}
+                    cancelled_result.update(
+                        {
+                            "completed": False,
+                            "durability_confirmed": False,
+                            "failed": True,
+                            "final_response": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                            "interrupted": True,
+                            "partial": True,
+                            "transcript_durable": False,
+                            "turn_exit_reason": "cancelled_before_tui_terminalization",
+                        }
+                    )
+                    result = cancelled_result
                 turn_usage_result = result
                 # Compaction redesign: a compacting turn NO LONGER rotates the
                 # session id — the transcript is append-only and compaction lives
@@ -7867,6 +8207,27 @@ def _(rid, params: dict) -> dict:
                     # the digest to "Worked for Ns" and the steered
                     # continuation renders as a disconnected new turn.
                     payload["followup"] = True
+                # Cancellation may land after run_conversation returned but
+                # before its queued-steer result is projected.  Revalidate at
+                # the boundary so a Stop cannot publish a success-shaped
+                # followup frame or schedule another round.
+                if (
+                    has_followup
+                    and turn_token is not None
+                    and turn_fence.is_cancelled(turn_token)
+                ):
+                    has_followup = False
+                    followup = None
+                    status = "interrupted"
+                    receipt_terminal_status = "interrupted"
+                    payload.update(
+                        {
+                            "text": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                            "status": "interrupted",
+                        }
+                    )
+                    payload.pop("followup", None)
+                    payload.pop("rendered", None)
                 if not has_followup:
                     turn_usage_after = completion_usage
                     turn_latency_ms = int(
@@ -7878,7 +8239,27 @@ def _(rid, params: dict) -> dict:
                     # This closes only an intermediate visual round. The
                     # accepted prompt receipt remains running and is committed
                     # against the final re-minted assistant id below.
-                    _emit("message.complete", sid, payload)
+                    try:
+                        with turn_fence.acquire_permit(
+                            turn_token,
+                            "intermediate_projection",
+                            {"message_id": turn_ids["assistant"]},
+                        ):
+                            _emit("message.complete", sid, payload)
+                    except TurnCancelled:
+                        has_followup = False
+                        followup = None
+                        status = "interrupted"
+                        receipt_terminal_status = "interrupted"
+                        payload.update(
+                            {
+                                "text": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                                "status": "interrupted",
+                            }
+                        )
+                        payload.pop("followup", None)
+                        payload.pop("rendered", None)
+                        _finalize_terminal(payload)
                 if followup_rounds > 0 and not has_followup:
                     _record_backend_event(
                         "experience.recovered",
@@ -7893,39 +8274,44 @@ def _(rid, params: dict) -> dict:
                         },
                     )
 
-                # Auto-generate a session title after the first exchange.
-                # CLI parity: cli.py fires maybe_auto_title here, but the
-                # gateway never did — so dashboard/Electron sessions kept
-                # the raw first prompt (typos and all) as their sidebar
-                # label forever. maybe_auto_title is idempotent: it no-ops
-                # once a title exists or past the first couple exchanges,
-                # so running it on every first-pass turn is safe.
+                # Capture auto-title inputs from the first exchange, but run
+                # the best-effort metadata update only after the accepted turn
+                # is fenced, terminal, and visible. It must never hold the
+                # composer busy or masquerade as unfinished user work.
                 if (
                     followup_rounds == 0
                     and status == "complete"
                     and isinstance(raw, str)
                     and raw.strip()
                 ):
-                    try:
-                        from agent.title_generator import maybe_auto_title
-
-                        maybe_auto_title(
-                            _get_db(),
-                            session.get("session_key"),
-                            text if isinstance(text, str) else "",
-                            raw,
-                            result.get("messages")
-                            if isinstance(result, dict)
-                            else None,
-                        )
-                    except Exception as title_exc:
-                        logger.debug("auto-title skipped: %s", title_exc)
+                    auto_title_payload = (
+                        text if isinstance(text, str) else "",
+                        raw,
+                        result.get("messages")
+                        if isinstance(result, dict)
+                        else None,
+                    )
 
                 if (
                     not followup
                     or not str(followup).strip()
                     or followup_rounds >= 8
                 ):
+                    break
+                # An intermediate projection permit may have won just before
+                # Stop.  Once it releases, cancellation must still prevent
+                # identity reminting and continuation start.
+                if (
+                    turn_token is not None
+                    and turn_fence.is_cancelled(turn_token)
+                ):
+                    _finalize_terminal(
+                        {
+                            "text": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                            "status": "interrupted",
+                            "message_id": turn_ids["assistant"],
+                        }
+                    )
                     break
                 followup_rounds += 1
                 current_prompt = str(followup).strip()
@@ -7944,19 +8330,34 @@ def _(rid, params: dict) -> dict:
                 # showed.
                 turn_ids["user"] = f"steer.{_wire_message_id()}"
                 turn_ids["assistant"] = _wire_message_id()
-                _emit(
-                    "message.start",
-                    sid,
-                    {
-                        "message_id": turn_ids["assistant"],
-                        "user_message_id": turn_ids["user"],
-                        # This round continues the same visual run under the
-                        # injected steer — the dashboard keeps the existing
-                        # digest ticking and drops a "Conversation steered"
-                        # marker instead of starting a fresh bubble.
-                        "continuation": True,
-                    },
-                )
+                try:
+                    with turn_fence.acquire_permit(
+                        turn_token,
+                        "continuation_projection",
+                        {"message_id": turn_ids["assistant"]},
+                    ):
+                        _emit(
+                            "message.start",
+                            sid,
+                            {
+                                "message_id": turn_ids["assistant"],
+                                "user_message_id": turn_ids["user"],
+                                # This round continues the same visual run under the
+                                # injected steer — the dashboard keeps the existing
+                                # digest ticking and drops a "Conversation steered"
+                                # marker instead of starting a fresh bubble.
+                                "continuation": True,
+                            },
+                        )
+                except TurnCancelled:
+                    _finalize_terminal(
+                        {
+                            "text": _INTERRUPTED_BEFORE_RESPONSE_MESSAGE,
+                            "status": "interrupted",
+                            "message_id": turn_ids["assistant"],
+                        }
+                    )
+                    break
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool
@@ -8050,20 +8451,148 @@ def _(rid, params: dict) -> dict:
                     )
             with _prompt_claims_lock:
                 _active_prompt_claims.pop(claim_key, None)
-            if terminalized and not session_released:
-                # message.complete was projected only after the durable join.
-                # Its replay ring is cleared by write_json only when delivery
-                # succeeds; do not erase a terminal frame a disconnected client
-                # still needs.
-                _mark_session_idle(session, clear_replay=False)
-            elif not claimed:
-                # A lost claim never executed the agent and remains governed by
-                # the durable receipt owner, so this local actor can be released.
-                _mark_session_idle(session)
+            if turn_binding_entered and turn_binding is not None:
+                try:
+                    turn_binding.__exit__(None, None, None)
+                except BaseException:
+                    # Permit cleanup is fail-closed. ``finish_worker`` below
+                    # will retain a non-quiescent fence if a raw worker still
+                    # owns an operation; never manufacture idle from this.
+                    logger.exception(
+                        "turn-fence context cleanup failed session=%s message=%s",
+                        session_key,
+                        receipt_user_id,
+                    )
+            try:
+                if turn_token is None:
+                    raise RuntimeError("prompt turn token disappeared")
+                if turn_worker_bound:
+                    fence_snapshot = turn_fence.finish_worker(
+                        turn_token,
+                        terminal_status=receipt_terminal_status,
+                    )
+                else:
+                    fence_snapshot = turn_fence.abandon_admission(
+                        turn_token,
+                        reason="prompt worker could not bind",
+                    )
+            except (TurnBusy, TurnCancelled, RuntimeError):
+                logger.exception(
+                    "turn-fence worker cleanup failed session=%s message=%s",
+                    session_key,
+                    receipt_user_id,
+                )
+                fence_snapshot = turn_fence.snapshot()
+            def _project_after_quiescence() -> None:
+                if terminalization_failed:
+                    return
+                if _sessions.get(sid) is not session:
+                    return
+                if session.get("turn_token") is not turn_token:
+                    return
+                if terminalized and isinstance(
+                    terminal_payload_for_projection, dict
+                ):
+                    # Durable terminal truth was committed above. Project it
+                    # only after the worker and every already-won operation
+                    # permit have drained. Release prompt admission under its
+                    # history lock immediately before projecting completion.
+                    released = _mark_session_idle(
+                        session,
+                        clear_replay=False,
+                        on_idle=lambda: _emit(
+                            "message.complete",
+                            sid,
+                            terminal_payload_for_projection,
+                        ),
+                    )
+                    if released and auto_title_payload is not None:
+                        try:
+                            from agent.title_generator import maybe_auto_title
+
+                            title_prompt, title_response, title_messages = (
+                                auto_title_payload
+                            )
+                            maybe_auto_title(
+                                _get_db(),
+                                session.get("session_key"),
+                                title_prompt,
+                                title_response,
+                                title_messages,
+                            )
+                        except Exception as title_exc:
+                            logger.debug("auto-title skipped: %s", title_exc)
+                    if released and session.get("close_after_turn"):
+                        _finalize_session_close(
+                            sid,
+                            session,
+                            reason="forced session close after turn",
+                        )
+                elif not claimed:
+                    # A lost claim never executed the agent and remains
+                    # governed by the durable receipt owner.
+                    released = _mark_session_idle(session)
+                    if released and session.get("close_after_turn"):
+                        _finalize_session_close(
+                            sid,
+                            session,
+                            reason="forced session close after abandoned admission",
+                        )
+
+            if fence_snapshot.get("quiesced"):
+                _project_after_quiescence()
+            elif not terminalization_failed and turn_token is not None:
+                def _await_and_project() -> None:
+                    try:
+                        while not turn_fence.wait_generation_quiesced(
+                            turn_token,
+                            timeout=30.0,
+                        ):
+                            snapshot = turn_fence.snapshot()
+                            logger.error(
+                                "turn-fence quiescence stalled session=%s "
+                                "message=%s state=%s worker=%s permits=%s",
+                                session_key,
+                                receipt_user_id,
+                                snapshot.get("state"),
+                                snapshot.get("worker_active"),
+                                snapshot.get("in_flight_permits"),
+                            )
+                            _record_backend_event(
+                                "session.quiescence_stalled",
+                                sid,
+                                {
+                                    "correlation_id": receipt_user_id,
+                                    "state": snapshot.get("state"),
+                                    "worker_active": bool(
+                                        snapshot.get("worker_active")
+                                    ),
+                                    "in_flight_permits": int(
+                                        snapshot.get("in_flight_permits") or 0
+                                    ),
+                                    "outcome": "still_waiting",
+                                },
+                                severity="error",
+                            )
+                        _project_after_quiescence()
+                    except Exception:
+                        logger.exception(
+                            "turn-fence quiescence wait failed session=%s message=%s",
+                            session_key,
+                            receipt_user_id,
+                        )
+
+                threading.Thread(
+                    target=_await_and_project,
+                    name=f"tui-turn-quiesce-{receipt_user_id[:12]}",
+                    daemon=True,
+                ).start()
+
             # A claimed turn whose terminal commit failed deliberately stays
             # busy/fail-closed. Removing the process claim makes a later cold
             # restart classify the stale running receipt as outcome_unknown;
-            # it must never execute the agent again automatically.
+            # it must never execute the agent again automatically. Usage is
+            # post-terminal bookkeeping and does not hold prompt admission.
             if claimed and turn_started_at is not None:
                 _record_tui_turn_usage(
                     session_id=session_key,
@@ -8090,6 +8619,18 @@ def _(rid, params: dict) -> dict:
     except Exception as exc:
         with _prompt_claims_lock:
             _active_prompt_claims.pop(claim_key, None)
+        if turn_token is not None:
+            try:
+                turn_fence.abandon_admission(
+                    turn_token,
+                    reason=f"prompt worker did not start: {type(exc).__name__}",
+                )
+            except (TurnBusy, TurnCancelled, RuntimeError):
+                logger.exception(
+                    "turn-fence admission cleanup failed session=%s message=%s",
+                    session_key,
+                    receipt_user_id,
+                )
         _mark_session_idle(session)
         return _err(
             rid,
@@ -8453,12 +8994,13 @@ def _(rid, params: dict) -> dict:
 
 def _respond(rid, params, key):
     r = params.get("request_id", "")
-    entry = _pending.get(r)
-    if not entry:
-        return _err(rid, 4009, f"no pending {key} request")
-    _, ev = entry
-    _answers[r] = params.get(key, "")
-    ev.set()
+    with _pending_lock:
+        entry = _pending.get(r)
+        if not entry:
+            return _err(rid, 4009, f"no pending {key} request")
+        _, ev = entry
+        _answers[r] = params.get(key, "")
+        ev.set()
     return _ok(rid, {"status": "ok"})
 
 
@@ -8984,7 +9526,28 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.process_registry import process_registry
 
-        return _ok(rid, {"killed": process_registry.kill_all()})
+        sid = str(params.get("session_id") or "")
+        if sid:
+            session = _sessions.get(sid)
+            if not session:
+                return _err(rid, 4001, "session not found")
+            session_key = str(session.get("session_key") or "")
+            if not session_key:
+                return _err(rid, 4001, "session has no process scope")
+            return _ok(
+                rid,
+                {"killed": process_registry.kill_all(session_key=session_key)},
+            )
+        if (
+            params.get("scope") == "global"
+            and params.get("confirm_global") is True
+        ):
+            return _ok(rid, {"killed": process_registry.kill_all()})
+        return _err(
+            rid,
+            4004,
+            "process.stop requires session_id or explicit confirmed global scope",
+        )
     except Exception as e:
         return _err(rid, 5010, str(e))
 
@@ -9312,43 +9875,29 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4018, f"failed to spawn gateway restart: {e}")
 
     if name == "stop":
-        # Interrupt the active turn + kill any in-flight tool processes.
-        # Same primitives as session.interrupt + the process_registry
-        # kill_all that already runs in _mirror_slash_side_effects.
-        agent = session.get("agent") if session else None
-        interrupted = False
-        if agent and hasattr(agent, "interrupt"):
-            try:
-                agent.interrupt()
-                interrupted = True
-            except Exception:
-                pass
-        killed = 0
-        try:
-            from tools.process_registry import process_registry
-            killed = process_registry.kill_all()
-        except Exception:
-            pass
-        _clear_pending(params.get("session_id", ""))
-        try:
-            from tools.approval import resolve_gateway_approval
-            if session:
-                resolve_gateway_approval(
-                    session["session_key"],
-                    "deny",
-                    resolve_all=True,
-                    reason="session_stopped",
-                )
-        except Exception:
-            pass
-        parts = []
-        if interrupted:
-            parts.append("interrupted current turn")
+        if not session:
+            return _err(rid, 4001, "no active session to stop")
+        sid = str(params.get("session_id") or "")
+        stop_result = _request_session_stop(sid, session)
+        status = str(stop_result.get("status") or "stopping")
+        killed = int(stop_result.get("killed") or 0)
+        detail = (
+            "stopped"
+            if status == "stopped"
+            else "completion already won; finishing cleanup"
+            if status == "finishing"
+            else "stop requested; waiting for the active turn to quiesce"
+        )
         if killed:
-            parts.append(f"killed {killed} tool process(es)")
-        if not parts:
-            parts.append("no active agent or tool processes to stop")
-        return _ok(rid, {"type": "exec", "output": "🛑 " + ", ".join(parts) + "."})
+            detail += f"; killed {killed} session-scoped tool process(es)"
+        return _ok(
+            rid,
+            {
+                "type": "exec",
+                "output": f"🛑 {detail}.",
+                "stop": stop_result,
+            },
+        )
 
     if name == "retry":
         if not session:
@@ -9897,10 +10446,6 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             _emit("session.info", sid, _session_info(agent))
         elif name == "reload-mcp" and agent and hasattr(agent, "reload_mcp_tools"):
             agent.reload_mcp_tools()
-        elif name == "stop":
-            from tools.process_registry import process_registry
-
-            process_registry.kill_all()
     except Exception as e:
         return f"live session sync failed: {e}"
     return ""
@@ -10027,6 +10572,28 @@ def _(rid, params: dict) -> dict:
     # note to the model is lost, which is low-severity.)
     _cmd_parts = cmd.split() if not cmd.startswith("/") else cmd.lstrip("/").split()
     _cmd_base = _cmd_parts[0] if _cmd_parts else ""
+
+    if _cmd_base == "stop":
+        sid = str(params.get("session_id") or "")
+        stop_result = _request_session_stop(sid, session)
+        status = str(stop_result.get("status") or "stopping")
+        killed = int(stop_result.get("killed") or 0)
+        detail = (
+            "stopped"
+            if status == "stopped"
+            else "completion already won; finishing cleanup"
+            if status == "finishing"
+            else "stop requested; waiting for the active turn to quiesce"
+        )
+        if killed:
+            detail += f"; killed {killed} session-scoped tool process(es)"
+        return _ok(
+            rid,
+            {
+                "output": f"🛑 {detail}.",
+                "stop": stop_result,
+            },
+        )
 
     if _cmd_base in _PENDING_INPUT_COMMANDS:
         return _err(

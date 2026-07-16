@@ -18,6 +18,7 @@ import re
 import sqlite3
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -111,6 +112,7 @@ _KIND_FORMAT_CONTRACTS: dict[str, frozenset[str]] = {
     "contract": frozenset({".docx", ".pdf"}),
     "cma_report": frozenset({".pdf"}),
     "mlc_pdf": frozenset({".pdf"}),
+    "provider_form_pdf": frozenset({".pdf"}),
     "title_search": frozenset({".pdf", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}),
     "signed_envelope": frozenset({".pdf"}),
     "signed_docs": frozenset({".pdf"}),
@@ -3203,10 +3205,14 @@ def record_run_result(
             output_path = attachment["filePath"]
     if normalized_status in {"succeeded", "completed"}:
         updates = _explicit_checklist_updates(checklist_updates)
-        for artifact in artifact_rows:
-            hinted = _ARTIFACT_CHECKLIST_HINTS.get(str(artifact.get("kind") or ""))
-            if hinted:
-                updates.setdefault(hinted, True)
+        # A manual provider-export claim proves only that this exact task was
+        # reviewed with this exact PDF.  It is not authenticated provider
+        # origin and must never auto-satisfy a stage/current-form checklist.
+        if _manual_forms_review_receipt is None:
+            for artifact in artifact_rows:
+                hinted = _ARTIFACT_CHECKLIST_HINTS.get(str(artifact.get("kind") or ""))
+                if hinted:
+                    updates.setdefault(hinted, True)
         updates, protected_skipped = _filter_protected_skill_checklist_updates(updates, actor=actor)
         result_payload["protectedChecklistSkipped"] = protected_skipped
         payload["result"] = result_payload
@@ -3318,6 +3324,246 @@ def record_run_result(
     return _row_to_action_run(updated)
 
 
+_MANUAL_FORMS_SOURCE_RECEIPT_SCHEMA = "elevate.manual-provider-export-claim.v1"
+_MANUAL_FORMS_REVIEW_SCHEMA = "elevate.manual-forms-review.v2"
+_MANUAL_FORMS_VERSION_MAX_AGE = timedelta(days=30)
+_GENERIC_DEAL_REFERENCES = {
+    "buyer",
+    "buyers",
+    "client",
+    "clients",
+    "deal",
+    "listing",
+    "manual",
+    "property",
+    "test",
+}
+
+
+def _normalized_document_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _manual_forms_reviewer(value: Any) -> str:
+    reviewer = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(reviewer) < 3 or _normalized_document_text(reviewer) in {
+        "human",
+        "me",
+        "realtor",
+        "reviewer",
+        "test",
+        "user",
+    }:
+        raise ValueError("manual document completion requires the reviewer's name")
+    return reviewer
+
+
+def _manual_forms_provider_identity(conn: sqlite3.Connection) -> str:
+    row = conn.execute(
+        "SELECT provider, value_json FROM admin_setup_items WHERE key='forms_provider'"
+    ).fetchone()
+    if row is None:
+        raise ValueError("forms provider is not configured in Admin Setup")
+    value = _decode_json(row["value_json"]) or {}
+    value_provider = value.get("provider") if isinstance(value, Mapping) else None
+    provider = re.sub(r"\s+", " ", str(row["provider"] or value_provider or "").strip())
+    if not provider:
+        raise ValueError("forms provider is not configured in Admin Setup")
+    return provider
+
+
+def _manual_forms_deal_references(
+    deal: Mapping[str, Any],
+    *,
+    form_code: str,
+) -> list[str]:
+    address = _normalized_document_text(deal.get("listingAddress"))
+    if form_code not in {"BAEC", "DORTS", "PNC"}:
+        # Property/transaction forms are never allowed to fall back to a client
+        # name: the same client may have multiple simultaneous properties.
+        return [address] if len(address) >= 5 else []
+
+    values: list[Any] = [deal.get("listingAddress")]
+    extra = deal.get("extraToggles")
+    if isinstance(extra, Mapping):
+        for key in ("buyers", "buyerNames", "clients", "clientNames", "sellers", "sellerNames"):
+            raw = extra.get(key)
+            if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+                for item in raw:
+                    values.append(item.get("name") if isinstance(item, Mapping) else item)
+            elif raw:
+                values.append(raw)
+    values.append(deal.get("title"))
+    references: list[str] = []
+    for value in values:
+        normalized = _normalized_document_text(value)
+        if (
+            len(normalized) >= 5
+            and normalized not in _GENERIC_DEAL_REFERENCES
+            and normalized not in references
+        ):
+            references.append(normalized)
+    return references
+
+
+def _manual_forms_pdf_text(path: Path) -> str:
+    """Extract bounded text/widget values used only for fail-closed identity checks."""
+    try:
+        import fitz
+
+        chunks: list[str] = []
+        total = 0
+        with fitz.open(path) as document:
+            for page_index in range(min(document.page_count, 80)):
+                page = document.load_page(page_index)
+                page_text = page.get_text("text") or ""
+                if page_text:
+                    chunks.append(page_text)
+                    total += len(page_text)
+                try:
+                    widgets = page.widgets() or []
+                    for widget in widgets:
+                        widget_value = str(getattr(widget, "field_value", "") or "")
+                        if widget_value:
+                            chunks.append(widget_value)
+                            total += len(widget_value)
+                except Exception:
+                    pass
+                if total >= 2 * 1024 * 1024:
+                    break
+    except Exception as exc:
+        raise ValueError("reviewed provider PDF text could not be verified") from exc
+    text = _normalized_document_text("\n".join(chunks)[: 2 * 1024 * 1024])
+    if not text:
+        raise ValueError("reviewed provider PDF has no verifiable text or form values")
+    return text
+
+
+def _manual_forms_form_markers(form_code: str, form_title: str) -> tuple[str, ...]:
+    markers = {
+        "MLC": ("multiple listing contract",),
+        "CPS-res": ("contract of purchase and sale",),
+        "BAEC": (
+            "buyer agency exclusive contract",
+            "buyers agency exclusive contract",
+            "buyer s agency exclusive contract",
+        ),
+        "DORTS": (
+            "disclosure of representation in trading services",
+            "dorts",
+        ),
+        "PNC": ("privacy notice consent", "privacy notice and consent", "pnc"),
+    }.get(form_code)
+    if markers:
+        return markers
+    normalized_title = _normalized_document_text(form_title)
+    return (normalized_title,) if normalized_title else ()
+
+
+def _manual_forms_iso_datetime(value: Any, label: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{label} is required")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _manual_forms_version_provenance(
+    *,
+    version_status: str,
+    document_version: str | None,
+    effective_date: str | None,
+    version_verified_at: str | None,
+) -> dict[str, str | None]:
+    status = str(version_status or "").strip().lower()
+    version = str(document_version or "").strip() or None
+    effective = str(effective_date or "").strip() or None
+    checked_at = str(version_verified_at or "").strip() or None
+    if status not in {"verified", "unverified"}:
+        raise ValueError("versionStatus must be verified or unverified")
+    if effective:
+        try:
+            effective_value = datetime.strptime(effective, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("effectiveDate must use YYYY-MM-DD") from exc
+        if effective_value > datetime.now(timezone.utc).date():
+            raise ValueError("effectiveDate cannot be in the future")
+    if status == "verified":
+        if not (version or effective):
+            raise ValueError("verified form version requires documentVersion or effectiveDate")
+        verified_at = _manual_forms_iso_datetime(checked_at, "versionVerifiedAt")
+        now = datetime.now(timezone.utc)
+        if verified_at > now + timedelta(minutes=5):
+            raise ValueError("versionVerifiedAt cannot be in the future")
+        if now - verified_at > _MANUAL_FORMS_VERSION_MAX_AGE:
+            raise ValueError("form-version verification is stale; verify it again")
+    elif checked_at:
+        raise ValueError("unverified version must not claim versionVerifiedAt")
+    return {
+        "versionStatus": status,
+        "documentVersion": version,
+        "effectiveDate": effective,
+        "versionVerifiedAt": checked_at,
+    }
+
+
+def _manual_forms_source_receipt(
+    source_receipt: Mapping[str, Any] | None,
+    *,
+    deal_id: str,
+    run_id: str,
+    form_code: str,
+    provider: str,
+    reviewer_name: str,
+    artifact_sha256: str,
+    allowed_deal_references: Sequence[str],
+    version: Mapping[str, str | None],
+) -> dict[str, Any]:
+    if not isinstance(source_receipt, Mapping):
+        raise ValueError("a task-bound forms-provider source receipt is required")
+    receipt_id = re.sub(r"\s+", " ", str(source_receipt.get("receiptId") or "").strip())
+    if not receipt_id or len(receipt_id) > 200:
+        raise ValueError("source receipt receiptId is required")
+    expected = {
+        "schema": _MANUAL_FORMS_SOURCE_RECEIPT_SCHEMA,
+        "sourceVerified": False,
+        "dealId": deal_id,
+        "taskId": run_id,
+        "formCode": form_code,
+        "provider": provider,
+        "reviewerName": reviewer_name,
+        "artifactSha256": artifact_sha256,
+        **version,
+    }
+    for key, expected_value in expected.items():
+        actual = source_receipt.get(key)
+        actual_value = str(actual).strip() if actual is not None else None
+        normalized_expected = str(expected_value).strip() if expected_value is not None else None
+        if actual_value != normalized_expected:
+            raise ValueError(f"source receipt mismatch for {key}")
+    deal_reference = _normalized_document_text(source_receipt.get("dealReference"))
+    if not deal_reference or deal_reference not in set(allowed_deal_references):
+        raise ValueError("source receipt mismatch for dealReference")
+    return {
+        "schema": _MANUAL_FORMS_SOURCE_RECEIPT_SCHEMA,
+        "sourceVerified": False,
+        "receiptId": receipt_id,
+        "dealId": deal_id,
+        "taskId": run_id,
+        "formCode": form_code,
+        "provider": provider,
+        "reviewerName": reviewer_name,
+        "artifactSha256": artifact_sha256,
+        "dealReference": deal_reference,
+        **version,
+    }
+
+
 def complete_run_with_reviewed_manual_pdf(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -3326,14 +3572,23 @@ def complete_run_with_reviewed_manual_pdf(
     kind: str,
     file_path: str,
     reviewed: bool,
+    form_code: str,
+    provider: str,
+    reviewer_name: str,
+    version_status: str,
+    source_receipt: Mapping[str, Any],
+    document_version: str | None = None,
+    effective_date: str | None = None,
+    version_verified_at: str | None = None,
     summary: str | None = None,
     actor: str = "human",
 ) -> dict[str, Any]:
-    """Close a parked exact-Beta MLC/CPS run with a human-reviewed PDF.
+    """Close one task-bound exact-Beta provider-form run with reviewed evidence.
 
     This is the truthful Option-B escape hatch: it never claims provider
-    access or dispatch. The persisted receipt binds the human actor, semantic
-    document kind, canonical local artifact, content hash, and review time.
+    access or dispatch. The persisted receipt binds the exact deal, run, BC
+    form code, configured provider, named reviewer, version truth, canonical
+    artifact, and server-computed content hash.
     """
     from elevate_constants import exact_realtor_beta_active
 
@@ -3343,7 +3598,8 @@ def complete_run_with_reviewed_manual_pdf(
         raise PermissionError("manual document completion requires a human actor")
     if reviewed is not True:
         raise ValueError("confirm that the PDF was reviewed before completing the run")
-    if get_deal(conn, deal_id) is None:
+    deal = get_deal(conn, deal_id)
+    if deal is None:
         raise LookupError(f"deal {deal_id!r} not found")
     row = conn.execute(
         "SELECT * FROM admin_action_runs WHERE id=? AND deal_id=?",
@@ -3353,18 +3609,24 @@ def complete_run_with_reviewed_manual_pdf(
         raise LookupError(f"action run {run_id!r} not found for deal {deal_id!r}")
 
     from elevate_cli.data.dispatch import (
-        forms_document_type_for_run,
+        forms_document_spec_for_run,
         live_forms_provider_block_reason_for_run,
-        required_forms_artifact_kind_for_run,
     )
 
-    document_type = forms_document_type_for_run(conn, run_id)
-    expected_kind = required_forms_artifact_kind_for_run(conn, run_id)
-    if document_type not in {"mlc", "cps"} or not expected_kind:
-        raise ValueError("run is not semantic MLC/CPS document creation")
+    document_spec = forms_document_spec_for_run(conn, run_id) or {}
+    document_type = str(document_spec.get("documentType") or "")
+    expected_form_code = str(document_spec.get("formCode") or "")
+    form_title = str(document_spec.get("formTitle") or "")
+    expected_kind = str(document_spec.get("artifactKind") or "")
+    if not expected_form_code or not expected_kind or document_type in {"forms", "forms_bundle"}:
+        raise ValueError("run is not bound to one supported BC provider form")
+    if str(form_code or "").strip() != expected_form_code:
+        raise ValueError(
+            f"manual completion requires form code {expected_form_code} for this task"
+        )
     if str(kind or "").strip() != expected_kind:
         raise ValueError(
-            f"manual {document_type.upper()} completion requires artifact kind {expected_kind}"
+            f"manual {expected_form_code} completion requires artifact kind {expected_kind}"
         )
     if not live_forms_provider_block_reason_for_run(conn, run_id):
         raise ValueError("run is not blocked on unavailable live forms-provider access")
@@ -3372,14 +3634,66 @@ def complete_run_with_reviewed_manual_pdf(
     canonical_path = _validated_deal_attachment_path(file_path)
     path = Path(canonical_path)
     if path.suffix.lower() != ".pdf":
-        raise ValueError("manual MLC/CPS completion requires a reviewed PDF")
+        raise ValueError("manual provider-form completion requires a reviewed PDF")
     _validate_deal_attachment_kind(expected_kind, path)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     sha256 = digest.hexdigest()
-    idempotency_key = f"manual-reviewed-pdf:{run_id}:{sha256}"
+    configured_provider = _manual_forms_provider_identity(conn)
+    submitted_provider = re.sub(r"\s+", " ", str(provider or "").strip())
+    if _normalized_document_text(submitted_provider) != _normalized_document_text(
+        configured_provider
+    ):
+        raise ValueError("provider does not match the forms provider in Admin Setup")
+    named_reviewer = _manual_forms_reviewer(reviewer_name)
+    version = _manual_forms_version_provenance(
+        version_status=version_status,
+        document_version=document_version,
+        effective_date=effective_date,
+        version_verified_at=version_verified_at,
+    )
+    deal_references = _manual_forms_deal_references(
+        deal,
+        form_code=expected_form_code,
+    )
+    if not deal_references:
+        raise ValueError(
+            "deal has no strong document-verifiable reference for this form; update the deal first"
+        )
+    bound_source_receipt = _manual_forms_source_receipt(
+        source_receipt,
+        deal_id=deal_id,
+        run_id=run_id,
+        form_code=expected_form_code,
+        provider=configured_provider,
+        reviewer_name=named_reviewer,
+        artifact_sha256=sha256,
+        allowed_deal_references=deal_references,
+        version=version,
+    )
+    pdf_text = _manual_forms_pdf_text(path)
+    form_markers = _manual_forms_form_markers(expected_form_code, form_title)
+    if not form_markers or not any(marker in pdf_text for marker in form_markers):
+        raise ValueError(
+            f"reviewed PDF does not identify the task-bound form {expected_form_code}"
+        )
+    deal_reference = str(bound_source_receipt["dealReference"])
+    if deal_reference not in pdf_text:
+        raise ValueError("reviewed PDF does not identify this deal")
+    source_receipt_sha256 = hashlib.sha256(
+        json.dumps(
+            bound_source_receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    idempotency_key = (
+        f"manual-reviewed-pdf-v2:{run_id}:{expected_form_code}:{sha256}:"
+        f"{source_receipt_sha256}"
+    )
 
     prior_key = (
         row["result_idempotency_key"]
@@ -3394,20 +3708,41 @@ def complete_run_with_reviewed_manual_pdf(
             raise ValueError("run is not parked for human forms-provider completion")
         if prompt.get("kind") != "forms_provider":
             raise ValueError("run is not parked on the forms-provider gate")
+        if str(prompt.get("dealId") or "") != deal_id:
+            raise ValueError("parked forms-provider task does not match this deal")
+        if str(prompt.get("runId") or "") != run_id:
+            raise ValueError("parked forms-provider task does not match this run")
+        if str(prompt.get("formCode") or "") != expected_form_code:
+            raise ValueError("parked forms-provider task has no matching form-code binding")
+        if str(prompt.get("requiredArtifactKind") or "") != expected_kind:
+            raise ValueError("parked forms-provider task has no matching artifact binding")
         if row["cron_job_id"] or row["callback_token_hash"]:
             raise ValueError("manual completion requires a run with no provider dispatch")
 
     reviewed_at = now_iso()
     receipt = {
-        "schema": "elevate.manual-forms-review.v1",
+        "schema": _MANUAL_FORMS_REVIEW_SCHEMA,
         "completionMethod": "manual_reviewed_pdf",
         "providerDispatch": False,
+        "dealId": deal_id,
+        "taskId": run_id,
         "formsDocumentType": document_type,
+        "formCode": expected_form_code,
+        "formTitle": form_title,
         "artifactKind": expected_kind,
         "filePath": canonical_path,
         "sha256": sha256,
+        "provider": configured_provider,
+        "sourceReceiptId": bound_source_receipt["receiptId"],
+        "sourceReceiptSchema": bound_source_receipt["schema"],
+        "sourceReceiptSha256": source_receipt_sha256,
+        "sourceVerified": False,
+        "catalogCurrentVersionVerified": False,
+        "dealReference": deal_reference,
+        **version,
         "reviewed": True,
         "reviewedBy": actor,
+        "reviewerName": named_reviewer,
         "reviewedAt": reviewed_at,
     }
     return record_run_result(

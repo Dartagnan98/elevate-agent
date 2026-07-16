@@ -168,8 +168,12 @@ export interface SessionCloseResponse {
   ok?: boolean
 }
 
-export interface SessionInterruptResponse {
-  ok?: boolean
+export interface SessionStopResponse {
+  interrupted?: boolean
+  killed?: number
+  quiesced?: boolean
+  running?: boolean
+  status?: 'finishing' | 'stopped' | 'stopping'
 }
 
 export interface SessionSteerResponse {

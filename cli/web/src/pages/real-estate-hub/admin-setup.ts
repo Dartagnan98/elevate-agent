@@ -29,6 +29,9 @@ export type AdminSetupDraft = {
   crmProvider: string;
   mlsProvider: string;
   formsProvider: string;
+  formsLoginUrl: string;
+  formsAccountEmail: string;
+  formsSessionMode: string;
   signingProvider: string;
   complianceProvider: string;
   showingProvider: string;
@@ -84,6 +87,8 @@ export function adminSetupDraftFromSnapshot(setup: AdminSetupSnapshot): AdminSet
   const profile = setup.profile;
   const itemsByKey = new Map(setup.items.map((item) => [item.key, item]));
   const photoValue = setupRecord(itemsByKey.get("photo_processing")?.value);
+  const formsValue = setupRecord(itemsByKey.get("forms_provider")?.value);
+  const formsPlaybook = setupRecord(formsValue.playbook);
   const browserValue = setupRecord(itemsByKey.get("browser_workflows")?.value);
   const playbooks = setupRecord(browserValue.playbooks);
   const mlsPlaybook = setupRecord(playbooks.mls);
@@ -111,6 +116,9 @@ export function adminSetupDraftFromSnapshot(setup: AdminSetupSnapshot): AdminSet
     crmProvider: profile.crmProvider ?? "",
     mlsProvider: profile.mlsProvider ?? "",
     formsProvider: profile.formsProvider ?? "",
+    formsLoginUrl: setupString(formsPlaybook.loginUrl),
+    formsAccountEmail: setupString(formsPlaybook.accountEmail),
+    formsSessionMode: setupString(formsPlaybook.sessionMode) || "existing_session",
     signingProvider: profile.signingProvider ?? "",
     complianceProvider: profile.complianceProvider ?? "",
     showingProvider: profile.showingProvider ?? "",
@@ -226,6 +234,29 @@ export function adminSetupPayloadFromDraft(draft: AdminSetupDraft) {
     },
     ...ADMIN_SETUP_PROVIDER_ITEMS.map((item) => {
       const value = String(draft[item.field] ?? "").trim();
+      if (item.key === "forms_provider") {
+        const sessionMode = draft.formsSessionMode === "account_email"
+          ? "account_email"
+          : "existing_session";
+        return {
+          key: item.key,
+          status: value ? item.status : "missing",
+          provider: value || null,
+          value: value
+            ? {
+                provider: value,
+                playbook: {
+                  provider: value,
+                  loginUrl: draft.formsLoginUrl.trim() || null,
+                  accountEmail: sessionMode === "account_email"
+                    ? draft.formsAccountEmail.trim().toLowerCase() || null
+                    : null,
+                  sessionMode,
+                },
+              }
+            : null,
+        };
+      }
       return {
         key: item.key,
         status: value ? item.status : "missing",

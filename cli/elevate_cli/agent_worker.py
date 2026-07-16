@@ -25,6 +25,7 @@ from elevate_constants import exact_realtor_beta_active
 from elevate_cli.config import load_config
 from elevate_cli.data.paths import data_root
 from elevate_cli.data._util import now_iso
+from cron.execution_policy import scheduled_execution_disabled_reason
 
 
 _LOCK = threading.Lock()
@@ -89,13 +90,21 @@ def _int_setting(value: Any, default: int, *, minimum: int = 0) -> int:
 def _config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else load_config()
     worker = cfg.get("agent_worker") if isinstance(cfg.get("agent_worker"), dict) else {}
-    enabled = worker.get("enabled", True)
+    configured_enabled = str(worker.get("enabled", True)).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    policy_disabled_reason = scheduled_execution_disabled_reason()
     exact_beta = exact_realtor_beta_active()
     legacy_stale_running_minutes = worker.get("stale_running_minutes")
     default_handoff_stale_minutes = 180 if exact_beta else 120
     default_admin_stale_minutes = 120
     return {
-        "enabled": str(enabled).strip().lower() not in {"0", "false", "no", "off"},
+        "enabled": configured_enabled and policy_disabled_reason is None,
+        "configured_enabled": configured_enabled,
+        "policy_disabled_reason": policy_disabled_reason or "",
         "max_handoffs_per_tick": _int_setting(worker.get("max_handoffs_per_tick"), 25),
         "max_admin_runs_per_tick": _int_setting(worker.get("max_admin_runs_per_tick"), 25),
         "stale_handoff_running_minutes": _int_setting(
@@ -161,12 +170,14 @@ def _base_snapshot(state: str = "unknown", *, config: dict[str, Any] | None = No
     worker = _config(config)
     return {
         "enabled": worker["enabled"],
+        "configuredEnabled": worker["configured_enabled"],
+        "disabledReason": worker["policy_disabled_reason"],
         "mode": "heartbeat+wake",
         "state": state,
         "lastReason": "",
         "lastTickAt": None,
         "lastSuccessAt": None,
-        "lastError": "",
+        "lastError": worker["policy_disabled_reason"],
         "drained": {"handoffs": 0, "adminRuns": 0},
         "recovered": {"staleHandoffs": 0, "staleAdminRuns": 0},
         "limits": {
@@ -221,8 +232,12 @@ def snapshot(*, config: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(stored, dict):
         merged = {**base, **stored}
         merged["enabled"] = base["enabled"]
+        merged["configuredEnabled"] = base["configuredEnabled"]
+        merged["disabledReason"] = base["disabledReason"]
         merged["limits"] = base["limits"]
         merged["mode"] = base["mode"]
+        if base["disabledReason"]:
+            merged["lastError"] = base["disabledReason"]
         merged["loop"] = {
             **base["loop"],
             **(stored.get("loop") if isinstance(stored.get("loop"), dict) else {}),
@@ -303,6 +318,8 @@ def tick(
         status = _base_snapshot("disabled", config=config)
         status["lastTickAt"] = now
         status["agentId"] = scoped_agent_id
+        if worker["policy_disabled_reason"]:
+            status["lastError"] = worker["policy_disabled_reason"]
         _merge_runtime_status(
             status,
             config=config,
@@ -457,6 +474,24 @@ def request_wake(
     now = _utc_iso()
     clean_reason = str(reason or "manual").strip()[:160] or "manual"
     scoped_agent_id = _clean_agent_id(agent_id)
+    worker = _config()
+    if worker["policy_disabled_reason"]:
+        status = _base_snapshot("disabled")
+        status["lastTickAt"] = now
+        status["lastReason"] = clean_reason
+        status["lastError"] = worker["policy_disabled_reason"]
+        status["agentId"] = scoped_agent_id
+        status["wake"] = {
+            **(status.get("wake") if isinstance(status.get("wake"), dict) else {}),
+            "enabled": False,
+            "pending": False,
+            "lastWakeAt": now,
+            "lastReason": clean_reason,
+            "agentId": scoped_agent_id,
+            "count": _WAKE_COUNT,
+        }
+        _write_status(status)
+        return status
     if scoped_agent_id and not _agent_enabled(scoped_agent_id):
         status = snapshot()
         status["state"] = "disabled"
@@ -599,6 +634,18 @@ def start_background_loop(
     global _LOOP_THREAD, _LOOP_STARTED_AT
 
     with _LOOP_LOCK:
+        worker = _config(config)
+        if worker["policy_disabled_reason"]:
+            status = _base_snapshot("disabled", config=config)
+            status["lastReason"] = "loop_start_blocked"
+            status["lastError"] = worker["policy_disabled_reason"]
+            status["loop"] = {
+                **(status.get("loop") if isinstance(status.get("loop"), dict) else {}),
+                "running": False,
+                "startedAt": None,
+            }
+            _write_status(status)
+            return status
         if _loop_running():
             return snapshot(config=config)
         _STOP_EVENT.clear()

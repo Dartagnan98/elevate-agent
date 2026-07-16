@@ -176,7 +176,7 @@ export function AdminDesignShell() {
                 <span>
                   <strong>Admin is ready. Document drafting is paused.</strong>{" "}
                   {formsProviderCard.provider ? `${formsProviderCard.provider} is saved, but ` : "Your forms provider is not yet configured and "}
-                  live forms access is not verified. MLC and CPS tasks will wait for manual completion instead of claiming success.
+                  live forms access is not verified. Provider-required BC document tasks will wait for manual completion instead of claiming success.
                 </span>
               </span>
               <Button variant="outline" size="sm" onClick={() => setForceOnboarding(true)}>

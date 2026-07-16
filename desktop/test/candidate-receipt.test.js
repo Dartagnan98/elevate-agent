@@ -27,6 +27,7 @@ const {
   buildRemotePublishTransaction,
   canonicalJson,
   createPreSignEvidence,
+  createSourceReceipt,
   evidenceIntegrity,
   fileRecord,
   hashPortableTree,
@@ -48,6 +49,15 @@ const {
   waitForCompleteAsar,
   writeImmutableReceipt,
 } = require("../scripts/candidate-receipt");
+const {
+  BETA_SOURCE_SAFETY_KIND,
+  BETA_SOURCE_SAFETY_SCHEMA_VERSION,
+  REQUIRED_SUITE_IDS,
+  currentNodeAtLeast,
+  pythonDescriptor,
+  suiteManifest,
+  suiteManifestId,
+} = require("../scripts/beta-source-safety-gate");
 const { BETA, STABLE } = require("../src/release-profile");
 
 function temporaryDirectory(t) {
@@ -80,6 +90,120 @@ test("candidate profile binds the Beta verifier ring without changing Stable", (
   assert.equal("entitlementAssertionKeysetSha256" in stable, false);
   assert.equal(SOURCE_RECEIPT_SCHEMA_VERSION, 2);
   assert.equal(CANDIDATE_RECEIPT_SCHEMA_VERSION, 2);
+});
+
+test("Beta source receipts cannot be minted without exact passing source safety evidence", (t) => {
+  if (!currentNodeAtLeast(22, 12)) {
+    t.skip("Beta source receipt minting requires the release Node 22.12+ toolchain");
+    return;
+  }
+  const root = temporaryDirectory(t);
+  const git = (args) => {
+    const result = require("node:child_process").spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return (result.stdout || "").trim();
+  };
+  git(["init", "-q"]);
+  git(["config", "user.email", "source-gate@example.invalid"]);
+  git(["config", "user.name", "Source Gate Test"]);
+  fs.writeFileSync(path.join(root, ".gitignore"), "candidate-source.json\n");
+  git(["add", ".gitignore"]);
+  git(["commit", "-qm", "fixture"]);
+
+  const manifest = suiteManifest();
+  const python = pythonDescriptor();
+  const sourceSafety = {
+    schema_version: BETA_SOURCE_SAFETY_SCHEMA_VERSION,
+    kind: BETA_SOURCE_SAFETY_KIND,
+    channel: "beta",
+    started_at: "2026-07-15T12:00:00.000Z",
+    completed_at: "2026-07-15T12:05:00.000Z",
+    node: process.version,
+    python: python.path,
+    python_version: python.version,
+    manifest,
+    manifest_id: suiteManifestId(manifest),
+    git: {
+      commit: git(["rev-parse", "HEAD"]),
+      branch: git(["branch", "--show-current"]),
+      clean: true,
+      status_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
+    checkout_stable: true,
+    passed: true,
+    suites: REQUIRED_SUITE_IDS.map((id) => ({
+      id,
+      passed: true,
+      status: 0,
+      duration_ms: 1,
+      output_sha256: "a".repeat(64),
+    })),
+  };
+  const options = {
+    channel: "beta",
+    version: "1.2.71",
+    profile: BETA,
+    publicFeeds: {
+      latest: { channel: "latest", version: "1.2.63", sha256: "a".repeat(64) },
+      beta: { channel: "beta", version: "1.2.65", sha256: "b".repeat(64) },
+    },
+    repoRoot: root,
+    desktopRoot: root,
+    outputPath: path.join(root, "candidate-source.json"),
+    inputs: {},
+    toolchain: { node: process.version },
+  };
+
+  assert.throws(() => createSourceReceipt(options), /missing source safety evidence/);
+  assert.throws(
+    () => createSourceReceipt({ ...options, sourceSafety: { ...sourceSafety, passed: false } }),
+    /did not pass/,
+  );
+  const receipt = createSourceReceipt({ ...options, sourceSafety });
+  assert.deepEqual(receipt.source_safety, sourceSafety);
+  assert.match(receipt.source_receipt_id, /^[a-f0-9]{64}$/);
+
+  delete receipt.toolchain;
+  receipt.source_receipt_id = receiptId(receipt, "source_receipt_id");
+  fs.writeFileSync(options.outputPath, JSON.stringify(receipt));
+  assert.equal(
+    verifySourceReceipt({
+      receiptPath: options.outputPath,
+      repoRoot: root,
+      desktopRoot: root,
+      channel: "beta",
+      version: "1.2.71",
+    }).source_receipt_id,
+    receipt.source_receipt_id,
+  );
+
+  const forgedFailure = structuredClone(receipt);
+  forgedFailure.source_safety.passed = false;
+  forgedFailure.source_receipt_id = receiptId(forgedFailure, "source_receipt_id");
+  fs.writeFileSync(options.outputPath, JSON.stringify(forgedFailure));
+  assert.throws(
+    () => verifySourceReceipt({
+      receiptPath: options.outputPath,
+      repoRoot: root,
+      desktopRoot: root,
+      channel: "beta",
+      version: "1.2.71",
+    }),
+    /did not pass/,
+  );
+
+  const stableOptions = {
+    ...options,
+    channel: "latest",
+    profile: STABLE,
+    outputPath: path.join(root, "candidate-source.json"),
+  };
+  const stableReceipt = createSourceReceipt(stableOptions);
+  assert.equal("source_safety" in stableReceipt, false);
+  assert.throws(
+    () => createSourceReceipt({ ...stableOptions, sourceSafety }),
+    /cannot be attached to Stable/,
+  );
 });
 
 test("schema-v1 candidate artifacts are historical only, not promotion evidence", (t) => {
@@ -348,16 +472,22 @@ test("the real build runner exports one verified source ID into both builder con
 });
 
 test("Beta release preflight probes the signed Codex-only runtime policy", () => {
+  const scripts = require("../package.json").scripts;
   const preflight = fs.readFileSync(
     path.resolve(__dirname, "..", "scripts", "preflight-apple-release.js"),
     "utf8",
   );
 
   assert.match(preflight, /releaseProfile\.allowedProvider/);
+  assert.equal(scripts["gate:beta-source"], "node scripts/beta-source-safety-gate.js");
+  assert.match(preflight, /if \(releaseProfile\.isBeta\)/);
   assert.match(preflight, /releaseProfile\.allowedModels\[0\]/);
   assert.match(preflight, /releaseProfile\.elevateHomeName/);
   assert.match(preflight, /path\.join\(elevateHome, "auth\.json"\)/);
   assert.match(preflight, /provider = sys\.argv\[2\]/);
+  assert.match(preflight, /beta-source-safety-gate\.js/);
+  assert.match(preflight, /validateBetaSourceSafetyEvidence/);
+  assert.match(preflight, /sourceSafety: betaSourceSafety/);
   assert.doesNotMatch(preflight, /provider="custom"/);
 });
 
@@ -1058,9 +1188,9 @@ test("source verification rejects dirty or changed release inputs", (t) => {
     kind: "elevate-candidate-source",
     git: { commit: git(["rev-parse", "HEAD"]), branch: git(["branch", "--show-current"]), clean: true },
     release: {
-      channel: "beta",
+      channel: "latest",
       version: "1.2.67",
-      profile: profileSnapshot(BETA),
+      profile: profileSnapshot(STABLE),
     },
     inputs: { release_input: { kind: "file", ...fileRecord(input, root) } },
   };
@@ -1068,12 +1198,12 @@ test("source verification rejects dirty or changed release inputs", (t) => {
   const receiptPath = path.join(root, "candidate-source.json");
   fs.writeFileSync(receiptPath, JSON.stringify(receipt));
   assert.equal(
-    verifySourceReceipt({ receiptPath, repoRoot: root, channel: "beta", version: "1.2.67" }).source_receipt_id,
+    verifySourceReceipt({ receiptPath, repoRoot: root, channel: "latest", version: "1.2.67" }).source_receipt_id,
     receipt.source_receipt_id,
   );
   fs.writeFileSync(input, "tampered");
   assert.throws(
-    () => verifySourceReceipt({ receiptPath, repoRoot: root, channel: "beta", version: "1.2.67" }),
+    () => verifySourceReceipt({ receiptPath, repoRoot: root, channel: "latest", version: "1.2.67" }),
     /checkout no longer matches clean source receipt/,
   );
 });

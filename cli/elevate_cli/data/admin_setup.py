@@ -8,6 +8,7 @@ This module owns that singleton readiness profile in operational.db.
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 from elevate_constants import get_elevate_home
 from elevate_cli.data._util import now_iso
@@ -40,8 +42,8 @@ PROVINCE_DERIVED_SETUP_KEYS = (
 )
 _BETA_FORMS_PROVIDER_UNAVAILABLE_REASON = "live_forms_provider_not_verified"
 _BETA_FORMS_PROVIDER_UNAVAILABLE_MESSAGE = (
-    "Live forms-provider access is not verified in this Beta. MLC and CPS document "
-    "creation pauses for completion in the realtor's licensed forms provider."
+    "Live forms-provider access is not verified in this Beta. Provider-required BC "
+    "document tasks pause for completion in the realtor's licensed forms provider."
 )
 
 PROVINCE_TERMINOLOGY: dict[str, dict[str, str]] = {
@@ -395,6 +397,136 @@ def _provider_identity(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
 
 
+_FORMS_PROVIDER_SECRET_KEY_RE = re.compile(
+    r"(?:^|_)(?:password|passwd|passcode|secret|token|api[_-]?key)(?:$|_)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_forms_provider_value(value: Any) -> Any:
+    """Validate the password-free provider coordination playbook.
+
+    Exact-Beta forms work uses an existing signed-in browser session or an
+    account email as a human handoff hint.  Raw forms-provider passwords and
+    tokens do not belong in the operational database.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("forms_provider value must be an object")
+
+    def reject_secret_keys(node: Any, path: str = "forms_provider") -> None:
+        if isinstance(node, Mapping):
+            items = node.items()
+        elif isinstance(node, (list, tuple)):
+            for index, child in enumerate(node):
+                reject_secret_keys(child, f"{path}[{index}]")
+            return
+        else:
+            return
+        for raw_key, child in items:
+            key = str(raw_key)
+            normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower().replace("-", "_")
+            if _FORMS_PROVIDER_SECRET_KEY_RE.search(normalized_key):
+                raise ValueError(
+                    f"{path}.{key} cannot store a raw password, token, or secret"
+                )
+            reject_secret_keys(child, f"{path}.{key}")
+
+    reject_secret_keys(value)
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        unknown_top_level = set(value) - {"provider", "playbook"}
+        if unknown_top_level:
+            raise ValueError(
+                "forms_provider value has unsupported field(s): "
+                + ", ".join(sorted(map(str, unknown_top_level)))
+            )
+    result = dict(value)
+    raw_playbook = result.get("playbook")
+    if raw_playbook is None:
+        return result
+    if not isinstance(raw_playbook, Mapping):
+        raise ValueError("forms_provider.value.playbook must be an object")
+    if exact_realtor_beta_active():
+        unknown_playbook = set(raw_playbook) - {
+            "provider",
+            "loginUrl",
+            "accountEmail",
+            "sessionMode",
+        }
+        if unknown_playbook:
+            raise ValueError(
+                "forms_provider playbook has unsupported field(s): "
+                + ", ".join(sorted(map(str, unknown_playbook)))
+            )
+    provider = _clean_text(raw_playbook.get("provider") or result.get("provider"))
+    login_url = _clean_text(raw_playbook.get("loginUrl"))
+    account_email = _clean_text(raw_playbook.get("accountEmail"))
+    session_mode = _clean_key(raw_playbook.get("sessionMode") or "existing_session")
+    if session_mode not in {"existing-session", "account-email"}:
+        raise ValueError(
+            "forms_provider playbook sessionMode must be existing_session or account_email"
+        )
+    if login_url:
+        try:
+            parsed = urlsplit(login_url)
+            host = str(parsed.hostname or "").rstrip(".").lower()
+            if (
+                parsed.scheme.lower() != "https"
+                or not host
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise ValueError
+            if host in {"localhost", "localhost.localdomain"} or host.endswith(
+                (".localhost", ".local", ".internal")
+            ):
+                raise ValueError
+            try:
+                address = ipaddress.ip_address(host.strip("[]"))
+            except ValueError:
+                address = None
+            if address is not None and (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_reserved
+                or address.is_unspecified
+            ):
+                raise ValueError
+            if parsed.port not in {None, 443}:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "forms_provider playbook loginUrl must be a public absolute HTTPS URL without embedded credentials"
+            ) from exc
+        login_url = urlunsplit(
+            ("https", parsed.netloc, parsed.path or "/", parsed.query, "")
+        )
+    if account_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", account_email):
+        raise ValueError("forms_provider playbook accountEmail must be a valid email")
+    if account_email:
+        account_email = account_email.lower()
+    if session_mode == "account-email" and not account_email:
+        raise ValueError(
+            "forms_provider account_email mode requires an accountEmail"
+        )
+    if session_mode == "existing-session" and account_email:
+        raise ValueError(
+            "forms_provider existing_session mode must not include an accountEmail"
+        )
+    result["playbook"] = {
+        "provider": provider,
+        "loginUrl": login_url,
+        "accountEmail": account_email,
+        "sessionMode": session_mode.replace("-", "_"),
+    }
+    return result
+
+
 def forms_provider_capability(
     conn: sqlite3.Connection | None = None,
     *,
@@ -410,11 +542,50 @@ def forms_provider_capability(
     # licensed form generation. Keep the capability unavailable until a
     # durable private proof store exists; manual reviewed PDFs are the safe
     # completion path in this release.
-    _ = conn, item
+    if item is None and conn is not None:
+        row = conn.execute(
+            "SELECT provider, value_json FROM admin_setup_items WHERE key='forms_provider'"
+        ).fetchone()
+        if row is not None:
+            value = _decode_json(row["value_json"])
+            item = {"provider": row["provider"], "value": value}
+    value = item.get("value") if isinstance(item, Mapping) else None
+    value = value if isinstance(value, Mapping) else {}
+    try:
+        normalized_value = _normalize_forms_provider_value(value)
+        value = normalized_value if isinstance(normalized_value, Mapping) else {}
+    except ValueError:
+        # Legacy/hand-edited unsafe playbooks may remain visible for repair,
+        # but can never become a clickable coordination capability.
+        value = {}
+    playbook = value.get("playbook") if isinstance(value.get("playbook"), Mapping) else {}
+    provider = _clean_text(
+        (item or {}).get("provider") if isinstance(item, Mapping) else None
+    ) or _clean_text(playbook.get("provider") or value.get("provider"))
+    login_url = _clean_text(playbook.get("loginUrl"))
+    account_email = _clean_text(playbook.get("accountEmail"))
+    session_mode = _clean_key(playbook.get("sessionMode") or "")
+    coordination_ready = bool(
+        provider
+        and login_url
+        and (
+            session_mode == "existing-session"
+            or (session_mode == "account-email" and account_email)
+        )
+    )
     return {
         "available": False,
         "reason": _BETA_FORMS_PROVIDER_UNAVAILABLE_REASON,
         "message": _BETA_FORMS_PROVIDER_UNAVAILABLE_MESSAGE,
+        "coordination": {
+            "ready": coordination_ready,
+            "provider": provider,
+            "loginUrl": login_url,
+            "accountEmail": account_email,
+            "sessionMode": session_mode.replace("-", "_") or None,
+            "storesPassword": False,
+            "completionMethod": "manual_reviewed_pdf",
+        },
     }
 
 
@@ -988,6 +1159,8 @@ def admin_setup_memory_summary(snapshot: Mapping[str, Any]) -> str:
 
     browser = item_value("browser_workflows")
     playbooks = browser.get("playbooks") if isinstance(browser.get("playbooks"), Mapping) else {}
+    forms_value = item_value("forms_provider")
+    forms_playbook = forms_value.get("playbook") if isinstance(forms_value.get("playbook"), Mapping) else {}
     photo = item_value("photo_processing")
     regional_memory = profile.get("regionalMemory") if isinstance(profile.get("regionalMemory"), Mapping) else {}
     approval_policy = profile.get("approvalPolicy") if isinstance(profile.get("approvalPolicy"), Mapping) else {}
@@ -1011,6 +1184,9 @@ def admin_setup_memory_summary(snapshot: Mapping[str, Any]) -> str:
         f"- CRM: {provider('crm', profile.get('crmProvider') or '') or 'not recorded'}",
         f"- CRM status sync: {_crm_push_summary(profile)}",
         f"- Forms: {provider('forms_provider', profile.get('formsProvider') or '') or 'not recorded'}",
+        f"  Handoff URL: {_redact_memory_text(forms_playbook.get('loginUrl')) or 'not recorded'}",
+        f"  Account email: {_redact_memory_text(forms_playbook.get('accountEmail')) or 'not stored; use existing signed-in session'}",
+        f"  Session mode: {_redact_memory_text(forms_playbook.get('sessionMode')) or 'not recorded'} (no forms-provider password stored)",
         f"- Signing: {provider('signing_provider', profile.get('signingProvider') or '') or 'not recorded'}",
         f"- FINTRAC: {provider('fintrac_workflow', profile.get('fintracProvider') or '') or 'not recorded'}",
         "",
@@ -1237,6 +1413,9 @@ def update_admin_setup(
             status = str(item.get("status") or "missing").strip()
             if status not in VALID_STATUSES:
                 raise ValueError(f"invalid admin setup status {status!r}")
+            item_value = item.get("value")
+            if key == "forms_provider":
+                item_value = _normalize_forms_provider_value(item_value)
             conn.execute(
                 """
                 UPDATE admin_setup_items
@@ -1246,7 +1425,7 @@ def update_admin_setup(
                 (
                     status,
                     _clean_text(item.get("provider")),
-                    _encode_json(item.get("value")),
+                    _encode_json(item_value),
                     _clean_text(item.get("notes")),
                     now,
                     key,
@@ -1435,28 +1614,28 @@ def sync_admin_setup_runtime(
 
     forms_connector = connectors.get("forms-signing")
     if _connector_configured(forms_connector):
+        from elevate_constants import exact_realtor_beta_active
+
         provider_label = str(
             forms_connector.get("label")
             or profile.get("formsProvider")
             or "Forms"
         )
-        mark(
-            "forms_provider",
-            status="configured",
-            provider=provider_label,
-            signals=["Forms/signing source connector configured"],
-            details={
-                "sourceId": "forms-signing",
-                "state": forms_connector.get("state"),
-                "connected": forms_connector.get("connected") is True,
-                # This catalog connector is an unwired setup scaffold. Its
-                # status receipt is never provider-side proof that licensed
-                # MLC/CPS templates were found and can be created.
-                "providerProof": False,
-                "providerIdentity": _provider_identity(provider_label),
-                "lastCheckedAt": forms_connector.get("lastCheckedAt"),
-            },
-        )
+        if not exact_realtor_beta_active():
+            mark(
+                "forms_provider",
+                status="configured",
+                provider=provider_label,
+                signals=["Forms/signing source connector configured"],
+                details={
+                    "sourceId": "forms-signing",
+                    "state": forms_connector.get("state"),
+                    "connected": forms_connector.get("connected") is True,
+                    "providerProof": False,
+                    "providerIdentity": _provider_identity(provider_label),
+                    "lastCheckedAt": forms_connector.get("lastCheckedAt"),
+                },
+            )
         mark(
             "signing_provider",
             status="configured",

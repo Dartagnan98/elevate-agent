@@ -1032,8 +1032,69 @@ def _semantic_string_values(
     return values
 
 
-def _forms_document_type(row: sqlite3.Row) -> str | None:
-    """Classify licensed MLC/CPS creation from semantics, never one flag."""
+_ONBOARDING_PROVIDER_FORMS: dict[str, str] = {
+    "BAEC": "Buyer Agency Exclusive Contract",
+    "DORTS": "Disclosure of Representation in Trading Services",
+    "PNC": "Privacy Notice & Consent Form",
+}
+_PROVIDER_FORM_ALIASES = {
+    "agency": "BAEC",
+    "buyer-agency": "BAEC",
+    "buyer-agency-agreement": "BAEC",
+    "buyers-agency-agreement": "BAEC",
+    "dorts": "DORTS",
+    "mlc": "MLC",
+    "mlc-pdf": "MLC",
+    "pnc": "PNC",
+    "cps": "CPS-res",
+    "cps-draft": "CPS-res",
+    "cps-residential": "CPS-res",
+}
+
+
+def _normalized_form_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _exact_beta_provider_form_catalog() -> dict[str, tuple[str, str]]:
+    """Return normalized code -> (canonical code, title) for safe coordination.
+
+    The signed catalog is lookup metadata only.  Resolving a code here never
+    claims the form applies to a deal and never unlocks local form generation.
+    """
+    catalog: dict[str, tuple[str, str]] = {
+        _normalized_form_token(code): (code, title)
+        for code, title in _ONBOARDING_PROVIDER_FORMS.items()
+    }
+    try:
+        from elevate_cli.data.beta_province_pack import load_exact_beta_bc_pack
+
+        pack = load_exact_beta_bc_pack()
+    except Exception:
+        return catalog
+    for form in pack.forms:
+        catalog[_normalized_form_token(form.code)] = (form.code, form.title)
+    return catalog
+
+
+def _canonical_provider_form(value: Any) -> tuple[str, str] | None:
+    token = _normalized_form_token(value)
+    if not token:
+        return None
+    alias = _PROVIDER_FORM_ALIASES.get(token)
+    catalog = _exact_beta_provider_form_catalog()
+    return catalog.get(_normalized_form_token(alias or token))
+
+
+def _provider_form_spec(row: sqlite3.Row) -> dict[str, str] | None:
+    """Classify one exact provider form without making a legal selection.
+
+    Arbitrary BC catalog/onboarding forms are accepted only when the task
+    explicitly names exactly one supported code.  Legacy MLC/CPS inference is
+    retained for the two existing stage actions.  An explicit provider gate
+    with no exact code remains blocked but is intentionally not completable by
+    attaching an unbound PDF.
+    """
     mappings = _run_semantic_mappings(row)
     skill = str(_row_value(row, "skill") or "").strip().lower().rstrip("/")
     skill_leaf = skill.rsplit("/", 1)[-1]
@@ -1047,7 +1108,7 @@ def _forms_document_type(row: sqlite3.Row) -> str | None:
         "artifact_kind",
         "kind",
     )
-    form_codes = _semantic_string_values(
+    raw_form_codes = _semantic_string_values(
         mappings,
         "formCode",
         "form_code",
@@ -1065,33 +1126,75 @@ def _forms_document_type(row: sqlite3.Row) -> str | None:
         or mapping.get("requires_live_forms_provider") is True
         for mapping in mappings
     )
+    explicit_forms = {
+        resolved
+        for value in raw_form_codes
+        if (resolved := _canonical_provider_form(value)) is not None
+    }
+    if len(explicit_forms) == 1:
+        form_code, form_title = next(iter(explicit_forms))
+    elif len(explicit_forms) > 1:
+        return {
+            "documentType": "forms_bundle",
+            "formCode": "",
+            "formTitle": "Multiple provider forms",
+            "artifactKind": "",
+        }
+    else:
+        form_code = ""
+        form_title = ""
+
     cps_marker = bool(
         {"cps_draft", "cps-res", "cps", "cps-residential"}
-        .intersection(artifact_kinds | form_codes)
+        .intersection(artifact_kinds | raw_form_codes)
     )
-    mlc_marker = bool({"mlc_pdf", "mlc"}.intersection(artifact_kinds | form_codes))
+    mlc_marker = bool({"mlc_pdf", "mlc"}.intersection(artifact_kinds | raw_form_codes))
 
-    if skill_leaf in {"buyer-cps", "cps", "webforms"} or cps_marker:
-        return "cps"
-    if skill_leaf == "mlc":
+    if not form_code and (skill_leaf in {"buyer-cps", "cps"} or cps_marker):
+        form_code, form_title = "CPS-res", "Contract of Purchase and Sale (CPS) - Residential"
+    if not form_code and skill_leaf == "mlc":
         if modes.intersection({"intake", "collect", "info"}) and not (
             mlc_marker or explicitly_gated
         ):
             return None
-        return "mlc"
-    if mlc_marker:
-        return "mlc"
-    if re.search(r"\bcps\b", name) and re.search(
+        form_code, form_title = "MLC", "Multiple Listing Contract"
+    if not form_code and mlc_marker:
+        form_code, form_title = "MLC", "Multiple Listing Contract"
+    if not form_code and re.search(r"\bcps\b", name) and re.search(
         r"\b(?:draft|document|form|package|prepare|write)\b", name
     ):
-        return "cps"
-    if re.search(r"\bmlc\b", name) and re.search(
+        form_code, form_title = "CPS-res", "Contract of Purchase and Sale (CPS) - Residential"
+    if not form_code and re.search(r"\bmlc\b", name) and re.search(
         r"\b(?:draft|document|form|package|prepare|write)\b", name
     ):
-        return "mlc"
+        form_code, form_title = "MLC", "Multiple Listing Contract"
+
+    if form_code:
+        document_type = (
+            "mlc" if form_code == "MLC" else "cps" if form_code == "CPS-res" else "form"
+        )
+        artifact_kind = (
+            "mlc_pdf" if form_code == "MLC" else "cps_draft" if form_code == "CPS-res" else "provider_form_pdf"
+        )
+        return {
+            "documentType": document_type,
+            "formCode": form_code,
+            "formTitle": form_title,
+            "artifactKind": artifact_kind,
+        }
     if explicitly_gated:
-        return "forms"
+        return {
+            "documentType": "forms",
+            "formCode": "",
+            "formTitle": "Licensed provider form",
+            "artifactKind": "",
+        }
     return None
+
+
+def _forms_document_type(row: sqlite3.Row) -> str | None:
+    spec = _provider_form_spec(row)
+    return str(spec.get("documentType") or "") or None if spec else None
 
 
 def forms_document_type_for_run(
@@ -1102,15 +1205,22 @@ def forms_document_type_for_run(
     return _forms_document_type(_run_lookup(conn, run_id))
 
 
+def forms_document_spec_for_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> dict[str, str] | None:
+    """Return the task-bound provider-form identity for one run."""
+    spec = _provider_form_spec(_run_lookup(conn, run_id))
+    return dict(spec) if spec else None
+
+
 def required_forms_artifact_kind_for_run(
     conn: sqlite3.Connection,
     run_id: str,
 ) -> str | None:
-    """Return exact-Beta evidence required by semantic MLC/CPS work."""
-    return {
-        "mlc": "mlc_pdf",
-        "cps": "cps_draft",
-    }.get(forms_document_type_for_run(conn, run_id) or "")
+    """Return exact-Beta evidence required by one task-bound provider form."""
+    spec = forms_document_spec_for_run(conn, run_id)
+    return str(spec.get("artifactKind") or "") or None if spec else None
 
 
 def live_forms_provider_block_reason_for_run(
@@ -1136,7 +1246,7 @@ def park_run_for_live_forms_provider(
     *,
     actor: str,
 ) -> dict[str, Any]:
-    """Park an MLC/CPS run without issuing a callback token or cron job."""
+    """Park a provider-form run without issuing a callback token or cron job."""
     reason = live_forms_provider_block_reason_for_run(conn, run_id)
     if not reason:
         return _row_to_run(_select_action_run_with_registry(conn, run_id))
@@ -1148,10 +1258,15 @@ def park_run_for_live_forms_provider(
     from elevate_cli.data.admin_setup import forms_provider_capability
 
     capability = forms_provider_capability(conn)
-    document_type = forms_document_type_for_run(conn, run_id)
-    required_artifact_kind = required_forms_artifact_kind_for_run(conn, run_id)
+    document_spec = forms_document_spec_for_run(conn, run_id) or {}
+    document_type = str(document_spec.get("documentType") or "forms")
+    form_code = str(document_spec.get("formCode") or "")
+    form_title = str(document_spec.get("formTitle") or "Licensed provider form")
+    required_artifact_kind = str(document_spec.get("artifactKind") or "") or None
     payload["requiresLiveFormsProvider"] = True
     payload["formsDocumentType"] = document_type
+    payload["formCode"] = form_code or None
+    payload["formTitle"] = form_title
     payload["requiredArtifactKind"] = required_artifact_kind
     payload["formsProviderCapability"] = capability
     payload["dispatchBlocked"] = {
@@ -1159,21 +1274,34 @@ def park_run_for_live_forms_provider(
         "actor": actor,
         "recordedAt": now,
     }
+    if form_code and required_artifact_kind:
+        required_fields = [
+            f"Complete {form_code} ({form_title}) in the licensed forms provider, then attach the reviewed PDF with its source receipt."
+        ]
+        manual_completion: dict[str, Any] | None = {
+            "method": "manual_reviewed_pdf",
+            "requiresHumanReview": True,
+            "requiresSourceReceipt": True,
+            "requiresNamedReviewer": True,
+            "endpoint": f"/api/deals/{row['deal_id']}/runs/{run_id}/manual-reviewed-document",
+        }
+    else:
+        required_fields = [
+            "Split this provider task into one exact BC form code per run before attaching any PDF."
+        ]
+        manual_completion = None
     human_prompt = {
         "title": "Licensed forms provider required",
         "message": reason,
-        "requiredFields": [
-            "Complete the MLC or CPS in the licensed forms provider, then attach the reviewed PDF."
-        ],
+        "requiredFields": required_fields,
         "kind": "forms_provider",
         "capabilityReason": capability.get("reason"),
+        "providerCoordination": capability.get("coordination"),
         "formsDocumentType": document_type,
+        "formCode": form_code or None,
+        "formTitle": form_title,
         "requiredArtifactKind": required_artifact_kind,
-        "manualCompletion": {
-            "method": "manual_reviewed_pdf",
-            "requiresHumanReview": True,
-            "endpoint": f"/api/deals/{row['deal_id']}/runs/{run_id}/manual-reviewed-document",
-        },
+        "manualCompletion": manual_completion,
         "runId": run_id,
         "dealId": row["deal_id"],
     }

@@ -79,6 +79,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
+    from model_tools import exact_beta_tool_containment_active
+
+    exact_beta = exact_beta_tool_containment_active()
 
     # ── Pre-flight: interrupt check ──────────────────────────────────
     if agent._interrupt_requested:
@@ -96,12 +99,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for tool_call in tool_calls:
         function_name = tool_call.function.name
 
-        # Reset nudge counters
-        if function_name == "memory":
-            agent._turns_since_memory = 0
-        elif function_name == "skill_manage":
-            agent._iters_since_skill = 0
-
         try:
             function_args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError:
@@ -109,8 +106,30 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         if not isinstance(function_args, dict):
             function_args = {}
 
+        from model_tools import (
+            exact_beta_tool_containment_active,
+            exact_beta_tool_preflight_block,
+        )
+
+        beta_block = exact_beta_tool_preflight_block(
+            function_name,
+            function_args,
+            session_id=agent.session_id or "",
+            tool_call_id=tool_call.id,
+        )
+        # Reset nudge counters only for a call that passed the Beta gate.
+        if not exact_beta and beta_block is None and function_name == "memory":
+            agent._turns_since_memory = 0
+        elif not exact_beta and beta_block is None and function_name == "skill_manage":
+            agent._iters_since_skill = 0
+
         # Checkpoint for file-mutating tools
-        if function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:
+        if (
+            not exact_beta
+            and beta_block is None
+            and function_name in {"write_file", "patch"}
+            and agent._checkpoint_mgr.enabled
+        ):
             try:
                 file_path = function_args.get("path", "")
                 if file_path:
@@ -120,7 +139,12 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 pass
 
         # Checkpoint before destructive terminal commands
-        if function_name == "terminal" and agent._checkpoint_mgr.enabled:
+        if (
+            not exact_beta
+            and beta_block is None
+            and function_name == "terminal"
+            and agent._checkpoint_mgr.enabled
+        ):
             try:
                 cmd = function_args.get("command", "")
                 if _is_destructive_command(cmd):
@@ -131,17 +155,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception:
                 pass
 
-        block_result = None
+        block_result = beta_block
         blocked_by_guardrail = False
-        try:
-            from elevate_cli.plugins import get_pre_tool_call_block_message
-            block_message = get_pre_tool_call_block_message(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            block_message = None
+        block_message = None
+        if block_result is None and not exact_beta:
+            try:
+                from elevate_cli.plugins import get_pre_tool_call_block_message
+                block_message = get_pre_tool_call_block_message(
+                    function_name, function_args, task_id=effective_task_id or "",
+                )
+            except Exception:
+                block_message = None
 
-        if block_message is not None:
+        if block_result is not None:
+            pass
+        elif block_message is not None:
             block_result = json.dumps({"error": block_message}, ensure_ascii=False)
         else:
             guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
@@ -165,7 +193,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
 
     for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
-        if block_result is not None:
+        if exact_beta or block_result is not None:
             continue
         if agent.tool_progress_callback:
             try:
@@ -175,7 +203,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 logging.debug(f"Tool progress callback error: {cb_err}")
 
     for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
-        if block_result is not None:
+        if exact_beta or block_result is not None:
             continue
         if agent.tool_start_callback:
             try:
@@ -190,10 +218,19 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         if block_result is not None:
             results[i] = (name, args, block_result, 0.0, True, True)
 
-    # Touch activity before launching workers so the gateway knows
-    # we're executing tools (not stuck).
-    agent._current_tool = tool_names_str
-    agent._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
+    # Touch activity only for calls that survived every preflight. A denied
+    # Beta call must not look like physical tool work to session observers.
+    runnable_names = [
+        name
+        for _tc, name, _args, block_result, _blocked_by_guardrail in parsed_calls
+        if block_result is None
+    ]
+    if runnable_names and not exact_beta:
+        agent._current_tool = ", ".join(runnable_names)
+        agent._touch_activity(
+            f"executing {len(runnable_names)} tools concurrently: "
+            + ", ".join(runnable_names)
+        )
 
     # Capture CLI callbacks from the agent thread so worker threads can
     # register them locally.  Without this, _get_approval_callback() in
@@ -243,24 +280,45 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 pass
         start = time.time()
         try:
+            invoke_kwargs = {
+                "messages": messages,
+                "pre_tool_block_checked": True,
+            }
+            if exact_beta:
+                invoke_kwargs["return_outcome"] = True
             result = agent._invoke_tool(
                 function_name,
                 function_args,
                 effective_task_id,
                 tool_call.id,
-                messages=messages,
-                pre_tool_block_checked=True,
+                **invoke_kwargs,
             )
         except Exception as tool_error:
             result = f"Error executing tool '{function_name}': {tool_error}"
             logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
+        from model_tools import ToolDispatchOutcome
+
+        if exact_beta and isinstance(result, ToolDispatchOutcome):
+            dispatch_started = result.started
+            result = result.result
+        else:
+            # An exact-Beta stub or legacy path that drops the typed outcome
+            # is not evidence that a handler physically started.
+            dispatch_started = not exact_beta
         duration = time.time() - start
         is_error, _ = _detect_tool_failure(function_name, result)
-        if is_error:
+        if dispatch_started and is_error:
             logger.info("tool %s failed (%.2fs): %s", function_name, duration, result[:200])
-        else:
+        elif dispatch_started:
             logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result))
-        results[index] = (function_name, function_args, result, duration, is_error, False)
+        results[index] = (
+            function_name,
+            function_args,
+            result,
+            duration,
+            is_error,
+            not dispatch_started,
+        )
         # Tear down worker-tid tracking.  Clear any interrupt bit we may
         # have set so the next task scheduled onto this recycled tid
         # starts with a clean slate.
@@ -358,6 +416,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for i, (tc, name, args, block_result, blocked_by_guardrail) in enumerate(parsed_calls):
         r = results[i]
         blocked = False
+        physically_started = False
         if r is None:
             # Tool was cancelled (interrupt) or thread didn't return
             if agent._interrupt_requested:
@@ -371,8 +430,27 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             blocked = False
         else:
             function_name, function_args, function_result, tool_duration, is_error, blocked = r
+            physically_started = not blocked
 
-            if not blocked:
+            if physically_started:
+                if exact_beta:
+                    agent._current_tool = function_name
+                    agent._touch_activity(f"executing tool: {function_name}")
+                    if agent.tool_progress_callback:
+                        try:
+                            preview = _build_tool_preview(function_name, function_args)
+                            agent.tool_progress_callback(
+                                "tool.started", function_name, preview, function_args,
+                            )
+                        except Exception as cb_err:
+                            logging.debug(f"Tool progress callback error: {cb_err}")
+                    if agent.tool_start_callback:
+                        try:
+                            agent.tool_start_callback(
+                                tc.id, function_name, function_args,
+                            )
+                        except Exception as cb_err:
+                            logging.debug(f"Tool start callback error: {cb_err}")
                 function_result = agent._append_guardrail_observation(
                     function_name,
                     function_args,
@@ -380,7 +458,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     failed=is_error,
                 )
 
-            if is_error:
+            if physically_started and is_error:
                 _err_text = _multimodal_text_summary(function_result)
                 result_preview = _err_text[:200] if len(_err_text) > 200 else _err_text
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
@@ -388,7 +466,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             # Track file-mutation outcome for the turn-end verifier.
             # `blocked` calls never actually ran — don't let a guardrail
             # block count as either a failure or a success.
-            if not blocked:
+            if physically_started:
                 try:
                     agent._record_file_mutation_result(
                         function_name, function_args, function_result, is_error,
@@ -396,7 +474,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 except Exception as _ver_err:
                     logging.debug("file-mutation verifier record failed: %s", _ver_err)
 
-            if not blocked and agent.tool_progress_callback:
+            if physically_started and agent.tool_progress_callback:
                 try:
                     agent.tool_progress_callback(
                         "tool.completed", function_name, None, None,
@@ -405,15 +483,15 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
 
-            if agent.verbose_logging:
+            if physically_started and agent.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
 
         # Print cute message per tool
-        if agent._should_emit_quiet_tool_messages():
+        if physically_started and agent._should_emit_quiet_tool_messages():
             cute_msg = _get_cute_tool_message_impl(name, args, tool_duration, result=function_result)
             agent._safe_print(f"  {cute_msg}")
-        elif not agent.quiet_mode:
+        elif physically_started and not agent.quiet_mode:
             _preview_str = _multimodal_text_summary(function_result)
             marker = "❌" if is_error else "✅"
             outcome = "failed" if is_error else "completed"
@@ -424,23 +502,29 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 response_preview = _preview_str[:agent.log_prefix_chars] + "..." if len(_preview_str) > agent.log_prefix_chars else _preview_str
                 print(f"  {marker} Tool {i+1} {outcome} in {tool_duration:.2f}s - {response_preview}")
 
-        agent._current_tool = None
-        agent._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
+        if physically_started:
+            agent._current_tool = None
+            agent._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
 
-        if not blocked and agent.tool_complete_callback:
+        if physically_started and agent.tool_complete_callback:
             try:
                 agent.tool_complete_callback(tc.id, name, args, function_result)
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 
-        function_result = maybe_persist_tool_result(
-            content=function_result,
-            tool_name=name,
-            tool_use_id=tc.id,
-            env=get_active_env(effective_task_id),
-        ) if not _is_multimodal_tool_result(function_result) else function_result
+        if physically_started and not _is_multimodal_tool_result(function_result):
+            function_result = maybe_persist_tool_result(
+                content=function_result,
+                tool_name=name,
+                tool_use_id=tc.id,
+                env=get_active_env(effective_task_id),
+            )
 
-        subdir_hints = agent._subdirectory_hints.check_tool_call(name, args)
+        subdir_hints = (
+            agent._subdirectory_hints.check_tool_call(name, args)
+            if physically_started
+            else ""
+        )
         if subdir_hints:
             if _is_multimodal_tool_result(function_result):
                 # Append the hint to the text summary part so the model
@@ -516,14 +600,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             function_args = {}
 
         # Check plugin hooks for a block directive before executing.
-        _block_msg: Optional[str] = None
-        try:
-            from elevate_cli.plugins import get_pre_tool_call_block_message
-            _block_msg = get_pre_tool_call_block_message(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            pass
+        from model_tools import (
+            exact_beta_tool_containment_active,
+            exact_beta_tool_preflight_block,
+        )
+
+        beta_preflight_result = exact_beta_tool_preflight_block(
+            function_name,
+            function_args,
+            session_id=agent.session_id or "",
+            tool_call_id=tool_call.id,
+        )
+        _block_msg: Optional[str] = beta_preflight_result
+        exact_beta = exact_beta_tool_containment_active()
+        if _block_msg is None and not exact_beta:
+            try:
+                from elevate_cli.plugins import get_pre_tool_call_block_message
+                _block_msg = get_pre_tool_call_block_message(
+                    function_name, function_args, task_id=effective_task_id or "",
+                )
+            except Exception:
+                pass
 
         _guardrail_block_decision: ToolGuardrailDecision | None = None
         if _block_msg is None:
@@ -531,7 +628,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             if not guardrail_decision.allows_execution:
                 _guardrail_block_decision = guardrail_decision
 
-        _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+        _preexecution_blocked = (
+            _block_msg is not None or _guardrail_block_decision is not None
+        )
+        # Exact Beta waits for the immutable registry outcome before claiming
+        # that physical execution started.  This suppresses every pre-call
+        # observer for stale/denied/unknown calls.
+        _execution_blocked = _preexecution_blocked or exact_beta
 
         if _execution_blocked:
             # Tool blocked by plugin or guardrail policy — skip counters,
@@ -605,7 +708,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         tool_start_time = time.time()
 
-        if _block_msg is not None:
+        if beta_preflight_result is not None:
+            function_result = beta_preflight_result
+            tool_duration = 0.0
+        elif _block_msg is not None:
             # Tool blocked by plugin policy — return error without executing.
             function_result = json.dumps({"error": _block_msg}, ensure_ascii=False)
             tool_duration = 0.0
@@ -614,6 +720,37 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             # tool result for the original tool_call_id without executing.
             function_result = agent._guardrail_block_result(_guardrail_block_decision)
             tool_duration = 0.0
+        elif exact_beta:
+            from model_tools import ToolDispatchOutcome
+
+            try:
+                dispatch_outcome = agent._invoke_tool(
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                    tool_call.id,
+                    messages=messages,
+                    pre_tool_block_checked=True,
+                    return_outcome=True,
+                )
+            except Exception as tool_error:
+                dispatch_outcome = None
+                function_result = (
+                    f"Error executing tool '{function_name}': {tool_error}"
+                )
+                logger.error(
+                    "_invoke_tool raised for %s: %s",
+                    function_name,
+                    tool_error,
+                    exc_info=True,
+                )
+            if isinstance(dispatch_outcome, ToolDispatchOutcome):
+                function_result = dispatch_outcome.result
+                _execution_blocked = not dispatch_outcome.started
+            else:
+                # A raw legacy result is not physical-start proof in Beta.
+                _execution_blocked = True
+            tool_duration = time.time() - tool_start_time
         elif function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
             function_result = _todo_tool(
@@ -799,6 +936,25 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
             tool_duration = time.time() - tool_start_time
 
+        if exact_beta and not _execution_blocked:
+            agent._current_tool = function_name
+            agent._touch_activity(f"executing tool: {function_name}")
+            if agent.tool_progress_callback:
+                try:
+                    preview = _build_tool_preview(function_name, function_args)
+                    agent.tool_progress_callback(
+                        "tool.started", function_name, preview, function_args,
+                    )
+                except Exception as cb_err:
+                    logging.debug(f"Tool progress callback error: {cb_err}")
+            if agent.tool_start_callback:
+                try:
+                    agent.tool_start_callback(
+                        tool_call.id, function_name, function_args,
+                    )
+                except Exception as cb_err:
+                    logging.debug(f"Tool start callback error: {cb_err}")
+
         if isinstance(function_result, str):
             result_preview = function_result if agent.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
@@ -822,9 +978,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             result_preview = function_result if agent.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
             )
-        if _is_error_result:
+        if not _execution_blocked and _is_error_result:
             logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
-        else:
+        elif not _execution_blocked:
             logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, _result_len)
 
         # Track file-mutation outcome for the turn-end verifier.  See
@@ -848,10 +1004,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool progress callback error: {cb_err}")
 
-        agent._current_tool = None
-        agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s)")
+        if not _execution_blocked:
+            agent._current_tool = None
+            agent._touch_activity(
+                f"tool completed: {function_name} ({tool_duration:.1f}s)"
+            )
 
-        if agent.verbose_logging:
+        if not _execution_blocked and agent.verbose_logging:
             logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
             _log_result = _multimodal_text_summary(function_result)
             logging.debug(f"Tool result ({len(_log_result)} chars): {_log_result}")
@@ -862,15 +1021,23 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 
-        function_result = maybe_persist_tool_result(
-            content=function_result,
-            tool_name=function_name,
-            tool_use_id=tool_call.id,
-            env=get_active_env(effective_task_id),
-        ) if not _is_multimodal_tool_result(function_result) else function_result
+        if not _execution_blocked and not _is_multimodal_tool_result(function_result):
+            function_result = maybe_persist_tool_result(
+                content=function_result,
+                tool_name=function_name,
+                tool_use_id=tool_call.id,
+                env=get_active_env(effective_task_id),
+            )
 
         # Discover subdirectory context files from tool arguments
-        subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
+        subdir_hints = (
+            agent._subdirectory_hints.check_tool_call(
+                function_name,
+                function_args,
+            )
+            if not _execution_blocked
+            else ""
+        )
         if subdir_hints:
             if _is_multimodal_tool_result(function_result):
                 _append_subdir_hint_to_multimodal(function_result, subdir_hints)

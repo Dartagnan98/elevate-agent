@@ -1351,7 +1351,10 @@ def test_context_overflow_keeps_prompt_fenced_until_reset_claims_actor(
             self.runs = 0
 
         def run_conversation(self, prompt, conversation_history=None, **kwargs):
+            from agent.turn_fence import seal_current_turn_terminal
+
             self.runs += 1
+            seal_current_turn_terminal("error")
             return {
                 "completed": False,
                 "error": "maximum context length exceeded",
@@ -1402,8 +1405,8 @@ def test_context_overflow_keeps_prompt_fenced_until_reset_claims_actor(
     )
     try:
         assert first["result"]["status"] == "streaming"
-        assert complete_emitted.wait(timeout=3)
         assert reset_entered.wait(timeout=3)
+        assert not complete_emitted.is_set()
         assert session["running"] is True
 
         second = server.handle_request(
@@ -1426,6 +1429,7 @@ def test_context_overflow_keeps_prompt_fenced_until_reset_claims_actor(
         deadline = time.monotonic() + 3
         while session.get("running") and time.monotonic() < deadline:
             time.sleep(0.01)
+        assert complete_emitted.wait(timeout=3)
         while (
             db.get_recoverable_prompt_receipt(persisted_id)
             and time.monotonic() < deadline

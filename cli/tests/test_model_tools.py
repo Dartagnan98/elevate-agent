@@ -10,6 +10,7 @@ import pytest
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -22,6 +23,22 @@ from tools.approval import (
     set_current_execution_policy,
 )
 from tools.registry import ToolCallContext, registry
+
+
+_EXACT_BETA_MUTATING_REGISTRY_CALLS = (
+    ("write_file", {"path": "/tmp/never-written", "content": "blocked"}),
+    ("patch", {"mode": "replace", "path": "/tmp/never-patched", "old_string": "a", "new_string": "b"}),
+    ("execute_code", {"code": "result = 1"}),
+    ("process", {"action": "kill", "process_id": "never"}),
+    ("send_message", {"action": "send", "target": "telegram", "message": "blocked"}),
+    ("lead_status", {"action": "set", "contact_id": "never", "status": "dead"}),
+    ("admin_profile", {"action": "promote", "contact_id": "never"}),
+    ("agent_bus", {"action": "create_task", "title": "blocked"}),
+    ("agent_handoff", {"action": "create", "goal": "blocked"}),
+    ("skill_manage", {"action": "delete", "name": "never"}),
+    ("browser_click", {"element": "never"}),
+    ("browser_type", {"element": "never", "text": "blocked"}),
+)
 
 
 # =========================================================================
@@ -156,8 +173,43 @@ class TestHandleFunctionCall:
                 skip_pre_tool_call_hook=True,
             )
 
+        # Terminal is hard-denied before durable identity evaluation in the
+        # Realtor Beta; no command shape may reach the terminal classifier.
+        assert json.loads(result)["shadow_status"] == "effect_policy_block"
+        dispatch.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        _EXACT_BETA_MUTATING_REGISTRY_CALLS,
+        ids=[name for name, _args in _EXACT_BETA_MUTATING_REGISTRY_CALLS],
+    )
+    def test_exact_beta_named_mutator_missing_identity_never_uses_legacy_dispatch(
+        self,
+        monkeypatch,
+        tool_name,
+        tool_args,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        with (
+            patch("tools.approval.get_current_execution_policy", return_value=None),
+            patch("tools.approval.get_current_execution_policy_revision", return_value=None),
+            patch("model_tools.registry.dispatch") as dispatch,
+            patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+            patch("elevate_cli.plugins.invoke_hook", return_value=[]) as hooks,
+            patch("tools.file_tools.notify_other_tool_call") as tracker,
+        ):
+            result = handle_function_call(
+                tool_name,
+                tool_args,
+                session_id="session-beta",
+                tool_call_id="call-beta",
+            )
+
         assert json.loads(result)["shadow_status"] == "effect_context_block"
         dispatch.assert_not_called()
+        pre_hook.assert_not_called()
+        hooks.assert_not_called()
+        tracker.assert_not_called()
 
     def test_stable_terminal_missing_identity_retains_legacy_fallback(
         self,
@@ -409,6 +461,145 @@ class TestHandleFunctionCall:
         assert "effect_not_allowed" in caplog.text
         assert "enforcement=false" in caplog.text
 
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        _EXACT_BETA_MUTATING_REGISTRY_CALLS,
+        ids=[name for name, _args in _EXACT_BETA_MUTATING_REGISTRY_CALLS],
+    )
+    def test_exact_beta_named_mutator_with_durable_identity_never_starts_handler(
+        self,
+        monkeypatch,
+        tool_name,
+        tool_args,
+    ):
+        entry = registry.get_entry(tool_name)
+        assert entry is not None, f"installed registry tool missing: {tool_name}"
+        calls = []
+        monkeypatch.setattr(
+            entry,
+            "handler",
+            lambda args, **kwargs: calls.append((args, kwargs)) or "unexpected",
+        )
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        policy = ExecutionPolicy.for_mode("accepted-beta-mutator", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=19)
+        try:
+            with (
+                patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+                patch("elevate_cli.plugins.invoke_hook", return_value=[]) as hooks,
+                patch("tools.file_tools.notify_other_tool_call") as tracker,
+            ):
+                result = handle_function_call(
+                    tool_name,
+                    tool_args,
+                    task_id="task-beta",
+                    session_id="session-beta",
+                    tool_call_id="call-beta",
+                )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert json.loads(result)["shadow_status"] == "effect_policy_block"
+        assert calls == []
+        pre_hook.assert_not_called()
+        hooks.assert_not_called()
+        tracker.assert_not_called()
+
+    def test_exact_beta_unknown_tool_runs_no_hooks_tracker_or_handler(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        policy = ExecutionPolicy.for_mode("accepted-beta-unknown", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=20)
+        try:
+            with (
+                patch("model_tools.registry.dispatch") as dispatch,
+                patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+                patch("elevate_cli.plugins.invoke_hook", return_value=[]) as hooks,
+                patch("tools.file_tools.notify_other_tool_call") as tracker,
+            ):
+                result = handle_function_call(
+                    "unknown_beta_mutator",
+                    {"action": "mutate"},
+                    task_id="task-beta",
+                    session_id="session-beta",
+                    tool_call_id="call-beta-unknown",
+                )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert json.loads(result)["shadow_status"] == "effect_policy_block"
+        dispatch.assert_not_called()
+        pre_hook.assert_not_called()
+        hooks.assert_not_called()
+        tracker.assert_not_called()
+
+    def test_exact_beta_stale_registration_after_preflight_runs_no_observers(
+        self,
+        monkeypatch,
+    ):
+        tool_name = "_test_beta_stale_after_preflight"
+        original_calls = []
+        replacement_calls = []
+        registry.register(
+            tool_name,
+            "test-shadow",
+            {
+                "name": tool_name,
+                "description": "test",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            lambda args, **kwargs: original_calls.append((args, kwargs)) or "old",
+            effects={"read"},
+        )
+        real_prepare = registry.prepare_shadow
+
+        def prepare_then_replace(*args, **kwargs):
+            prepared = real_prepare(*args, **kwargs)
+            registry.register(
+                tool_name,
+                "test-shadow",
+                {
+                    "name": tool_name,
+                    "description": "replacement",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                lambda call_args, **call_kwargs: replacement_calls.append(
+                    (call_args, call_kwargs)
+                ) or "new",
+                effects={"read"},
+            )
+            return prepared
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        policy = ExecutionPolicy.for_mode("accepted-beta-stale", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=21)
+        try:
+            with (
+                patch.object(registry, "prepare_shadow", side_effect=prepare_then_replace),
+                patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+                patch("elevate_cli.plugins.invoke_hook", return_value=[]) as hooks,
+                patch("tools.file_tools.notify_other_tool_call") as tracker,
+            ):
+                result = handle_function_call(
+                    tool_name,
+                    {},
+                    task_id="task-beta",
+                    session_id="session-beta",
+                    tool_call_id="call-beta-stale",
+                )
+        finally:
+            reset_current_execution_policy(token)
+            registry.deregister(tool_name)
+
+        assert json.loads(result)["shadow_status"] == "stale_registration"
+        assert original_calls == []
+        assert replacement_calls == []
+        pre_hook.assert_not_called()
+        hooks.assert_not_called()
+        tracker.assert_not_called()
+
 
 # =========================================================================
 # Agent loop tools
@@ -424,6 +615,78 @@ class TestAgentLoopTools:
     def test_no_regular_tools_in_set(self):
         assert "web_search" not in _AGENT_LOOP_TOOLS
         assert "terminal" not in _AGENT_LOOP_TOOLS
+
+
+class TestToolDefinitionContainment:
+    def test_disabled_toolsets_subtract_from_explicit_enabled_toolsets(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+
+        definitions = get_tool_definitions(
+            enabled_toolsets=["file", "messaging"],
+            disabled_toolsets=["messaging"],
+            quiet_mode=True,
+        )
+        names = {tool["function"]["name"] for tool in definitions}
+
+        assert "read_file" in names
+        assert "send_message" not in names
+
+    def test_exact_beta_advertises_only_effect_declared_registry_tools(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        definitions = get_tool_definitions(
+            enabled_toolsets=[
+                "deals_overview",
+                "file",
+                "lead_status",
+                "messaging",
+                "skills",
+                "terminal",
+            ],
+            quiet_mode=True,
+        )
+        names = {tool["function"]["name"] for tool in definitions}
+
+        assert {"deals_overview", "skills_list"} <= names
+        assert not {
+            "write_file",
+            "patch",
+            "lead_status",
+            "send_message",
+            "skill_manage",
+            "skill_view",
+        }.intersection(names)
+        assert all(registry.get_effect_metadata(name)["declared"] for name in names)
+
+    def test_tool_definition_cache_is_release_channel_scoped(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+        stable_names = {
+            tool["function"]["name"]
+            for tool in get_tool_definitions(
+                enabled_toolsets=["file"],
+                quiet_mode=True,
+            )
+        }
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        beta_names = {
+            tool["function"]["name"]
+            for tool in get_tool_definitions(
+                enabled_toolsets=["file"],
+                quiet_mode=True,
+            )
+        }
+
+        assert "write_file" in stable_names
+        assert beta_names == set()
 
 
 # =========================================================================

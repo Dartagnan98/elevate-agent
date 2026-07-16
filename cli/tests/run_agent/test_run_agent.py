@@ -2406,6 +2406,197 @@ class TestConcurrentToolExecution:
             mock_todo.assert_called_once()
         assert "ok" in result
 
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        [
+            ("todo", {"todos": [{"content": "must not persist"}]}),
+            ("session_search", {"query": "private listing"}),
+            ("delegate_task", {"goal": "spawn a child"}),
+        ],
+        ids=["todo", "session-search", "delegate-task"],
+    )
+    def test_exact_beta_direct_agent_tools_fail_before_every_handler(
+        self,
+        agent,
+        monkeypatch,
+        tool_name,
+        tool_args,
+    ):
+        from tools.approval import (
+            ExecutionPolicy,
+            reset_current_execution_policy,
+            set_current_execution_policy,
+        )
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        policy = ExecutionPolicy.for_mode("accepted-beta-special", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=31)
+        try:
+            from agent.agent_runtime_helpers import invoke_tool as invoke_helper
+
+            with (
+                patch("tools.todo_tool.todo_tool") as todo_handler,
+                patch("tools.session_search_tool.session_search") as session_handler,
+                patch.object(agent, "_dispatch_delegate_task") as delegate_handler,
+                patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+            ):
+                result = agent._invoke_tool(
+                    tool_name,
+                    tool_args,
+                    "task-beta",
+                    tool_call_id=f"call-{tool_name}",
+                )
+                helper_result = invoke_helper(
+                    agent,
+                    tool_name,
+                    tool_args,
+                    "task-beta",
+                    tool_call_id=f"call-helper-{tool_name}",
+                )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert json.loads(result)["shadow_status"] == "effect_policy_block"
+        assert json.loads(helper_result)["shadow_status"] == "effect_policy_block"
+        todo_handler.assert_not_called()
+        session_handler.assert_not_called()
+        delegate_handler.assert_not_called()
+        pre_hook.assert_not_called()
+
+    def test_exact_beta_agent_dispatch_skips_hooks_when_start_turns_stale(
+        self,
+        agent,
+        monkeypatch,
+    ):
+        from tools.approval import (
+            ExecutionPolicy,
+            reset_current_execution_policy,
+            set_current_execution_policy,
+        )
+        from tools.registry import registry
+
+        tool_name = "_test_beta_agent_stale_start"
+        original_calls = []
+        replacement_calls = []
+        schema = {
+            "name": tool_name,
+            "description": "test",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        registry.register(
+            tool_name,
+            "test-shadow",
+            schema,
+            lambda args, **kwargs: original_calls.append((args, kwargs)) or "old",
+            effects={"read"},
+        )
+        real_prepare = registry.prepare_shadow
+        prepare_count = 0
+
+        def replace_after_inner_preflight(*args, **kwargs):
+            nonlocal prepare_count
+            prepare_count += 1
+            prepared = real_prepare(*args, **kwargs)
+            if prepare_count == 2:
+                registry.register(
+                    tool_name,
+                    "test-shadow",
+                    schema,
+                    lambda call_args, **call_kwargs: replacement_calls.append(
+                        (call_args, call_kwargs)
+                    ) or "new",
+                    effects={"read"},
+                )
+            return prepared
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        policy = ExecutionPolicy.for_mode("accepted-beta-agent-stale", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=33)
+        try:
+            with (
+                patch.object(
+                    registry,
+                    "prepare_shadow",
+                    side_effect=replace_after_inner_preflight,
+                ),
+                patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+                patch("elevate_cli.plugins.invoke_hook", return_value=[]) as hooks,
+                patch("tools.file_tools.notify_other_tool_call") as tracker,
+            ):
+                result = agent._invoke_tool(
+                    tool_name,
+                    {},
+                    "task-beta",
+                    tool_call_id="call-beta-agent-stale",
+                )
+        finally:
+            reset_current_execution_policy(token)
+            registry.deregister(tool_name)
+
+        assert json.loads(result)["shadow_status"] == "stale_registration"
+        assert prepare_count == 2
+        assert original_calls == []
+        assert replacement_calls == []
+        pre_hook.assert_not_called()
+        hooks.assert_not_called()
+        tracker.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        [
+            ("todo", {"todos": [{"content": "must not persist"}]}),
+            ("session_search", {"query": "private listing"}),
+            ("delegate_task", {"goal": "spawn a child"}),
+        ],
+        ids=["todo", "session-search", "delegate-task"],
+    )
+    def test_exact_beta_sequential_agent_branches_have_zero_side_effects(
+        self,
+        agent,
+        monkeypatch,
+        tool_name,
+        tool_args,
+    ):
+        from tools.approval import (
+            ExecutionPolicy,
+            reset_current_execution_policy,
+            set_current_execution_policy,
+        )
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        tool_call = _mock_tool_call(
+            name=tool_name,
+            arguments=json.dumps(tool_args),
+            call_id=f"call-{tool_name}",
+        )
+        message = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+        todo_before = agent._todo_store.read()
+        policy = ExecutionPolicy.for_mode("accepted-beta-sequential", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=32)
+        try:
+            with (
+                patch("tools.todo_tool.todo_tool") as todo_handler,
+                patch("tools.session_search_tool.session_search") as session_handler,
+                patch.object(agent, "_dispatch_delegate_task") as delegate_handler,
+                patch("elevate_cli.plugins.get_pre_tool_call_block_message") as pre_hook,
+            ):
+                agent._execute_tool_calls_sequential(
+                    message,
+                    messages,
+                    "task-beta",
+                )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert len(messages) == 1
+        assert json.loads(messages[0]["content"])["shadow_status"] == "effect_policy_block"
+        assert agent._todo_store.read() == todo_before
+        todo_handler.assert_not_called()
+        session_handler.assert_not_called()
+        delegate_handler.assert_not_called()
+        pre_hook.assert_not_called()
+
     def test_invoke_tool_blocked_returns_error_and_skips_execution(self, agent, monkeypatch):
         """_invoke_tool should return error JSON when a plugin blocks the tool."""
         monkeypatch.setattr(

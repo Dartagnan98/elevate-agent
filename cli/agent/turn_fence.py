@@ -696,6 +696,10 @@ class TurnFence:
 _CURRENT_TURN: contextvars.ContextVar[
     tuple[TurnFence, TurnToken] | None
 ] = contextvars.ContextVar("elevate_current_turn_fence", default=None)
+_DEFER_TERMINAL_SEAL: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "elevate_defer_turn_terminal_seal",
+    default=False,
+)
 class _OwnedPermitRegistry:
     """Thread-safe cleanup registry for permits owned by one binding.
 
@@ -751,6 +755,8 @@ _CURRENT_OWNED_PERMITS: contextvars.ContextVar[
 def bind_turn_fence(
     fence: TurnFence | None,
     token: TurnToken | None,
+    *,
+    defer_terminal_seal: bool = False,
 ) -> Iterator[None]:
     """Bind a gateway turn to this execution context.
 
@@ -761,6 +767,9 @@ def bind_turn_fence(
         yield
         return
     context_token = _CURRENT_TURN.set((fence, token))
+    terminal_seal_token = _DEFER_TERMINAL_SEAL.set(
+        bool(defer_terminal_seal)
+    )
     owned_permits = _OwnedPermitRegistry()
     owned_token = _CURRENT_OWNED_PERMITS.set(owned_permits)
     try:
@@ -795,6 +804,7 @@ def bind_turn_fence(
                 raise first_error
         finally:
             _CURRENT_OWNED_PERMITS.reset(owned_token)
+            _DEFER_TERMINAL_SEAL.reset(terminal_seal_token)
             _CURRENT_TURN.reset(context_token)
 
 
@@ -915,6 +925,16 @@ def seal_current_turn_terminal(terminal_status: str) -> dict[str, Any]:
             "terminal_status": str(terminal_status or "error"),
         }
     fence, token = binding
+    if _DEFER_TERMINAL_SEAL.get():
+        # The TUI gateway can run one or more queued-steer continuations under
+        # a single accepted prompt receipt. Each inner AIAgent invocation
+        # reaches this function, but only the gateway knows which invocation
+        # is the receipt's true terminal round. Preserve cancellation truth
+        # while leaving the generation open; the gateway seals exactly once
+        # immediately before its durable final commit.
+        snapshot = fence.snapshot()
+        snapshot["terminal_status"] = str(terminal_status or "error")
+        return snapshot
     return fence.seal_terminal(
         token,
         terminal_status=terminal_status,

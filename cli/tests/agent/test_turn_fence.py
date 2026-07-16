@@ -18,6 +18,7 @@ from agent.turn_fence import (
     current_turn_cancelled,
     current_turn_persist_allowed,
     current_turn_publish_allowed,
+    seal_current_turn_terminal,
 )
 
 
@@ -220,6 +221,25 @@ def test_context_binding_is_optional_and_copies_into_concurrent_worker() -> None
 
     fence.finish_worker(token, terminal_status="interrupted")
     assert fence.wait_quiesced(timeout=0.1)
+
+
+def test_gateway_deferred_terminal_seal_keeps_continuation_permits_open() -> None:
+    fence = TurnFence()
+    token = fence.begin_turn("prompt-1", "owner")
+    fence.bind_worker(token)
+
+    with bind_turn_fence(fence, token, defer_terminal_seal=True):
+        deferred = seal_current_turn_terminal("completed")
+        assert deferred["terminal_committed"] is False
+        assert deferred["terminal_status"] == "completed"
+        assert current_turn_publish_allowed() is True
+        with acquire_current_turn_permit("continuation_model"):
+            pass
+
+    sealed = fence.seal_terminal(token, terminal_status="completed")
+    assert sealed["terminal_committed"] is True
+    fence.finish_worker(token, terminal_status="completed")
+    assert fence.wait_generation_quiesced(token, timeout=1)
 
 
 def test_admission_reserves_worker_before_thread_start() -> None:

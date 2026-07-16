@@ -1670,6 +1670,26 @@ function joinTurnUsageToMessages(
   return map;
 }
 
+type SessionStopResult = {
+  interrupted?: boolean;
+  quiesced?: boolean;
+  running?: boolean;
+  status?: "finishing" | "stopped" | "stopping";
+};
+
+function sessionStopDisposition(
+  result: SessionStopResult,
+  hasActiveAssistant: boolean,
+): "already-settled" | "settled" | "waiting" {
+  if (result.quiesced === true && result.running !== true) return "settled";
+  // Gateway actor truth outranks a missing/stale optimistic assistant id.
+  // A reconnect or render race may lose that UI identity while the fenced
+  // worker or an already-won permit is still draining.
+  if (result.running === true || result.quiesced === false) return "waiting";
+  if (!hasActiveAssistant) return "already-settled";
+  return "waiting";
+}
+
 export const __chatPageTestables = {
   activeSnapshotAlreadyCompleted,
   buildBreakdownSteps,
@@ -1689,6 +1709,7 @@ export const __chatPageTestables = {
   queueAfterConnectionReset,
   resolveActivityDigestVisibility,
   routePromptForAgent,
+  sessionStopDisposition,
   shouldClearUsageForStatus,
   shouldClearUsageForStatusUpdate,
   shouldHandlePreviewShortcut,
@@ -7392,83 +7413,41 @@ export default function ChatPage() {
         .find((message) => message.role === "assistant" && message.status === "streaming")
         ?.id ??
       null;
-    if (activeAssistantId) {
-      stoppedAssistantIdsRef.current.add(activeAssistantId);
-      currentAssistantRef.current = activeAssistantId;
-      const stoppedAt = Date.now();
-      setMessages((prev) => {
-        const next = prev.map((message) =>
-          message.id === activeAssistantId && message.status === "streaming"
-            ? {
-                ...message,
-                completedAt: message.completedAt ?? stoppedAt,
-                status: "interrupted" as const,
-              }
-            : message,
-        );
-        const persisted = persistedSessionIdRef.current ?? sessionId;
-        if (persisted) {
-          rememberTranscript(
-            persisted,
-            attachLiveActivitySnapshots(
-              dropForeignMessages(next, ownedSessionIdsRef.current),
-              [],
-              [],
-            ),
-          );
-        }
-        return next;
-      });
-    } else {
-      const stoppedAt = Date.now();
-      setMessages((prev) => {
-        const next = markStreamingTurnsInterrupted(prev, stoppedAt);
-        const persisted = persistedSessionIdRef.current ?? sessionId;
-        if (persisted && next !== prev) {
-          rememberTranscript(
-            persisted,
-            attachLiveActivitySnapshots(
-              dropForeignMessages(next, ownedSessionIdsRef.current),
-              [],
-              [],
-            ),
-          );
-        }
-        return next;
-      });
-    }
-    setQueuedInputs([]);
-    setTools([]);
-    setActivityTrace([]);
-    clearActiveTurnSnapshot(persistedSessionIdRef.current ?? sessionId);
-    setSubagents((prev) =>
-      prev.map((subagent) =>
-        subagent.status === "running"
-          ? { ...subagent, completedAt: Date.now(), status: "error" }
-          : subagent,
-      ),
-    );
-    setBusy(false);
     setStatusText("Stopping...");
     void gw
-      .request("session.stop", { session_id: sessionId })
-      .then(() => {
-        setStatusText("Stopped");
+      .request<SessionStopResult>("session.stop", { session_id: sessionId })
+      .then((result) => {
+        // Stop is a cancellation request, not proof that the old worker and
+        // its already-won effects have exited. Keep the composer locked until
+        // the fenced message.complete arrives. A late completion cannot be
+        // mistaken for a fresh turn because its exact assistant id is marked.
+        if (result.interrupted && activeAssistantId) {
+          stoppedAssistantIdsRef.current.add(activeAssistantId);
+        }
+        const disposition = sessionStopDisposition(
+          result,
+          currentAssistantRef.current !== null,
+        );
+        if (disposition === "settled") {
+          setMessages((prev) => markStreamingTurnsInterrupted(prev));
+          setQueuedInputs([]);
+          setTools([]);
+          setActivityTrace([]);
+          clearActiveTurnSnapshot(persistedSessionIdRef.current ?? sessionId);
+          setBusy(false);
+          setStatusText("Stopped");
+          return;
+        }
+        // The terminal event may have beaten this RPC response. Do not put a
+        // completed view back into a synthetic stopping state.
+        if (disposition === "already-settled") return;
+        setBusy(true);
+        setStatusText(result.status === "finishing" ? "Finishing..." : "Stopping...");
       })
       .catch((error) => {
-        void gw
-          .request("session.interrupt", { session_id: sessionId })
-          .then(() => {
-            setStatusText("Interrupted");
-          })
-          .catch((interruptError) => {
-            const message =
-              interruptError instanceof Error
-                ? interruptError.message
-                : String(interruptError);
-            const stopMessage = error instanceof Error ? error.message : String(error);
-            setBanner(`Stop failed: ${stopMessage}; interrupt failed: ${message}`);
-          });
+        const stopMessage = error instanceof Error ? error.message : String(error);
+        setBanner(`Stop failed: ${stopMessage}`);
+        setStatusText("Stop failed");
       });
   }, [gw, messages, sessionId, state]);
 

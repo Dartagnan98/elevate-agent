@@ -1,6 +1,6 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "1.2.71",
+  "version": "1.2.72",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
@@ -14,6 +14,7 @@
     "pack:mac": "npm run build:web && electron-builder --config electron-builder.config.js --mac dir",
     "build:mac": "export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; export ELEVATE_RELEASE_CHANNEL=${ELEVATE_RELEASE_CHANNEL:-latest}; node scripts/candidate-receipt.js build-mac",
     "sync:mac-runtime": "bash scripts/sync-mac-runtime.sh",
+    "gate:beta-source": "node scripts/beta-source-safety-gate.js",
     "preflight:apple": "node scripts/preflight-apple-release.js",
     "merge:mac-feed": "node scripts/merge-mac-feed.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",

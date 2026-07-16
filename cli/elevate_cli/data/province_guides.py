@@ -260,9 +260,9 @@ def _row_to_form(row: sqlite3.Row) -> dict[str, Any]:
     from elevate_constants import exact_realtor_beta_active
 
     if exact_realtor_beta_active() and str(row["province"] or "").upper() == "BC":
-        result["requiresLiveFormsProvider"] = (
-            str(row["code"] or "").strip().upper() in {"MLC", "CPS-RES"}
-        )
+        # Every bundled BC form is reference-only/provider-required.  This is
+        # a coordination flag, not a claim that the form applies to a deal.
+        result["requiresLiveFormsProvider"] = provider_required
     return result
 
 

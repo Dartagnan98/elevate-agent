@@ -1,6 +1,7 @@
 import { REASONING_PULSE_MS, STREAM_BATCH_MS } from '../config/timing.js'
-import type { SessionInterruptResponse, SubagentEventPayload } from '../gatewayTypes.js'
+import type { SessionStopResponse, SubagentEventPayload } from '../gatewayTypes.js'
 import { hasReasoningTag, splitReasoning } from '../lib/reasoning.js'
+import { rpcErrorMessage } from '../lib/rpc.js'
 import {
   buildToolTrailLine,
   estimateTokensRough,
@@ -15,7 +16,6 @@ import { pushSnapshot } from './spawnHistoryStore.js'
 import { getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
-const INTERRUPT_COOLDOWN_MS = 1500
 const ACTIVITY_LIMIT = 8
 const TRAIL_LIMIT = 8
 
@@ -68,6 +68,8 @@ class TurnController {
   private activityId = 0
   private reasoningStreamingTimer: Timer = null
   private reasoningTimer: Timer = null
+  private stopRequestInFlight: null | Promise<void> = null
+  private stopRequestSequence = 0
   private streamTimer: Timer = null
   private toolProgressTimer: Timer = null
 
@@ -107,47 +109,57 @@ class TurnController {
     resetFlowOverlays(terminalApprovalRequestId)
   }
 
-  interruptTurn({ appendMessage, gw, sid, sys }: InterruptDeps) {
+  interruptTurn({ gw, sid, sys }: InterruptDeps): Promise<void> {
+    // Stop is a request, not terminal proof. Keep the exact turn visible and
+    // the composer locked until its fenced message.complete arrives. Repeated
+    // Ctrl+C / double-empty submissions share the same request instead of
+    // issuing competing cancellation RPCs.
+    if (this.interrupted) {
+      patchUiState(state => ({ ...state, busy: true }))
+
+      return this.stopRequestInFlight ?? Promise.resolve()
+    }
+
     this.interrupted = true
-    gw.request<SessionInterruptResponse>('session.interrupt', { session_id: sid }).catch(() => {})
-
-    const segments = this.segmentMessages
-    const partial = this.bufRef.trimStart()
-    const tools = this.pendingSegmentTools
-
-    // Drain streaming/segment state off the nanostore before writing the
-    // preserved snapshot to the transcript — otherwise each flushed segment
-    // appears in both `turn.streamSegments` and the transcript for one frame.
-    this.idle()
-    this.clearReasoning()
-    this.turnTools = []
-    patchTurnState({ activity: [], outcome: '' })
-
-    for (const msg of segments) {
-      appendMessage(msg)
-    }
-
-    // Always surface an interruption indicator — if there's an in-flight
-    // `partial` or pending tools, fold them into a single assistant message;
-    // otherwise emit a sys note so the transcript always records that the
-    // turn was cancelled, even when only prior `segments` were preserved.
-    if (partial || tools.length) {
-      appendMessage({
-        role: 'assistant',
-        text: partial ? `${partial}\n\n*[interrupted]*` : '*[interrupted]*',
-        ...(tools.length && { tools })
-      })
-    } else {
-      sys('interrupted')
-    }
-
-    patchUiState({ status: 'interrupted' })
     this.clearStatusTimer()
+    patchUiState({ busy: true, status: 'stopping…' })
 
-    this.statusTimer = setTimeout(() => {
-      this.statusTimer = null
-      patchUiState({ status: 'ready' })
-    }, INTERRUPT_COOLDOWN_MS)
+    const requestSequence = ++this.stopRequestSequence
+
+    const request = gw
+      .request<SessionStopResponse>('session.stop', { session_id: sid })
+      .then(result => {
+        // message.complete may win while the RPC response is in flight. Never
+        // overwrite that authoritative terminal state with a late Stop ack.
+        if (requestSequence !== this.stopRequestSequence || !this.interrupted || !getUiState().busy) {
+          return
+        }
+
+        patchUiState({
+          busy: true,
+          status: result?.status === 'finishing' ? 'finishing…' : 'stopping…'
+        })
+      })
+      .catch((error: unknown) => {
+        // A terminal frame also wins over a late Stop transport failure. If
+        // the turn is still live, resume streaming truth and allow a retry.
+        if (requestSequence !== this.stopRequestSequence || !this.interrupted || !getUiState().busy) {
+          return
+        }
+
+        this.interrupted = false
+        patchUiState({ busy: true, status: 'running…' })
+        sys(`stop failed: ${rpcErrorMessage(error)}`)
+      })
+      .finally(() => {
+        if (requestSequence === this.stopRequestSequence) {
+          this.stopRequestInFlight = null
+        }
+      })
+
+    this.stopRequestInFlight = request
+
+    return request
   }
 
   pruneTransient() {
@@ -329,8 +341,6 @@ class TurnController {
       }
     }
 
-    const wasInterrupted = this.interrupted
-
     // Archive the turn's spawn tree to history BEFORE idle() drops subagents
     // from turnState.  Lets /replay and the overlay's history nav pull up
     // finished fan-outs without a round-trip to disk.
@@ -350,9 +360,10 @@ class TurnController {
     this.turnTools = []
     this.persistedToolLabels.clear()
     this.bufRef = ''
+    this.interrupted = false
     patchTurnState({ activity: [], outcome: '' })
 
-    return { finalMessages, finalText, wasInterrupted }
+    return { finalMessages, finalText }
   }
 
   recordMessageDelta({ rendered, text }: { rendered?: string; text?: string }) {

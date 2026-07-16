@@ -48,6 +48,10 @@ def _write_beta_auth(home) -> None:
 
 def _prepare_beta_cron(monkeypatch, tmp_path) -> MagicMock:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    # The shipped Realtor Beta blocks scheduled execution at run_job(). These
+    # tests exercise the defense-in-depth provider firewall below that public
+    # entrypoint, so explicitly open only the policy seam in this unit module.
+    monkeypatch.setattr(scheduler, "scheduled_execution_disabled_reason", lambda: None)
     monkeypatch.delenv("ELEVATE_MODEL", raising=False)
     monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
     monkeypatch.setattr(scheduler, "_hermes_home", tmp_path)

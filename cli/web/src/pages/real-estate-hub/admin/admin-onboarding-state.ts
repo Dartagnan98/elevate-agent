@@ -16,6 +16,12 @@ export function missingAdminOnboardingFields<T extends AdminOnboardingDraftField
   draft: AdminSetupDraft,
 ): T[] {
   return fields.filter((field) => {
+    if (
+      field.key === "formsAccountEmail"
+      && draft.formsSessionMode === "account_email"
+    ) {
+      return draft.formsAccountEmail.trim().length === 0;
+    }
     if (field.optional) return false;
     const raw = draft[field.key];
     return typeof raw !== "string" || raw.trim().length === 0;
@@ -94,10 +100,12 @@ export type AdminFormsProviderCardModel = {
   visible: boolean;
   available: boolean;
   provider: string;
+  loginUrl: string;
+  coordinationReady: boolean;
   title: "Forms provider";
   statusLabel: "provider needed" | "document drafting paused" | "verified";
   message: string;
-  buttonLabel: "Connect & verify";
+  buttonLabel: "Open provider" | "Finish provider setup";
   buttonDisabled: boolean;
   disabledReason: string;
 };
@@ -114,16 +122,21 @@ export function adminFormsProviderCardModel(
   const provider = String(item?.provider || setup?.profile.formsProvider || "").trim();
   const exactBeta = capability !== undefined;
   const available = capability?.available === true;
+  const coordination = capability?.coordination;
+  const loginUrl = String(coordination?.loginUrl || "").trim();
+  const coordinationReady = coordination?.ready === true;
   const paused = exactBeta && !available;
   const fallbackMessage = provider
-    ? "Admin is ready, but live MLC and CPS drafting stays paused until forms-provider access is verified. Use the named provider manually in the meantime."
-    : "Choose the forms provider your brokerage uses. Admin can start after setup, but MLC and CPS drafting stays manual until live access is verified.";
+    ? "Admin is ready, but provider-required BC document drafting stays paused. Use the saved provider handoff and return a reviewed PDF with a manual export claim."
+    : "Choose the forms provider your brokerage uses. Admin can start after setup, but provider-required document work stays manual.";
 
   return {
     exactBeta,
     visible: paused,
     available,
     provider,
+    loginUrl,
+    coordinationReady,
     title: "Forms provider",
     statusLabel: available
       ? "verified"
@@ -131,10 +144,12 @@ export function adminFormsProviderCardModel(
         ? "document drafting paused"
         : "provider needed",
     message: String(capability?.message || "").trim() || fallbackMessage,
-    buttonLabel: "Connect & verify",
-    buttonDisabled: paused,
+    buttonLabel: loginUrl ? "Open provider" : "Finish provider setup",
+    buttonDisabled: paused && !loginUrl,
     disabledReason: paused
-      ? "Automatic live forms verification is not available in this Beta build. Elevation will hold MLC and CPS drafting for manual completion instead of claiming a connection."
+      ? loginUrl
+        ? "Opens the saved provider handoff link. This does not verify provider access or enable automatic document drafting."
+        : "Add the provider login URL and choose an existing session or account email. Automatic provider verification is not available in this Beta."
       : "",
   };
 }

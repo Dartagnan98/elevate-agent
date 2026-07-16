@@ -25,9 +25,10 @@ Usage in run_agent.py:
 
 from __future__ import annotations
 
-import logging
-import re
 import inspect
+import logging
+import os
+import re
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -39,6 +40,123 @@ logger = logging.getLogger(__name__)
 _DISABLED_POLICY_VALUES = {"", "none", "disabled", "off", "never"}
 _NO_RECALL_VALUES = _DISABLED_POLICY_VALUES | {"no_recall", "read_disabled"}
 _NO_WRITE_VALUES = _DISABLED_POLICY_VALUES | {"no_write", "read_only", "readonly", "write_disabled"}
+
+_BETA_FACT_STORE_READ_ACTIONS = frozenset({
+    "search",
+    "probe",
+    "related",
+    "reason",
+    "contradict",
+    "embedding_status",
+    "journal_status",
+    "recent",
+    "wiki",
+    "layered_recall",
+    "rag_query",
+    "recall_route",
+    "document_search",
+    "document_status",
+    "hygiene",
+    "memory_events",
+    "memory_replay",
+    "memory_profile",
+    "list",
+})
+_BETA_FACT_STORE_WRITE_ACTIONS = frozenset({
+    "add",
+    "embedding_backfill",
+    "chunk_embedding_backfill",
+    "organize_journal",
+    "community_reports",
+    "relation_backfill",
+    "backfill_critical",
+    "graph_reprocess",
+    "document_add",
+    "document_delete",
+    "import_plaud_archive",
+    "cluster",
+    "auto_tag",
+    "confidence_maintenance",
+    "prune_logs",
+    "benchmark",
+    "supersede",
+    "update",
+    "remove",
+})
+
+
+def _exact_beta_memory_policy_active() -> bool:
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        return beta_provider_policy_active()
+    except Exception:
+        return os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+
+def _beta_memory_tool_effects(tool_name: str, args: Any) -> set[str]:
+    """Treat provider reads as mixed because they persist retrieval telemetry."""
+    if not isinstance(args, dict):
+        return {"unknown"}
+    action = str(args.get("action") or args.get("operation") or "").strip().lower()
+    if tool_name == "fact_store":
+        if action in _BETA_FACT_STORE_WRITE_ACTIONS:
+            return {"write_local:memory"}
+        if action in _BETA_FACT_STORE_READ_ACTIONS:
+            # Search, probe, layered recall, document search, and related
+            # operations all write activity/retrieval records today.  Until a
+            # no-write provider path exists they are not read-only operations.
+            return {"read:memory", "write_local:memory"}
+        return {"unknown"}
+    if tool_name == "fact_feedback":
+        if action in {"helpful", "unhelpful"}:
+            return {"write_local:memory"}
+        return {"unknown"}
+    return {"unknown"}
+
+
+def _beta_memory_authorization(tool_name: str, args: Any, kwargs: Dict[str, Any]):
+    if not _exact_beta_memory_policy_active():
+        return None
+    from tools.approval import (
+        ExecutionPolicy,
+        authorize_effects,
+        get_current_execution_policy,
+        get_current_execution_policy_revision,
+    )
+
+    policy = get_current_execution_policy()
+    revision = get_current_execution_policy_revision()
+    session_id = str(kwargs.get("session_id") or "").strip()
+    tool_call_id = str(kwargs.get("tool_call_id") or "").strip()
+    accepted_turn_id = str(kwargs.get("accepted_turn_id") or "").strip()
+    supplied_revision = kwargs.get("policy_revision")
+    durable_identity_matches = (
+        isinstance(policy, ExecutionPolicy)
+        and isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and revision >= 0
+        and isinstance(supplied_revision, int)
+        and not isinstance(supplied_revision, bool)
+        and session_id
+        and tool_call_id
+        and accepted_turn_id == policy.accepted_turn_id
+        and supplied_revision == revision
+    )
+
+    return authorize_effects(
+        policy if durable_identity_matches else None,
+        _beta_memory_tool_effects(tool_name, args),
+    )
+
+
+def _beta_visible_memory_schema(schema: Any) -> Optional[Dict[str, Any]]:
+    """Hide direct provider tools until they have a no-write Beta read path."""
+    if not isinstance(schema, dict):
+        return None
+    if not _exact_beta_memory_policy_active():
+        return schema
+    return None
 
 
 def _as_list(value: Any) -> list[str]:
@@ -427,6 +545,11 @@ class MemoryManager:
         Returns combined text, or empty string if no providers contribute.
         Each non-empty block is labeled with the provider name.
         """
+        if _exact_beta_memory_policy_active():
+            # Provider prompt blocks currently instruct the model to call the
+            # direct fact_store/fact_feedback tools hidden below. Advertising
+            # unavailable tools creates retries and false task stalls.
+            return ""
         blocks = []
         for provider in self._providers:
             try:
@@ -448,6 +571,8 @@ class MemoryManager:
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
         """
+        if _exact_beta_memory_policy_active():
+            return ""
         if not memory_policy_allows_recall(self._agent_memory_policy):
             return ""
         parts = []
@@ -467,6 +592,8 @@ class MemoryManager:
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
+        if _exact_beta_memory_policy_active():
+            return
         if not memory_policy_allows_recall(self._agent_memory_policy):
             return
         policy_kwargs = self._policy_kwargs(session_id=session_id)
@@ -484,6 +611,8 @@ class MemoryManager:
 
     def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Sync a completed turn to all providers."""
+        if _exact_beta_memory_policy_active():
+            return
         if not memory_policy_allows_write(self._agent_memory_policy):
             return
         policy_kwargs = self._policy_kwargs(session_id=session_id)
@@ -505,14 +634,22 @@ class MemoryManager:
 
     def get_all_tool_schemas(self) -> List[Dict[str, Any]]:
         """Collect tool schemas from all providers."""
+        # Exact Realtor Beta must not even ask an external provider for its
+        # tool inventory.  Schema discovery is observable provider work and
+        # several providers persist telemetry while building definitions.
+        if _exact_beta_memory_policy_active():
+            return []
         schemas = []
         seen = set()
         for provider in self._providers:
             try:
                 for schema in provider.get_tool_schemas():
-                    name = schema.get("name", "")
+                    visible_schema = _beta_visible_memory_schema(schema)
+                    if visible_schema is None:
+                        continue
+                    name = visible_schema.get("name", "")
                     if name and name not in seen:
-                        schemas.append(schema)
+                        schemas.append(visible_schema)
                         seen.add(name)
             except Exception as e:
                 logger.warning(
@@ -522,11 +659,19 @@ class MemoryManager:
         return schemas
 
     def get_all_tool_names(self) -> set:
-        """Return set of all tool names across all providers."""
-        return set(self._tool_to_provider.keys())
+        """Return the same visible provider-tool inventory as the schemas."""
+        if _exact_beta_memory_policy_active():
+            return set()
+        return {
+            str(schema.get("name") or "")
+            for schema in self.get_all_tool_schemas()
+            if str(schema.get("name") or "")
+        }
 
     def has_tool(self, tool_name: str) -> bool:
         """Check if any provider handles this tool."""
+        if _exact_beta_memory_policy_active():
+            return False
         return tool_name in self._tool_to_provider
 
     def handle_tool_call(
@@ -541,6 +686,12 @@ class MemoryManager:
         if provider is None:
             return tool_error(f"No memory provider handles tool '{tool_name}'")
         try:
+            beta_authorization = _beta_memory_authorization(tool_name, args, kwargs)
+            if beta_authorization is not None and not beta_authorization.allowed:
+                return tool_error(
+                    "Realtor Beta blocked this memory operation under the "
+                    f"accepted-turn policy: {beta_authorization.reason}"
+                )
             action_text = str(args.get("action") or args.get("operation") or "").lower()
             if action_text in {"add", "append", "replace", "update", "write", "delete"}:
                 if not memory_policy_allows_write(self._agent_memory_policy):
@@ -558,9 +709,21 @@ class MemoryManager:
                     self._agent_memory_policy,
                     extra=metadata if isinstance(metadata, dict) else None,
                 )
-            kwargs = {**kwargs, **self._policy_kwargs()}
-            kwargs = self._accepted_kwargs(provider.handle_tool_call, kwargs)
-            return provider.handle_tool_call(tool_name, scoped_args, **kwargs)
+            provider_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key not in {"accepted_turn_id", "policy_revision", "tool_call_id"}
+            }
+            provider_kwargs = {**provider_kwargs, **self._policy_kwargs()}
+            provider_kwargs = self._accepted_kwargs(
+                provider.handle_tool_call,
+                provider_kwargs,
+            )
+            return provider.handle_tool_call(
+                tool_name,
+                scoped_args,
+                **provider_kwargs,
+            )
         except Exception as e:
             logger.error(
                 "Memory provider '%s' handle_tool_call(%s) failed: %s",
@@ -575,6 +738,8 @@ class MemoryManager:
 
         kwargs may include: remaining_tokens, model, platform, tool_count.
         """
+        if _exact_beta_memory_policy_active():
+            return
         for provider in self._providers:
             try:
                 provider.on_turn_start(turn_number, message, **kwargs)
@@ -586,6 +751,8 @@ class MemoryManager:
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Notify all providers of session end."""
+        if _exact_beta_memory_policy_active():
+            return
         for provider in self._providers:
             try:
                 provider.on_session_end(messages)
@@ -614,6 +781,8 @@ class MemoryManager:
         session's record. See ``MemoryProvider.on_session_switch`` for
         the full contract.
         """
+        if _exact_beta_memory_policy_active():
+            return
         if not new_session_id:
             return
         for provider in self._providers:
@@ -636,6 +805,8 @@ class MemoryManager:
         Returns combined text from providers to include in the compression
         summary prompt. Empty string if no provider contributes.
         """
+        if _exact_beta_memory_policy_active():
+            return ""
         parts = []
         for provider in self._providers:
             try:
@@ -686,6 +857,8 @@ class MemoryManager:
 
         Skips the builtin provider itself (it's the source of the write).
         """
+        if _exact_beta_memory_policy_active():
+            return
         if not memory_policy_allows_write(self._agent_memory_policy):
             return
         write_metadata = memory_policy_metadata(self._agent_memory_policy, extra=dict(metadata or {}))
@@ -711,6 +884,8 @@ class MemoryManager:
     def on_delegation(self, task: str, result: str, *,
                       child_session_id: str = "", **kwargs) -> None:
         """Notify all providers that a subagent completed."""
+        if _exact_beta_memory_policy_active():
+            return
         for provider in self._providers:
             try:
                 provider.on_delegation(
@@ -724,6 +899,8 @@ class MemoryManager:
 
     def shutdown_all(self) -> None:
         """Shut down all providers (reverse order for clean teardown)."""
+        if _exact_beta_memory_policy_active():
+            return
         for provider in reversed(self._providers):
             try:
                 provider.shutdown()
@@ -740,6 +917,8 @@ class MemoryManager:
         provider can resolve profile-scoped storage paths without importing
         ``get_elevate_home()`` themselves.
         """
+        if _exact_beta_memory_policy_active():
+            return
         if "elevate_home" not in kwargs:
             from elevate_constants import get_elevate_home
             kwargs["elevate_home"] = str(get_elevate_home())

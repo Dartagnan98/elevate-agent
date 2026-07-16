@@ -173,6 +173,44 @@ describe("terminal failure truth", () => {
   });
 });
 
+describe("session Stop quiescence", () => {
+  it("keeps the composer waiting while the fenced worker is still running", () => {
+    expect(
+      __chatPageTestables.sessionStopDisposition(
+        { quiesced: false, running: true, status: "stopping" },
+        true,
+      ),
+    ).toBe("waiting");
+  });
+
+  it("settles only from explicit quiescence", () => {
+    expect(
+      __chatPageTestables.sessionStopDisposition(
+        { quiesced: true, running: false, status: "stopped" },
+        true,
+      ),
+    ).toBe("settled");
+  });
+
+  it("trusts authoritative running state even when the UI lost assistant identity", () => {
+    expect(
+      __chatPageTestables.sessionStopDisposition(
+        { quiesced: false, running: true, status: "stopping" },
+        false,
+      ),
+    ).toBe("waiting");
+  });
+
+  it("does not restore stopping state after authoritative quiescence", () => {
+    expect(
+      __chatPageTestables.sessionStopDisposition(
+        { quiesced: true, running: false, status: "stopped" },
+        false,
+      ),
+    ).toBe("settled");
+  });
+});
+
 describe("delegate completion truth", () => {
   it("accepts only an explicit verified completion", () => {
     expect(

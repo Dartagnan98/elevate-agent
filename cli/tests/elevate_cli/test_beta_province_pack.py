@@ -209,7 +209,7 @@ def test_fresh_activation_imports_provider_required_catalog_and_verifies_documen
         form["code"]
         for form in forms
         if form.get("requiresLiveFormsProvider") is True
-    } == {"CPS-res", "MLC"}
+    } == {form["code"] for form in forms}
     coverage = province_coverage(conn)[0]
     assert coverage["referenceOnly"] is True
     assert coverage["availability"] == "provider_required"

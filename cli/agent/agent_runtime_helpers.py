@@ -1594,16 +1594,42 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
 
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
-                 pre_tool_block_checked: bool = False) -> str:
+                 pre_tool_block_checked: bool = False,
+                 return_outcome: bool = False):
     """Invoke a single tool and return the result string. No display logic.
 
     Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
     tools. Used by the concurrent execution path; the sequential path retains
     its own inline invocation for backward-compatible display handling.
     """
+    from model_tools import (
+        ToolDispatchOutcome,
+        exact_beta_tool_containment_active,
+        exact_beta_tool_preflight_block,
+    )
+
+    def _result(value, *, started: bool, reason: str = ""):
+        if return_outcome:
+            return ToolDispatchOutcome(value, started, reason)
+        return value
+
+    beta_block = exact_beta_tool_preflight_block(
+        function_name,
+        function_args,
+        session_id=agent.session_id or "",
+        tool_call_id=tool_call_id,
+    )
+    if beta_block is not None:
+        return _result(
+            beta_block,
+            started=False,
+            reason="beta_preflight_block",
+        )
+    exact_beta = exact_beta_tool_containment_active()
+
     # Check plugin hooks for a block directive before executing anything.
     block_message: Optional[str] = None
-    if not pre_tool_block_checked:
+    if not exact_beta and not pre_tool_block_checked:
         try:
             from elevate_cli.plugins import get_pre_tool_call_block_message
             block_message = get_pre_tool_call_block_message(
@@ -1612,31 +1638,44 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         except Exception:
             pass
     if block_message is not None:
-        return json.dumps({"error": block_message}, ensure_ascii=False)
+        return _result(
+            json.dumps({"error": block_message}, ensure_ascii=False),
+            started=False,
+            reason="plugin_block",
+        )
 
     if function_name == "todo":
         from tools.todo_tool import todo_tool as _todo_tool
-        return _todo_tool(
-            todos=function_args.get("todos"),
-            merge=function_args.get("merge", False),
-            store=agent._todo_store,
+        return _result(
+            _todo_tool(
+                todos=function_args.get("todos"),
+                merge=function_args.get("merge", False),
+                store=agent._todo_store,
+            ),
+            started=True,
         )
     elif function_name == "session_search":
         session_db = agent._get_session_db_for_recall()
         if not session_db:
             from elevate_state import format_session_db_unavailable
-            return json.dumps({"success": False, "error": format_session_db_unavailable()})
+            return _result(
+                json.dumps({"success": False, "error": format_session_db_unavailable()}),
+                started=True,
+            )
         from tools.session_search_tool import session_search as _session_search
-        return _session_search(
-            query=function_args.get("query", ""),
-            role_filter=function_args.get("role_filter"),
-            limit=function_args.get("limit", 3),
-            session_id=function_args.get("session_id"),
-            around_message_id=function_args.get("around_message_id"),
-            window=function_args.get("window", 5),
-            sort=function_args.get("sort"),
-            db=session_db,
-            current_session_id=agent.session_id,
+        return _result(
+            _session_search(
+                query=function_args.get("query", ""),
+                role_filter=function_args.get("role_filter"),
+                limit=function_args.get("limit", 3),
+                session_id=function_args.get("session_id"),
+                around_message_id=function_args.get("around_message_id"),
+                window=function_args.get("window", 5),
+                sort=function_args.get("sort"),
+                db=session_db,
+                current_session_id=agent.session_id,
+            ),
+            started=True,
         )
     elif function_name == "memory":
         target = function_args.get("target", "memory")
@@ -1662,18 +1701,24 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 )
             except Exception:
                 pass
-        return result
+        return _result(result, started=True)
     elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
-        return agent._memory_manager.handle_tool_call(function_name, function_args)
+        return _result(
+            agent._memory_manager.handle_tool_call(function_name, function_args),
+            started=True,
+        )
     elif function_name == "clarify":
         from tools.clarify_tool import clarify_tool as _clarify_tool
-        return _clarify_tool(
-            question=function_args.get("question", ""),
-            choices=function_args.get("choices"),
-            callback=agent.clarify_callback,
+        return _result(
+            _clarify_tool(
+                question=function_args.get("question", ""),
+                choices=function_args.get("choices"),
+                callback=agent.clarify_callback,
+            ),
+            started=True,
         )
     elif function_name == "delegate_task":
-        return agent._dispatch_delegate_task(function_args)
+        return _result(agent._dispatch_delegate_task(function_args), started=True)
     else:
         return _ra().handle_function_call(
             function_name, function_args, effective_task_id,
@@ -1681,6 +1726,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             session_id=agent.session_id or "",
             enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
             skip_pre_tool_call_hook=True,
+            return_outcome=return_outcome,
         )
 
 

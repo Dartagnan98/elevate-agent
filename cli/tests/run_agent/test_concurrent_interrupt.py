@@ -11,6 +11,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_elevate(tmp_path, monkeypatch):
     monkeypatch.setenv("ELEVATE_HOME", str(tmp_path / ".elevate"))
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
     (tmp_path / ".elevate").mkdir(exist_ok=True)
 
 

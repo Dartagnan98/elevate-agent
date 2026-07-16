@@ -15,7 +15,15 @@ import { getUiState, patchUiState } from './uiStore.js'
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
 
-const statusFromBusy = () => (getUiState().busy ? 'running…' : 'ready')
+const statusFromBusy = () => {
+  const ui = getUiState()
+
+  if (turnController.interrupted && ui.busy) {
+    return ui.status === 'finishing…' ? 'finishing…' : 'stopping…'
+  }
+
+  return ui.busy ? 'running…' : 'ready'
+}
 
 const applySkin = (s: GatewaySkin) =>
   patchUiState({
@@ -108,6 +116,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   }
 
   const setStatus = (status: string) => {
+    // Stop stays visibly pending until recordMessageComplete clears the
+    // controller flag. Late thinking/status/approval frames are progress, not
+    // terminal proof, and must not unlock or relabel the turn.
+    if (turnController.interrupted && getUiState().busy) {
+      return
+    }
+
     pendingThinkingStatus = ''
 
     if (thinkingStatusTimer) {
@@ -119,6 +134,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   }
 
   const scheduleThinkingStatus = (status: string) => {
+    if (turnController.interrupted && getUiState().busy) {
+      return
+    }
+
     pendingThinkingStatus = status
 
     if (thinkingStatusTimer) {
@@ -127,6 +146,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
     thinkingStatusTimer = setTimeout(() => {
       thinkingStatusTimer = null
+
+      if (turnController.interrupted && getUiState().busy) {
+        return
+      }
+
       patchUiState({ status: pendingThinkingStatus || statusFromBusy() })
     }, STREAM_BATCH_MS)
   }
@@ -599,19 +623,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
       case 'message.complete': {
-        const { finalMessages, finalText, wasInterrupted } = turnController.recordMessageComplete(ev.payload ?? {})
+        const { finalMessages, finalText } = turnController.recordMessageComplete(ev.payload ?? {})
 
-        if (!wasInterrupted) {
-          const msgs: Msg[] = finalMessages.length
-            ? finalMessages
-            : [
-                { role: 'assistant', text: finalText, ...(ev.payload?.status && { status: ev.payload.status }) }
-              ]
-          msgs.forEach(appendMessage)
+        const msgs: Msg[] = finalMessages.length
+          ? finalMessages
+          : [{ role: 'assistant', text: finalText, ...(ev.payload?.status && { status: ev.payload.status }) }]
 
-          if (ev.payload?.status === 'complete' && bellOnComplete && stdout?.isTTY) {
-            stdout.write('\x07')
-          }
+        msgs.forEach(appendMessage)
+
+        if (ev.payload?.status === 'complete' && bellOnComplete && stdout?.isTTY) {
+          stdout.write('\x07')
         }
 
         setStatus(

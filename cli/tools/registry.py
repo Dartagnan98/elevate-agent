@@ -20,6 +20,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,6 +28,21 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+def _exact_beta_effect_enforcement_active() -> bool:
+    """Return whether every registry start must honor accepted-turn effects.
+
+    Keep the policy import lazy because the registry is imported during early
+    CLI startup.  The environment fallback keeps a partially installed Beta
+    fail closed without changing Stable's legacy dispatch behavior.
+    """
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        return beta_provider_policy_active()
+    except Exception:
+        return os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
 
 
 def _normalize_function_schema(name: str, schema: dict) -> dict:
@@ -727,6 +743,29 @@ class ToolRegistry:
             effect_resolution_error=effect_resolution_error,
         )
 
+    def prepare_shadow(
+        self,
+        name: str,
+        args: Any,
+        *,
+        context: ToolCallContext,
+        execution_policy: Any = _USE_CURRENT_EXECUTION_POLICY,
+        handler_kwargs: Any = None,
+    ) -> PreparedToolCall:
+        """Freeze and authorize one call without running hooks or a handler.
+
+        Exact-Beta adapters use this as their first, side-effect-free gate.  A
+        separately exposed start operation lets them keep the exact policy,
+        registry entry, arguments, and handler context that passed that gate.
+        """
+        return self._prepare_shadow_call(
+            name,
+            args,
+            context,
+            execution_policy,
+            handler_kwargs=handler_kwargs,
+        )
+
     def _shadow_start_error(
         self,
         prepared: PreparedToolCall,
@@ -810,42 +849,24 @@ class ToolRegistry:
                 stale_reason=stale_reason,
             )
 
-        approval_effect_context = None
-        if prepared.tool_name == "terminal":
-            try:
-                from elevate_cli.beta_provider_policy import (
-                    beta_provider_policy_active,
-                )
-
-                exact_beta = beta_provider_policy_active()
-            except Exception:
-                import os
-
-                exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
-            if exact_beta:
-                authorization = prepared.authorization
-                if not authorization.allowed:
-                    return self._shadow_start_error(
-                        prepared,
-                        "effect_policy_block",
-                        "Terminal effect blocked by the accepted-turn policy: "
-                        f"{authorization.reason}",
-                    )
-                try:
-                    from tools.approval import (
-                        approval_effect_context_from_prepared,
-                    )
-
-                    approval_effect_context = (
-                        approval_effect_context_from_prepared(prepared)
-                    )
-                except Exception as exc:
-                    return self._shadow_start_error(
-                        prepared,
-                        "effect_context_block",
-                        "Terminal effect blocked because durable invocation "
-                        f"context is unavailable: {type(exc).__name__}",
-                    )
+        exact_beta = _exact_beta_effect_enforcement_active()
+        if exact_beta and prepared.tool_name == "terminal":
+            # Realtor Beta does not ship terminal capability.  Enforce that at
+            # the atomic registry start boundary as well as model schema and
+            # preflight boundaries so direct prepared-call users cannot revive
+            # it with an otherwise-allowing read policy.
+            return self._shadow_start_error(
+                prepared,
+                "effect_policy_block",
+                "Terminal is unavailable in Realtor Beta.",
+            )
+        if exact_beta and not prepared.authorization.allowed:
+            return self._shadow_start_error(
+                prepared,
+                "effect_policy_block",
+                "Tool effect blocked by the accepted-turn policy: "
+                f"{prepared.authorization.reason}",
+            )
 
         execution_error = None
         try:
@@ -854,10 +875,6 @@ class ToolRegistry:
                 raise RuntimeError("prepared call has no captured handler")
             args = prepared.thaw_args()
             handler_kwargs = prepared.thaw_handler_kwargs()
-            if approval_effect_context is not None:
-                handler_kwargs["_approval_effect_context"] = (
-                    approval_effect_context
-                )
             if prepared.captured_is_async:
                 from model_tools import _run_async
 
@@ -888,6 +905,15 @@ class ToolRegistry:
             execution_error=execution_error,
         )
 
+    def execute_prepared_shadow(
+        self,
+        prepared: PreparedToolCall,
+    ) -> ShadowToolExecution:
+        """Revalidate and start one call frozen by :meth:`prepare_shadow`."""
+        if not isinstance(prepared, PreparedToolCall):
+            raise TypeError("prepared must be a PreparedToolCall")
+        return self._start_prepared_shadow(prepared)
+
     def execute_shadow(
         self,
         name: str,
@@ -899,26 +925,41 @@ class ToolRegistry:
     ) -> ShadowToolExecution:
         """Exercise the atomic registry path with a frozen call snapshot.
 
-        Stable retains observational authorization behavior. The exact-Beta
-        terminal registration is the deliberately narrow exception: denied or
-        incomplete effect context fails closed before its handler starts.
+        Stable retains observational authorization behavior. Exact Realtor
+        Beta enforces every denied/unknown effect before its handler starts;
+        terminal additionally requires its durable approval-effect context.
         """
-        prepared = self._prepare_shadow_call(
+        prepared = self.prepare_shadow(
             name,
             args,
-            context,
-            execution_policy,
+            context=context,
+            execution_policy=execution_policy,
             handler_kwargs=handler_kwargs,
         )
-        return self._start_prepared_shadow(prepared)
+        return self.execute_prepared_shadow(prepared)
 
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """Execute a tool handler by name.
+
+        Exact Realtor Beta disables this legacy, non-atomic adapter entirely.
+        Beta callers must use ``prepare_shadow`` + ``execute_prepared_shadow``
+        so the entry, arguments, effects, policy identity, and start decision
+        are revalidated together under the registry lock.
 
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
         """
+        if _exact_beta_effect_enforcement_active():
+            return json.dumps(
+                {
+                    "error": (
+                        "Legacy tool dispatch is unavailable in exact Realtor "
+                        "Beta; use the prepared atomic execution path."
+                    ),
+                    "shadow_status": "legacy_dispatch_block",
+                }
+            )
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})

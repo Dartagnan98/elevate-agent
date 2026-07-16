@@ -1,11 +1,47 @@
 """Tests for the memory provider interface, manager, and builtin provider."""
 
 import json
+from pathlib import Path
+
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager
+from tools.approval import (
+    Effect,
+    ExecutionPolicy,
+    ExecutionPolicyMode,
+    reset_current_execution_policy,
+    set_current_execution_policy,
+)
+
+
+_FACT_STORE_TEST_SCHEMA = {
+    "name": "fact_store",
+    "description": "test fact store",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["add", "search", "document_delete", "list"],
+            }
+        },
+        "required": ["action"],
+    },
+}
+_FACT_FEEDBACK_TEST_SCHEMA = {
+    "name": "fact_feedback",
+    "description": "test feedback",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["helpful", "unhelpful"]},
+        },
+        "required": ["action"],
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Concrete test provider
@@ -75,6 +111,111 @@ class FakeMemoryProvider(MemoryProvider):
 
     def on_memory_write(self, action, target, content):
         self.memory_writes.append((action, target, content))
+
+
+class LifecycleTripwireProvider(MemoryProvider):
+    """Provider whose complete manager-facing lifecycle mutates disk."""
+
+    BASELINE = b'{"profile":"byte-identical-before-lifecycle"}\n'
+    TOOL_SCHEMA = {
+        "name": "tripwire_memory_tool",
+        "description": "Tripwire tool",
+        "parameters": {"type": "object", "properties": {}},
+    }
+
+    def __init__(self, sentinel_path: Path):
+        self.sentinel_path = sentinel_path
+        self.calls = []
+        self.reset()
+
+    @property
+    def name(self) -> str:
+        return "lifecycle-tripwire"
+
+    def reset(self) -> None:
+        self.calls.clear()
+        self.sentinel_path.write_bytes(self.BASELINE)
+
+    def _mark(self, method: str) -> None:
+        self.calls.append(method)
+        self.sentinel_path.write_bytes(f"mutated-by:{method}\n".encode())
+
+    def is_available(self) -> bool:
+        self._mark("is_available")
+        return True
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        self._mark("initialize")
+
+    def system_prompt_block(self) -> str:
+        self._mark("system_prompt_block")
+        return "provider prompt"
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        self._mark("prefetch")
+        return "provider prefetch"
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        self._mark("queue_prefetch")
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+    ) -> None:
+        self._mark("sync_turn")
+
+    def get_tool_schemas(self):
+        self._mark("get_tool_schemas")
+        return [dict(self.TOOL_SCHEMA)]
+
+    def handle_tool_call(self, tool_name, args, **kwargs):
+        self._mark("handle_tool_call")
+        return '{"unexpected":true}'
+
+    def on_turn_start(self, turn_number, message, **kwargs) -> None:
+        self._mark("on_turn_start")
+
+    def on_session_end(self, messages) -> None:
+        self._mark("on_session_end")
+
+    def on_session_switch(
+        self,
+        new_session_id,
+        *,
+        parent_session_id="",
+        reset=False,
+        **kwargs,
+    ) -> None:
+        self._mark("on_session_switch")
+
+    def on_pre_compress(self, messages) -> str:
+        self._mark("on_pre_compress")
+        return "provider compress"
+
+    def on_memory_write(
+        self,
+        action,
+        target,
+        content,
+        metadata=None,
+    ) -> None:
+        self._mark("on_memory_write")
+
+    def on_delegation(
+        self,
+        task,
+        result,
+        *,
+        child_session_id="",
+        **kwargs,
+    ) -> None:
+        self._mark("on_delegation")
+
+    def shutdown(self) -> None:
+        self._mark("shutdown")
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +437,333 @@ class TestMemoryManager:
         r2 = json.loads(mgr.handle_tool_call("ext_tool", {"b": 2}))
         assert r2["handled"] == "ext_tool"
 
+    def test_exact_beta_hides_all_direct_memory_schemas_until_reads_are_pure(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA, _FACT_FEEDBACK_TEST_SCHEMA],
+        )
+        provider._prompt_block = (
+            "Use fact_store for recall and fact_feedback after every answer."
+        )
+        mgr.add_provider(provider)
+
+        schemas = mgr.get_all_tool_schemas()
+
+        assert schemas == []
+        assert mgr.get_all_tool_names() == set()
+        assert mgr.build_system_prompt() == ""
+        assert "add" in _FACT_STORE_TEST_SCHEMA["parameters"]["properties"]["action"]["enum"]
+
+    @pytest.mark.parametrize("mode", ["read_only", "draft_only"])
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        [
+            ("fact_store", {"action": "add", "content": "blocked"}),
+            ("fact_store", {"action": "document_delete", "document_id": 1}),
+            ("fact_feedback", {"action": "helpful", "fact_id": 1}),
+        ],
+        ids=["fact-add", "document-delete", "fact-feedback"],
+    )
+    def test_exact_beta_direct_memory_writes_never_reach_provider(
+        self,
+        monkeypatch,
+        mode,
+        tool_name,
+        tool_args,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA, _FACT_FEEDBACK_TEST_SCHEMA],
+        )
+        provider.handle_tool_call = MagicMock(return_value='{"unexpected":true}')
+        mgr.add_provider(provider)
+        policy = ExecutionPolicy.for_mode("turn-beta-memory", mode)
+        token = set_current_execution_policy(policy, policy_revision=2)
+        try:
+            result = json.loads(
+                mgr.handle_tool_call(
+                    tool_name,
+                    tool_args,
+                    session_id="session-beta-memory",
+                    tool_call_id="call-beta-memory",
+                    accepted_turn_id=policy.accepted_turn_id,
+                    policy_revision=2,
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert "error" in result
+        assert "accepted-turn policy" in result["error"]
+        provider.handle_tool_call.assert_not_called()
+
+    def test_exact_beta_direct_memory_read_requires_identity_and_is_not_read_only(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA, _FACT_FEEDBACK_TEST_SCHEMA],
+        )
+        provider.handle_tool_call = MagicMock(return_value='{"facts":[]}')
+        mgr.add_provider(provider)
+
+        missing = json.loads(
+            mgr.handle_tool_call("fact_store", {"action": "search", "query": "x"})
+        )
+        assert "missing_policy" in missing["error"]
+        provider.handle_tool_call.assert_not_called()
+
+        policy = ExecutionPolicy.for_mode("turn-beta-memory-read", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=3)
+        try:
+            denied = json.loads(
+                mgr.handle_tool_call(
+                    "fact_store",
+                    {"action": "search", "query": "x"},
+                    session_id="session-beta-memory",
+                    tool_call_id="call-beta-memory-read",
+                    accepted_turn_id=policy.accepted_turn_id,
+                    policy_revision=3,
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert "effect_not_allowed" in denied["error"]
+        provider.handle_tool_call.assert_not_called()
+
+    def test_exact_beta_stale_memory_revision_never_reaches_provider(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA],
+        )
+        provider.handle_tool_call = MagicMock(return_value='{"unexpected":true}')
+        mgr.add_provider(provider)
+        policy = ExecutionPolicy.for_mode("turn-beta-memory-stale", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=5)
+        try:
+            result = json.loads(
+                mgr.handle_tool_call(
+                    "fact_store",
+                    {"action": "search", "query": "x"},
+                    session_id="session-beta-memory",
+                    tool_call_id="call-beta-memory-stale",
+                    accepted_turn_id=policy.accepted_turn_id,
+                    policy_revision=4,
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert "missing_policy" in result["error"]
+        provider.handle_tool_call.assert_not_called()
+
+    def test_exact_beta_denied_memory_read_keeps_profile_bytes_identical(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        profile_state = tmp_path / "memory_activity.json"
+        profile_state.write_bytes(b'{"sentinel":"before"}')
+        before = profile_state.read_bytes()
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA],
+        )
+
+        def mutate_if_called(*_args, **_kwargs):
+            profile_state.write_bytes(b'{"sentinel":"mutated"}')
+            return '{"facts":[]}'
+
+        provider.handle_tool_call = MagicMock(side_effect=mutate_if_called)
+        mgr.add_provider(provider)
+        policy = ExecutionPolicy.for_mode("turn-beta-memory-bytes", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=6)
+        try:
+            result = json.loads(
+                mgr.handle_tool_call(
+                    "fact_store",
+                    {"action": "search", "query": "x"},
+                    session_id="session-beta-memory",
+                    tool_call_id="call-beta-memory-bytes",
+                    accepted_turn_id=policy.accepted_turn_id,
+                    policy_revision=6,
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert "effect_not_allowed" in result["error"]
+        assert profile_state.read_bytes() == before
+        provider.handle_tool_call.assert_not_called()
+
+    def test_exact_beta_direct_memory_write_runs_only_with_explicit_capability(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA, _FACT_FEEDBACK_TEST_SCHEMA],
+        )
+        provider.handle_tool_call = MagicMock(return_value='{"stored":true}')
+        mgr.add_provider(provider)
+        policy = ExecutionPolicy(
+            accepted_turn_id="turn-explicit-memory-write",
+            mode=ExecutionPolicyMode.DEFAULT,
+            allowed_effects=frozenset({Effect.parse("write_local:memory")}),
+        )
+        token = set_current_execution_policy(policy, policy_revision=4)
+        try:
+            result = json.loads(
+                mgr.handle_tool_call(
+                    "fact_store",
+                    {"action": "add", "content": "explicit"},
+                    session_id="session-beta-memory",
+                    tool_call_id="call-explicit-memory-write",
+                    accepted_turn_id=policy.accepted_turn_id,
+                    policy_revision=4,
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert result == {"stored": True}
+        provider.handle_tool_call.assert_called_once()
+
+    @staticmethod
+    def _exercise_complete_provider_lifecycle(mgr):
+        """Invoke every MemoryManager surface that can call provider lifecycle."""
+
+        results = {}
+        mgr.initialize_all("session-lifecycle", platform="test")
+        results["prompt"] = mgr.build_system_prompt()
+        results["prefetch"] = mgr.prefetch_all(
+            "find the listing",
+            session_id="session-lifecycle",
+        )
+        mgr.queue_prefetch_all(
+            "next listing",
+            session_id="session-lifecycle",
+        )
+        mgr.sync_all(
+            "user turn",
+            "assistant turn",
+            session_id="session-lifecycle",
+        )
+        # Schema discovery is part of MemoryProvider's documented core
+        # lifecycle and runs during agent construction, before the first turn.
+        results["schemas"] = mgr.get_all_tool_schemas()
+        results["tool_names"] = mgr.get_all_tool_names()
+        mgr.on_turn_start(1, "start", platform="test")
+        mgr.on_session_end([{"role": "user", "content": "done"}])
+        mgr.on_session_switch(
+            "session-next",
+            parent_session_id="session-lifecycle",
+            reset=True,
+            reason="test",
+        )
+        results["compress"] = mgr.on_pre_compress(
+            [{"role": "user", "content": "old"}]
+        )
+        mgr.on_memory_write(
+            "add",
+            "memory",
+            "never persist in Beta",
+            metadata={"source": "test"},
+        )
+        mgr.on_delegation(
+            "task",
+            "result",
+            child_session_id="child-lifecycle",
+        )
+        mgr.shutdown_all()
+        return results
+
+    def test_exact_beta_complete_memory_lifecycle_is_physically_inert(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        sentinel_path = tmp_path / "memory-profile-state.json"
+        provider = LifecycleTripwireProvider(sentinel_path)
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+        # Registration indexes schemas in both channels. The release invariant
+        # begins at the live manager lifecycle boundary exercised below.
+        provider.reset()
+        before = sentinel_path.read_bytes()
+
+        results = self._exercise_complete_provider_lifecycle(mgr)
+
+        assert results == {
+            "prompt": "",
+            "prefetch": "",
+            "schemas": [],
+            "tool_names": set(),
+            "compress": "",
+        }
+        assert provider.calls == []
+        assert sentinel_path.read_bytes() == before
+
+    def test_stable_complete_memory_lifecycle_preserves_legacy_execution(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+        sentinel_path = tmp_path / "stable-memory-profile-state.json"
+        provider = LifecycleTripwireProvider(sentinel_path)
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+        provider.reset()
+
+        results = self._exercise_complete_provider_lifecycle(mgr)
+
+        assert results == {
+            "prompt": "provider prompt",
+            "prefetch": "provider prefetch",
+            "schemas": [LifecycleTripwireProvider.TOOL_SCHEMA],
+            "tool_names": {"tripwire_memory_tool"},
+            "compress": "provider compress",
+        }
+        assert provider.calls == [
+            "initialize",
+            "system_prompt_block",
+            "prefetch",
+            "queue_prefetch",
+            "sync_turn",
+            "get_tool_schemas",
+            "get_tool_schemas",
+            "on_turn_start",
+            "on_session_end",
+            "on_session_switch",
+            "on_pre_compress",
+            "on_memory_write",
+            "on_delegation",
+            "shutdown",
+        ]
+        assert sentinel_path.read_bytes() != LifecycleTripwireProvider.BASELINE
+
     # -- Lifecycle hooks -----------------------------------------------------
 
     def test_on_turn_start(self):
@@ -486,7 +954,7 @@ class TestUserInstalledProviderDiscovery:
 
     def test_discover_finds_user_plugins(self, tmp_path, monkeypatch):
         """discover_memory_providers() includes user-installed plugins."""
-        from plugins.memory import discover_memory_providers, _get_user_plugins_dir
+        from plugins.memory import discover_memory_providers
         self._make_user_memory_plugin(tmp_path, "myexternal")
         monkeypatch.setattr(
             "plugins.memory._get_user_plugins_dir",
