@@ -418,6 +418,9 @@ remove_dotenv_links() {
   for name in "${dotenv_names[@]}"; do
     [[ -L "$stage_dir/$name" ]] && rm -f -- "$stage_dir/$name"
   done
+  # An EXIT-trap handler whose last command is a false [[ ]] && chain poisons
+  # the script's exit status under set -e (proven on the deploy host).
+  return 0
 }
 trap remove_dotenv_links EXIT
 

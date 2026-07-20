@@ -46,7 +46,13 @@ grep -Fq -- "--expected-fingerprint \"\$PRIOR_HEALTH_FINGERPRINT\"" scripts/depl
 grep -Fq -- "git status --porcelain=v1 --untracked-files=all" scripts/deploy.sh
 grep -Fq -- "git HEAD must exactly match its tracked upstream" scripts/deploy.sh
 grep -Fq -- 'git ls-remote --exit-code "$UPSTREAM_REMOTE" "$UPSTREAM_MERGE"' scripts/deploy.sh
-grep -Fq -- 'git archive --format=tar "$SOURCE_REV:backend"' scripts/deploy.sh
+# Archive MUST run from the repo toplevel: git archive treats the cwd as an
+# implicit pathspec, and from backend/ the HEAD:backend tree matches nothing,
+# silently emitting an empty tar (found on the first real --deploy, 2026-07-20).
+grep -Fq -- 'git -C "$(git rev-parse --show-toplevel)" archive --format=tar "$SOURCE_REV:backend"' scripts/deploy.sh
+# The dotenv EXIT-trap must end with return 0 or a false [[ ]] && tail poisons
+# the staged-build exit status under set -e (second 07-20 deploy finding).
+grep -A8 'remove_dotenv_links()' scripts/deploy.sh | grep -Fq -- 'return 0'
 grep -Fq -- 'pm2 stop elevation-hq' scripts/deploy.sh
 grep -Fq -- '--delay-ms 11000' scripts/deploy.sh
 
