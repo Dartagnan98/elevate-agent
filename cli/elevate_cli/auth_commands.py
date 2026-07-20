@@ -161,58 +161,15 @@ def _format_exhausted_status(entry) -> str:
 
 
 def auth_add_command(args) -> None:
-    raw_provider = str(getattr(args, "provider", "") or "").strip()
-    from elevate_cli.beta_provider_policy import (
-        BETA_ALLOWED_PROVIDER,
-        BetaProviderPolicyError,
-        beta_provider_policy_active,
-        canonical_beta_provider,
-    )
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
 
     if beta_provider_policy_active():
-        try:
-            provider = canonical_beta_provider(
-                raw_provider,
-                source="auth provider",
-            )
-        except BetaProviderPolicyError as exc:
-            raise SystemExit(f"Error [{exc.code}]: {exc}") from exc
-
-        requested_type = str(getattr(args, "auth_type", "") or "").strip().lower()
-        if requested_type in {AUTH_TYPE_API_KEY, "api-key"}:
-            raise SystemExit(
-                "Error [beta_primary_api_key_not_allowed]: Realtor Beta "
-                "requires current-profile OpenAI Codex OAuth."
-            )
-        if requested_type not in {"", AUTH_TYPE_OAUTH}:
-            raise SystemExit(
-                "Error [beta_auth_type_not_allowed]: Realtor Beta requires "
-                "OpenAI Codex OAuth."
-            )
-
-        creds = auth_mod._codex_device_code_login()
-        tokens = creds.get("tokens") if isinstance(creds, dict) else None
-        access_token = str(
-            (tokens.get("access_token") or "") if isinstance(tokens, dict) else ""
-        ).strip()
-        refresh_token = str(
-            (tokens.get("refresh_token") or "") if isinstance(tokens, dict) else ""
-        ).strip()
-        if not access_token or not refresh_token:
-            raise SystemExit(
-                "Error [beta_codex_auth_invalid]: OpenAI Codex login did not "
-                "return a usable access and refresh token pair."
-            )
-        auth_mod._save_codex_tokens(
-            dict(tokens),
-            creds.get("last_refresh"),
-            clear_device_code_suppression=True,
+        raise SystemExit(
+            "Error [beta_app_onboarding_required]: Connect OpenAI Codex "
+            "from the Elevate app so every live session is repaired safely."
         )
-        print(
-            f"Connected {BETA_ALLOWED_PROVIDER} for this Realtor Beta profile."
-        )
-        return
 
+    raw_provider = str(getattr(args, "provider", "") or "").strip()
     provider = _normalize_provider(raw_provider)
     if provider not in PROVIDER_REGISTRY and provider != "openrouter" and not provider.startswith(CUSTOM_POOL_PREFIX):
         raise SystemExit(f"Unknown provider: {provider}")
@@ -534,6 +491,15 @@ def auth_list_command(args) -> None:
 
 
 def auth_remove_command(args) -> None:
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        raise SystemExit(
+            "Error [beta_app_onboarding_required]: Remove or disconnect "
+            "OpenAI Codex from the Elevate app so live sessions can be "
+            "stopped safely."
+        )
+
     provider = _normalize_provider(getattr(args, "provider", ""))
     target = getattr(args, "target", None)
     if target is None:
@@ -644,22 +610,10 @@ def _interactive_auth() -> None:
     from elevate_cli.beta_provider_policy import beta_provider_policy_active
 
     if beta_provider_policy_active():
-        auth_list_command(SimpleNamespace(provider="openai-codex"))
-        print()
-        try:
-            choice = input("Connect or refresh OpenAI Codex now? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return
-        if choice in {"y", "yes"}:
-            auth_add_command(
-                SimpleNamespace(
-                    provider="openai-codex",
-                    auth_type="oauth",
-                    label=None,
-                    api_key=None,
-                )
-            )
-        return
+        raise SystemExit(
+            "Error [beta_app_onboarding_required]: Manage OpenAI Codex "
+            "authentication in the Elevate app."
+        )
 
     # Show current pool status first
     print("Credential Pool Status")

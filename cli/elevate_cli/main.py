@@ -1052,6 +1052,14 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
 
 def _launch_tui(resume_session_id: Optional[str] = None, tui_dev: bool = False):
     """Replace current process with the TUI."""
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        print(
+            "Realtor Beta terminal chat is available inside the Elevate app only.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     tui_dir = PROJECT_ROOT / "ui-tui"
 
     env = os.environ.copy()
@@ -1088,6 +1096,14 @@ def _launch_tui(resume_session_id: Optional[str] = None, tui_dev: bool = False):
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        print(
+            "Realtor Beta chat is available inside the Elevate app only.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     # Core Elevate is local-first and should not require a subscription.
     # A license only mounts/update-gates cloud or premium skill packs.
     if os.environ.get("ELEVATE_DEV_MODE") != "1":
@@ -1580,88 +1596,10 @@ def _prompt_beta_codex_model(models: tuple[str, ...], current_model: str) -> str
 
 def _select_beta_codex_model() -> None:
     """Run the exact-channel Realtor Beta model flow without provider discovery."""
-    from elevate_cli.beta_provider_policy import (
-        BETA_ALLOWED_MODELS,
-        BETA_ALLOWED_PROVIDER,
-        BETA_CODEX_BASE_URL,
-        BETA_DEFAULT_MODEL,
-        BetaProviderPolicyError,
-        beta_model_or_default,
-        read_beta_codex_auth_status,
+    print(
+        "Error [beta_app_onboarding_required]: Change the Realtor Beta Codex "
+        "model in the running Elevate app so live sessions can be refreshed."
     )
-    from elevate_cli.config import read_raw_config, save_config
-    from elevate_constants import get_elevate_home
-
-    config = read_raw_config()
-    model_config = config.get("model")
-    model_config = model_config if isinstance(model_config, dict) else {}
-    configured_provider = str(model_config.get("provider") or "").strip()
-    configured_model = str(
-        model_config.get("default") or model_config.get("model") or ""
-    ).strip()
-    current_model = (
-        configured_model
-        if configured_model in BETA_ALLOWED_MODELS
-        else BETA_DEFAULT_MODEL
-    )
-
-    print()
-    print(f"  Realtor Beta provider:  {BETA_ALLOWED_PROVIDER}")
-    print(f"  Current model:           {current_model}")
-    if configured_provider and configured_provider != BETA_ALLOWED_PROVIDER:
-        print(
-            "  Blocked legacy provider: "
-            f"{configured_provider} (will not be used by Realtor Beta)"
-        )
-    print()
-
-    auth_status = read_beta_codex_auth_status(get_elevate_home())
-    if not auth_status.get("logged_in"):
-        print(
-            "Error [beta_codex_auth_required]: Connect OpenAI Codex in this "
-            "Beta profile first with `elevate auth add openai-codex --type oauth`."
-        )
-        return
-
-    selected_model = _prompt_beta_codex_model(
-        BETA_ALLOWED_MODELS,
-        current_model,
-    )
-    if selected_model is None:
-        print("No change.")
-        return
-
-    try:
-        selected_model = beta_model_or_default(
-            selected_model,
-            source="selected model",
-        )
-        # Re-read both authorities immediately before the first mutation so a
-        # concurrent auth/config change cannot be hidden by the picker.
-        live_config = read_raw_config()
-        live_auth_status = read_beta_codex_auth_status(get_elevate_home())
-        if not live_auth_status.get("logged_in"):
-            raise BetaProviderPolicyError(
-                "OpenAI Codex auth changed before the model selection was saved.",
-                code="beta_codex_auth_required",
-            )
-        live_model = live_config.get("model")
-        next_model = dict(live_model) if isinstance(live_model, dict) else {}
-        next_model.update(
-            provider=BETA_ALLOWED_PROVIDER,
-            default=selected_model,
-            base_url=BETA_CODEX_BASE_URL,
-            api_mode="codex_responses",
-        )
-        next_model.pop("api_key", None)
-        next_model.pop("key_env", None)
-        live_config["model"] = next_model
-        save_config(live_config)
-    except BetaProviderPolicyError as exc:
-        print(f"Error [{exc.code}]: {exc}")
-        return
-
-    print(f"Default model set to: {selected_model} (via OpenAI Codex)")
 
 
 def select_provider_and_model(args=None):

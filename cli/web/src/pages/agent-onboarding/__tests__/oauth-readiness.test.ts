@@ -245,5 +245,10 @@ describe("agent onboarding OAuth readiness", () => {
     ).toHaveLength(2);
     expect(serializer).toContain("canonicalizePrimaryDraftForOnboarding(");
     expect(serializer).toContain("api.getOAuthProviders()");
+    expect(serializer).toContain("onRuntimeRefresh={loadRuntimeStatus}");
+    expect(serializer).toContain("if (realtorBeta) void onRuntimeRefresh?.()");
+    expect(wizard).toContain("onRuntimeRefresh?: () => Promise<void>");
+    expect(wizard).toContain("void onRuntimeRefresh?.()");
+    expect(wizard).not.toContain('title="Connect Telegram"');
   });
 });

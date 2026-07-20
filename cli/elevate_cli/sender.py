@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from elevate_cli import outreach_db
-from elevate_constants import get_elevate_home
+from elevate_constants import exact_realtor_beta_active, get_elevate_home
 
 
 _log = logging.getLogger(__name__)
@@ -47,6 +47,39 @@ _log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 30
 BACKOFF_CAP_SECONDS = 3600
+
+# ---------------------------------------------------------------------------
+# Exact Realtor Beta: the outbound send queue is a direct external-effect
+# lane (Composio provider sends, native Apple Messages, agent dispatchers)
+# that does not pass through the accepted-turn registry/effect-broker
+# boundary.  The Beta containment contract keeps outbound/external writes
+# denied until policy proof, so the whole lane fails closed here at its two
+# chokepoints (``tick`` and ``dispatch_one``) with a typed refusal and ZERO
+# state mutation by this module: no stale-send recovery, no row claim, no
+# ``mark_*`` write, no dispatcher invocation.  Rows keep whatever durable
+# state their caller left them in (``queued`` from the autonomous ticker,
+# which refuses before claiming; ``sending`` when a human dashboard action
+# claimed first) — a Stable profile later delivers ``queued`` rows and
+# fail-closes stale ``sending`` rows to ``failed`` for operator
+# verification via ``recover_stale_sends``.  No path resends
+# automatically.  Stable behavior is byte-identical (ERB-406 sender-queue
+# lane / package A5).
+# ---------------------------------------------------------------------------
+BETA_OUTBOUND_SEND_DISABLED_CODE = "beta_outbound_send_disabled"
+BETA_OUTBOUND_SEND_DISABLED_MESSAGE = (
+    "Realtor Beta does not dispatch queued outbound messages. The send "
+    "queue was left untouched and no message was sent."
+)
+
+
+def outbound_send_disabled_reason() -> str | None:
+    """Return the typed release-policy refusal when outbound send is disabled."""
+    if not exact_realtor_beta_active():
+        return None
+    return (
+        f"Error [{BETA_OUTBOUND_SEND_DISABLED_CODE}]: "
+        f"{BETA_OUTBOUND_SEND_DISABLED_MESSAGE}"
+    )
 
 
 class SenderTransientError(Exception):
@@ -730,6 +763,26 @@ def _next_retry_at(attempts: int) -> str:
 def dispatch_one(row: dict[str, Any]) -> dict[str, Any]:
     """Send one queue row. Updates queue state. Safe to call concurrently with
     other rows because each `mark_*` call is its own atomic SQLite write."""
+    # Exact Realtor Beta fails the whole outbound lane closed BEFORE any
+    # queue-state write or dispatcher can run — including the crash-recovery
+    # ``mark_sent`` short-circuit below.  The row is deliberately left in its
+    # current durable state (never failed/retried/claimed by this refusal).
+    policy_refusal = outbound_send_disabled_reason()
+    if policy_refusal is not None:
+        _log.warning(
+            "sender.dispatch_one refused row %s (%s): %s",
+            row.get("id"),
+            row.get("channel"),
+            policy_refusal,
+        )
+        return {
+            "id": row.get("id"),
+            "status": "policy_blocked",
+            "error_code": BETA_OUTBOUND_SEND_DISABLED_CODE,
+            "lastError": policy_refusal,
+            "providerMessageId": None,
+        }
+
     queue_id = row["id"]
     channel = row["channel"]
     attempts = int(row.get("attempts", 0))
@@ -791,6 +844,22 @@ def tick(*, batch: int = 10, skip_channels: "set[str] | None" = None) -> dict[st
     passes ``{"sms"}`` because Mac Messages sends require Automation permission
     that only the Elevate app process can hold — SMS is delivered by the app's
     approve-tick, not the daemon. The app's tick passes no skip (handles all)."""
+    # Exact Realtor Beta stops the tick before ANY queue mutation: no
+    # stale-send recovery, no claim, no dispatch.  Typed refusal only.
+    policy_refusal = outbound_send_disabled_reason()
+    if policy_refusal is not None:
+        _log.info("sender.tick refused: %s", policy_refusal)
+        return {
+            "claimed": 0,
+            "sent": 0,
+            "retrying": 0,
+            "failed": 0,
+            "recovered_sent": 0,
+            "recovered_failed": 0,
+            "policy_blocked": policy_refusal,
+            "duration_ms": 0,
+        }
+
     started = time.time()
     counts = {"claimed": 0, "sent": 0, "retrying": 0, "failed": 0}
     recovered = outreach_db.recover_stale_sends()

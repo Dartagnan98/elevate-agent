@@ -14,6 +14,7 @@ readonly REMOTE_DIR="$REMOTE_ROOT/backend"
 readonly LOCK_DIR="$REMOTE_ROOT/.deploy-lock"
 readonly HEALTH_URL="https://api.elevationrealestatehq.com/api/health"
 readonly PM2_PROCESS="elevation-hq"
+readonly EXPECTED_ACTIVE_KID="ent-2026-07-a"
 
 MODE=""
 
@@ -169,6 +170,7 @@ if [[ "$MODE" == "--dry-run" ]]; then
 [deploy] 5. temporarily link exact live dotenv names into the root-only stage
 [deploy] 6. npm ci --ignore-scripts; invoke Next directly with build id $DEPLOY_ID
 [deploy] 7. cut over, reload PM2, and require three matching entitlement/schema samples
+[deploy] signer activation gate: $EXPECTED_ACTIVE_KID
 [deploy] 8. on failure, restore archive, require PM2 online and prior-health fingerprint
 [deploy] database migrations: disabled; live schema is checked read-only
 EOF
@@ -180,8 +182,9 @@ require_command ssh
 
 remote_command() {
   local rendered
-  printf -v rendered 'bash -s -- %q %q %q %q %q' \
-    "$REMOTE_DIR" "$STAGE_DIR" "$ROLLBACK_DIR" "$LOCK_DIR" "$DEPLOY_ID"
+  printf -v rendered 'bash -s -- %q %q %q %q %q %q' \
+    "$REMOTE_DIR" "$STAGE_DIR" "$ROLLBACK_DIR" "$LOCK_DIR" "$DEPLOY_ID" \
+    "$EXPECTED_ACTIVE_KID"
   printf '%s' "$rendered"
 }
 
@@ -396,7 +399,8 @@ readonly current_dir="$1"
 readonly stage_dir="$2"
 readonly lock_dir="$4"
 readonly deploy_id="$5"
-readonly -a dotenv_names=(.env .env.local .env.production.local)
+readonly expected_active_kid="$6"
+readonly -a dotenv_names=(.env .env.local .env.production .env.production.local)
 
 [[ -f "$lock_dir/deploy-id" ]] || exit 1
 [[ "$(<"$lock_dir/deploy-id")" == "$deploy_id" ]] || exit 1
@@ -443,6 +447,24 @@ NODE
 
 npm ci --ignore-scripts --no-audit --no-fund --silent
 [[ -x ./node_modules/.bin/next ]] || { echo "[deploy] staged Next.js executable is missing" >&2; exit 1; }
+NODE_ENV=production \
+  EXPECTED_ACTIVE_KID_FOR_DEPLOY="$expected_active_kid" \
+  node --import tsx --input-type=module <<'NODE'
+const nextEnv = (await import("@next/env")).default;
+nextEnv.loadEnvConfig(process.cwd(), false);
+const entitlement = (await import("./src/lib/entitlement-assertion.ts")).default;
+const readiness = entitlement.entitlementSignerReadiness();
+if (
+  readiness.ready !== true ||
+  readiness.activeKid !== process.env.EXPECTED_ACTIVE_KID_FOR_DEPLOY ||
+  readiness.configurationMode !== "key-ring" ||
+  readiness.completeKeyRingReady !== true
+) {
+  console.error("[deploy] staged complete signer ring does not match the rollout key");
+  process.exit(1);
+}
+console.log("[deploy] staged complete signer ring matches the rollout key");
+NODE
 ELEVATE_BACKEND_BUILD_ID="$deploy_id" \
   NEXT_TELEMETRY_DISABLED=1 \
   NODE_ENV=production \
@@ -507,6 +529,7 @@ echo "[deploy] requiring build-bound entitlement and schema readiness"
 node --import tsx scripts/verify-entitlement-health.ts \
   --url "$HEALTH_URL" \
   --expected-build-id "$DEPLOY_ID" \
+  --expected-active-kid "$EXPECTED_ACTIVE_KID" \
   --attempts 30 \
   --consecutive 3 \
   --delay-ms 11000

@@ -18,7 +18,20 @@ from tools.registry import registry, tool_error, tool_result
 
 
 def _leads_overview_handler(args: dict[str, Any], **_: Any) -> str:
+    """Build the snapshot over ONE already-ready forced-READ-ONLY connection.
+
+    Every section is a plain SELECT against the operational store. The
+    handler deliberately never opens ``outreach_db.connect()`` (which can
+    seed templates and write metadata on a cold store) or the general
+    ``data.connection.connect()`` (which can bootstrap/migrate): a pure
+    read tool must not mutate product state as a side effect of looking.
+    """
     from elevate_cli import outreach_db
+    from elevate_cli.data import leads_worked_recently
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect_ready_read_only,
+    )
 
     def _int(key: str, default: int) -> int:
         try:
@@ -28,56 +41,69 @@ def _leads_overview_handler(args: dict[str, Any], **_: Any) -> str:
             return default
 
     recent_limit = max(1, min(_int("recent_limit", 5), 25))
+    since_hours = max(1, min(_int("worked_since_hours", 18), 168))
 
     try:
-        status_counts = outreach_db.send_queue_stats()
-    except Exception as exc:  # noqa: BLE001
-        return tool_error(f"leads_overview: send_queue unavailable: {exc}")
+        with connect_ready_read_only() as conn:
+            try:
+                status_counts = outreach_db.send_queue_stats(conn=conn)
+            except Exception as exc:  # noqa: BLE001
+                return tool_error(f"leads_overview: send_queue unavailable: {exc}")
 
-    pending_by_channel: dict[str, int] = {}
-    pending_by_source: dict[str, int] = {}
-    try:
-        with outreach_db.connect() as conn:
-            for row in conn.execute(
-                "SELECT channel, COUNT(*) AS n FROM send_queue "
-                "WHERE status='pending_approval' GROUP BY channel"
-            ):
-                pending_by_channel[str(row["channel"] or "unknown")] = int(row["n"])
-            for row in conn.execute(
-                "SELECT source_id, COUNT(*) AS n FROM send_queue "
-                "WHERE status='pending_approval' GROUP BY source_id"
-            ):
-                pending_by_source[str(row["source_id"] or "unknown")] = int(row["n"])
-    except Exception:  # noqa: BLE001 — breakdowns are best-effort
-        pass
+            pending_by_channel: dict[str, int] = {}
+            pending_by_source: dict[str, int] = {}
+            try:
+                for row in conn.execute(
+                    "SELECT channel, COUNT(*) AS n FROM send_queue "
+                    "WHERE status='pending_approval' GROUP BY channel"
+                ):
+                    pending_by_channel[str(row["channel"] or "unknown")] = int(row["n"])
+                for row in conn.execute(
+                    "SELECT source_id, COUNT(*) AS n FROM send_queue "
+                    "WHERE status='pending_approval' GROUP BY source_id"
+                ):
+                    pending_by_source[str(row["source_id"] or "unknown")] = int(row["n"])
+            except Exception:  # noqa: BLE001 — breakdowns are best-effort
+                pass
 
-    recent_sends: list[dict[str, Any]] = []
-    try:
-        for s in outreach_db.list_recent_sends(
-            statuses=(outreach_db.SEND_STATUS_SENT,), limit=recent_limit
-        ):
-            payload = s.get("payload") if isinstance(s.get("payload"), dict) else {}
-            recipient = payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {}
-            recent_sends.append(
-                {
-                    "to": recipient.get("person_name") or recipient.get("email") or recipient.get("phone"),
-                    "channel": s.get("channel"),
-                    "at": s.get("updatedAt") or s.get("createdAt"),
-                }
-            )
-    except Exception:  # noqa: BLE001
-        pass
+            recent_sends: list[dict[str, Any]] = []
+            try:
+                for s in outreach_db.list_recent_sends(
+                    statuses=(outreach_db.SEND_STATUS_SENT,),
+                    limit=recent_limit,
+                    conn=conn,
+                ):
+                    payload = s.get("payload") if isinstance(s.get("payload"), dict) else {}
+                    recipient = payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {}
+                    recent_sends.append(
+                        {
+                            "to": recipient.get("person_name") or recipient.get("email") or recipient.get("phone"),
+                            "channel": s.get("channel"),
+                            "at": s.get("updatedAt") or s.get("createdAt"),
+                        }
+                    )
+            except Exception:  # noqa: BLE001
+                pass
 
-    # Leads the agent already worked recently (with the status it left them in)
-    # so a heartbeat skips re-processing them and sees what was decided.
-    recently_worked: list[dict[str, Any]] = []
-    try:
-        from elevate_cli.data import connect, leads_worked_recently
-        since_hours = max(1, min(_int("worked_since_hours", 18), 168))
-        with connect() as conn:
-            recently_worked = leads_worked_recently(conn, since_hours=since_hours, limit=50)
-    except Exception:  # noqa: BLE001 — best-effort
-        pass
+            # Leads the agent already worked recently (with the status it
+            # left them in) so a heartbeat skips re-processing them and
+            # sees what was decided.
+            recently_worked: list[dict[str, Any]] = []
+            try:
+                recently_worked = leads_worked_recently(
+                    conn, since_hours=since_hours, limit=50
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+    except OperationalStoreNotReady:
+        return tool_result(
+            success=False,
+            error="operational_store_not_ready",
+            message=(
+                "Leads data is still starting for the active account. "
+                "Wait for Elevate startup to complete, then retry once."
+            ),
+        )
 
     overview = {
         "pendingApproval": status_counts.get("pending_approval", 0),
@@ -137,4 +163,5 @@ registry.register(
         "pending-approval by channel + source, recent sends."
     ),
     emoji="",
+    effects={"read:leads"},
 )

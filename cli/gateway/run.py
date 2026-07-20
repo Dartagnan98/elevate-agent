@@ -15770,6 +15770,18 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        logger.info(
+            "Realtor Beta messaging gateway is disabled; use the in-app agent "
+            "so provider repair can coordinate every live runtime."
+        )
+        # This is an intentional product boundary, not a startup failure.
+        # Returning success prevents launchd/systemd on-failure policies from
+        # turning the disabled Beta gateway into a permanent restart loop.
+        return True
+
     # Long-running process: post-turn scorecard inference stays async (snappy).
     try:
         from agent.turn_attribution import mark_persistent_process

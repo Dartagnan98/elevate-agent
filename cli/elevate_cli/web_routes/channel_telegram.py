@@ -39,6 +39,23 @@ def register_telegram_routes(
     sync_executive_telegram_aliases: TelegramAliasSync,
     token_preview: TokenPreview,
 ) -> None:
+    def require_telegram_runtime_available() -> None:
+        """Keep exact Beta messaging setup honest while its gateway is disabled."""
+        if not beta_provider_policy_active():
+            return
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "beta_messaging_runtime_unavailable",
+                "message": (
+                    "Telegram pairing is not enabled in this Realtor Beta build. "
+                    "Use in-app chat while the messaging runtime is being hardened."
+                ),
+                "configurationSaved": False,
+                "restartStarted": False,
+            },
+        )
+
     def telegram_env_value(key: str) -> str:
         if beta_provider_policy_active():
             return str(load_env().get(key) or "")
@@ -91,6 +108,7 @@ def register_telegram_routes(
     async def start_telegram_pairing(request: Request):
         """Save bot token, switch unauthorized DMs to pairing, restart gateway."""
         require_token(request)
+        require_telegram_runtime_available()
         try:
             body = await request.json()
         except Exception:
@@ -158,6 +176,7 @@ def register_telegram_routes(
     async def approve_telegram_pairing(request: Request):
         """Approve a pairing code minted by the bot."""
         require_token(request)
+        require_telegram_runtime_available()
         try:
             body = await request.json()
         except Exception:
@@ -325,6 +344,7 @@ def register_telegram_routes(
     async def configure_telegram(request: Request):
         """Mirror ``setup._setup_telegram``."""
         require_token(request)
+        require_telegram_runtime_available()
         try:
             body = await request.json()
         except Exception:

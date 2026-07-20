@@ -34,7 +34,6 @@ UNDECLARED_RL_TOOLS = (
     "rl_start_training",
     "rl_check_status",
     "rl_stop_training",
-    "rl_get_results",
     "rl_test_inference",
 )
 
@@ -162,6 +161,134 @@ def test_networked_and_mutating_rl_inspectors_remain_unknown():
         assert decision.allowed is False
         assert decision.denied_effects == unknown
         assert decision.reason == "unknown_effect"
+
+
+def test_rl_get_results_is_declared_via_resolver_only():
+    entry = registry.get_entry("rl_get_results")
+    assert entry is not None
+    assert entry.effects is None
+    assert entry.effect_resolver is rl_module._rl_get_results_effect_resolver
+    assert registry.get_effect_metadata("rl_get_results") == {
+        "declared": True,
+        "effects": frozenset(),
+        "has_resolver": True,
+    }
+
+
+def test_rl_get_results_resolves_to_read_rl_without_wandb_sdk(monkeypatch):
+    monkeypatch.setattr(rl_module, "_WANDB_SDK_AVAILABLE", False)
+    expected = frozenset({Effect.parse("read:rl")})
+
+    resolved = registry.resolve_effects("rl_get_results", {"run_id": "any"})
+    decision = authorize_effects(
+        ExecutionPolicy.for_mode(
+            "turn-rl_get_results",
+            ExecutionPolicyMode.READ_ONLY,
+        ),
+        resolved,
+    )
+
+    assert resolved == expected
+    assert decision.allowed is True
+    assert decision.denied_effects == frozenset()
+    assert decision.reason == "allowed"
+
+
+def test_rl_get_results_fails_closed_to_unknown_with_wandb_sdk(monkeypatch):
+    monkeypatch.setattr(rl_module, "_WANDB_SDK_AVAILABLE", True)
+    unknown = frozenset({Effect(EffectKind.UNKNOWN)})
+
+    resolved = registry.resolve_effects("rl_get_results", {"run_id": "any"})
+    decision = authorize_effects(
+        ExecutionPolicy.for_mode(
+            "turn-rl_get_results",
+            ExecutionPolicyMode.READ_ONLY,
+        ),
+        resolved,
+    )
+
+    assert resolved == unknown
+    assert decision.allowed is False
+    assert decision.denied_effects == unknown
+    assert decision.reason == "unknown_effect"
+
+
+def test_wandb_probe_is_process_stable(monkeypatch):
+    monkeypatch.setattr(rl_module, "_WANDB_SDK_AVAILABLE", None)
+    monkeypatch.setattr(
+        rl_module.importlib.util, "find_spec", lambda _name: None
+    )
+    assert rl_module._wandb_sdk_available() is False
+
+    # A later install (find_spec now succeeding) must NOT flip the snapshot:
+    # the resolver classified calls with the first probe.
+    monkeypatch.setattr(
+        rl_module.importlib.util, "find_spec", lambda _name: object()
+    )
+    assert rl_module._wandb_sdk_available() is False
+    assert registry.resolve_effects("rl_get_results", {"run_id": "r"}) == frozenset(
+        {Effect.parse("read:rl")}
+    )
+
+
+def test_wandb_probe_failure_fails_closed(monkeypatch):
+    monkeypatch.setattr(rl_module, "_WANDB_SDK_AVAILABLE", None)
+
+    def _boom(_name):
+        raise RuntimeError("probe failure")
+
+    monkeypatch.setattr(rl_module.importlib.util, "find_spec", _boom)
+    assert rl_module._wandb_sdk_available() is True
+    assert registry.resolve_effects("rl_get_results", {"run_id": "r"}) == frozenset(
+        {Effect(EffectKind.UNKNOWN)}
+    )
+
+
+def test_rl_get_results_declared_read_never_reaches_wandb(
+    tmp_path, monkeypatch
+):
+    """Adversarial: even with an importable wandb module at execute time, a
+    call whose effects resolved to a pure read must never construct the SDK
+    client, touch the network, or write the filesystem."""
+    import sys
+    import types
+
+    monkeypatch.setattr(rl_module, "_WANDB_SDK_AVAILABLE", False)
+
+    def unexpected_effect(*_args, **_kwargs):
+        raise AssertionError("declared-read rl_get_results reached the W&B SDK")
+
+    fake_wandb = types.ModuleType("wandb")
+    fake_wandb.Api = unexpected_effect
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    monkeypatch.setattr(socket, "create_connection", unexpected_effect)
+    monkeypatch.setattr(socket.socket, "connect", unexpected_effect)
+
+    run_state = _make_run_state(run_id="declared-read-run")
+    run_state.status = "completed"
+    monkeypatch.setattr(
+        rl_module, "_active_runs", {"declared-read-run": run_state}
+    )
+
+    before = _tree_snapshot(tmp_path)
+    result = json.loads(
+        asyncio.run(rl_module.rl_get_results(run_id="declared-read-run"))
+    )
+
+    assert result["run_id"] == "declared-read-run"
+    assert result["status"] == "completed"
+    assert result["wandb_error"] == "wandb SDK is not installed"
+    assert "final_metrics" not in result
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_rl_get_results_missing_run_is_a_pure_error(monkeypatch):
+    monkeypatch.setattr(rl_module, "_WANDB_SDK_AVAILABLE", False)
+    monkeypatch.setattr(rl_module, "_active_runs", {})
+
+    result = json.loads(asyncio.run(rl_module.rl_get_results(run_id="nope")))
+
+    assert result["error"] == "Run 'nope' not found"
 
 
 def _make_run_state(**overrides) -> RunState:

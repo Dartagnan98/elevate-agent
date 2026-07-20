@@ -5922,6 +5922,346 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
 # CLI Commands — login / logout
 # =============================================================================
 
+def _validate_beta_repair_receipt(
+    result: object,
+    repair_id: str,
+    *,
+    phase: str,
+) -> None:
+    if not isinstance(result, dict) or result.get("repair_id") != repair_id:
+        raise RuntimeError("live-session repair returned no matching receipt")
+    if phase == "prepare":
+        count_names = ("marked", "running", "quiesced", "pending")
+    else:
+        count_names = ("marked", "rebuilt", "pending")
+    counts = {name: result.get(name) for name in count_names}
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in counts.values()
+    ):
+        raise RuntimeError("live-session repair returned an invalid receipt")
+    if phase == "prepare" and not (
+        counts["pending"] == 0 and counts["quiesced"] == counts["marked"]
+    ):
+        raise RuntimeError("one or more live sessions were not quiesced")
+    if phase == "commit" and not (
+        counts["pending"] == 0 and counts["rebuilt"] == counts["marked"]
+    ):
+        raise RuntimeError("one or more live sessions were not rebuilt")
+
+
+def _begin_exact_beta_provider_repair(repair_id: str) -> None:
+    """Fence dashboard and PTY actors before the first provider mutation."""
+    from elevate_cli.beta_provider_policy import (
+        mark_beta_runtime_repair_failed,
+        mark_beta_runtime_repair_pending,
+    )
+
+    if not mark_beta_runtime_repair_pending(repair_id):
+        raise RuntimeError("another Realtor Beta provider repair is already active")
+    try:
+        chat_websockets = sys.modules.get(
+            "elevate_cli.web_routes.chat_websockets"
+        )
+        control_plane_ready = getattr(
+            chat_websockets,
+            "dashboard_repair_control_plane_ready",
+            None,
+        )
+        if not callable(control_plane_ready) or not control_plane_ready():
+            raise RuntimeError(
+                "Realtor Beta provider setup must be completed in the running Elevate app"
+            )
+
+        tui_server = sys.modules.get("tui_gateway.server")
+        prepare = getattr(
+            tui_server, "prepare_exact_beta_runtime_sessions", None
+        )
+        if callable(prepare):
+            if not callable(
+                getattr(tui_server, "release_exact_beta_runtime_sessions", None)
+            ):
+                raise RuntimeError(
+                    "Realtor Beta in-process runtime release is unavailable"
+                )
+            _validate_beta_repair_receipt(
+                prepare(repair_id), repair_id, phase="prepare"
+            )
+
+        prepare_ptys = getattr(
+            chat_websockets,
+            "begin_exact_beta_pty_runtime_repair",
+            None,
+        )
+        if not callable(prepare_ptys):
+            raise RuntimeError("Realtor Beta dashboard PTY repair is unavailable")
+        result = prepare_ptys(repair_id)
+        if (
+            not isinstance(result, dict)
+            or result.get("repair_id") != repair_id
+            or result.get("expected") != result.get("prepared")
+        ):
+            raise RuntimeError(
+                "not every dashboard PTY acknowledged provider repair prepare"
+            )
+    except Exception:
+        mark_beta_runtime_repair_failed(repair_id)
+        raise
+
+
+def _finish_exact_beta_provider_repair(repair_id: str) -> None:
+    """Retire stale persisted overrides and refresh live desktop actors.
+
+    ``ELEVATE_MODEL`` and ``ELEVATE_INFERENCE_PROVIDER`` are legitimate Stable
+    operator controls, but the exact Realtor Beta deliberately has one local
+    inference authority: the just-repaired Codex profile.  Older desktop
+    processes can still carry Gemini-era values in those variables after the
+    canonical config write.  Leaving them in place makes a cold resume fail
+    before it can read the repaired config.
+
+    The TUI gateway is optional (CLI setup does not import it), so notify it
+    only when it is already resident in this process.  Its repair hook fences
+    active turns and rebuilds their agents after quiescence. An unexpected
+    top-level repair failure does not roll back the durable auth/config/env
+    transition, but it does fail setup so onboarding cannot claim the live
+    runtime is ready before the user retries.
+    """
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if not beta_provider_policy_active():
+        return
+
+    # Re-check the current profile immediately before changing either the
+    # persisted or process environment.  ``save_config`` performed this same
+    # pure auth check before the canonical write, but an auth store can be
+    # replaced concurrently between that validation and this post-write
+    # repair.  Failed auth must leave both environment authorities and live
+    # actors untouched.
+    from elevate_cli.beta_env_policy import enforce_beta_env_store_local
+    from elevate_cli.beta_provider_policy import (
+        clear_beta_runtime_repair_state,
+        mark_beta_runtime_repair_failed,
+        require_beta_codex_auth,
+    )
+    from elevate_cli.config import load_env, remove_env_values
+
+    try:
+        require_beta_codex_auth(get_elevate_home())
+        enforce_beta_env_store_local()
+
+        stale_override_keys = (
+            "ELEVATE_MODEL",
+            "ELEVATE_INFERENCE_PROVIDER",
+        )
+        # ``remove_env_values`` performs one fsync + atomic replacement and only
+        # clears os.environ after that replacement succeeds.  Do this before
+        # touching live actors so an I/O failure cannot strand some sessions on a
+        # repaired runtime while the persisted Gemini override remains authoritative
+        # for the next process start.
+        remove_env_values(stale_override_keys)
+        persisted_env = load_env()
+        remaining = [
+            key
+            for key in stale_override_keys
+            if key in persisted_env or key in os.environ
+        ]
+        if remaining:
+            raise RuntimeError(
+                "canonical Realtor Beta provider environment was not durably retired"
+            )
+
+        local_release = None
+        try:
+            tui_server = sys.modules.get("tui_gateway.server")
+            complete = getattr(
+                tui_server, "complete_exact_beta_runtime_sessions", None
+            )
+            if callable(complete):
+                local_release = getattr(
+                    tui_server,
+                    "release_exact_beta_runtime_sessions",
+                    None,
+                )
+                if not callable(local_release):
+                    raise RuntimeError(
+                        "Realtor Beta in-process runtime release is unavailable"
+                    )
+                retire_process = getattr(
+                    tui_server,
+                    "retire_exact_beta_runtime_process_overrides",
+                    None,
+                )
+                if callable(retire_process):
+                    retire_process()
+                _validate_beta_repair_receipt(
+                    complete(repair_id), repair_id, phase="commit"
+                )
+            else:
+                # Backward-compatible in-process fallback for CLI-only callers
+                # and older test doubles. It is accepted only when every actor
+                # was synchronously rebuilt; draining is never completion.
+                repair = getattr(
+                    tui_server,
+                    "invalidate_exact_beta_runtime_sessions",
+                    None,
+                )
+                if callable(repair):
+                    result = repair()
+                    if not isinstance(result, dict):
+                        raise RuntimeError(
+                            "live-session repair returned no completion receipt"
+                        )
+                    counts = {
+                        key: result.get(key)
+                        for key in ("marked", "rebuilt", "draining")
+                    }
+                    if any(
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 0
+                        for value in counts.values()
+                    ) or not (
+                        counts["draining"] == 0
+                        and counts["marked"] == counts["rebuilt"]
+                    ):
+                        raise RuntimeError(
+                            "one or more live sessions were not synchronously rebuilt"
+                        )
+
+            chat_websockets = sys.modules.get(
+                "elevate_cli.web_routes.chat_websockets"
+            )
+            complete_ptys = getattr(
+                chat_websockets,
+                "complete_exact_beta_pty_runtime_repair",
+                None,
+            )
+            if not callable(complete_ptys):
+                raise RuntimeError("Realtor Beta dashboard PTY repair is unavailable")
+            result = complete_ptys(repair_id)
+            if (
+                not isinstance(result, dict)
+                or result.get("repair_id") != repair_id
+                or result.get("expected") != result.get("completed")
+                or result.get("expected") != result.get("released")
+            ):
+                raise RuntimeError(
+                    "not every dashboard PTY completed provider repair"
+                )
+        except Exception as exc:
+            logger.exception(
+                "Realtor Beta provider repair could not refresh live TUI sessions"
+            )
+            raise RuntimeError(
+                "Realtor Beta could not refresh live sessions after Codex setup; retry setup"
+            ) from exc
+        if callable(local_release):
+            release_result = local_release(repair_id)
+            if (
+                not isinstance(release_result, dict)
+                or release_result.get("repair_id") != repair_id
+                or release_result.get("released") is not True
+            ):
+                raise RuntimeError(
+                    "in-process Realtor Beta runtime release was incomplete"
+                )
+        # Keep actor admission closed until the last process-local delegate
+        # lease is restored. Opening the shared gate first creates a small but
+        # real window where a new prompt can start while child spawning still
+        # belongs to the provider-repair transaction.
+        if not clear_beta_runtime_repair_state(
+            expected_generation=repair_id
+        ):
+            raise RuntimeError("Realtor Beta provider repair was superseded")
+    except Exception:
+        mark_beta_runtime_repair_failed(repair_id)
+        raise
+
+
+_EXACT_BETA_PROVIDER_TRANSITION_LOCK = threading.RLock()
+
+
+def disconnect_exact_beta_provider_auth(provider_id: str) -> bool:
+    """Quiesce every Beta actor, delete auth, and retain the repair fence.
+
+    Disconnect is intentionally only half of the normal provider transition:
+    prepare now proves all in-process, PTY, and delegated actors are idle, but
+    commit/release cannot rebuild them until fresh Codex auth exists. The same
+    retained generation is completed by the next coordinated in-app login.
+    """
+    from elevate_cli.beta_provider_policy import (
+        beta_provider_policy_active,
+        beta_runtime_repair_generation,
+        canonical_beta_provider,
+        mark_beta_runtime_auth_required,
+        mark_beta_runtime_repair_failed,
+        read_beta_codex_auth_status,
+    )
+
+    if not beta_provider_policy_active():
+        return clear_provider_auth(provider_id)
+    canonical_beta_provider(provider_id, source="OAuth disconnect provider")
+
+    with _EXACT_BETA_PROVIDER_TRANSITION_LOCK:
+        repair_id = beta_runtime_repair_generation() or uuid.uuid4().hex
+        _begin_exact_beta_provider_repair(repair_id)
+        try:
+            cleared = clear_provider_auth(provider_id)
+            if read_beta_codex_auth_status(get_elevate_home()).get("logged_in"):
+                raise RuntimeError(
+                    "Realtor Beta Codex authentication was not durably disconnected"
+                )
+            if not mark_beta_runtime_auth_required(repair_id):
+                raise RuntimeError(
+                    "Realtor Beta disconnect repair was superseded"
+                )
+            return cleared
+        except Exception:
+            mark_beta_runtime_repair_failed(repair_id)
+            raise
+
+
+def _apply_exact_beta_provider_config(model_cfg: dict[str, object]) -> Path:
+    """Serialize prepare -> durable mutation -> exact completion in-process."""
+    from elevate_cli.beta_env_policy import enforce_beta_env_store_local
+    from elevate_cli.beta_provider_policy import (
+        beta_runtime_repair_generation,
+        mark_beta_runtime_repair_failed,
+        require_beta_codex_auth,
+    )
+    from elevate_cli.config import save_config
+
+    with _EXACT_BETA_PROVIDER_TRANSITION_LOCK:
+        # Re-read under the transition lock so a concurrent settings update
+        # cannot be overwritten by a config object captured before this repair.
+        config = read_raw_config()
+        config["model"] = dict(model_cfg)
+        require_beta_codex_auth(get_elevate_home())
+        enforce_beta_env_store_local()
+        repair_id = beta_runtime_repair_generation() or uuid.uuid4().hex
+        _begin_exact_beta_provider_repair(repair_id)
+        try:
+            save_config(config)
+            persisted_config = read_raw_config()
+            persisted_model = (
+                persisted_config.get("model")
+                if isinstance(persisted_config, dict)
+                else None
+            )
+            if not isinstance(persisted_model, dict) or any(
+                persisted_model.get(key) != value
+                for key, value in model_cfg.items()
+            ):
+                raise RuntimeError(
+                    "canonical Realtor Beta provider configuration was not durably saved"
+                )
+            _finish_exact_beta_provider_repair(repair_id)
+        except Exception:
+            mark_beta_runtime_repair_failed(repair_id)
+            raise
+        return get_config_path()
+
+
 def _update_config_for_provider(
     provider_id: str,
     inference_base_url: str,
@@ -5968,12 +6308,8 @@ def _update_config_for_provider(
         model_cfg["api_mode"] = "codex_responses"
         model_cfg.pop("api_key", None)
         model_cfg.pop("key_env", None)
-        config["model"] = model_cfg
-
-        from elevate_cli.config import save_config
-
-        save_config(config)
-        return get_config_path()
+        model_cfg.pop("openai_runtime", None)
+        return _apply_exact_beta_provider_config(model_cfg)
 
     # Set active_provider in auth.json so auto-resolution picks this provider
     with _auth_store_lock():
@@ -6312,6 +6648,13 @@ def _save_model_choice(model_id: str) -> None:
 
 def login_command(args) -> None:
     """Deprecated: use 'elevate model' or 'elevate setup' instead."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        raise SystemExit(
+            "Error [beta_app_onboarding_required]: Connect OpenAI Codex "
+            "from the Elevate app so every live session is repaired safely."
+        )
     print("The 'elevate login' command has been removed.")
     print("Use 'elevate auth' to manage credentials,")
     print("'elevate model' to select a provider, or 'elevate setup' for full setup.")
@@ -7660,6 +8003,14 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
 
 def logout_command(args) -> None:
     """Clear auth state for a provider."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        raise SystemExit(
+            "Error [beta_app_onboarding_required]: Disconnect OpenAI Codex "
+            "from the Elevate app so live sessions can be stopped safely."
+        )
+
     provider_id = getattr(args, "provider", None)
 
     if provider_id and not is_known_auth_provider(provider_id):

@@ -525,6 +525,10 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
     if toolset:
         return toolset
 
+    # Dispatch-only registry toolsets are invisible on every lookup path.
+    if name in HIDDEN_REGISTRY_TOOLSETS:
+        return None
+
     try:
         from tools.registry import registry
     except Exception:
@@ -536,7 +540,7 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
 
     if name not in _get_plugin_toolset_names():
         registry_toolset = alias_target
-        if not registry_toolset:
+        if not registry_toolset or registry_toolset in HIDDEN_REGISTRY_TOOLSETS:
             return None
         description = f"MCP server '{name}' tools"
     else:
@@ -628,11 +632,34 @@ def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
     return sorted(all_tools)
 
 
+# Registry toolsets that are dispatch-only. Their tools are registered so
+# invocations traverse the atomic registry shadow boundary, but their schemas
+# are advertised (or hidden) exclusively by the owning subsystem — never by
+# generic toolset enumeration. The memory manager advertises provider schemas
+# itself and hides them entirely under the exact Realtor Beta policy, so
+# surfacing its process-global ``memory-provider`` registrations here would
+# leak ``fact_store``/``fact_feedback`` schemas past that gate. Hidden
+# toolsets — and any alias resolving to them — never appear in
+# ``get_all_toolsets()``, ``get_toolset_names()``, ``validate_toolset()``,
+# ``get_toolset()``, or ``resolve_toolset()`` on any path, including
+# ``get_tool_definitions(enabled_toolsets=None)``. Dispatch is unaffected:
+# registry entries stay registered and callable through their owner's
+# dispatcher (``dispatch_memory_tool_via_registry``).
+#
+# ``context-engine`` (``lcm_*`` tools) is hidden for the same reason: the
+# active context engine advertises its schemas directly through
+# ``run_agent``'s tool injection, so surfacing its process-global
+# registrations through generic toolset enumeration would double-advertise
+# them. Invocations route through ``dispatch_context_engine_tool_via_registry``.
+HIDDEN_REGISTRY_TOOLSETS = frozenset({"memory-provider", "context-engine"})
+
+
 def _get_plugin_toolset_names() -> Set[str]:
     """Return toolset names registered by plugins (from the tool registry).
 
     These are toolsets that exist in the registry but not in the static
     ``TOOLSETS`` dict — i.e. they were added by plugins at load time.
+    Dispatch-only ``HIDDEN_REGISTRY_TOOLSETS`` are never reported.
     """
     try:
         from tools.registry import registry
@@ -640,16 +667,26 @@ def _get_plugin_toolset_names() -> Set[str]:
             toolset_name
             for toolset_name in registry.get_registered_toolset_names()
             if toolset_name not in TOOLSETS
+            and toolset_name not in HIDDEN_REGISTRY_TOOLSETS
         }
     except Exception:
         return set()
 
 
 def _get_registry_toolset_aliases() -> Dict[str, str]:
-    """Return explicit toolset aliases registered in the live registry."""
+    """Return explicit toolset aliases registered in the live registry.
+
+    Aliases pointing at dispatch-only ``HIDDEN_REGISTRY_TOOLSETS`` are
+    dropped so a hidden toolset cannot resurface under another name.
+    """
     try:
         from tools.registry import registry
-        return registry.get_registered_toolset_aliases()
+        return {
+            alias: canonical
+            for alias, canonical
+            in registry.get_registered_toolset_aliases().items()
+            if canonical not in HIDDEN_REGISTRY_TOOLSETS
+        }
     except Exception:
         return {}
 

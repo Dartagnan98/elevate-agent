@@ -168,6 +168,39 @@ def _write_stderr_log_header(server_name: str) -> None:
         pass
 
 # ---------------------------------------------------------------------------
+# Exact Realtor Beta: external MCP servers are a provider-owned effect lane
+# outside the accepted-turn registry/effect-broker boundary — connecting
+# spawns stdio subprocesses or opens network transports, and their tools
+# carry no trusted effect declarations.  The Beta containment contract keeps
+# that lane fail-closed at its connection chokepoints — the two registration
+# entries here (``discover_mcp_tools`` and ``register_mcp_servers``) plus the
+# operator-CLI temporary probe (``elevate_cli.mcp_config._probe_single_server``,
+# which ``mcp add``/``test``/``login`` funnel through): under the exact
+# Beta channel none of them reads config, starts the loop thread, spawns, or
+# connects, and no ``mcp-*`` tool can enter the registry.  Any mcp tool
+# somehow present anyway stays undeclared → ``unknown`` → typed
+# ``effect_policy_block`` before its handler at the atomic dispatch
+# boundary.  Stable behavior is byte-identical (ERB-406 MCP lane / A5).
+# ---------------------------------------------------------------------------
+
+BETA_MCP_SERVERS_DISABLED_CODE = "beta_mcp_servers_disabled"
+BETA_MCP_SERVERS_DISABLED_MESSAGE = (
+    "Realtor Beta does not connect to external MCP servers or register "
+    "their tools. No MCP server was spawned or contacted."
+)
+
+
+def _beta_mcp_lane_disabled() -> bool:
+    """Exact-Beta gate; environment fallback keeps a broken bundle closed."""
+    try:
+        from elevate_constants import exact_realtor_beta_active
+
+        return exact_realtor_beta_active()
+    except Exception:
+        return os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+
+# ---------------------------------------------------------------------------
 # Graceful import -- MCP SDK is an optional dependency
 # ---------------------------------------------------------------------------
 
@@ -3299,6 +3332,14 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     Returns:
         List of all currently registered MCP tool names.
     """
+    if _beta_mcp_lane_disabled():
+        logger.warning(
+            "[%s] %s",
+            BETA_MCP_SERVERS_DISABLED_CODE,
+            BETA_MCP_SERVERS_DISABLED_MESSAGE,
+        )
+        return []
+
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping explicit MCP registration")
         return []
@@ -3394,6 +3435,16 @@ def discover_mcp_tools() -> List[str]:
     Returns:
         List of all registered MCP tool names.
     """
+    if _beta_mcp_lane_disabled():
+        # Fail closed BEFORE the config read: an exact-Beta profile must not
+        # even resolve mcp_servers config into connection attempts.
+        logger.warning(
+            "[%s] %s",
+            BETA_MCP_SERVERS_DISABLED_CODE,
+            BETA_MCP_SERVERS_DISABLED_MESSAGE,
+        )
+        return []
+
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
         return []

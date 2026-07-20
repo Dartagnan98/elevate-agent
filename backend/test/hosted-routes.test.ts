@@ -272,6 +272,8 @@ describe("hosted route handlers", () => {
       backend_build_id: "development",
       entitlement_signer_ready: true,
       entitlement_signing_active_kid: "ent-2026-07-a",
+      entitlement_signing_configuration_mode: "legacy",
+      entitlement_signing_complete_key_ring_ready: false,
       entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
       database_schema_ready: true,
       database_schema_contract: "elevate-hq-schema-readiness-v1",
@@ -288,6 +290,8 @@ describe("hosted route handlers", () => {
         backend_build_id: "development",
         entitlement_signer_ready: true,
         entitlement_signing_active_kid: TEST_ENTITLEMENT_KEY_B,
+        entitlement_signing_configuration_mode: "key-ring",
+        entitlement_signing_complete_key_ring_ready: true,
         entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
         database_schema_ready: true,
         database_schema_contract: "elevate-hq-schema-readiness-v1",
@@ -310,6 +314,7 @@ describe("hosted route handlers", () => {
           ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
         },
         activeKid: "ent-2026-07-a",
+        configurationMode: "legacy",
       },
       {
         values: {
@@ -318,6 +323,7 @@ describe("hosted route handlers", () => {
           ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
         },
         activeKid: "ent-2026-07-a",
+        configurationMode: "key-ring",
       },
       {
         values: {
@@ -326,6 +332,7 @@ describe("hosted route handlers", () => {
           ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: "not-json",
         },
         activeKid: TEST_ENTITLEMENT_KEY_B,
+        configurationMode: "key-ring",
       },
       {
         values: {
@@ -335,6 +342,7 @@ describe("hosted route handlers", () => {
           ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: "{}",
         },
         activeKid: null,
+        configurationMode: "key-ring",
       },
     ] as const) {
       await withEntitlementSigningEnvironment(scenario.values, async () => {
@@ -347,6 +355,8 @@ describe("hosted route handlers", () => {
           backend_build_id: "development",
           entitlement_signer_ready: false,
           entitlement_signing_active_kid: scenario.activeKid,
+          entitlement_signing_configuration_mode: scenario.configurationMode,
+          entitlement_signing_complete_key_ring_ready: false,
           entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
           database_schema_ready: true,
           database_schema_contract: "elevate-hq-schema-readiness-v1",

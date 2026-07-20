@@ -48,7 +48,7 @@ test("gateway self-heal installs missing service and direct-bootstraps as fallba
   assert.match(block, /gateway still down/);
 });
 
-test("desktop schedules gateway self-heal for adopted and spawned dashboards", () => {
+test("desktop keeps delayed gateway maintenance only on adopted and spawned Stable paths", () => {
   const runner = fs.readFileSync(runnerPath, "utf8");
   const block = functionBlock(runner, "ensureBackend");
   const calls = block.match(/scheduleGatewaySelfHeal\(launcher, baseEnv\)/g) || [];
@@ -80,6 +80,7 @@ function fakeSpawn(behavior) {
     process.nextTick(() => {
       const b = behavior(command, args) || {};
       if (b.stdout) child.stdout.emit("data", b.stdout);
+      if (b.stderr) child.stderr.emit("data", b.stderr);
       child.emit("close", b.status ?? 0, null);
     });
     return child;
@@ -88,20 +89,187 @@ function fakeSpawn(behavior) {
 }
 
 function buildSelfHeal(spawn, logs, overrides = {}) {
+  const fsImpl = overrides.fs || require("node:fs");
+  const osImpl = overrides.os || require("node:os");
   return createGatewaySelfHeal({
     app: { getVersion: () => "0.0.0-test" },
     appendBackendLog: (line) => logs.push(line),
     envWithPath: (env) => env,
-    fileExists: () => false,
-    fs: require("node:fs"),
-    os: require("node:os"),
+    fileExists: overrides.fileExists || (() => false),
+    fs: fsImpl,
+    os: osImpl,
     path: require("node:path"),
-    process: { platform: "darwin", getuid: () => 501 },
+    process: overrides.process || { platform: "darwin", getuid: () => 501 },
     spawn,
     elevateHome: overrides.elevateHome,
     gatewayLabel: overrides.gatewayLabel,
   });
 }
+
+test("exact Beta self-heal boots out and removes stale gateway without reviving it", async (t) => {
+  const realFs = require("node:fs");
+  const realOs = require("node:os");
+  const realPath = require("node:path");
+  const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), "elevate-beta-gateway-"));
+  t.after(() => realFs.rmSync(home, { recursive: true, force: true }));
+  const plist = realPath.join(
+    home,
+    "Library",
+    "LaunchAgents",
+    "ai.elevate.gateway.plist",
+  );
+  realFs.mkdirSync(realPath.dirname(plist), { recursive: true });
+  realFs.writeFileSync(plist, "stale beta plist", "utf8");
+
+  const logs = [];
+  const { spawn, calls } = fakeSpawn((_command, args) => {
+    if (args[0] === "print") {
+      return { status: 113, stderr: "Could not find service" };
+    }
+    return { status: 0 };
+  });
+  const heal = buildSelfHeal(spawn, logs, {
+    fs: realFs,
+    os: { homedir: () => home },
+    fileExists: (candidate) => realFs.existsSync(candidate),
+    elevateHome: realPath.join(home, ".elevate-beta"),
+  });
+
+  await heal.ensureGatewayInstalled(null, { ELEVATE_RELEASE_CHANNEL: "beta" });
+
+  assert.deepEqual(calls, [
+    {
+      command: "launchctl",
+      args: ["bootout", "gui/501/ai.elevate.gateway"],
+    },
+    {
+      command: "launchctl",
+      args: ["print", "gui/501/ai.elevate.gateway"],
+    },
+  ]);
+  assert.equal(realFs.existsSync(plist), false);
+  assert.ok(logs.some((line) => line.includes("self-heal skipped")));
+  assert.equal(calls.some((call) => call.args.includes("kickstart")), false);
+  assert.equal(calls.some((call) => call.args.includes("bootstrap")), false);
+  assert.equal(calls.some((call) => call.command === "elevate"), false);
+});
+
+test("exact Beta cleanup kills and retries when first bootout leaves a running job", async (t) => {
+  const realFs = require("node:fs");
+  const realOs = require("node:os");
+  const realPath = require("node:path");
+  const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), "elevate-beta-retry-"));
+  t.after(() => realFs.rmSync(home, { recursive: true, force: true }));
+  const plist = realPath.join(home, "Library", "LaunchAgents", "ai.elevate.gateway.plist");
+  realFs.mkdirSync(realPath.dirname(plist), { recursive: true });
+  realFs.writeFileSync(plist, "stale", "utf8");
+  let prints = 0;
+  let bootouts = 0;
+  const { spawn, calls } = fakeSpawn((_command, args) => {
+    if (args[0] === "bootout") {
+      bootouts += 1;
+      return { status: bootouts === 1 ? 5 : 0, stderr: "busy" };
+    }
+    if (args[0] === "print") {
+      prints += 1;
+      return prints === 1
+        ? { status: 0, stdout: "state = running\npid = 123\n" }
+        : { status: 113, stderr: "Could not find service" };
+    }
+    if (args[0] === "kill") return { status: 0 };
+    throw new Error(`unexpected launchctl command: ${args.join(" ")}`);
+  });
+  const heal = buildSelfHeal(spawn, [], {
+    fs: realFs,
+    os: { homedir: () => home },
+    fileExists: (candidate) => realFs.existsSync(candidate),
+  });
+
+  await heal.ensureGatewayInstalled(null, { ELEVATE_RELEASE_CHANNEL: "beta" });
+
+  assert.deepEqual(calls.map((call) => call.args[0]), [
+    "bootout",
+    "print",
+    "kill",
+    "bootout",
+    "print",
+  ]);
+  assert.equal(realFs.existsSync(plist), false);
+});
+
+test("exact Beta cleanup fails closed and preserves plist when absence is unproven", async (t) => {
+  const realFs = require("node:fs");
+  const realOs = require("node:os");
+  const realPath = require("node:path");
+  const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), "elevate-beta-fail-"));
+  t.after(() => realFs.rmSync(home, { recursive: true, force: true }));
+  const plist = realPath.join(home, "Library", "LaunchAgents", "ai.elevate.gateway.plist");
+  realFs.mkdirSync(realPath.dirname(plist), { recursive: true });
+  realFs.writeFileSync(plist, "must survive", "utf8");
+  const { spawn } = fakeSpawn((_command, args) => (
+    args[0] === "print"
+      ? { status: 0, stdout: "state = running\npid = 123\n" }
+      : { status: 5, stderr: "operation failed" }
+  ));
+  const heal = buildSelfHeal(spawn, [], {
+    fs: realFs,
+    os: { homedir: () => home },
+    fileExists: (candidate) => realFs.existsSync(candidate),
+  });
+
+  await assert.rejects(
+    heal.ensureGatewayInstalled(null, { ELEVATE_RELEASE_CHANNEL: "beta" }),
+    /remained loaded/,
+  );
+  assert.equal(realFs.readFileSync(plist, "utf8"), "must survive");
+});
+
+test("exact Beta cleanup removes a broken plist symlink after absence proof", async (t) => {
+  const realFs = require("node:fs");
+  const realOs = require("node:os");
+  const realPath = require("node:path");
+  const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), "elevate-beta-link-"));
+  t.after(() => realFs.rmSync(home, { recursive: true, force: true }));
+  const plist = realPath.join(home, "Library", "LaunchAgents", "ai.elevate.gateway.plist");
+  realFs.mkdirSync(realPath.dirname(plist), { recursive: true });
+  realFs.symlinkSync(realPath.join(home, "missing-target"), plist);
+  const { spawn } = fakeSpawn((_command, args) => (
+    args[0] === "print"
+      ? { status: 113, stderr: "Could not find service" }
+      : { status: 0 }
+  ));
+  const heal = buildSelfHeal(spawn, [], {
+    fs: realFs,
+    os: { homedir: () => home },
+    // access/exists semantics deliberately cannot see this broken symlink.
+    fileExists: (candidate) => realFs.existsSync(candidate),
+  });
+
+  await heal.ensureGatewayInstalled(null, { ELEVATE_RELEASE_CHANNEL: "beta" });
+  assert.throws(() => realFs.lstatSync(plist), { code: "ENOENT" });
+});
+
+test("gateway command timeout force-kills and resolves without waiting for close", async () => {
+  const kills = [];
+  const spawn = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = (signal) => {
+      kills.push(signal);
+      return true;
+    };
+    return child;
+  };
+  const heal = buildSelfHeal(spawn, []);
+  const started = Date.now();
+  const result = await heal.run("launchctl", ["print", "missing"], { timeout: 10 });
+
+  assert.equal(result.status, null);
+  assert.equal(result.error.code, "ETIMEDOUT");
+  assert.deepEqual(kills, ["SIGTERM", "SIGKILL"]);
+  assert.ok(Date.now() - started < 1000);
+});
 
 test("probeGateway parses launchctl print output asynchronously", async () => {
   const { spawn } = fakeSpawn(() => ({ status: 0, stdout: "pid = 4242\n" }));

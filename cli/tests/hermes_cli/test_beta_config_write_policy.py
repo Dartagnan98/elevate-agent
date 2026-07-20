@@ -99,6 +99,16 @@ def _valid_beta_config():
                 "model": {
                     "provider": BETA_ALLOWED_PROVIDER,
                     "default": BETA_DEFAULT_MODEL,
+                    "openai_runtime": "codex_app_server",
+                }
+            },
+            "beta_codex_app_server_not_allowed",
+        ),
+        (
+            {
+                "model": {
+                    "provider": BETA_ALLOWED_PROVIDER,
+                    "default": BETA_DEFAULT_MODEL,
                     "key_env": "OPENAI_API_KEY",
                 }
             },
@@ -415,13 +425,47 @@ def test_beta_config_routes_accept_valid_local_codex_state(
 ):
     _write_local_codex_auth(beta_home)
     saved = []
-    client = _config_client(save_config_func=saved.append)
+    client = _config_client(
+        load_config_func=lambda: copy.deepcopy(_valid_beta_config()),
+        save_config_func=saved.append,
+    )
 
     response = client.put(path, json=payload)
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert saved == [_valid_beta_config()]
+
+
+@pytest.mark.parametrize("raw_route", [False, True])
+def test_beta_generic_config_routes_reject_allowed_model_drift_before_save(
+    beta_home,
+    raw_route,
+):
+    _write_local_codex_auth(beta_home)
+    current = _valid_beta_config()
+    current_before = copy.deepcopy(current)
+    prospective = copy.deepcopy(current)
+    prospective["model"]["default"] = "gpt-5.4"
+    saved = []
+    client = _config_client(
+        load_config_func=lambda: current,
+        save_config_func=saved.append,
+    )
+
+    response = client.put(
+        "/api/config/raw" if raw_route else "/api/config",
+        json=(
+            {"yaml_text": yaml.safe_dump(prospective)}
+            if raw_route
+            else {"config": prospective}
+        ),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "beta_app_onboarding_required"
+    assert saved == []
+    assert current == current_before
 
 
 @pytest.mark.parametrize("raw_route", [False, True])

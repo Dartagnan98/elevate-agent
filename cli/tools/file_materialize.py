@@ -12,6 +12,21 @@ This module detects the dataless flag, triggers materialization
 (``brctl download``) with a bounded wait, and retries reads once on EDEADLK.
 It is a no-op on non-macOS platforms and for files whose data is already
 resident, so it is safe to call unconditionally before any local read.
+
+Two lanes share the dataless *detection* (:func:`is_dataless`) but not the
+*materialization*:
+
+* The **materializing lane** (:func:`materialize_if_dataless` /
+  :func:`read_bytes_resilient`) runs the ``brctl download`` subprocess and
+  changes a file's iCloud residency. That is a real, non-read side effect, so
+  it is an explicit opt-in path with an ``unknown`` declared effect. Effect-
+  bearing tools that must see the bytes regardless (e.g. ``vision_analyze``)
+  call it directly.
+* The **declared-read lane** (:func:`require_resident`) never materializes: it
+  performs a single residency ``stat`` and refuses a dataless placeholder with
+  :class:`FileNotResidentError`. A caller that passes this guard is reading
+  resident bytes, which is a provably pure read — this is what lets
+  ``read_file`` truthfully declare ``read:files``.
 """
 from __future__ import annotations
 
@@ -36,6 +51,21 @@ class FileNotReadyError(OSError):
     """Raised when an iCloud placeholder could not be materialized in time."""
 
 
+class FileNotResidentError(OSError):
+    """Raised by the declared-read lane when a file is a dataless placeholder.
+
+    Unlike :class:`FileNotReadyError`, reaching this error means the read lane
+    *declined to materialize* — no ``brctl`` subprocess ran and the file's
+    iCloud residency is unchanged. It exists so ``read_file`` can fail closed
+    on offloaded files while remaining a provably pure ``read:files`` surface.
+    """
+
+
+# ``errno.ENODATA`` ("No data available") is the closest fit for a dataless
+# placeholder; fall back to ``EIO`` on platforms that do not define it.
+_ENODATA = getattr(errno, "ENODATA", errno.EIO)
+
+
 def is_dataless(path) -> bool:
     """Return True if ``path`` is an offloaded iCloud placeholder (macOS only)."""
     if not _IS_MACOS:
@@ -45,6 +75,23 @@ def is_dataless(path) -> bool:
     except (OSError, AttributeError):
         return False
     return bool(flags & SF_DATALESS)
+
+
+def require_resident(path) -> None:
+    """Fail closed on a dataless placeholder without materializing it.
+
+    This is the residency guard for the declared-read lane. It performs a
+    single :func:`is_dataless` residency check and **never** triggers a
+    download (no ``brctl`` subprocess, no residency change). Non-macOS
+    platforms and already-resident files return ``None``; a dataless
+    placeholder raises :class:`FileNotResidentError`.
+    """
+    if is_dataless(path):
+        raise FileNotResidentError(
+            _ENODATA,
+            "iCloud file is offloaded (dataless placeholder); the read path "
+            f"will not download it: {path}",
+        )
 
 
 def materialize_if_dataless(path, timeout: float = 10.0, poll: float = 0.25) -> bool:

@@ -188,12 +188,28 @@ def test_realtor_beta_permission_modes_are_immutably_draft_clamped(
     expected_mode: ExecutionPolicyMode,
     expected_effects: set[str],
 ) -> None:
-    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "BeTa")
+    # The Beta channel value is bundle-controlled and exactly lowercase; the
+    # clamp keys on that exact value, and noncanonical casings deliberately
+    # keep Stable behavior (see test_beta_approval_bypass case-mismatch tests).
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
 
     policy = execution_policy_for_permission_mode("turn-beta", permission_mode)
 
     assert policy.mode is expected_mode
     assert {str(effect) for effect in policy.allowed_effects} == expected_effects
+
+
+@pytest.mark.parametrize("channel", ["BeTa", "BETA", " beta"])
+def test_noncanonical_beta_channel_keeps_stable_permission_modes(
+    monkeypatch,
+    channel: str,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", channel)
+    clamped = execution_policy_for_permission_mode("turn-x", "bypassPermissions")
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "stable")
+    stable = execution_policy_for_permission_mode("turn-x", "bypassPermissions")
+    assert clamped.mode is stable.mode
+    assert clamped.allowed_effects == stable.allowed_effects
 
 
 def test_policy_ceiling_and_permission_mappings_are_immutable() -> None:

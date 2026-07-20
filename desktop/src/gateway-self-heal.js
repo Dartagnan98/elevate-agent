@@ -28,11 +28,21 @@ function createGatewaySelfHeal({
       let stderr = "";
       let settled = false;
       const timer = setTimeout(() => {
+        const error = new Error(`${command} timed out after ${timeout}ms`);
+        error.code = "ETIMEDOUT";
         try {
           child.kill("SIGTERM");
         } catch {
           /* already gone */
         }
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        // Never wait indefinitely for an uncooperative child to emit close.
+        // Beta startup treats this resolved timeout as a cleanup failure.
+        settle(null, "SIGKILL", error);
       }, timeout);
       const settle = (status, signal, error) => {
         if (settled) return;
@@ -116,7 +126,7 @@ function createGatewaySelfHeal({
     return res.status === 0;
   }
 
-  async function probeGateway(uid) {
+  async function probeGatewayState(uid) {
     const probe = await run(
       "launchctl",
       ["print", `gui/${uid}/${gatewayLabel}`],
@@ -126,7 +136,22 @@ function createGatewaySelfHeal({
     const loaded = probe.status === 0;
     const running =
       loaded && (/\bpid = \d+/.test(out) || /state = running/.test(out));
+    return { ...probe, loaded, running };
+  }
+
+  async function probeGateway(uid) {
+    const { loaded, running } = await probeGatewayState(uid);
     return { loaded, running };
+  }
+
+  function pathLexists(candidate) {
+    try {
+      fs.lstatSync(candidate);
+      return true;
+    } catch (e) {
+      if (e && e.code === "ENOENT") return false;
+      throw e;
+    }
   }
 
   async function bootstrapGatewayDirect(uid, plist) {
@@ -142,16 +167,79 @@ function createGatewaySelfHeal({
     return (await probeGateway(uid)).running;
   }
 
+  async function disableExactBetaGateway(uid, plist) {
+    const target = `gui/${uid}/${gatewayLabel}`;
+    const bootout = () => run(
+      "launchctl",
+      ["bootout", target],
+      { timeout: 15000 },
+    );
+    const assertAbsent = async () => {
+      const state = await probeGatewayState(uid);
+      const detail = String(state.stderr || state.stdout || "");
+      const provenMissing =
+        state.status === 113 ||
+        (state.status !== 0 && /could not find service|service not found|no such process/i.test(detail));
+      if (state.error || state.status === null) {
+        throw new Error(`could not verify disabled Beta gateway absence: ${state.error || detail}`);
+      }
+      if (!state.loaded && !provenMissing) {
+        throw new Error(
+          `could not prove disabled Beta gateway absent (launchctl rc=${state.status}): ${detail}`,
+        );
+      }
+      return { ...state, absent: provenMissing };
+    };
+
+    const stopped = await bootout();
+    appendBackendLog(
+      `[gateway] Realtor Beta disabled: bootout rc=${stopped.status}\n`,
+    );
+    let state = await assertAbsent();
+    if (state.loaded || state.running) {
+      const killed = await run(
+        "launchctl",
+        ["kill", "SIGKILL", target],
+        { timeout: 15000 },
+      );
+      appendBackendLog(
+        `[gateway] Realtor Beta disabled: kill rc=${killed.status}; retrying bootout\n`,
+      );
+      const retry = await bootout();
+      appendBackendLog(
+        `[gateway] Realtor Beta disabled: retry bootout rc=${retry.status}\n`,
+      );
+      state = await assertAbsent();
+    }
+    if (state.loaded || state.running || !state.absent) {
+      throw new Error("Realtor Beta gateway remained loaded after forced bootout");
+    }
+
+    // lstat/lexists semantics intentionally catch broken symlinks that the
+    // launcher's ordinary accessSync-based fileExists helper cannot see.
+    if (pathLexists(plist)) fs.unlinkSync(plist);
+    appendBackendLog(
+      "[gateway] Realtor Beta disabled: absence proven and stale launchd plist removed; self-heal skipped\n",
+    );
+  }
+
   async function ensureGatewayInstalled(launcher, baseEnv) {
     if (process.platform !== "darwin") return;
+    const plist = path.join(
+      os.homedir(),
+      "Library",
+      "LaunchAgents",
+      `${gatewayLabel}.plist`,
+    );
+    const uid = typeof process.getuid === "function" ? process.getuid() : "";
+    if (baseEnv && baseEnv.ELEVATE_RELEASE_CHANNEL === "beta") {
+      // Beta cleanup is a startup safety precondition. Propagate any failure;
+      // the desktop must not launch a dashboard while an old uncoordinated
+      // gateway can still perform inference.
+      await disableExactBetaGateway(uid, plist);
+      return;
+    }
     try {
-      const plist = path.join(
-        os.homedir(),
-        "Library",
-        "LaunchAgents",
-        `${gatewayLabel}.plist`,
-      );
-      const uid = typeof process.getuid === "function" ? process.getuid() : "";
       const { loaded, running } = await probeGateway(uid);
       const appVersion = app.getVersion();
       if (fileExists(plist) && loaded && !running) {
@@ -222,12 +310,14 @@ function createGatewaySelfHeal({
 
   return {
     bootstrapGatewayDirect,
+    disableExactBetaGateway,
     ensureGatewayInstalled,
     existingGatewayMissingResource,
     gatewayVersionMarkerPath,
     kickstartGateway,
     probeGateway,
     readGatewayVersionMarker,
+    run,
     runGatewayCommand,
     writeGatewayVersionMarker,
   };

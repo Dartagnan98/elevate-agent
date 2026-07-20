@@ -895,8 +895,24 @@ def create_oauth_router(*, require_token: RequireToken) -> APIRouter:
             return {"ok": True, "provider": provider_id}
 
         try:
-            from elevate_cli.auth import clear_provider_auth
-            cleared = clear_provider_auth(provider_id)
+            if beta_provider_policy_active():
+                from elevate_cli.auth import disconnect_exact_beta_provider_auth
+
+                # Provider repair is deliberately synchronous: it waits for
+                # every in-process/PTY/delegated actor to acknowledge the
+                # prepare fence before deleting credentials.  The PTY
+                # publisher that must deliver that acknowledgement runs on
+                # this FastAPI event loop, so invoking the coordinator inline
+                # would either deadlock or trip the same-loop fail-closed
+                # guard whenever a live dashboard session exists.
+                cleared = await asyncio.to_thread(
+                    disconnect_exact_beta_provider_auth,
+                    provider_id,
+                )
+            else:
+                from elevate_cli.auth import clear_provider_auth
+
+                cleared = clear_provider_auth(provider_id)
             _log.info("oauth/disconnect: %s (cleared=%s)", provider_id, cleared)
             return {"ok": bool(cleared), "provider": provider_id}
         except Exception as e:

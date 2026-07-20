@@ -73,3 +73,42 @@ def _fake_clock():
         return state["t"]
 
     return _clock
+
+
+# ── require_resident: the pure (non-materializing) declared-read guard ─────
+
+
+def test_require_resident_noop_on_resident_file(tmp_file):
+    """A resident file passes the guard and returns None."""
+    assert fm.require_resident(tmp_file) is None
+
+
+def test_require_resident_noop_on_missing_file():
+    """A missing file is not dataless, so the guard is a no-op."""
+    assert fm.require_resident("/no/such/path/xyz.bin") is None
+
+
+def test_require_resident_refuses_dataless_without_subprocess(monkeypatch, tmp_file):
+    """A dataless placeholder is refused WITHOUT any brctl download.
+
+    This is the core repair: the declared-read lane must never run the
+    materialization subprocess or change iCloud residency. If it did, the
+    read effect would be unclassifiable from args and read_file could not
+    truthfully declare read:files.
+    """
+    monkeypatch.setattr(fm, "is_dataless", lambda p: True)
+
+    def _boom(*a, **k):  # pragma: no cover - must never be reached
+        raise AssertionError("require_resident shelled out to a subprocess")
+
+    monkeypatch.setattr(fm.subprocess, "run", _boom)
+
+    with pytest.raises(fm.FileNotResidentError):
+        fm.require_resident(tmp_file)
+
+
+def test_file_not_resident_is_distinct_from_not_ready():
+    """The two typed errors are distinct classes (both OSError)."""
+    assert fm.FileNotResidentError is not fm.FileNotReadyError
+    assert issubclass(fm.FileNotResidentError, OSError)
+    assert issubclass(fm.FileNotReadyError, OSError)

@@ -171,6 +171,69 @@ describe("terminal failure truth", () => {
     expect(__chatPageTestables.subagentCompletionStatus("completed")).toBe("done");
     expect(__chatPageTestables.subagentCompletionStatus("Completed")).toBe("done");
   });
+
+  it.each([
+    "delegation_failed",
+    "delegation_timeout",
+    "delegation_interrupted",
+    "delegation_start_failed",
+    "unknown_terminal_reason",
+    "",
+    undefined,
+  ])("keeps durable terminal reason %s out of the done state", (endReason) => {
+    expect(
+      __chatPageTestables.durableSubagentCompletionStatus({
+        ended_at: 2_000,
+        end_reason: endReason,
+      }),
+    ).toBe("error");
+  });
+
+  it("treats only delegation_complete as durable success", () => {
+    expect(
+      __chatPageTestables.durableSubagentCompletionStatus({
+        ended_at: 2_000,
+        end_reason: "delegation_complete",
+      }),
+    ).toBe("done");
+    expect(
+      __chatPageTestables.durableSubagentCompletionStatus({
+        ended_at: null,
+        end_reason: "delegation_complete",
+      }),
+    ).toBe("running");
+  });
+
+  it("preserves interrupted durable truth during poll and reload reconciliation", () => {
+    const running = {
+      goal: "Prepare documents",
+      id: "subagent-1",
+      startedAt: 1_000,
+      status: "running" as const,
+      subagent_id: "subagent-1",
+    };
+    const reconciled = __chatPageTestables.reconcileSubagentFromDurableChild(
+      running,
+      {
+        id: "child-1",
+        ended_at: 2_000,
+        end_reason: "delegation_interrupted",
+      },
+    );
+
+    expect(reconciled).toMatchObject({
+      status: "error",
+      completedAt: 2_000_000,
+      finalSummary: "delegation_interrupted",
+    });
+    expect(
+      __chatPageTestables.reconcileSubagentFromDurableChild(reconciled, {
+        id: "child-1",
+        ended_at: 2_000,
+        end_reason: "delegation_interrupted",
+      }),
+    ).toEqual(reconciled);
+  });
 });
 
 describe("session Stop quiescence", () => {

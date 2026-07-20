@@ -43,6 +43,34 @@ _FACT_FEEDBACK_TEST_SCHEMA = {
     },
 }
 
+@pytest.fixture(autouse=True)
+def _clean_registry_routed_memory_tools():
+    """Drop memory-provider registrations a test created in the registry.
+
+    ``MemoryManager.add_provider`` now registers EVERY provider tool
+    (``fact_store``/``fact_feedback`` plus ``hindsight_*``, ``honcho_*``, …)
+    process-globally under the ``memory-provider`` toolset so they can
+    traverse the atomic registry shadow boundary.  Tests build managers with
+    fake providers, so every memory-provider registration created inside one
+    test is removed afterwards to keep the global registry clean for the rest
+    of the suite.
+    """
+    from tools.registry import registry
+    from agent.memory_manager import MEMORY_PROVIDER_TOOLSET
+
+    def _memory_provider_entries() -> set[str]:
+        return {
+            name
+            for name, toolset in registry.get_tool_to_toolset_map().items()
+            if toolset == MEMORY_PROVIDER_TOOLSET
+        }
+
+    pre_existing = _memory_provider_entries()
+    yield
+    for name in _memory_provider_entries() - pre_existing:
+        registry.deregister(name)
+
+
 # ---------------------------------------------------------------------------
 # Concrete test provider
 # ---------------------------------------------------------------------------
@@ -1129,6 +1157,405 @@ class TestSequentialDispatchRouting:
 
         names = mgr.get_all_tool_names()
         assert names == {"builtin_tool", "ext_recall", "ext_retain"}
+
+
+# ---------------------------------------------------------------------------
+# ERB-406: registry-routed provider tools (fact_store / fact_feedback)
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryRoutedMemoryTools:
+    """fact_store/fact_feedback traverse the atomic registry shadow boundary
+    with truthful write-effect declarations and unchanged provider behavior."""
+
+    _ROUTED = ("fact_store", "fact_feedback")
+
+    def _manager(self):
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA, _FACT_FEEDBACK_TEST_SCHEMA],
+        )
+        mgr.add_provider(provider)
+        return mgr, provider
+
+    def test_add_provider_registers_fact_tools_with_truthful_write_effects(self):
+        from tools.registry import registry
+
+        self._manager()
+        for name in self._ROUTED:
+            entry = registry.get_entry(name)
+            assert entry is not None, name
+            assert entry.toolset == "memory-provider"
+            metadata = registry.get_effect_metadata(name)
+            assert metadata["declared"] is True
+            assert metadata["has_resolver"] is True
+            # Static declaration is honestly a memory write, never a read.
+            assert sorted(str(e) for e in metadata["effects"]) == [
+                "write_local:memory"
+            ]
+
+        def resolved(name, args):
+            return sorted(str(e) for e in registry.resolve_effects(name, args))
+
+        assert resolved("fact_store", {"action": "add"}) == ["write_local:memory"]
+        # Provider reads persist retrieval telemetry: read plus write.
+        assert resolved("fact_store", {"action": "search"}) == [
+            "read:memory",
+            "write_local:memory",
+        ]
+        assert resolved("fact_feedback", {"action": "helpful"}) == [
+            "write_local:memory"
+        ]
+        # Unclassified actions stay fail-closed.
+        assert "unknown" in resolved("fact_store", {"action": "bogus"})
+        assert "unknown" in resolved("fact_feedback", {"action": "bogus"})
+
+    def test_fact_tool_registration_is_idempotent_across_managers(self):
+        from tools.registry import registry
+
+        self._manager()
+        first_ids = {
+            name: registry.get_entry(name).entry_id for name in self._ROUTED
+        }
+        # A second agent's manager must not rotate the registration identity.
+        self._manager()
+        for name in self._ROUTED:
+            assert registry.get_entry(name).entry_id == first_ids[name]
+
+    def test_registered_handler_without_bound_manager_returns_typed_error(self):
+        from tools.registry import registry
+
+        _mgr, provider = self._manager()
+        provider.handle_tool_call = MagicMock(return_value='{"unexpected":true}')
+        result = json.loads(
+            registry.get_entry("fact_store").handler({"action": "search"})
+        )
+        assert "no active memory provider" in result["error"]
+        provider.handle_tool_call.assert_not_called()
+
+    def test_routed_dispatch_matches_direct_manager_dispatch(self):
+        from agent.memory_manager import dispatch_memory_tool_via_registry
+
+        mgr, _provider = self._manager()
+        args = {"action": "search", "query": "alice"}
+        direct = mgr.handle_tool_call("fact_store", dict(args))
+        routed = dispatch_memory_tool_via_registry(
+            mgr,
+            "fact_store",
+            dict(args),
+            task_id="task-mem",
+            session_id="session-mem",
+            tool_call_id="call-mem-parity",
+        )
+        assert routed == direct
+        assert json.loads(routed)["handled"] == "fact_store"
+
+    def test_routed_dispatch_traverses_atomic_boundary(self, monkeypatch):
+        from agent.memory_manager import dispatch_memory_tool_via_registry
+        from tools.registry import registry
+
+        mgr, _provider = self._manager()
+        policy = ExecutionPolicy.for_mode("turn-memory-routing", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=5)
+        captured = {}
+        real_execute_shadow = registry.execute_shadow
+
+        def spy(name, args, **kwargs):
+            outcome = real_execute_shadow(name, args, **kwargs)
+            captured["name"] = name
+            captured["context"] = outcome.prepared.context
+            captured["args_digest"] = outcome.prepared.args_digest
+            captured["effects"] = sorted(
+                str(e) for e in outcome.prepared.resolved_effects
+            )
+            captured["started"] = outcome.started
+            return outcome
+
+        monkeypatch.setattr(registry, "execute_shadow", spy)
+        try:
+            result = json.loads(
+                dispatch_memory_tool_via_registry(
+                    mgr,
+                    "fact_feedback",
+                    {"action": "helpful", "fact_id": 7},
+                    task_id="task-mem",
+                    session_id="session-mem",
+                    tool_call_id="call-mem-shadow",
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert result["handled"] == "fact_feedback"
+        assert captured["name"] == "fact_feedback"
+        assert captured["started"] is True
+        assert captured["effects"] == ["write_local:memory"]
+        assert captured["context"].session_id == "session-mem"
+        assert captured["context"].invocation_id == "call-mem-shadow"
+        assert captured["context"].accepted_turn_id == "turn-memory-routing"
+        assert captured["context"].policy_revision == 5
+        assert isinstance(captured["args_digest"], str)
+        assert len(captured["args_digest"]) == 64
+
+    def test_stale_registration_fails_closed_before_provider(self, monkeypatch):
+        from agent.memory_manager import dispatch_memory_tool_via_registry
+        from tools.registry import registry
+
+        mgr, provider = self._manager()
+        provider.handle_tool_call = MagicMock(return_value='{"unexpected":true}')
+        policy = ExecutionPolicy.for_mode("turn-memory-stale", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=6)
+        entry = registry.get_entry("fact_store")
+        real_prepare = registry.prepare_shadow
+
+        def replace_after_preparation(name, args, **kwargs):
+            prepared = real_prepare(name, args, **kwargs)
+            if name == "fact_store":
+                registry.register(
+                    name="fact_store",
+                    toolset=entry.toolset,
+                    schema=entry.schema,
+                    handler=entry.handler,
+                    effects={"write_local:memory"},
+                    effect_resolver=entry.effect_resolver,
+                )
+            return prepared
+
+        monkeypatch.setattr(registry, "prepare_shadow", replace_after_preparation)
+        try:
+            result = json.loads(
+                dispatch_memory_tool_via_registry(
+                    mgr,
+                    "fact_store",
+                    {"action": "search", "query": "x"},
+                    task_id="task-mem",
+                    session_id="session-mem",
+                    tool_call_id="call-mem-stale",
+                )
+            )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert result["shadow_status"] == "stale_registration"
+        provider.handle_tool_call.assert_not_called()
+
+    def test_manager_write_policy_still_enforced_through_routing(self):
+        from agent.memory_manager import dispatch_memory_tool_via_registry
+
+        mgr, provider = self._manager()
+        provider.handle_tool_call = MagicMock(return_value='{"unexpected":true}')
+        mgr.set_agent_policy("agent-x", {"write_policy": "read_only"})
+
+        routed = json.loads(
+            dispatch_memory_tool_via_registry(
+                mgr,
+                "fact_store",
+                {"action": "add", "content": "blocked"},
+                task_id="task-mem",
+                session_id="session-mem",
+                tool_call_id="call-mem-policy",
+            )
+        )
+        direct = json.loads(
+            mgr.handle_tool_call("fact_store", {"action": "add", "content": "blocked"})
+        )
+        assert routed == direct
+        assert "write policy blocks" in routed["error"]
+        provider.handle_tool_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ERB adversarial review: dispatch-only registration must never leak schemas
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryRoutedMemoryToolContainment:
+    """The dispatch-only ``memory-provider`` registry toolset never surfaces
+    through toolset enumeration or model schemas on any path — including
+    ``get_tool_definitions(enabled_toolsets=None)`` — while registry dispatch
+    and the typed no-provider error keep working unchanged."""
+
+    _ROUTED = ("fact_store", "fact_feedback")
+
+    def _manager(self):
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider(
+            "holographic",
+            tools=[_FACT_STORE_TEST_SCHEMA, _FACT_FEEDBACK_TEST_SCHEMA],
+        )
+        mgr.add_provider(provider)
+        return mgr, provider
+
+    @staticmethod
+    def _clear_tool_defs_cache():
+        import model_tools
+
+        with model_tools._TOOL_DEFS_CACHE_LOCK:
+            model_tools._TOOL_DEFS_CACHE.clear()
+
+    def test_memory_provider_toolset_is_declared_hidden(self):
+        from agent.memory_manager import MEMORY_PROVIDER_TOOLSET
+        from toolsets import HIDDEN_REGISTRY_TOOLSETS
+
+        assert MEMORY_PROVIDER_TOOLSET in HIDDEN_REGISTRY_TOOLSETS
+
+    def test_toolset_enumeration_never_lists_memory_provider(self):
+        import toolsets
+
+        self._manager()
+        assert "memory-provider" not in toolsets.get_all_toolsets()
+        assert "memory-provider" not in toolsets.get_toolset_names()
+        assert toolsets.get_toolset("memory-provider") is None
+        assert toolsets.validate_toolset("memory-provider") is False
+        assert toolsets.resolve_toolset("memory-provider") == []
+        assert not set(toolsets.resolve_toolset("all")).intersection(
+            self._ROUTED
+        )
+
+    def test_alias_cannot_resurface_hidden_toolset(self, monkeypatch):
+        import toolsets
+        from tools.registry import registry
+
+        self._manager()
+        monkeypatch.setattr(
+            registry,
+            "get_registered_toolset_aliases",
+            lambda: {"memory-alias": "memory-provider"},
+        )
+        monkeypatch.setattr(
+            registry,
+            "get_toolset_alias_target",
+            lambda name: "memory-provider" if name == "memory-alias" else None,
+        )
+        assert toolsets.get_toolset("memory-alias") is None
+        assert toolsets.validate_toolset("memory-alias") is False
+        assert toolsets.resolve_toolset("memory-alias") == []
+        assert "memory-alias" not in toolsets.get_all_toolsets()
+        assert "memory-alias" not in toolsets.get_toolset_names()
+
+    @pytest.mark.parametrize(
+        "channel", [None, "beta"], ids=["stable", "exact-beta"]
+    )
+    @pytest.mark.parametrize(
+        "enabled_toolsets",
+        [None, ["all"], ["memory-provider"]],
+        ids=["none-path", "all-alias", "explicit-name"],
+    )
+    def test_model_schema_paths_never_advertise_direct_memory_tools(
+        self,
+        monkeypatch,
+        channel,
+        enabled_toolsets,
+    ):
+        import model_tools
+        from tools.registry import registry
+
+        if channel is None:
+            monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+        else:
+            monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", channel)
+        self._manager()
+        # Precondition — this is exactly the leak the review proved: the
+        # tools ARE registered (dispatchable through the shadow boundary,
+        # with declared effects) while every schema path must omit them.
+        assert all(
+            registry.get_entry(name) is not None for name in self._ROUTED
+        )
+
+        self._clear_tool_defs_cache()
+        try:
+            definitions = model_tools.get_tool_definitions(
+                enabled_toolsets=enabled_toolsets,
+                quiet_mode=True,
+            )
+        finally:
+            self._clear_tool_defs_cache()
+
+        names = {tool["function"]["name"] for tool in definitions}
+        assert not names.intersection(self._ROUTED)
+        if channel is None and enabled_toolsets is None:
+            # Sanity: the None path really enumerated the full surface.
+            assert names
+
+    def test_hidden_toolset_keeps_registry_dispatch_working(self):
+        from agent.memory_manager import dispatch_memory_tool_via_registry
+
+        mgr, _provider = self._manager()
+        routed = json.loads(
+            dispatch_memory_tool_via_registry(
+                mgr,
+                "fact_store",
+                {"action": "search", "query": "alice"},
+                task_id="task-hidden",
+                session_id="session-hidden",
+                tool_call_id="call-hidden-dispatch",
+            )
+        )
+        assert routed["handled"] == "fact_store"
+
+    def test_no_active_provider_error_unchanged_while_hidden(self):
+        from tools.registry import registry
+
+        self._manager()
+        result = json.loads(
+            registry.get_entry("fact_store").handler({"action": "search"})
+        )
+        assert "no active memory provider" in result["error"]
+
+    def test_registration_lock_is_held_across_check_and_register(
+        self, monkeypatch
+    ):
+        from agent import memory_manager as memory_manager_module
+
+        mgr, _provider = self._manager()
+        observed: list = []
+        monkeypatch.setattr(
+            memory_manager_module,
+            "_ensure_registry_routed_memory_tool",
+            lambda name, schema: observed.append(
+                memory_manager_module._REGISTRY_ROUTED_REGISTRATION_LOCK.locked()
+            ),
+        )
+        # Force the "entry missing" branch so the register step runs.
+        monkeypatch.setattr(
+            memory_manager_module.registry, "get_entry", lambda name: None
+        )
+        mgr.ensure_registry_routed_tools_registered()
+        assert observed == [True, True]
+
+    def test_concurrent_registration_registers_each_tool_exactly_once(
+        self, monkeypatch
+    ):
+        import threading
+
+        from tools.registry import registry
+
+        mgr, _provider = self._manager()
+        for name in self._ROUTED:
+            registry.deregister(name)
+
+        registered_names: list = []
+        real_register = registry.register
+
+        def counting_register(*args, **kwargs):
+            registered_names.append(kwargs.get("name"))
+            return real_register(*args, **kwargs)
+
+        monkeypatch.setattr(registry, "register", counting_register)
+        threads = [
+            threading.Thread(target=mgr.ensure_registry_routed_tools_registered)
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(registered_names) == ["fact_feedback", "fact_store"]
+        assert all(
+            registry.get_entry(name) is not None for name in self._ROUTED
+        )
 
 
 # ---------------------------------------------------------------------------

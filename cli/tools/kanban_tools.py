@@ -345,7 +345,14 @@ def _handle_show(args: dict, **kw) -> str:
 
 
 def _handle_list(args: dict, **kw) -> str:
-    """List task summaries with the same core filters as the CLI."""
+    """List task summaries with the same core filters as the CLI.
+
+    Pure read: listing goes through the already-initialized, forced-
+    READ-ONLY operational boundary and never mutates board state.
+    Dependency readiness recomputation — which promotes tasks, resets
+    failure counters, and appends ``promoted`` events — is a deliberate
+    board mutation and lives in the separate ``kanban_recompute`` tool.
+    """
     guard = _require_orchestrator_tool("kanban_list")
     if guard:
         return guard
@@ -366,12 +373,10 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error("limit must be >= 1")
     if limit > KANBAN_LIST_MAX_LIMIT:
         return tool_error(f"limit must be <= {KANBAN_LIST_MAX_LIMIT}")
-    board = args.get("board")
+    from elevate_cli.data.connection import OperationalStoreNotReady
+
     try:
-        with _connect(board=board) as (kb, conn):
-            # Match CLI list: dependencies that cleared since the last
-            # dispatcher tick should be visible to orchestrators immediately.
-            promoted = kb.recompute_ready(conn)
+        with _connect_read_only() as (kb, conn):
             # Fetch one extra row so model-facing output can report that
             # a bounded listing was truncated without dumping the board.
             rows = kb.list_tasks(
@@ -393,13 +398,45 @@ def _handle_list(args: dict, **kw) -> str:
                     min(limit * 2, KANBAN_LIST_MAX_LIMIT)
                     if truncated and limit < KANBAN_LIST_MAX_LIMIT else None
                 ),
-                "promoted": promoted,
             })
+    except OperationalStoreNotReady:
+        return tool_result(
+            success=False,
+            error="operational_store_not_ready",
+            message=(
+                "Kanban data is still starting for the active account. "
+                "Wait for Elevate startup to complete, then retry once."
+            ),
+        )
     except ValueError as e:
         return tool_error(f"kanban_list: {e}")
     except Exception as e:
         logger.exception("kanban_list failed")
         return tool_error(f"kanban_list: {e}")
+
+
+def _handle_recompute(args: dict, **kw) -> str:
+    """Explicitly recompute dependency readiness. A deliberate board mutation.
+
+    Split out of ``kanban_list`` so that listing stays a pure read.
+    ``recompute_ready`` can flip ``todo``/``blocked`` tasks to ``ready``,
+    reset failure counters, and append ``promoted`` events — effects an
+    orchestrator must ask for explicitly, not receive as a side effect of
+    looking at the board.
+    """
+    guard = _require_orchestrator_tool("kanban_recompute")
+    if guard:
+        return guard
+    board = args.get("board")
+    try:
+        with _connect(board=board) as (kb, conn):
+            promoted = kb.recompute_ready(conn)
+            return _ok(promoted=promoted)
+    except ValueError as e:
+        return tool_error(f"kanban_recompute: {e}")
+    except Exception as e:
+        logger.exception("kanban_recompute failed")
+        return tool_error(f"kanban_recompute: {e}")
 
 
 def _handle_complete(args: dict, **kw) -> str:
@@ -817,9 +854,11 @@ KANBAN_LIST_SCHEMA = {
         "status, tenant, include_archived, and limit. Returns compact rows "
         "with ids, title, status, assignee, priority, parent/child ids, and "
         "counts. Bounded to 50 rows by default, 200 max, with truncation "
-        "metadata. Also recomputes ready tasks before listing, matching the "
-        "CLI. Orchestrator-only — dispatcher-spawned task workers never see "
-        "this tool."
+        "metadata. Pure read — never changes board state. Dependency "
+        "readiness is recomputed automatically on task completion and each "
+        "dispatcher tick; call kanban_recompute first if you need pending "
+        "promotions reflected immediately. Orchestrator-only — dispatcher-"
+        "spawned task workers never see this tool."
     ),
     "parameters": {
         "type": "object",
@@ -848,6 +887,30 @@ KANBAN_LIST_SCHEMA = {
                 "type": "integer",
                 "description": "Optional maximum rows to return (default 50, max 200).",
             },
+            "board": _board_schema_prop(),
+        },
+        "required": [],
+    },
+}
+
+KANBAN_RECOMPUTE_SCHEMA = {
+    "name": "kanban_recompute",
+    "description": (
+        "Explicitly recompute dependency readiness across the board: "
+        "promote 'todo' (and auto-recoverable 'blocked') tasks to 'ready' "
+        "when every parent is done/archived. This MUTATES board state — it "
+        "flips task statuses, resets failure counters, and appends "
+        "'promoted' events. It exists as its own tool so kanban_list can "
+        "stay a pure read. Usually unnecessary: task completion and every "
+        "dispatcher tick already recompute readiness. Call it only when a "
+        "dependency cleared outside those paths and you need the promotion "
+        "reflected before routing work. Returns the number of tasks "
+        "promoted. Orchestrator-only — dispatcher-spawned task workers "
+        "never see this tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
             "board": _board_schema_prop(),
         },
         "required": [],
@@ -1221,6 +1284,20 @@ registry.register(
     handler=_handle_list,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="📋",
+    effects={"read:kanban"},
+)
+
+# Deliberately UNDECLARED (unknown effects): recompute_ready promotes
+# tasks, resets failure counters, and appends events. It stays unknown
+# until write-effect classification (write_local:kanban) lands with its
+# own authorization evidence.
+registry.register(
+    name="kanban_recompute",
+    toolset="kanban",
+    schema=KANBAN_RECOMPUTE_SCHEMA,
+    handler=_handle_recompute,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="♻️",
 )
 
 registry.register(

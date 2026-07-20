@@ -138,7 +138,7 @@ def test_telegram_approve_adds_allowed_user_and_home(monkeypatch):
     assert syncs == [("TELEGRAM_HOME_CHANNEL", "222")]
 
 
-def test_exact_beta_telegram_configure_rejects_reused_agent_token(monkeypatch):
+def test_exact_beta_telegram_configure_is_unavailable_without_mutation(monkeypatch):
     from elevate_cli.config import get_env_path, load_env, save_env_value
 
     token = "123456:ABCDEFGHIJKLMNOPQRSTUVWX"
@@ -159,12 +159,20 @@ def test_exact_beta_telegram_configure_rejects_reused_agent_token(monkeypatch):
     )
 
     assert resp.status_code == 409
-    assert resp.json()["detail"]["code"] == "beta_telegram_token_reused"
+    assert resp.json()["detail"] == {
+        "code": "beta_messaging_runtime_unavailable",
+        "message": (
+            "Telegram pairing is not enabled in this Realtor Beta build. "
+            "Use in-app chat while the messaging runtime is being hardened."
+        ),
+        "configurationSaved": False,
+        "restartStarted": False,
+    }
     assert load_env() == before
     assert env_path.read_bytes() == before_bytes
 
 
-def test_exact_beta_telegram_configure_write_failure_is_atomic(monkeypatch):
+def test_exact_beta_telegram_configure_stops_before_any_writer(monkeypatch):
     from elevate_cli.config import get_env_path, load_env
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
@@ -187,12 +195,13 @@ def test_exact_beta_telegram_configure_write_failure_is_atomic(monkeypatch):
         },
     )
 
-    assert resp.status_code == 500
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_messaging_runtime_unavailable"
     assert load_env() == before
     assert (env_path.read_bytes() if env_path.exists() else None) == before_bytes
 
 
-def test_exact_beta_pair_start_closes_stale_open_access_flags(monkeypatch):
+def test_exact_beta_pair_start_is_unavailable_without_mutation(monkeypatch):
     from elevate_cli.config import load_env, save_env_values
 
     save_env_values(
@@ -206,23 +215,19 @@ def test_exact_beta_pair_start_closes_stale_open_access_flags(monkeypatch):
         }
     )
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    before = dict(load_env())
 
     resp = make_client().post(
         "/api/telegram/pair/start",
         json={"bot_token": "123456:ABCDEFGHIJKLMNOPQRSTUVWX"},
     )
 
-    assert resp.status_code == 200
-    env = load_env()
-    assert env["GATEWAY_ALLOW_ALL_USERS"] == "false"
-    assert env["GATEWAY_ALLOWED_USERS"] == ""
-    assert env["TELEGRAM_ALLOW_ALL_USERS"] == "false"
-    assert env["TELEGRAM_ALLOWED_USERS"] == ""
-    assert env["TELEGRAM_GROUP_ALLOWED_USERS"] == ""
-    assert env["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] == "pair"
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_messaging_runtime_unavailable"
+    assert load_env() == before
 
 
-def test_exact_beta_pair_start_reports_saved_config_when_restart_spawn_fails(monkeypatch):
+def test_exact_beta_pair_start_never_spawns_the_disabled_gateway(monkeypatch):
     from elevate_cli.config import load_env
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
@@ -235,22 +240,22 @@ def test_exact_beta_pair_start_reports_saved_config_when_restart_spawn_fails(mon
         json={"bot_token": "123456:ABCDEFGHIJKLMNOPQRSTUVWX"},
     )
 
-    assert resp.status_code == 503
+    assert resp.status_code == 409
     assert resp.json()["detail"] == {
-        "code": "beta_gateway_restart_not_started",
+        "code": "beta_messaging_runtime_unavailable",
         "message": (
-            "Telegram was saved securely, but the agent restart did not start. "
-            "Retry the connection to start it."
+            "Telegram pairing is not enabled in this Realtor Beta build. "
+            "Use in-app chat while the messaging runtime is being hardened."
         ),
-        "configurationSaved": True,
+        "configurationSaved": False,
         "restartStarted": False,
     }
     env = load_env()
-    assert env["TELEGRAM_BOT_TOKEN"] == "123456:ABCDEFGHIJKLMNOPQRSTUVWX"
-    assert env["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] == "pair"
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR" not in env
 
 
-def test_exact_beta_pair_approval_write_failure_does_not_consume_code(monkeypatch):
+def test_exact_beta_pair_approval_is_unavailable_without_consuming_code(monkeypatch):
     consumed = []
 
     class Store:
@@ -279,13 +284,12 @@ def test_exact_beta_pair_approval_write_failure_does_not_consume_code(monkeypatc
         json={"code": "abc123", "set_home": True},
     )
 
-    assert resp.status_code == 500
-    assert resp.json()["detail"]["code"] == "beta_pairing_authorization_not_saved"
-    assert resp.json()["detail"]["retryable"] is True
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_messaging_runtime_unavailable"
     assert consumed == []
 
 
-def test_exact_beta_pair_approval_rejects_non_numeric_user_without_consuming_code(monkeypatch):
+def test_exact_beta_pair_approval_stops_before_pairing_store_lookup(monkeypatch):
     consumed = []
 
     class Store:
@@ -307,9 +311,8 @@ def test_exact_beta_pair_approval_rejects_non_numeric_user_without_consuming_cod
         json={"code": "abc123"},
     )
 
-    assert resp.status_code == 500
-    assert resp.json()["detail"]["code"] == "beta_pairing_authorization_not_saved"
-    assert resp.json()["detail"]["retryable"] is True
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_messaging_runtime_unavailable"
     assert consumed == []
 
 
@@ -320,6 +323,7 @@ def test_exact_beta_status_reports_stale_open_access_sources(monkeypatch):
         {
             "GATEWAY_ALLOW_ALL_USERS": "true",
             "TELEGRAM_GROUP_ALLOWED_USERS": "*",
+            "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR": "pair",
         }
     )
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")

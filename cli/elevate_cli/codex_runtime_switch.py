@@ -62,6 +62,10 @@ def parse_args(arg_string: str) -> tuple[Optional[str], list[str]]:
 def get_current_runtime(config: dict) -> str:
     """Read the current `model.openai_runtime` value from a config dict.
     Returns 'auto' for unset / empty / unrecognized values."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        return "auto"
     if not isinstance(config, dict):
         return "auto"
     model_cfg = config.get("model") or {}
@@ -76,6 +80,16 @@ def get_current_runtime(config: dict) -> str:
 def set_runtime(config: dict, new_value: str) -> str:
     """Mutate the config dict in place to persist the new runtime value.
     Returns the previous value for callers that want to report a delta."""
+    from elevate_cli.beta_provider_policy import (
+        BetaProviderPolicyError,
+        beta_provider_policy_active,
+    )
+
+    if beta_provider_policy_active():
+        raise BetaProviderPolicyError(
+            "Realtor Beta uses its registered in-app Codex runtime.",
+            code="beta_codex_app_server_not_allowed",
+        )
     if new_value not in VALID_RUNTIMES:
         raise ValueError(
             f"invalid runtime {new_value!r}; must be one of {VALID_RUNTIMES}"
@@ -114,6 +128,19 @@ def apply(
 
     Returns: CodexRuntimeStatus describing the outcome.
     """
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        return CodexRuntimeStatus(
+            success=False,
+            new_value=None,
+            old_value="auto",
+            message=(
+                "Realtor Beta uses the registered in-app Codex Responses "
+                "runtime; /codex-runtime is not available in this Beta."
+            ),
+        )
+
     current = get_current_runtime(config)
 
     # Cache the codex binary check for this apply() call. Subprocess spawn

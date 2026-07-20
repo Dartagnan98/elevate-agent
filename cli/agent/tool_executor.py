@@ -723,6 +723,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         elif exact_beta:
             from model_tools import ToolDispatchOutcome
 
+            dispatch_outcome = None
+            invoke_error = None
             try:
                 dispatch_outcome = agent._invoke_tool(
                     function_name,
@@ -734,10 +736,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     return_outcome=True,
                 )
             except Exception as tool_error:
-                dispatch_outcome = None
-                function_result = (
-                    f"Error executing tool '{function_name}': {tool_error}"
-                )
+                invoke_error = tool_error
                 logger.error(
                     "_invoke_tool raised for %s: %s",
                     function_name,
@@ -749,14 +748,36 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 _execution_blocked = not dispatch_outcome.started
             else:
                 # A raw legacy result is not physical-start proof in Beta.
+                # ``function_result`` MUST be assigned on every arm of this
+                # branch: leaving it unbound crashed the first tool of a batch
+                # (UnboundLocalError) and silently delivered the PREVIOUS
+                # iteration's stale result for later tools.
+                if invoke_error is not None:
+                    function_result = (
+                        f"Error executing tool '{function_name}': {invoke_error}"
+                    )
+                elif dispatch_outcome is not None:
+                    function_result = dispatch_outcome
+                else:
+                    function_result = json.dumps(
+                        {
+                            "error": (
+                                f"Tool '{function_name}' returned no exact-Beta "
+                                "dispatch outcome. No physical start was proven."
+                            )
+                        },
+                        ensure_ascii=False,
+                    )
                 _execution_blocked = True
             tool_duration = time.time() - tool_start_time
         elif function_name == "todo":
-            from tools.todo_tool import todo_tool as _todo_tool
-            function_result = _todo_tool(
-                todos=function_args.get("todos"),
-                merge=function_args.get("merge", False),
+            from tools.todo_tool import dispatch_todo_via_registry
+            function_result = dispatch_todo_via_registry(
+                function_args,
                 store=agent._todo_store,
+                task_id=effective_task_id,
+                session_id=agent.session_id or "",
+                tool_call_id=getattr(tool_call, "id", None),
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -767,54 +788,68 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 from elevate_state import format_session_db_unavailable
                 function_result = json.dumps({"success": False, "error": format_session_db_unavailable()})
             else:
-                from tools.session_search_tool import session_search as _session_search
-                function_result = _session_search(
-                    query=function_args.get("query", ""),
-                    role_filter=function_args.get("role_filter"),
-                    limit=function_args.get("limit", 3),
-                    session_id=function_args.get("session_id"),
-                    around_message_id=function_args.get("around_message_id"),
-                    window=function_args.get("window", 5),
-                    sort=function_args.get("sort"),
+                # ERB-406 lane 6: route the injected write-capable SessionDB
+                # through the atomic registry boundary via a dispatch-scoped
+                # companion. This extracted copy forwards the full arg shape
+                # (query/role_filter/limit/session_id/around_message_id/window/
+                # sort), preserved byte-identically.
+                from tools.session_search_tool import dispatch_session_search_via_registry
+                function_result = dispatch_session_search_via_registry(
+                    function_args,
                     db=session_db,
                     current_session_id=agent.session_id,
+                    task_id=effective_task_id,
+                    session_id=agent.session_id or "",
+                    tool_call_id=getattr(tool_call, "id", None),
                 )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
         elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            function_result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
+            # Route the built-in memory write through the atomic registry shadow
+            # boundary (ERB-406 lane 5). Store + manager + bridge metadata factory
+            # ride a dispatch-scoped companion; the provider bridge fires INSIDE
+            # the registered handler so a blocked/stale dispatch cannot fire it.
+            # This extracted branch never applied ``_memory_policy_block`` — that
+            # divergence is preserved (the gate lives in the caller, not the
+            # shared handler). The factory defers ``build_memory_write_metadata``
+            # (module-level in ``agent.background_review``; AIAgent has no such
+            # method — the previous ``agent._build_memory_write_metadata``
+            # reference raised AttributeError inside the bridge's
+            # swallow-exceptions block, silently dropping provider metadata)
+            # into the handler's bridge block, so it still runs only for
+            # add/replace, after the write, and a raising build can never lose
+            # the store write — byte-identical to the inline bridge.
+            from agent.background_review import build_memory_write_metadata
+            from tools.memory_tool import dispatch_builtin_memory_via_registry
+            # The factory closes over the loop var ``tool_call``; this is safe
+            # ONLY because the handler invokes it synchronously within this one
+            # dispatch (before the loop advances and before the companion is
+            # unbound). Never make the built-in memory handler async / deferred.
+            function_result = dispatch_builtin_memory_via_registry(
+                function_args,
                 store=agent._memory_store,
+                manager=agent._memory_manager,
+                metadata_factory=lambda: build_memory_write_metadata(
+                    agent,
+                    task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", None),
+                ),
+                task_id=effective_task_id,
+                session_id=agent.session_id or "",
+                tool_call_id=getattr(tool_call, "id", None),
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if agent._memory_manager and function_args.get("action") in {"add", "replace"}:
-                try:
-                    agent._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata=agent._build_memory_write_metadata(
-                            task_id=effective_task_id,
-                            tool_call_id=getattr(tool_call, "id", None),
-                        ),
-                    )
-                except Exception:
-                    pass
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
         elif function_name == "clarify":
-            from tools.clarify_tool import clarify_tool as _clarify_tool
-            function_result = _clarify_tool(
-                question=function_args.get("question", ""),
-                choices=function_args.get("choices"),
+            from tools.clarify_tool import dispatch_clarify_via_registry
+            function_result = dispatch_clarify_via_registry(
+                function_args,
                 callback=agent.clarify_callback,
+                task_id=effective_task_id,
+                session_id=agent.session_id or "",
+                tool_call_id=getattr(tool_call, "id", None),
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -834,7 +869,12 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._delegate_spinner = spinner
             _delegate_result = None
             try:
-                function_result = agent._dispatch_delegate_task(function_args)
+                function_result = agent._dispatch_delegate_task(
+                    function_args,
+                    task_id=effective_task_id,
+                    session_id=agent.session_id or "",
+                    tool_call_id=getattr(tool_call, "id", None),
+                )
                 _delegate_result = function_result
             finally:
                 agent._delegate_spinner = None
@@ -855,7 +895,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 spinner.start()
             _ce_result = None
             try:
-                function_result = agent.context_compressor.handle_tool_call(function_name, function_args, messages=messages)
+                from agent.context_engine_dispatch import dispatch_context_engine_tool_via_registry
+                function_result = dispatch_context_engine_tool_via_registry(
+                    agent.context_compressor,
+                    messages,
+                    function_name,
+                    function_args,
+                    task_id=effective_task_id,
+                    session_id=agent.session_id or "",
+                    tool_call_id=getattr(tool_call, "id", None),
+                )
                 _ce_result = function_result
             except Exception as tool_error:
                 function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
@@ -869,8 +918,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 elif agent._should_emit_quiet_tool_messages():
                     agent._vprint(f"  {cute_msg}")
         elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
-            # Memory provider tools (hindsight_retain, honcho_search, etc.)
-            # These are not in the tool registry — route through MemoryManager.
+            # Memory provider tools (fact_store/fact_feedback, hindsight_*,
+            # honcho_*, mem0_*, …). Every one traverses the atomic registry
+            # shadow boundary (ERB-406); the wrapper falls back to the direct
+            # manager path only when registration is impossible.
             spinner = None
             if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
                 face = random.choice(KawaiiSpinner.get_waiting_faces())
@@ -880,7 +931,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 spinner.start()
             _mem_result = None
             try:
-                function_result = agent._memory_manager.handle_tool_call(function_name, function_args)
+                from agent.memory_manager import dispatch_memory_tool_via_registry
+                function_result = dispatch_memory_tool_via_registry(
+                    agent._memory_manager,
+                    function_name,
+                    function_args,
+                    task_id=effective_task_id,
+                    session_id=agent.session_id or "",
+                    tool_call_id=getattr(tool_call, "id", None),
+                )
                 _mem_result = function_result
             except Exception as tool_error:
                 function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})

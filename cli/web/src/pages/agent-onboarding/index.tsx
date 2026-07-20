@@ -636,6 +636,7 @@ function SelectRow({
 export function AgentSetupLaunch({
   setup,
   onSetupUpdated,
+  onRuntimeRefresh,
   forceOnboarding = false,
   onForceOnboardingDone,
   realtorBeta = false,
@@ -643,6 +644,7 @@ export function AgentSetupLaunch({
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
+  onRuntimeRefresh?: () => Promise<void>;
   forceOnboarding?: boolean;
   onForceOnboardingDone?: () => void;
   realtorBeta?: boolean;
@@ -712,10 +714,18 @@ export function AgentSetupLaunch({
   const handleOAuthProvidersChange = useCallback(
     (providers: OAuthProvider[] | null) => {
       setOauthProviders(providers);
-      if (providers !== null) setError(null);
+      if (providers !== null) {
+        setError(null);
+        if (realtorBeta) void onRuntimeRefresh?.();
+      }
     },
-    [],
+    [onRuntimeRefresh, realtorBeta],
   );
+
+  const handleOAuthSuccess = useCallback(() => {
+    setError(null);
+    if (realtorBeta) void onRuntimeRefresh?.();
+  }, [onRuntimeRefresh, realtorBeta]);
 
   const save = useCallback(async () => {
     setSaving(true);
@@ -862,7 +872,7 @@ export function AgentSetupLaunch({
             realtorBeta
             onProvidersChange={handleOAuthProvidersChange}
             onError={(message) => setError(message)}
-            onSuccess={() => setError(null)}
+            onSuccess={handleOAuthSuccess}
           />
           {!betaPrimaryContract.valid && (
             <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] leading-5 text-destructive">
@@ -1153,12 +1163,12 @@ export function AgentSetupLaunch({
       {realtorBeta ? (
         <>
           <ItemCard
-            title="Private Telegram lane"
-            description="Realtor Beta uses Telegram for requests, progress, and approvals. Unknown users must pair before they can reach an agent."
-            status={telegramItem?.status ?? "missing"}
+            title="In-app chat"
+            description="This Beta keeps requests, progress, and approvals inside the signed Elevation app."
+            status="configured"
           >
             <p className="text-[11.5px] leading-5 text-muted-foreground">
-              Connect or repair Telegram from the guided onboarding flow so the bot token, allowlist, and agent aliases are saved together.
+              Telegram pairing is not enabled in this Beta build. It will return only after the messaging runtime has the same session, provider-repair, and audit guarantees as in-app chat.
             </p>
           </ItemCard>
           <ItemCard
@@ -1510,6 +1520,7 @@ export function AgentOnboardingPage() {
         setup={setup}
         realtorBeta={realtorBeta}
         betaRuntime={runtimeStatus.beta_runtime}
+        onRuntimeRefresh={loadRuntimeStatus}
         onSetupUpdated={setSetup}
         onFinishLater={finishOnboardingLater}
         onFinish={() => {
@@ -1570,6 +1581,7 @@ export function AgentOnboardingPage() {
         setup={setup}
         realtorBeta={realtorBeta}
         betaRuntime={runtimeStatus.beta_runtime}
+        onRuntimeRefresh={loadRuntimeStatus}
         onSetupUpdated={setSetup}
         forceOnboarding={forceOnboarding}
         onForceOnboardingDone={() => setForceOnboarding(false)}

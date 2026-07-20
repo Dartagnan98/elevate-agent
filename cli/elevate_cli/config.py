@@ -298,6 +298,21 @@ def managed_error(action: str = "modify configuration"):
     print(format_managed_message(action), file=sys.stderr)
 
 
+def reject_beta_cli_config_mutation(action: str) -> None:
+    """Fail closed before legacy CLI config writers touch Beta profile state."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if not beta_provider_policy_active():
+        return
+    print(
+        "Realtor Beta configuration is managed in the Elevate app. "
+        f"Open in-app onboarding or Settings before trying to {action} "
+        "(beta_app_onboarding_required).",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 # =============================================================================
 # Container-aware CLI (NixOS container mode)
 # =============================================================================
@@ -4045,7 +4060,14 @@ def load_env() -> Dict[str, str]:
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
                 key, _, value = line.partition('=')
-                env_vars[key.strip()] = value.strip().strip('"\'')
+                normalized_key = key.strip()
+                # python-dotenv accepts the POSIX ``export KEY=value`` form.
+                # Keep this lightweight reader aligned with startup semantics
+                # so verification/cleanup cannot miss a value that will be
+                # restored on the next process launch.
+                if normalized_key.startswith("export "):
+                    normalized_key = normalized_key.removeprefix("export ").strip()
+                env_vars[normalized_key] = value.strip().strip('"\'')
     
     return env_vars
 
@@ -4343,10 +4365,12 @@ def remove_env_values(keys: Iterable[str]) -> List[str]:
     new_lines = []
     for line in lines:
         stripped = line.strip()
-        matching_key = next(
-            (key for key in requested_set if stripped.startswith(f"{key}=")),
-            None,
-        )
+        assignment = stripped
+        if assignment.startswith("export "):
+            assignment = assignment.removeprefix("export ").lstrip()
+        assignment_key, separator, _value = assignment.partition("=")
+        normalized_key = assignment_key.strip() if separator else ""
+        matching_key = normalized_key if normalized_key in requested_set else None
         if matching_key is None:
             new_lines.append(line)
         else:
@@ -4619,6 +4643,7 @@ def show_config():
 
 def edit_config():
     """Open config file in user's editor."""
+    reject_beta_cli_config_mutation("edit configuration")
     if is_managed():
         managed_error("edit configuration")
         return
@@ -4651,6 +4676,7 @@ def edit_config():
 
 def set_config_value(key: str, value: str):
     """Set a configuration value."""
+    reject_beta_cli_config_mutation("set configuration values")
     if is_managed():
         managed_error("set configuration values")
         return
@@ -4743,6 +4769,8 @@ def set_config_value(key: str, value: str):
 def config_command(args):
     """Handle config subcommands."""
     subcmd = getattr(args, 'config_command', None)
+    if subcmd in {"edit", "set", "migrate"}:
+        reject_beta_cli_config_mutation(f"run `elevate config {subcmd}`")
     
     if subcmd is None or subcmd == "show":
         show_config()

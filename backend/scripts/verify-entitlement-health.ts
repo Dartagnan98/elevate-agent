@@ -21,6 +21,8 @@ export type VerifiedEntitlementHealth = Readonly<{
   service: "elevate-backend";
   backendBuildId: string;
   activeKid: string;
+  signingConfigurationMode: "key-ring";
+  completeKeyRingReady: true;
   publicKeysetSha256: string;
   databaseSchemaContract: typeof DATABASE_SCHEMA_CONTRACT;
   databaseSchemaVersion: typeof DATABASE_SCHEMA_VERSION;
@@ -35,13 +37,24 @@ export function verifyEntitlementHealth({
   status,
   body,
   expectedBuildId,
+  expectedActiveKid,
 }: Readonly<{
   status: number;
   body: unknown;
   expectedBuildId: string;
+  expectedActiveKid: string;
 }>): VerifiedEntitlementHealth {
   if (!SAFE_BUILD_ID.test(expectedBuildId)) {
     throw new Error("expected build id is invalid");
+  }
+  if (
+    !ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS.includes(
+      expectedActiveKid as (typeof ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS)[number],
+    )
+  ) {
+    throw new Error(
+      "expected active entitlement key id is not compiled into this release",
+    );
   }
   if (status < 200 || status >= 300) {
     throw new Error(`health endpoint returned HTTP ${status}`);
@@ -75,6 +88,21 @@ export function verifyEntitlementHealth({
       "health field entitlement_signing_active_kid is not accepted by this release",
     );
   }
+  if (activeKid !== expectedActiveKid) {
+    throw new Error(
+      "health field entitlement_signing_active_kid does not match the expected rollout key",
+    );
+  }
+  if (body.entitlement_signing_configuration_mode !== "key-ring") {
+    throw new Error(
+      "health field entitlement_signing_configuration_mode is not key-ring",
+    );
+  }
+  if (body.entitlement_signing_complete_key_ring_ready !== true) {
+    throw new Error(
+      "health field entitlement_signing_complete_key_ring_ready must be true",
+    );
+  }
   if (
     body.entitlement_public_keyset_sha256 !==
     ENTITLEMENT_ASSERTION_KEYSET_SHA256
@@ -104,6 +132,8 @@ export function verifyEntitlementHealth({
     service: "elevate-backend",
     backendBuildId: expectedBuildId,
     activeKid,
+    signingConfigurationMode: "key-ring",
+    completeKeyRingReady: true,
     publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     databaseSchemaContract: DATABASE_SCHEMA_CONTRACT,
     databaseSchemaVersion: DATABASE_SCHEMA_VERSION,
@@ -116,6 +146,7 @@ type CliOptions = Readonly<{
   delayMs: number;
   consecutive: number;
   expectedBuildId: string | null;
+  expectedActiveKid: string | null;
   fingerprint: boolean;
   expectedFingerprint: string | null;
   selfCheck: boolean;
@@ -135,6 +166,7 @@ function parseArgs(args: string[]): CliOptions {
   let delayMs = 1000;
   let consecutive = 1;
   let expectedBuildId: string | null = null;
+  let expectedActiveKid: string | null = null;
   let fingerprint = false;
   let expectedFingerprint: string | null = null;
   let selfCheck = false;
@@ -159,6 +191,7 @@ function parseArgs(args: string[]): CliOptions {
     else if (argument === "--consecutive") {
       consecutive = positiveInteger(value, argument);
     } else if (argument === "--expected-build-id") expectedBuildId = value;
+    else if (argument === "--expected-active-kid") expectedActiveKid = value;
     else if (argument === "--expected-fingerprint") expectedFingerprint = value;
     else throw new Error(`unknown or incomplete argument: ${argument}`);
     index += 1;
@@ -173,6 +206,16 @@ function parseArgs(args: string[]): CliOptions {
     throw new Error("expected build id is invalid");
   }
   if (
+    expectedActiveKid !== null &&
+    !ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS.includes(
+      expectedActiveKid as (typeof ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS)[number],
+    )
+  ) {
+    throw new Error(
+      "expected active entitlement key id is not compiled into this release",
+    );
+  }
+  if (
     expectedFingerprint !== null &&
     !SAFE_FINGERPRINT.test(expectedFingerprint)
   ) {
@@ -182,6 +225,14 @@ function parseArgs(args: string[]): CliOptions {
     throw new Error(
       "--expected-build-id is required for deployment verification",
     );
+  }
+  if (!selfCheck && !fingerprint && expectedActiveKid === null) {
+    throw new Error(
+      "--expected-active-kid is required for deployment verification",
+    );
+  }
+  if (fingerprint && expectedActiveKid !== null) {
+    throw new Error("--expected-active-kid is not valid with --fingerprint");
   }
   if (expectedFingerprint !== null && !fingerprint) {
     throw new Error("--expected-fingerprint requires --fingerprint");
@@ -193,6 +244,7 @@ function parseArgs(args: string[]): CliOptions {
     delayMs,
     consecutive,
     expectedBuildId,
+    expectedActiveKid,
     fingerprint,
     expectedFingerprint,
     selfCheck,
@@ -217,6 +269,7 @@ async function requestHealth(
 async function fetchAndVerify(
   url: string,
   expectedBuildId: string,
+  expectedActiveKid: string,
 ): Promise<VerifiedEntitlementHealth> {
   const response = await requestHealth(url);
   let body: unknown;
@@ -229,6 +282,7 @@ async function fetchAndVerify(
     status: response.status,
     body,
     expectedBuildId,
+    expectedActiveKid,
   });
 }
 
@@ -265,6 +319,7 @@ async function verifyConsecutive(options: CliOptions): Promise<void> {
         lastVerified = await fetchAndVerify(
           options.url,
           options.expectedBuildId as string,
+          options.expectedActiveKid as string,
         );
       }
       consecutiveSuccesses += 1;
@@ -273,7 +328,7 @@ async function verifyConsecutive(options: CliOptions): Promise<void> {
           console.log(baselineFingerprint);
         } else if (lastVerified) {
           console.log(
-            `[health] ready service=${lastVerified.service} build_id=${lastVerified.backendBuildId} active_kid=${lastVerified.activeKid} keyset_sha256=${lastVerified.publicKeysetSha256} schema=${lastVerified.databaseSchemaContract}@${lastVerified.databaseSchemaVersion} consecutive=${consecutiveSuccesses}`,
+            `[health] ready service=${lastVerified.service} build_id=${lastVerified.backendBuildId} active_kid=${lastVerified.activeKid} signing_mode=${lastVerified.signingConfigurationMode} complete_key_ring=${lastVerified.completeKeyRingReady} keyset_sha256=${lastVerified.publicKeysetSha256} schema=${lastVerified.databaseSchemaContract}@${lastVerified.databaseSchemaVersion} consecutive=${consecutiveSuccesses}`,
           );
         }
         return;
@@ -302,12 +357,15 @@ async function main(): Promise<void> {
     verifyEntitlementHealth({
       status: 200,
       expectedBuildId: "self-check",
+      expectedActiveKid: activeKid,
       body: {
         ok: true,
         service: "elevate-backend",
         backend_build_id: "self-check",
         entitlement_signer_ready: true,
         entitlement_signing_active_kid: activeKid,
+        entitlement_signing_configuration_mode: "key-ring",
+        entitlement_signing_complete_key_ring_ready: true,
         entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
         database_schema_ready: true,
         database_schema_contract: DATABASE_SCHEMA_CONTRACT,

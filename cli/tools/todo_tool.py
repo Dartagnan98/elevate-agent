@@ -294,14 +294,103 @@ TODO_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error  # noqa: E402 — deliberate late import; registry imports tool modules
+from tools.dispatch_companion import DispatchCompanion  # noqa: E402
+
+
+# The per-session ``TodoStore`` is process state on the AIAgent, not tool-call
+# data, so it can never ride through the registry's JSON-frozen
+# argument/handler-kwargs snapshot.  Agent dispatch binds it here for exactly
+# the duration of one registry shadow dispatch; the registered handler is the
+# only consumer.  A caller that reaches the registered handler outside that
+# binding (legacy ``registry.dispatch`` without an agent, plugin dispatch,
+# hallucinated calls) sees ``None`` and gets ``todo_tool``'s long-standing
+# "TodoStore not initialized" typed error — the plan store can never be
+# reached outside the shadow-dispatch boundary.
+_TODO_STORE_COMPANION = DispatchCompanion("active_todo_store")
+
+
+def bind_todo_store(store):
+    """Expose *store* to the registered todo handler for one dispatch."""
+    return _TODO_STORE_COMPANION.bound(store)
+
+
+def _registered_todo_handler(args, **_kwargs) -> str:
+    """Register-time handler: sources the plan store from the companion.
+
+    Handler kwargs are deliberately ignored — the registry's frozen
+    handler-kwargs snapshot is JSON-only, so a ``TodoStore`` smuggled through
+    dispatch kwargs (the old ``kw.get("store")`` seam) can never reach the
+    plan store.  The companion is resolved eagerly here, never stored for
+    lazy reads; a ``None`` result yields ``todo_tool``'s "TodoStore not
+    initialized" error rather than guessing at ambient state.
+    """
+    args = args if isinstance(args, dict) else {}
+    return todo_tool(
+        todos=args.get("todos"),
+        merge=args.get("merge", False),
+        store=_TODO_STORE_COMPANION.get(),
+    )
+
+
+def dispatch_todo_via_registry(
+    function_args,
+    *,
+    store,
+    task_id=None,
+    session_id=None,
+    tool_call_id=None,
+    return_outcome=False,
+):
+    """Route one todo invocation through the atomic registry boundary.
+
+    Every agent special-case branch calls this instead of ``todo_tool``
+    directly, so the call is captured with the same frozen identity,
+    args-digest, and policy context as ordinary registry tools.  The plan
+    store is bound only for the duration of this dispatch and only the
+    registered handler can consume it.  ``return_outcome=True`` returns the
+    adapter's :class:`ToolDispatchOutcome` (truthful physical-start proof
+    for the exact-Beta loops); the default returns the raw result
+    byte-identically.
+    """
+    from model_tools import dispatch_agent_owned_registry_tool
+
+    return dispatch_agent_owned_registry_tool(
+        "todo",
+        function_args if isinstance(function_args, dict) else {},
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        companions=(bind_todo_store(store),),
+        return_outcome=return_outcome,
+    )
+
+
+def _todo_effect_resolver(args: dict):
+    """Classify todo calls against the per-session in-memory plan store.
+
+    The todo list lives on the AIAgent's :class:`TodoStore` (one per
+    session): the tool touches no filesystem, database, network, process,
+    or cross-session state on any branch.  A call without a ``todos``
+    payload only copies the current list, so it resolves to an exact
+    ``read:session_plan``.  A call carrying ``todos`` (including an empty
+    list, which replaces the plan) mutates that session-plan state and
+    resolves to ``write_local:session_plan`` — the same capability the
+    PLAN / DRAFT_ONLY policy ceilings already sanction for plan upkeep.
+    The branch condition mirrors the handler exactly: the handler writes
+    iff ``args.get("todos") is not None``.
+    """
+    if not isinstance(args, dict) or args.get("todos") is None:
+        return {"read:session_plan"}
+    return {"write_local:session_plan"}
+
 
 registry.register(
     name="todo",
     toolset="todo",
     schema=TODO_SCHEMA,
-    handler=lambda args, **kw: todo_tool(
-        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
+    handler=_registered_todo_handler,
     check_fn=check_todo_requirements,
     emoji="📋",
+    effect_resolver=_todo_effect_resolver,
 )

@@ -291,3 +291,24 @@ def test_beta_primary_validation_canonicalizes_web_transport_alias():
         "apiKey": "",
         "usesEnvSecret": False,
     }
+
+
+def test_beta_primary_validation_rejects_hostile_ambient_override(monkeypatch):
+    monkeypatch.setenv("ELEVATE_MODEL", "gemini-2.5-flash")
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        validate_beta_primary_item(
+            {
+                "key": "model_primary",
+                "status": "configured",
+                "provider": "openai-codex",
+                "value": {
+                    "model": "gpt-5.5",
+                    "runtimeProvider": "openai-codex",
+                    "apiKey": "",
+                },
+            },
+            {"logged_in": True},
+        )
+
+    assert exc.value.code == "beta_model_not_allowed"

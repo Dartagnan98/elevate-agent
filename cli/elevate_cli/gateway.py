@@ -1119,14 +1119,18 @@ def _profile_suffix() -> str:
     """Derive a service-name suffix from the current ELEVATE_HOME.
 
     Beta uses the reserved ``beta`` suffix so its service can coexist with
-    Stable. Otherwise returns ``""`` for the default root, the profile name
-    for ``<root>/profiles/<name>``, or a short hash for any other path.
-    Works correctly in Docker (ELEVATE_HOME=/opt/data) and standard deployments.
+    Stable. The channel comparison is exact-match — the same contract every
+    safety reader of ``ELEVATE_RELEASE_CHANNEL`` uses (``== "beta"``), so a
+    sloppy value like ``"Beta "`` that no safety gate would treat as Beta
+    cannot claim the Beta service identity either. Otherwise returns ``""``
+    for the default root, the profile name for ``<root>/profiles/<name>``,
+    or a short hash for any other path. Works correctly in Docker
+    (ELEVATE_HOME=/opt/data) and standard deployments.
     """
     import hashlib
     import re
     from elevate_constants import get_default_elevate_root
-    if os.environ.get("ELEVATE_RELEASE_CHANNEL", "").strip().lower() == "beta":
+    if os.environ.get("ELEVATE_RELEASE_CHANNEL") == "beta":
         return "beta"
     home = get_elevate_home().resolve()
     default = get_default_elevate_root().resolve()
@@ -2531,6 +2535,82 @@ def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
+def _disable_exact_beta_launchd_gateway() -> bool:
+    """Prove the unsupported Beta gateway is unloaded, then remove its plist."""
+    from elevate_constants import exact_realtor_beta_active
+
+    if not exact_realtor_beta_active():
+        return False
+
+    plist_path = get_launchd_plist_path()
+    label = get_launchd_label()
+    target = f"{_launchd_domain()}/{label}"
+
+    def _run_launchctl(args: list[str], *, timeout: float = 15.0):
+        try:
+            return subprocess.run(
+                ["launchctl", *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Timed out proving disabled Realtor Beta gateway state: "
+                f"launchctl {' '.join(args)}"
+            ) from exc
+
+    def _absence_proven() -> bool:
+        result = _run_launchctl(["print", target], timeout=10.0)
+        if result.returncode == 0:
+            return False
+        detail = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        if result.returncode == 113 or any(
+            marker in detail
+            for marker in (
+                "could not find service",
+                "service not found",
+                "no such process",
+            )
+        ):
+            return True
+        raise RuntimeError(
+            "Could not prove disabled Realtor Beta gateway absent "
+            f"(launchctl rc={result.returncode}): {detail.strip()}"
+        )
+
+    try:
+        _run_launchctl(["bootout", target])
+    except RuntimeError:
+        # The command timing out is not proof either way. Probe next; a loaded
+        # job still gets the forced kill/retry path, while an absent job is safe.
+        print(f"⚠ Initial Realtor Beta gateway bootout timed out: {target}")
+
+    absent = _absence_proven()
+    if not absent:
+        _run_launchctl(["kill", "SIGKILL", target])
+        try:
+            _run_launchctl(["bootout", target])
+        except RuntimeError:
+            print(f"⚠ Retried Realtor Beta gateway bootout timed out: {target}")
+        absent = _absence_proven()
+
+    if not absent:
+        raise RuntimeError(
+            "Realtor Beta gateway remained loaded after forced bootout; "
+            "refusing to continue while an uncoordinated runtime is alive."
+        )
+
+    # lexists semantics include broken symlinks; Path.exists() does not.
+    if os.path.lexists(plist_path):
+        plist_path.unlink()
+        print(f"✓ Removed disabled Realtor Beta gateway service: {plist_path}")
+    else:
+        print("✓ Realtor Beta messaging gateway is disabled (no service installed)")
+    return True
+
+
 def generate_launchd_plist() -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
@@ -2553,7 +2633,11 @@ def generate_launchd_plist() -> str:
         pass
     pycache_dir = str(pycache_dir.resolve())
     label = get_launchd_label()
-    release_channel = os.environ.get("ELEVATE_RELEASE_CHANNEL", "").strip().lower()
+    # Exact-match like every other ELEVATE_RELEASE_CHANNEL reader: a sloppy
+    # value ("Beta ") must not be normalized into a persisted beta channel
+    # while _profile_suffix() simultaneously refuses it the beta label —
+    # that would install a beta-channel gateway under the Stable service name.
+    release_channel = os.environ.get("ELEVATE_RELEASE_CHANNEL", "")
     release_channel_xml = (
         "        <key>ELEVATE_RELEASE_CHANNEL</key>\n"
         f"        <string>{release_channel}</string>\n"
@@ -2759,6 +2843,9 @@ def _ensure_launchd_loaded(plist_path: Path, label: str | None = None) -> None:
 
 
 def launchd_install(force: bool = False):
+    if _disable_exact_beta_launchd_gateway():
+        return
+
     plist_path = get_launchd_plist_path()
 
     if plist_path.exists() and not force:
@@ -2805,6 +2892,9 @@ def launchd_uninstall():
     print("✓ Service uninstalled")
 
 def launchd_start():
+    if _disable_exact_beta_launchd_gateway():
+        return
+
     plist_path = get_launchd_plist_path()
     label = get_launchd_label()
 
@@ -2891,6 +2981,9 @@ def _wait_for_gateway_exit(timeout: float = 10.0, force_after: float | None = 5.
 
 
 def launchd_restart():
+    if _disable_exact_beta_launchd_gateway():
+        return
+
     label = get_launchd_label()
     target = f"{_launchd_domain()}/{label}"
     drain_timeout = _get_restart_drain_timeout()

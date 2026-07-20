@@ -66,6 +66,7 @@ test("backend runner schedules gateway self-heal for already-compatible backend"
     ensureGatewayInstalled: () => {
       healed = true;
     },
+    runtimeMetadata: { releaseChannel: "stable" },
   });
 
   assert.equal(await runner.ensureBackend(), true);
@@ -74,6 +75,39 @@ test("backend runner schedules gateway self-heal for already-compatible backend"
 
   timers[0][0]();
   assert.equal(healed, true);
+});
+
+test("Beta awaits stale gateway cleanup even when the CLI launcher is missing", async () => {
+  let cleanupArgs = null;
+  const { runner, timers } = makeRunner({
+    alreadyReady: true,
+    launcher: null,
+    ensureGatewayInstalled: (...args) => {
+      cleanupArgs = args;
+    },
+    runtimeMetadata: { releaseChannel: "beta" },
+  });
+
+  assert.equal(await runner.ensureBackend(), true);
+  assert.equal(timers.length, 0);
+  assert.equal(cleanupArgs[0], null);
+  assert.equal(cleanupArgs[1].ELEVATE_RELEASE_CHANNEL, "beta");
+});
+
+test("Stable still skips gateway self-heal when the CLI launcher is missing", async () => {
+  let healed = false;
+  const { runner, timers } = makeRunner({
+    alreadyReady: true,
+    launcher: null,
+    ensureGatewayInstalled: () => {
+      healed = true;
+    },
+    runtimeMetadata: { releaseChannel: "stable" },
+  });
+
+  assert.equal(await runner.ensureBackend(), true);
+  assert.equal(timers.length, 0);
+  assert.equal(healed, false);
 });
 
 test("backend runner spawns dashboard and clears owned process on exit", async () => {
@@ -95,7 +129,7 @@ test("backend runner spawns dashboard and clears owned process on exit", async (
     EXTRA: "1",
     PATH: "/bin",
   });
-  assert.equal(timers.length, 1);
+  assert.equal(timers.length, 0);
   assert.ok(marks.some(([name, detail]) => name === "backend:port-selected" && detail === "9119"));
   assert.ok(marks.some(([name, detail]) => name === "backend:spawn" && detail === "elevate"));
 
@@ -103,4 +137,49 @@ test("backend runner spawns dashboard and clears owned process on exit", async (
   assert.equal(state.backendProcess, null);
   assert.equal(state.ownsBackend, false);
   assert.deepEqual(launcher.args, ["dashboard"]);
+});
+
+test("Beta cleanup completes before port selection, compatibility checks, or spawn", async () => {
+  let releaseCleanup;
+  const cleanup = new Promise((resolve) => {
+    releaseCleanup = resolve;
+  });
+  const { marks, runner, state } = makeRunner({
+    ensureGatewayInstalled: () => cleanup,
+    runtimeMetadata: { releaseChannel: "beta" },
+  });
+
+  const pending = runner.ensureBackend();
+  await Promise.resolve();
+  assert.deepEqual(marks, [
+    ["backend:ensure-start", ""],
+    ["backend:beta-gateway-cleanup-start", ""],
+  ]);
+  assert.equal(state.spawnCall, undefined);
+
+  releaseCleanup();
+  assert.equal(await pending, true);
+  const cleanupDone = marks.findIndex(([name]) => name === "backend:beta-gateway-cleanup-complete");
+  const choose = marks.findIndex(([name]) => name === "choose");
+  const spawn = marks.findIndex(([name]) => name === "backend:spawn");
+  assert.ok(cleanupDone >= 0 && cleanupDone < choose && choose < spawn);
+  assert.equal(state.spawnCall.command, "/bin/elevate");
+});
+
+test("Beta cleanup failure aborts startup before port or backend work", async () => {
+  const cleanupError = Object.assign(new Error("launchctl timed out"), {
+    code: "ETIMEDOUT",
+  });
+  const { marks, runner, state, timers } = makeRunner({
+    ensureGatewayInstalled: async () => {
+      throw cleanupError;
+    },
+    runtimeMetadata: { releaseChannel: "beta" },
+  });
+
+  await assert.rejects(runner.ensureBackend(), cleanupError);
+  assert.equal(state.spawnCall, undefined);
+  assert.equal(timers.length, 0);
+  assert.equal(marks.some(([name]) => name === "choose"), false);
+  assert.equal(marks.some(([name]) => name === "backend:spawn"), false);
 });

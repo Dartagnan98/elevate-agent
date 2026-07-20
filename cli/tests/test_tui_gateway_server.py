@@ -18,6 +18,11 @@ def _allow_prompt_submit_without_license(monkeypatch):
     from elevate_cli import agent_hub
     from gateway import guardrails, usage_ledger
 
+    provider_env = {
+        key: os.environ.get(key)
+        for key in ("ELEVATE_MODEL", "ELEVATE_INFERENCE_PROVIDER")
+    }
+
     monkeypatch.setattr(server, "_license_signed_in", lambda: True)
     monkeypatch.setattr(
         guardrails,
@@ -30,6 +35,14 @@ def _allow_prompt_submit_without_license(monkeypatch):
     server._active_prompt_claims.clear()
     yield
     server._active_prompt_claims.clear()
+    # Stable model-switch tests exercise the production code's deliberate
+    # process-env synchronization. Restore that global state explicitly so a
+    # later exact-Beta test cannot inherit an unsupported Stable model.
+    for key, value in provider_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 class _ChunkyStdout:
@@ -1619,7 +1632,7 @@ def test_beta_tui_rejects_anthropic_model_sources(monkeypatch, source):
     assert exc.value.code == "beta_model_not_allowed"
 
 
-def test_beta_tui_model_switch_rejects_non_codex_before_switch(monkeypatch):
+def test_beta_tui_model_switch_requires_app_before_parsing_request(monkeypatch):
     from elevate_cli.beta_provider_policy import BetaProviderPolicyError
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
@@ -1642,7 +1655,7 @@ def test_beta_tui_model_switch_rejects_non_codex_before_switch(monkeypatch):
             "anthropic/claude-sonnet-4 --provider anthropic",
         )
 
-    assert exc.value.code == "beta_provider_not_allowed"
+    assert exc.value.code == "beta_app_onboarding_required"
 
 
 def test_beta_tui_runtime_rejects_non_codex_result_with_visible_code(monkeypatch):
@@ -1719,31 +1732,21 @@ def test_beta_background_agent_rejects_non_codex_parent(monkeypatch):
     assert exc.value.code == "beta_provider_not_allowed"
 
 
-def test_beta_tui_model_switch_replaces_stale_agent_credentials(monkeypatch):
+def test_beta_tui_model_switch_cannot_rewrite_stale_agent_credentials(monkeypatch):
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    # _apply_model_switch intentionally synchronizes these process-level
-    # values. Register their original absence so this test cannot leak them
-    # into later tests in the same worker.
     monkeypatch.delenv("ELEVATE_MODEL", raising=False)
     monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
-    initial_runtime = {
-        "provider": "openai-codex",
-        "base_url": "https://chatgpt.com/backend-api/codex",
-        "api_key": "initial-local-token",
-        "api_mode": "codex_responses",
-    }
-    final_runtime = {
-        **initial_runtime,
-        "api_key": "final-local-token",
-    }
-    seen = {}
-    runtime_calls = []
-
-    def _resolve_runtime():
-        runtime_calls.append(len(runtime_calls) + 1)
-        return initial_runtime if len(runtime_calls) == 1 else final_runtime
-
-    monkeypatch.setattr(server, "_resolve_tui_runtime", _resolve_runtime)
+    monkeypatch.setattr(
+        server,
+        "_resolve_tui_runtime",
+        lambda: pytest.fail("app-only Beta switch resolved a runtime"),
+    )
+    monkeypatch.setattr(
+        "elevate_cli.model_switch.switch_model",
+        lambda **_kwargs: pytest.fail("app-only Beta switch reached pipeline"),
+    )
 
     class _Agent:
         provider = "openai-codex"
@@ -1751,39 +1754,19 @@ def test_beta_tui_model_switch_replaces_stale_agent_credentials(monkeypatch):
         base_url = "https://hostile.example.test/v1"
         api_key = "stale-host-key"
 
-        def switch_model(self, **kwargs):
-            seen["agent"] = kwargs
+        def switch_model(self, **_kwargs):
+            pytest.fail("app-only Beta switch mutated the actor")
 
-    result = types.SimpleNamespace(
-        success=True,
-        new_model="gpt-5.4",
-        target_provider="openai-codex",
-        api_key="pipeline-hostile-key",
-        base_url="https://pipeline-hostile.example.test/v1",
-        api_mode="chat_completions",
-        warning_message="",
-    )
+    agent = _Agent()
+    before = dict(vars(agent))
 
-    def _switch_model(**kwargs):
-        seen["pipeline"] = kwargs
-        return result
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        server._apply_model_switch("sid", _session(agent=agent), "gpt-5.4")
 
-    monkeypatch.setattr("elevate_cli.model_switch.switch_model", _switch_model)
-    monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
-    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
-
-    response = server._apply_model_switch(
-        "sid", _session(agent=_Agent()), "gpt-5.4"
-    )
-
-    assert response["value"] == "gpt-5.4"
-    assert runtime_calls == [1, 2]
-    assert seen["pipeline"]["current_base_url"] == initial_runtime["base_url"]
-    assert seen["pipeline"]["current_api_key"] == initial_runtime["api_key"]
-    assert seen["agent"]["new_provider"] == "openai-codex"
-    assert seen["agent"]["base_url"] == final_runtime["base_url"]
-    assert seen["agent"]["api_key"] == final_runtime["api_key"]
-    assert seen["agent"]["api_mode"] == "codex_responses"
+    assert exc.value.code == "beta_app_onboarding_required"
+    assert dict(vars(agent)) == before
+    assert "ELEVATE_MODEL" not in os.environ
+    assert "ELEVATE_INFERENCE_PROVIDER" not in os.environ
 
 
 def test_beta_tui_model_switch_final_auth_race_has_zero_mutation(monkeypatch):
@@ -1792,25 +1775,11 @@ def test_beta_tui_model_switch_final_auth_race_has_zero_mutation(monkeypatch):
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.delenv("ELEVATE_MODEL", raising=False)
     monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
-    initial_runtime = {
-        "provider": "openai-codex",
-        "base_url": "https://chatgpt.com/backend-api/codex",
-        "api_key": "initial-local-token",
-        "api_mode": "codex_responses",
-    }
-    runtime_calls = 0
-
-    def _resolve_runtime():
-        nonlocal runtime_calls
-        runtime_calls += 1
-        if runtime_calls == 1:
-            return initial_runtime
-        raise BetaProviderPolicyError(
-            "OpenAI Codex auth disappeared before model-switch commit.",
-            code="beta_codex_auth_required",
-        )
-
-    monkeypatch.setattr(server, "_resolve_tui_runtime", _resolve_runtime)
+    monkeypatch.setattr(
+        server,
+        "_resolve_tui_runtime",
+        lambda: pytest.fail("app-only Beta switch resolved auth/runtime"),
+    )
 
     class _Agent:
         provider = "openai-codex"
@@ -1823,17 +1792,9 @@ def test_beta_tui_model_switch_final_auth_race_has_zero_mutation(monkeypatch):
             pytest.fail("agent mutated after final Beta auth failure")
 
     agent = _Agent()
-    result = types.SimpleNamespace(
-        success=True,
-        new_model="gpt-5.4",
-        target_provider="openai-codex",
-        api_key="pipeline-evil-key",
-        base_url="https://pipeline.attacker.invalid/v1",
-        api_mode="anthropic_messages",
-        warning_message="",
-    )
     monkeypatch.setattr(
-        "elevate_cli.model_switch.switch_model", lambda **_kwargs: result
+        "elevate_cli.model_switch.switch_model",
+        lambda **_kwargs: pytest.fail("app-only Beta switch reached pipeline"),
     )
     persist = MagicMock()
     monkeypatch.setattr(server, "_persist_model_switch", persist)
@@ -1852,17 +1813,14 @@ def test_beta_tui_model_switch_final_auth_race_has_zero_mutation(monkeypatch):
         key: os.environ.get(key)
         for key in ("ELEVATE_MODEL", "ELEVATE_INFERENCE_PROVIDER")
     }
-    result_before = dict(vars(result))
 
     with pytest.raises(BetaProviderPolicyError) as exc:
         server._apply_model_switch(
             "sid", _session(agent=agent), "gpt-5.4 --global"
         )
 
-    assert exc.value.code == "beta_codex_auth_required"
-    assert runtime_calls == 2
+    assert exc.value.code == "beta_app_onboarding_required"
     assert dict(vars(agent)) == agent_before
-    assert dict(vars(result)) == result_before
     assert {
         key: os.environ.get(key)
         for key in ("ELEVATE_MODEL", "ELEVATE_INFERENCE_PROVIDER")

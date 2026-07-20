@@ -1081,6 +1081,9 @@ test("hung Beta sign-in is bounded and releases background refresh", async () =>
 test("Beta sign-in timeout remains active while the response body stalls", async () => {
   const state = profile();
   let calls = 0;
+  let bodyReadEntered = false;
+  let requestObservedAt = null;
+  let abortObservedAt = null;
   try {
     const auth = createDesktopAuth({
       log,
@@ -1092,10 +1095,17 @@ test("Beta sign-in timeout remains active while the response body stalls", async
       authRequestTimeoutMs: 10,
       fetchImpl: async (_url, options) => {
         calls += 1;
+        requestObservedAt = Date.now();
+        options.signal.addEventListener(
+          "abort",
+          () => { abortObservedAt = Date.now(); },
+          { once: true },
+        );
         return {
           ok: true,
           status: 200,
           json() {
+            bodyReadEntered = true;
             return new Promise((_resolve, reject) => {
               options.signal.addEventListener(
                 "abort",
@@ -1109,7 +1119,6 @@ test("Beta sign-in timeout remains active while the response body stalls", async
       },
     });
 
-    const startedAt = Date.now();
     const login = await auth.performLogin({
       email: "agent@example.test",
       password: "password",
@@ -1117,7 +1126,19 @@ test("Beta sign-in timeout remains active while the response body stalls", async
 
     assert.equal(login.ok, false);
     assert.equal(login.code, "beta_auth_upstream_unavailable");
-    assert.ok(Date.now() - startedAt < 500);
+    // The stall must be resolved by the sign-in timeout firing *during* the body
+    // read (json() was entered and then aborted), not by the initial fetch. If a
+    // regression cancelled the abort before reading the body, the stubbed body
+    // never rejects and this test hangs -- surfacing the break loudly.
+    assert.equal(bodyReadEntered, true);
+    assert.notEqual(abortObservedAt, null);
+    // Bound only the abort mechanism itself (issued request -> timeout abort),
+    // isolated from the unrelated /usr/bin/lockf subprocess latency of writing
+    // the initial-auth marker. Measuring the whole performLogin wall clock made
+    // this assertion flake under full-serial-suite load; measuring the abort
+    // window keeps full power to catch the body read honoring a large default
+    // timeout instead of the configured authRequestTimeoutMs.
+    assert.ok(abortObservedAt - requestObservedAt < 500);
     assert.equal(calls, 1);
     assert.equal(auth.readLicense(), null);
     assert.equal(fs.existsSync(path.join(state.root, ".license-refresh-pending.json")), true);

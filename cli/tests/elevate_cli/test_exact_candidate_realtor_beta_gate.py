@@ -64,14 +64,25 @@ def _snapshot(channel: str, version: str, value: bytes) -> dict:
 
 
 def _receipt() -> tuple[dict, bytes, bytes, bytes]:
-    rollback_feed = _feed("1.2.65", "Elevate")
+    recovery_feed = _feed("1.2.74", "Elevate-Beta-Recovery")
     stable_feed = _feed("1.2.63", "Elevate")
-    candidate_feed = _feed("1.2.70", "Elevate-Beta")
-    rollback = _snapshot("beta", "1.2.65", rollback_feed)
+    candidate_feed = _feed("1.2.73", "Elevate-Beta")
     stable = _snapshot("latest", "1.2.63", stable_feed)
+    recovery_metadata = yaml.safe_load(recovery_feed)
+    beta_profile = {
+        "productName": "Elevate Beta",
+        "appBundleName": "Elevate Beta.app",
+        "appId": "com.elevationrealestate.elevate.beta",
+        "packageName": "elevate-beta-desktop",
+        "protocolScheme": "elevate-beta",
+        "elevateHomeName": ".elevate-beta",
+        "gatewayLabel": "ai.elevate.gateway-beta",
+        "downloadAliasPrefixes": ["Elevate-Beta", "Elevate-beta"],
+    }
     receipt = {
+        "source_receipt_id": "a" * 64,
         "release": {
-            "version": "1.2.70",
+            "version": "1.2.73",
             "channel": "beta",
             "feed_name": "beta-mac.yml",
             "download_aliases": [
@@ -80,73 +91,182 @@ def _receipt() -> tuple[dict, bytes, bytes, bytes]:
                 "Elevate-Beta-mac-arm64.dmg",
                 "Elevate-beta-mac-arm64.dmg",
             ],
-            "profile": {
-                "downloadAliasPrefixes": ["Elevate-Beta", "Elevate-beta"]
+            "profile": beta_profile,
+        },
+        "recovery": {
+            "schema_version": 1,
+            "kind": "elevate-beta-recovery-package",
+            "candidate_version": "1.2.73",
+            "version": "1.2.74",
+            "channel": "beta",
+            "public_feed_name": "beta-mac.yml",
+            "profile": beta_profile,
+            "local_feed": {
+                "path": "desktop/dist/recovery/beta-mac.yml",
+                "size": len(recovery_feed),
+                "sha256": hashlib.sha256(recovery_feed).hexdigest(),
+            },
+            "artifacts": {
+                item["url"]: {
+                    "size": item["size"],
+                    "sha512": item["sha512"],
+                    "sha256": hashlib.sha256(item["url"].encode()).hexdigest(),
+                }
+                for item in recovery_metadata["files"]
+            },
+            "static_provenance": {
+                "runtime_policy": {
+                    "backend": False,
+                    "cli": False,
+                    "gateway": False,
+                    "runtime": False,
+                    "tools": False,
+                    "profile_preserved": True,
+                }
+            },
+            "apps": {
+                arch: {
+                    "architecture": arch,
+                    "trust": {
+                        "signed": True,
+                        "notarized": True,
+                        "stapled": True,
+                        "verification_method": "codesign-gatekeeper-stapled-ticket",
+                    },
+                }
+                for arch in ("x64", "arm64")
             },
         },
-        "rollback_target": rollback,
-        "public_feeds_at_finalize": {"beta": rollback, "latest": stable},
+        "public_feeds_at_finalize": {"latest": stable},
         "artifacts": {
             "beta-mac.yml": {
                 "sha256": hashlib.sha256(candidate_feed).hexdigest()
             }
         },
     }
-    return receipt, candidate_feed, rollback_feed, stable_feed
+    return receipt, candidate_feed, recovery_feed, stable_feed
 
 
-def test_local_rollback_drill_restores_beta_and_leaves_stable_and_data_untouched(
+def test_local_recovery_drill_rolls_beta_forward_and_leaves_stable_and_data_untouched(
     tmp_path: Path,
 ):
     gate = _load_gate()
-    receipt, candidate_feed, rollback_feed, stable_feed = _receipt()
+    receipt, candidate_feed, recovery_feed, stable_feed = _receipt()
 
-    result = gate._rollback_dry_run(
+    result = gate._recovery_roll_forward_dry_run(
         receipt=receipt,
         candidate_feed=candidate_feed,
-        rollback_beta_feed=rollback_feed,
+        recovery_feed=recovery_feed,
         stable_feed=stable_feed,
         work_root=tmp_path,
     )
 
-    assert result["target_version"] == "1.2.65"
-    assert result["beta_after_sha256"] == receipt["rollback_target"]["sha256"]
+    assert result["candidate_version"] == "1.2.73"
+    assert result["recovery_version"] == "1.2.74"
+    assert result["beta_after_sha256"] == receipt["recovery"]["local_feed"]["sha256"]
     assert result["stable_before_sha256"] == result["stable_after_sha256"]
     assert result["stable_after_sha256"] == receipt["public_feeds_at_finalize"]["latest"]["sha256"]
-    assert result["beta_alias_count"] == 4
+    assert result["recovery_alias_count"] == 4
+    assert result["recovery_artifact_count"] == 4
+    assert result["runtime_actor_count"] == 0
     assert result["production_mutated"] is False
     assert result["profile_data_mutations"] == 0
     assert result["rpo_seconds"] == 0
+    assert result["signed_app_count"] == 2
+    assert result["notarized_app_count"] == 2
+    assert result["stapled_app_count"] == 2
+
+    # The trust counts are derived from the receipt's per-app trust records, not
+    # hardcoded: dropping one app's attestation must lower every count so the
+    # evidence can never over-claim.
+    untrusted, untrusted_candidate, untrusted_recovery, untrusted_stable = _receipt()
+    untrusted["recovery"]["apps"]["x64"]["trust"].update(
+        {"signed": False, "notarized": False, "stapled": False}
+    )
+    downgraded = gate._recovery_roll_forward_dry_run(
+        receipt=untrusted,
+        candidate_feed=untrusted_candidate,
+        recovery_feed=untrusted_recovery,
+        stable_feed=untrusted_stable,
+        work_root=tmp_path / "second",
+    )
+    assert downgraded["signed_app_count"] == 1
+    assert downgraded["notarized_app_count"] == 1
+    assert downgraded["stapled_app_count"] == 1
 
 
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
-        ("rollback", "rollback_beta_snapshot_hash_mismatch"),
+        ("recovery", "recovery_feed_hash_mismatch"),
         ("stable", "stable_snapshot_hash_mismatch"),
         ("candidate", "candidate_beta_feed_hash_mismatch"),
     ],
 )
-def test_local_rollback_drill_fails_closed_on_any_feed_drift(
+def test_local_recovery_drill_fails_closed_on_any_feed_drift(
     tmp_path: Path, mutation: str, code: str
 ):
     gate = _load_gate()
-    receipt, candidate_feed, rollback_feed, stable_feed = _receipt()
+    receipt, candidate_feed, recovery_feed, stable_feed = _receipt()
     values = {
         "candidate": candidate_feed,
-        "rollback": rollback_feed,
+        "recovery": recovery_feed,
         "stable": stable_feed,
     }
     values[mutation] += b"drift"
 
     with pytest.raises(gate.GateFailure, match=code):
-        gate._rollback_dry_run(
+        gate._recovery_roll_forward_dry_run(
             receipt=receipt,
             candidate_feed=values["candidate"],
-            rollback_beta_feed=values["rollback"],
+            recovery_feed=values["recovery"],
             stable_feed=values["stable"],
             work_root=tmp_path,
         )
+
+
+def test_local_recovery_drill_rejects_a_downgrade(tmp_path: Path):
+    gate = _load_gate()
+    receipt, candidate_feed, _recovery_feed, stable_feed = _receipt()
+    downgrade_feed = _feed("1.2.72", "Elevate-Beta-Recovery")
+    metadata = yaml.safe_load(downgrade_feed)
+    receipt["recovery"]["version"] = "1.2.72"
+    receipt["recovery"]["local_feed"]["size"] = len(downgrade_feed)
+    receipt["recovery"]["local_feed"]["sha256"] = hashlib.sha256(downgrade_feed).hexdigest()
+    receipt["recovery"]["artifacts"] = {
+        item["url"]: {
+            "size": item["size"],
+            "sha512": item["sha512"],
+            "sha256": hashlib.sha256(item["url"].encode()).hexdigest(),
+        }
+        for item in metadata["files"]
+    }
+    with pytest.raises(gate.GateFailure, match="recovery_not_roll_forward"):
+        gate._recovery_roll_forward_dry_run(
+            receipt=receipt,
+            candidate_feed=candidate_feed,
+            recovery_feed=downgrade_feed,
+            stable_feed=stable_feed,
+            work_root=tmp_path,
+        )
+
+
+def test_recovery_feed_receipt_path_rejects_escape_and_symlink(tmp_path: Path):
+    gate = _load_gate()
+    real = tmp_path / "desktop" / "dist" / "recovery" / "beta-mac.yml"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(b"recovery-feed")
+    assert gate._repo_receipt_file(
+        tmp_path, "desktop/dist/recovery/beta-mac.yml", "unsafe"
+    ) == real
+    with pytest.raises(gate.GateFailure, match="unsafe"):
+        gate._repo_receipt_file(tmp_path, "../escape", "unsafe")
+    with pytest.raises(gate.GateFailure, match="unsafe"):
+        gate._repo_receipt_file(tmp_path, str(real.resolve()), "unsafe")
+    link = tmp_path / "recovery-link.yml"
+    link.symlink_to(real)
+    with pytest.raises(gate.GateFailure, match="unsafe"):
+        gate._repo_receipt_file(tmp_path, link.name, "unsafe")
 
 
 def test_evidence_is_owner_only_immutable_and_content_free(tmp_path: Path):

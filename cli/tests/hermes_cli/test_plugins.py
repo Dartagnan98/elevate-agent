@@ -1065,26 +1065,57 @@ class TestPluginCommands:
 
 
 class TestPluginDispatchTool:
-    """Tests for PluginContext.dispatch_tool() — tool dispatch with agent context."""
+    """Tests for PluginContext.dispatch_tool() — routes through the common atomic
+    dispatch model (A2b lane 7).
 
-    def test_dispatch_tool_calls_registry(self):
-        """dispatch_tool() delegates to registry.dispatch()."""
+    Two paths: durable identity present → the atomic adapter
+    (``model_tools.dispatch_agent_owned_registry_tool``); absent (the typical
+    plugin) → the adapter's byte-parity legacy fallback (``registry.dispatch``
+    with the parent bound through the ``delegate_task`` companion).  These verify
+    the plugin's OWN routing/parent-resolution decisions at the unit level; the
+    end-to-end parity + adversarial (shadow/legacy/Beta/concurrency) coverage
+    lives in ``tests/tools/test_plugin_registry_dispatch.py``.
+    """
+
+    @staticmethod
+    def _legacy_spy():
+        """Return ``(spy, captured)`` for the no-identity path.  The spy stands in
+        for ``registry.dispatch`` and reads the ``delegate_task`` parent off the
+        companion the plugin bound around it."""
+        from tools.delegate_tool import _DELEGATE_PARENT_COMPANION
+
+        captured = {}
+
+        def spy(name, args, **kw):
+            captured["name"] = name
+            captured["args"] = args
+            captured["kw"] = dict(kw)
+            captured["parent"] = _DELEGATE_PARENT_COMPANION.get()
+            return '{"ok": true}'
+
+        return spy, captured
+
+    def test_dispatch_tool_routes_to_legacy_without_identity(self):
+        """No durable identity → the legacy ``registry.dispatch`` path, with only
+        the frozen ``task_id``/``user_task`` handler-kwargs, returning its
+        result verbatim."""
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
+        mgr._cli_ref = None
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"result": "ok"}'
+        spy, captured = self._legacy_spy()
+        with patch("tools.registry.registry.dispatch", spy):
+            result = ctx.dispatch_tool("web_search", {"query": "test"})
 
-        with patch("elevate_cli.plugins.PluginContext.dispatch_tool.__module__", "elevate_cli.plugins"):
-            with patch.dict("sys.modules", {}):
-                with patch("tools.registry.registry", mock_registry):
-                    result = ctx.dispatch_tool("web_search", {"query": "test"})
-
-        assert result == '{"result": "ok"}'
+        assert result == '{"ok": true}'
+        assert captured["name"] == "web_search"
+        assert captured["args"] == {"query": "test"}
+        assert captured["kw"] == {"task_id": None, "user_task": None}
 
     def test_dispatch_tool_injects_parent_agent_from_cli_ref(self):
-        """When _cli_ref has an agent, it's passed as parent_agent."""
+        """When _cli_ref has an agent, it rides the delegate companion (not a
+        dispatch kwarg — process state cannot cross the dispatch boundary)."""
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
@@ -1094,34 +1125,29 @@ class TestPluginDispatchTool:
         mock_cli.agent = mock_agent
         mgr._cli_ref = mock_cli
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"ok": true}'
-
-        with patch("tools.registry.registry", mock_registry):
+        spy, captured = self._legacy_spy()
+        with patch("tools.registry.registry.dispatch", spy):
             ctx.dispatch_tool("delegate_task", {"goal": "test"})
 
-        mock_registry.dispatch.assert_called_once()
-        call_kwargs = mock_registry.dispatch.call_args
-        assert call_kwargs[1].get("parent_agent") is mock_agent
+        assert captured["parent"] is mock_agent
+        assert "parent_agent" not in captured["kw"]
 
     def test_dispatch_tool_no_parent_agent_when_no_cli_ref(self):
-        """When _cli_ref is None (gateway mode), no parent_agent is injected."""
+        """When _cli_ref is None (gateway mode), no parent companion is bound."""
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
         mgr._cli_ref = None
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"ok": true}'
-
-        with patch("tools.registry.registry", mock_registry):
+        spy, captured = self._legacy_spy()
+        with patch("tools.registry.registry.dispatch", spy):
             ctx.dispatch_tool("delegate_task", {"goal": "test"})
 
-        call_kwargs = mock_registry.dispatch.call_args
-        assert "parent_agent" not in call_kwargs[1]
+        assert captured["parent"] is None
 
     def test_dispatch_tool_no_parent_agent_when_agent_is_none(self):
-        """When cli_ref exists but agent is None (not yet initialized), skip parent_agent."""
+        """When cli_ref exists but agent is None (not yet initialized), no parent
+        companion is bound."""
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
@@ -1130,17 +1156,15 @@ class TestPluginDispatchTool:
         mock_cli.agent = None
         mgr._cli_ref = mock_cli
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"ok": true}'
-
-        with patch("tools.registry.registry", mock_registry):
+        spy, captured = self._legacy_spy()
+        with patch("tools.registry.registry.dispatch", spy):
             ctx.dispatch_tool("delegate_task", {"goal": "test"})
 
-        call_kwargs = mock_registry.dispatch.call_args
-        assert "parent_agent" not in call_kwargs[1]
+        assert captured["parent"] is None
 
     def test_dispatch_tool_respects_explicit_parent_agent(self):
-        """Explicit parent_agent kwarg is not overwritten by _cli_ref.agent."""
+        """Explicit parent_agent kwarg is not overwritten by _cli_ref.agent and
+        rides the companion."""
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
@@ -1152,42 +1176,69 @@ class TestPluginDispatchTool:
 
         explicit_agent = MagicMock(name="explicit_agent")
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"ok": true}'
+        spy, captured = self._legacy_spy()
+        with patch("tools.registry.registry.dispatch", spy):
+            ctx.dispatch_tool(
+                "delegate_task", {"goal": "test"}, parent_agent=explicit_agent
+            )
 
-        with patch("tools.registry.registry", mock_registry):
-            ctx.dispatch_tool("delegate_task", {"goal": "test"}, parent_agent=explicit_agent)
+        assert captured["parent"] is explicit_agent
 
-        call_kwargs = mock_registry.dispatch.call_args
-        assert call_kwargs[1]["parent_agent"] is explicit_agent
+    def test_dispatch_tool_with_durable_identity_uses_adapter(self):
+        """A plugin that threads session/tool ids takes the atomic adapter path,
+        with the identity forwarded and the parent on the companion."""
+        import contextlib
 
-    def test_dispatch_tool_forwards_extra_kwargs(self):
-        """Extra kwargs are forwarded to registry.dispatch()."""
+        from tools.delegate_tool import _DELEGATE_PARENT_COMPANION
+
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
-        mgr._cli_ref = None
+        agent = MagicMock()
+        mock_cli = MagicMock()
+        mock_cli.agent = agent
+        mgr._cli_ref = mock_cli
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"ok": true}'
+        captured = {}
 
-        with patch("tools.registry.registry", mock_registry):
-            ctx.dispatch_tool("some_tool", {"x": 1}, task_id="test-123")
+        def fake_adapter(
+            name, args, *, task_id=None, user_task=None,
+            session_id=None, tool_call_id=None, companions=(),
+        ):
+            with contextlib.ExitStack() as stack:
+                for companion in companions:
+                    stack.enter_context(companion)
+                captured["parent"] = _DELEGATE_PARENT_COMPANION.get()
+            captured["session_id"] = session_id
+            captured["tool_call_id"] = tool_call_id
+            captured["task_id"] = task_id
+            return '{"ok": true}'
 
-        call_kwargs = mock_registry.dispatch.call_args
-        assert call_kwargs[1]["task_id"] == "test-123"
+        with patch("model_tools.dispatch_agent_owned_registry_tool", fake_adapter):
+            ctx.dispatch_tool(
+                "delegate_task",
+                {"goal": "test"},
+                task_id="test-123",
+                session_id="sess-9",
+                tool_call_id="call-9",
+            )
+
+        assert captured["session_id"] == "sess-9"
+        assert captured["tool_call_id"] == "call-9"
+        assert captured["task_id"] == "test-123"
+        assert captured["parent"] is agent
 
     def test_dispatch_tool_returns_json_string(self):
-        """dispatch_tool() returns the raw JSON string from the registry."""
+        """dispatch_tool() returns the raw JSON string from the handler."""
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
         mgr._cli_ref = None
 
-        mock_registry = MagicMock()
-        mock_registry.dispatch.return_value = '{"error": "Unknown tool: fake"}'
+        def spy(name, args, **kw):
+            return '{"error": "Unknown tool: fake"}'
 
-        with patch("tools.registry.registry", mock_registry):
+        with patch("tools.registry.registry.dispatch", spy):
             result = ctx.dispatch_tool("fake", {})
 
         assert '"error"' in result

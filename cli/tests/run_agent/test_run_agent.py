@@ -2406,6 +2406,57 @@ class TestConcurrentToolExecution:
             mock_todo.assert_called_once()
         assert "ok" in result
 
+    def test_invoke_tool_routes_clarify_through_registry_boundary(self, agent):
+        """The clarify branch traverses the atomic registry shadow boundary
+        with the agent's callback bound only for that dispatch (ERB-406)."""
+        from tools.approval import (
+            ExecutionPolicy,
+            reset_current_execution_policy,
+            set_current_execution_policy,
+        )
+        from tools.registry import registry
+
+        calls = []
+        agent.clarify_callback = lambda question, choices: (
+            calls.append((question, choices)) or "routed-answer"
+        )
+        policy = ExecutionPolicy.for_mode("accepted-clarify-routing", "read_only")
+        token = set_current_execution_policy(policy, policy_revision=17)
+        captured = {}
+        real_execute_shadow = registry.execute_shadow
+
+        def spy(name, args, **kwargs):
+            outcome = real_execute_shadow(name, args, **kwargs)
+            captured["name"] = name
+            captured["context"] = outcome.prepared.context
+            captured["started"] = outcome.started
+            return outcome
+
+        try:
+            with patch.object(registry, "execute_shadow", spy):
+                result = json.loads(
+                    agent._invoke_tool(
+                        "clarify",
+                        {"question": "Which listing?"},
+                        "task-clarify",
+                        tool_call_id="call-clarify-routing",
+                    )
+                )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert result["user_response"] == "routed-answer"
+        assert calls == [("Which listing?", None)]
+        assert captured["name"] == "clarify"
+        assert captured["started"] is True
+        assert captured["context"].invocation_id == "call-clarify-routing"
+        assert captured["context"].accepted_turn_id == "accepted-clarify-routing"
+        assert captured["context"].policy_revision == 17
+        # The callback seam closes again once the routed dispatch returns.
+        after = json.loads(registry.dispatch("clarify", {"question": "Q?"}))
+        assert "not available" in after["error"].lower()
+        assert len(calls) == 1
+
     @pytest.mark.parametrize(
         ("tool_name", "tool_args"),
         [
@@ -2663,6 +2714,148 @@ class TestConcurrentToolExecution:
 
         assert json.loads(result) == {"error": "Blocked"}
         assert agent._turns_since_memory == 5
+
+
+class TestBuiltinMemoryLaneMigration:
+    """Live-branch proofs for the built-in ``memory`` lane migration (A2b lane 5).
+
+    The migration routes the built-in memory write through
+    ``tools.memory_tool.dispatch_builtin_memory_via_registry`` (the atomic shadow
+    boundary) and moves the ``on_memory_write`` provider bridge INSIDE the
+    registered handler.  These tests exercise the LIVE ``_invoke_tool`` branch to
+    prove the two byte-identical invariants the recipe calls out for this lane:
+    ``_memory_policy_block`` still fires BEFORE any effect (the gate stays in the
+    caller), and an allowed add routes through the wrapper and bridges once.
+    """
+
+    class _RecordingStore:
+        def __init__(self):
+            self.calls = []
+
+        def add(self, target, content):
+            self.calls.append(("add", target, content))
+            return {"success": True, "op": "add", "target": target}
+
+        def remove(self, target, old_text):  # pragma: no cover - guarded by policy
+            self.calls.append(("remove", target, old_text))
+            return {"success": True, "op": "remove", "target": target}
+
+    class _RecordingManager:
+        def __init__(self):
+            self.writes = []
+
+        def on_memory_write(self, action, target, content, metadata=None):
+            self.writes.append((action, target, content, metadata))
+
+    def test_write_policy_block_fires_before_dispatch(self, agent, monkeypatch):
+        """A write-disallowed accepted turn is refused by ``_memory_policy_block``
+        with the byte-identical typed message BEFORE the atomic dispatch — the
+        wrapper (and thus any store write or provider bridge) never runs."""
+        monkeypatch.setattr(
+            "elevate_cli.plugins.get_pre_tool_call_block_message",
+            lambda *a, **k: None,
+        )
+        agent._agent_memory_write_allowed = False
+        agent._memory_store = self._RecordingStore()
+        with patch(
+            "tools.memory_tool.dispatch_builtin_memory_via_registry",
+            side_effect=AssertionError("dispatch must not run when policy blocks"),
+        ) as wrapper:
+            result = agent._invoke_tool(
+                "memory",
+                {"action": "add", "target": "memory", "content": "x"},
+                "task-1",
+                tool_call_id="c1",
+            )
+        assert json.loads(result) == {
+            "success": False,
+            "error": "Agent memory write policy blocks this operation.",
+        }
+        wrapper.assert_not_called()
+        assert agent._memory_store.calls == []
+
+    def test_recall_policy_block_fires_before_dispatch(self, agent, monkeypatch):
+        """A recall-disallowed accepted turn refuses a non-write action (remove
+        is treated as recall by ``_memory_policy_block``) BEFORE dispatch."""
+        monkeypatch.setattr(
+            "elevate_cli.plugins.get_pre_tool_call_block_message",
+            lambda *a, **k: None,
+        )
+        agent._agent_memory_recall_allowed = False
+        agent._memory_store = self._RecordingStore()
+        with patch(
+            "tools.memory_tool.dispatch_builtin_memory_via_registry",
+            side_effect=AssertionError("dispatch must not run when policy blocks"),
+        ) as wrapper:
+            result = agent._invoke_tool(
+                "memory",
+                {"action": "remove", "target": "memory", "old_text": "x"},
+                "task-1",
+                tool_call_id="c1",
+            )
+        assert json.loads(result) == {
+            "success": False,
+            "error": "Agent memory recall policy blocks this operation.",
+        }
+        wrapper.assert_not_called()
+        assert agent._memory_store.calls == []
+
+    def test_allowed_add_routes_and_bridges_through_invoke_tool(
+        self, agent, monkeypatch
+    ):
+        """An allowed add on the live branch routes through the wrapper, writes
+        the bound store, and fires the provider bridge exactly once with the
+        inline ``{session_id, agent_id}`` metadata — byte-identical to the
+        pre-migration inline branch."""
+        monkeypatch.setattr(
+            "elevate_cli.plugins.get_pre_tool_call_block_message",
+            lambda *a, **k: None,
+        )
+        store = self._RecordingStore()
+        manager = self._RecordingManager()
+        agent._memory_store = store
+        agent._memory_manager = manager
+        result = json.loads(
+            agent._invoke_tool(
+                "memory",
+                {"action": "add", "target": "memory", "content": "durable"},
+                "task-1",
+                tool_call_id="c1",
+            )
+        )
+        assert result["op"] == "add"
+        assert store.calls == [("add", "memory", "durable")]
+        assert manager.writes == [
+            (
+                "add",
+                "memory",
+                "durable",
+                {"session_id": agent.session_id, "agent_id": agent._agent_id},
+            )
+        ]
+
+    def test_allowed_remove_routes_without_bridge(self, agent, monkeypatch):
+        """remove routes through the wrapper and writes, but never bridges —
+        the add/replace-only bridge guard is preserved through the migration."""
+        monkeypatch.setattr(
+            "elevate_cli.plugins.get_pre_tool_call_block_message",
+            lambda *a, **k: None,
+        )
+        store = self._RecordingStore()
+        manager = self._RecordingManager()
+        agent._memory_store = store
+        agent._memory_manager = manager
+        result = json.loads(
+            agent._invoke_tool(
+                "memory",
+                {"action": "remove", "target": "memory", "old_text": "durable"},
+                "task-1",
+                tool_call_id="c1",
+            )
+        )
+        assert result["op"] == "remove"
+        assert store.calls == [("remove", "memory", "durable")]
+        assert manager.writes == []
 
 
 class TestPathsOverlap:

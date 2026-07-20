@@ -1248,6 +1248,43 @@ function subagentCompletionStatus(rawStatus: unknown): SubagentEntry["status"] {
     : "error";
 }
 
+function durableSubagentCompletionStatus(
+  child: Pick<SessionChildItem, "ended_at" | "end_reason"> | undefined,
+): SubagentEntry["status"] {
+  if (!child?.ended_at) return "running";
+  return String(child.end_reason ?? "").trim().toLowerCase() ===
+    "delegation_complete"
+    ? "done"
+    : "error";
+}
+
+function durableSubagentFailureDetail(
+  child: Pick<SessionChildItem, "ended_at" | "end_reason"> | undefined,
+): string | undefined {
+  if (durableSubagentCompletionStatus(child) !== "error") return undefined;
+  return String(child?.end_reason ?? "").trim() || "delegation_failed";
+}
+
+function reconcileSubagentFromDurableChild(
+  subagent: SubagentEntry,
+  child: SessionChildItem | undefined,
+): SubagentEntry {
+  const durableStatus = durableSubagentCompletionStatus(child);
+  if (subagent.status !== "running" || durableStatus === "running") {
+    return subagent;
+  }
+  return {
+    ...subagent,
+    status: durableStatus,
+    completedAt:
+      timeValueMs(child?.ended_at) ?? subagent.completedAt ?? Date.now(),
+    finalSummary:
+      durableStatus === "error"
+        ? (durableSubagentFailureDetail(child) ?? subagent.finalSummary)
+        : subagent.finalSummary,
+  };
+}
+
 function failActiveTurnMessage(
   message: ChatMessage,
   tools: ToolEntry[],
@@ -1716,6 +1753,9 @@ export const __chatPageTestables = {
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   subagentCompletionStatus,
+  durableSubagentCompletionStatus,
+  durableSubagentFailureDetail,
+  reconcileSubagentFromDurableChild,
   terminalErrorCompletionTarget,
   settleQueuedDelivery,
   terminalDuplicatePromptStatus,
@@ -6109,7 +6149,11 @@ export default function ChatPage() {
         if (!payload) return;
         const at = eventMillis(ev);
         const summary = compactLine(String(payload.summary ?? ""));
-        const failed = /error|fail/i.test(String(payload.status ?? ""));
+        // The gateway normalizes every non-success terminal state (including
+        // interrupted/cancelled/timeout) away from "completed". Reuse the
+        // exact completion rule so drill-in cannot turn those states into a
+        // green tool row, completed assistant, and misleading Ready label.
+        const failed = subagentCompletionStatus(payload.status) !== "done";
         setLiveSubagent((current) =>
           current && current.child_session_id === resumeId ? null : current,
         );
@@ -7763,9 +7807,9 @@ export default function ChatPage() {
           /* transient — keep polling while the turn runs */
         });
       // Reconcile the Background-tasks panel from the durable child rows too:
-      // children now write a real end marker (delegation_complete) the moment
-      // they finish, so if the live subagent.complete event was dropped by the
-      // same binding race, flip the stuck "running" card from the DB truth.
+      // children now write an outcome-specific terminal marker the moment they
+      // finish, so if the live subagent.complete event was dropped by the same
+      // binding race, settle the stuck "running" card from exact DB truth.
       void api
         .getSessionChildren(pid)
         .then((childResp) => {
@@ -7790,18 +7834,10 @@ export default function ChatPage() {
               ) {
                 return s;
               }
-              const child = endedById.get(s.child_session_id);
-              const failed =
-                !!child?.end_reason && child.end_reason !== "delegation_complete";
-              return {
-                ...s,
-                status: failed ? "error" : "done",
-                completedAt:
-                  timeValueMs(child?.ended_at) ?? s.completedAt ?? Date.now(),
-                finalSummary: failed
-                  ? (child?.end_reason ?? s.finalSummary)
-                  : s.finalSummary,
-              };
+              return reconcileSubagentFromDurableChild(
+                s,
+                endedById.get(s.child_session_id),
+              );
             }),
           );
         })
@@ -7847,18 +7883,8 @@ export default function ChatPage() {
               const child = s.child_session_id
                 ? endedById.get(s.child_session_id)
                 : undefined;
-              if (s.status !== "running" || !child) return s;
-              const failed =
-                !!child.end_reason && child.end_reason !== "delegation_complete";
-              return {
-                ...s,
-                status: failed ? "error" : "done",
-                completedAt:
-                  timeValueMs(child.ended_at) ?? s.completedAt ?? Date.now(),
-                finalSummary: failed
-                  ? (child.end_reason ?? s.finalSummary)
-                  : s.finalSummary,
-              };
+              if (!child) return s;
+              return reconcileSubagentFromDurableChild(s, child);
             }),
           );
         })
@@ -8774,15 +8800,11 @@ export default function ChatPage() {
     );
     for (const s of subagents) {
       const child = s.child_session_id ? childById.get(s.child_session_id) : undefined;
-      const childEnded = Boolean(child?.ended_at);
-      const childFailed =
-        childEnded &&
-        !!child?.end_reason &&
-        child.end_reason !== "delegation_complete";
+      const durableStatus = durableSubagentCompletionStatus(child);
+      const childEnded = durableStatus !== "running";
+      const childFailed = durableStatus === "error";
       const effectiveStatus: BackgroundTaskItem["status"] = childEnded
-        ? childFailed
-          ? "error"
-          : "done"
+        ? durableStatus
         : s.status;
       const realTokens =
         effectiveStatus !== "running" && s.child_session_id
@@ -8793,7 +8815,9 @@ export default function ChatPage() {
         kind: "subagent",
         label: s.goal || "Subagent",
         status: effectiveStatus,
-        detail: childFailed ? child?.end_reason ?? "Interrupted" : s.finalSummary || s.preview,
+        detail: childFailed
+          ? durableSubagentFailureDetail(child)
+          : s.finalSummary || s.preview,
         model: s.model,
         toolCount: s.toolCount,
         tokens: realTokens ?? s.thinkingTokens,
@@ -8841,17 +8865,17 @@ export default function ChatPage() {
       // "done" made the panel flip running→done→running on navigation (the
       // persisted row briefly replaced the live "running" entry after a
       // remount, then the next live event flipped it back).
-      const ended = Boolean(child.ended_at);
-      const failed =
-        ended &&
-        !!child.end_reason &&
-        child.end_reason !== "delegation_complete";
+      const durableStatus = durableSubagentCompletionStatus(child);
+      const ended = durableStatus !== "running";
+      const failed = durableStatus === "error";
       items.push({
         id: `child-${child.id}`,
         kind: "subagent",
         label: child.title?.trim() || "Subagent",
-        status: failed ? "error" : ended ? "done" : "running",
-        detail: failed ? child.end_reason ?? "Interrupted" : child.model ?? undefined,
+        status: durableStatus,
+        detail: failed
+          ? durableSubagentFailureDetail(child)
+          : child.model ?? undefined,
         toolCount: child.tool_call_count ?? undefined,
         tokens: childTokens.get(child.id),
         startedAt,

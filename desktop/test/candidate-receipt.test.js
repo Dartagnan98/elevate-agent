@@ -1,11 +1,14 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const asar = require("@electron/asar");
+const yaml = require("js-yaml");
 
 const {
   CANDIDATE_RECEIPT_SCHEMA_VERSION,
@@ -24,19 +27,29 @@ const {
   assertRuntimeCodeContract,
   assertTrustedSignerEvidence,
   assertEmbeddedWebMatchesBuild,
+  buildRemotePublishInnerScript,
   buildRemotePublishTransaction,
   canonicalJson,
+  captureToolchain,
+  classifyPublicCandidateFeeds,
   createPreSignEvidence,
   createSourceReceipt,
   evidenceIntegrity,
   fileRecord,
+  findSuccessfulReleaseArchive,
   hashPortableTree,
   hashTree,
   normalizeArchitecture,
   portableAsarDirectoryHash,
   preSignEvidencePath,
   profileSnapshot,
+  ROLLBACK_FREEZE_FILE,
+  releaseCommandDefaults,
+  realtorBetaRollbackClearedFile,
+  realtorBetaRollbackFreezeBytes,
   receiptId,
+  recoveryStaticProvenance,
+  resolveReleaseCandidateForShip,
   runMacBuilders,
   sha256File,
   verifyCandidateReceipt,
@@ -54,16 +67,35 @@ const {
   BETA_SOURCE_SAFETY_SCHEMA_VERSION,
   REQUIRED_SUITE_IDS,
   currentNodeAtLeast,
+  npmCliPath,
   pythonDescriptor,
   suiteManifest,
   suiteManifestId,
 } = require("../scripts/beta-source-safety-gate");
-const { BETA, STABLE } = require("../src/release-profile");
+const { BETA, STABLE, resolveReleaseProfile } = require("../src/release-profile");
+const { RECOVERY_SOURCE_FILES } = require("../electron-builder.recovery.config");
 
 function temporaryDirectory(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-candidate-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
+}
+
+function passingSourceSafetyExecution(contract) {
+  if (contract.kind === "command") return { kind: "command", commands_executed: 1 };
+  const tests = contract.expected_tests || contract.minimum_tests;
+  const base = {
+    kind: contract.kind,
+    tests,
+    passed: tests,
+    failed: 0,
+    skipped: 0,
+    deselected: 0,
+    collected_only: false,
+  };
+  if (contract.kind === "node-test") return { ...base, cancelled: 0, todo: 0 };
+  if (contract.kind === "pytest") return { ...base, errors: 0, xfailed: 0, xpassed: 0 };
+  return { ...base, todo: 0, test_files: 1, test_files_passed: 1 };
 }
 
 test("candidate IDs use canonical key ordering", () => {
@@ -131,11 +163,13 @@ test("Beta source receipts cannot be minted without exact passing source safety 
     },
     checkout_stable: true,
     passed: true,
-    suites: REQUIRED_SUITE_IDS.map((id) => ({
+    suites: REQUIRED_SUITE_IDS.map((id, index) => ({
       id,
       passed: true,
       status: 0,
+      signal: null,
       duration_ms: 1,
+      execution: passingSourceSafetyExecution(manifest[index].result_contract),
       output_sha256: "a".repeat(64),
     })),
   };
@@ -291,78 +325,371 @@ test("release signer is pinned to the trusted Apple TeamIdentifier", () => {
   );
 });
 
-test("remote publication verifies staged artifacts under one lock before aliases and feed", () => {
+function publisherFixture(t, { recovery = false } = {}) {
+  const root = `${temporaryDirectory(t)}${path.sep}`;
   const candidateId = "d".repeat(64);
   const artifactNames = [
     "Elevate-Beta-1.2.67-mac-x64.dmg",
     "Elevate-Beta-1.2.67-mac-arm64.dmg",
   ];
+  const aliases = [
+    "Elevate-Beta-mac-x64.dmg",
+    "Elevate-beta-mac-x64.dmg",
+    "Elevate-Beta-mac-arm64.dmg",
+    "Elevate-beta-mac-arm64.dmg",
+  ];
+  const bytes = {
+    [artifactNames[0]]: "candidate-x64-dmg",
+    [artifactNames[1]]: "candidate-arm64-dmg",
+    "beta-mac.yml": "candidate-beta-feed",
+  };
+  const oldFeeds = { latest: "old-stable-feed", beta: "old-beta-feed" };
+  const digest = (value) => crypto.createHash("sha256").update(value).digest("hex");
   const candidate = {
     candidate_id: candidateId,
+    source_receipt_id: "e".repeat(64),
     public_feeds_at_finalize: {
-      latest: { sha256: "latest-baseline" },
-      beta: { sha256: "beta-baseline" },
+      latest: { sha256: digest(oldFeeds.latest) },
+      beta: { sha256: digest(oldFeeds.beta) },
     },
-    artifacts: {
-      [artifactNames[0]]: { sha256: "a".repeat(64) },
-      [artifactNames[1]]: { sha256: "b".repeat(64) },
-      "beta-mac.yml": { sha256: "c".repeat(64) },
-    },
+    artifacts: Object.fromEntries(Object.entries(bytes).map(([name, value]) => [name, { sha256: digest(value) }])),
     release: {
       channel: "beta",
       feed_name: "beta-mac.yml",
       artifact_names: artifactNames,
-      download_aliases: [
-        "Elevate-Beta-mac-x64.dmg",
-        "Elevate-beta-mac-x64.dmg",
-        "Elevate-Beta-mac-arm64.dmg",
-        "Elevate-beta-mac-arm64.dmg",
-      ],
+      download_aliases: aliases,
     },
+    rollback_target: { sha256: digest(oldFeeds.beta) },
   };
-  const stagingName = `.candidate-${candidateId}-test`;
-  const command = buildRemotePublishTransaction({ candidate, stagingName });
-  const parsed = require("node:child_process").spawnSync("bash", ["-n", "-c", command], { encoding: "utf8" });
+  const recoveryNames = ["x64", "arm64"].flatMap((arch) => [
+    `Elevate-Beta-Recovery-1.2.68-mac-${arch}.zip`,
+    `Elevate-Beta-Recovery-1.2.68-mac-${arch}.dmg`,
+  ]);
+  const recoveryBytes = Object.fromEntries(recoveryNames.map((name) => [name, `recovery-${name}`]));
+  const recoveryFeedBytes = "recovery-roll-forward-feed";
+  const retainedFeedName = ".realtor-beta-recovery-1.2.68-beta-mac.yml";
+  if (recovery) {
+    candidate.recovery = {
+      version: "1.2.68",
+      artifact_names: recoveryNames,
+      artifacts: Object.fromEntries(recoveryNames.map((name) => [name, { sha256: digest(recoveryBytes[name]) }])),
+      local_feed: { sha256: digest(recoveryFeedBytes) },
+    };
+  }
+  fs.writeFileSync(path.join(root, "latest-mac.yml"), oldFeeds.latest);
+  fs.writeFileSync(path.join(root, "beta-mac.yml"), oldFeeds.beta);
+  const intendedOldAliases = Object.fromEntries(aliases.map((alias, index) => [alias, `old-alias-${index}`]));
+  for (const [alias, value] of Object.entries(intendedOldAliases)) fs.writeFileSync(path.join(root, alias), value);
+  const oldAliases = Object.fromEntries(aliases.map((alias) => [alias, fs.readFileSync(path.join(root, alias), "utf8")]));
+  const caseVariantsCollide = fs.statSync(path.join(root, aliases[0])).ino
+    === fs.statSync(path.join(root, aliases[1])).ino;
+  let stageNumber = 0;
+  function createStage(label = "test") {
+    stageNumber += 1;
+    const stagingName = `.candidate-${candidateId}-${label}${stageNumber}`;
+    const stagePath = path.join(root, stagingName);
+    fs.mkdirSync(stagePath, { mode: 0o700 });
+    for (const [name, value] of Object.entries(bytes)) fs.writeFileSync(path.join(stagePath, name), value);
+    if (recovery) {
+      for (const [name, value] of Object.entries(recoveryBytes)) fs.writeFileSync(path.join(stagePath, name), value);
+      fs.writeFileSync(path.join(stagePath, "recovery-beta-mac.yml"), recoveryFeedBytes);
+    }
+    return stagingName;
+  }
+  function run({ label, crashAfter = 0, crashSignal = "KILL" } = {}) {
+    const stagingName = createStage(label);
+    const script = buildRemotePublishInnerScript({
+      candidate,
+      remote: root,
+      stagingName,
+      owner: null,
+      testCrashAfterPointerMoves: crashAfter,
+      testCrashSignal: crashSignal,
+    });
+    return spawnSync("bash", ["-c", script], { encoding: "utf8", timeout: 30_000 });
+  }
+  return {
+    root,
+    candidate,
+    candidateId,
+    artifactNames,
+    aliases,
+    bytes,
+    oldFeeds,
+    oldAliases,
+    caseVariantsCollide,
+    createStage,
+    run,
+    recoveryNames,
+    recoveryBytes,
+    recoveryFeedBytes,
+    retainedFeedName,
+    transactionPath: path.join(root, `.candidate-${candidateId}-publish-state`),
+  };
+}
+
+function assertPublisherCommitted(fixture) {
+  const { root, candidate, aliases, artifactNames, bytes, oldFeeds } = fixture;
+  assert.equal(fs.readFileSync(path.join(root, "latest-mac.yml"), "utf8"), oldFeeds.latest);
+  assert.equal(fs.readFileSync(path.join(root, "beta-mac.yml"), "utf8"), bytes["beta-mac.yml"]);
+  for (const name of artifactNames) assert.equal(sha256File(path.join(root, name)), candidate.artifacts[name].sha256);
+  for (const alias of aliases) {
+    const source = alias.includes("-arm64.") ? artifactNames[1] : artifactNames[0];
+    assert.equal(sha256File(path.join(root, alias)), candidate.artifacts[source].sha256);
+  }
+}
+
+test("remote publication uses one bounded lock, a candidate journal, and feed-last commit", (t) => {
+  const fixture = publisherFixture(t);
+  const stagingName = fixture.createStage("syntax");
+  const command = buildRemotePublishTransaction({
+    candidate: fixture.candidate,
+    remote: fixture.root,
+    stagingName,
+    owner: null,
+    globalLock: path.join(fixture.root, "publish.lock"),
+  });
+  const parsed = spawnSync("bash", ["-n", "-c", command], { encoding: "utf8" });
   assert.equal(parsed.status, 0, parsed.stderr);
   assert.equal((command.match(/\bflock\b/g) || []).length, 1);
-  assert.match(command, /flock -x \/var\/lock\/elevate-release-publish\.lock/);
-  assert.match(command, new RegExp(stagingName));
-  assert.match(command, /latest-mac\.yml/);
-  assert.match(command, /beta-mac\.yml/);
-  assert.match(command, /Elevate-Beta-mac-arm64\.dmg/);
-  assert.match(command, /Elevate-beta-mac-arm64\.dmg/);
-  const firstStagedCheck = command.indexOf("STAGED_HASH_FAILED");
-  const lastStagedCheck = command.lastIndexOf("STAGED_HASH_FAILED");
-  const firstCollision = command.indexOf("FINAL_COLLISION");
-  const lastCollision = command.lastIndexOf("FINAL_COLLISION");
-  const firstArtifactMove = command.indexOf("else mv");
-  const lastArtifactMove = command.lastIndexOf("else mv");
-  const firstAliasMove = command.indexOf("mv -f");
-  const feedMove = command.lastIndexOf("mv -f");
-  assert.ok(command.indexOf("CAS_FAILED latest") < firstStagedCheck);
-  assert.ok(command.indexOf("CAS_FAILED beta") < firstStagedCheck);
-  assert.ok(lastStagedCheck < firstCollision);
-  assert.ok(lastCollision < firstArtifactMove);
-  assert.ok(lastArtifactMove < firstAliasMove);
-  assert.ok(command.lastIndexOf("Elevate-beta-mac-arm64.dmg") < feedMove);
-  assert.match(command, /trap .*rm -rf -- .*\.candidate-/);
-  for (const record of Object.values(candidate.artifacts)) assert.match(command, new RegExp(record.sha256));
-  assert.doesNotMatch(command, /mv -f .*Elevate-Beta-1\.2\.67-mac-(x64|arm64)\.dmg/);
+  assert.match(command, /flock -x -w 300/);
+  assert.equal(ROLLBACK_FREEZE_FILE, ".realtor-beta-rollback-freeze");
+  assert.match(command, /RELEASE_FREEZE_ACTIVE/);
+  assert.match(command, /elevate-remote-publish-journal/);
+  assert.match(command, /backups\.manifest/);
+  assert.match(command, /state=already_committed/);
+  assert.match(command, /state=recovered_committed/);
+  const inner = buildRemotePublishInnerScript({
+    candidate: fixture.candidate,
+    remote: fixture.root,
+    stagingName,
+    owner: null,
+  });
+  const mutation = inner.indexOf("mutation_started=1");
+  const firstAlias = inner.indexOf("atomic_replace", mutation);
+  const feed = inner.indexOf(`atomic_replace '${fixture.transactionPath}/next-feed'`, mutation);
+  const validation = inner.indexOf("committed_ok ||", feed);
+  assert.ok(mutation >= 0 && mutation < firstAlias);
+  assert.ok(firstAlias < feed);
+  assert.ok(feed < validation);
+  assert.match(inner, /trap 'cleanup 129' HUP/);
+  assert.match(inner, /trap 'cleanup 143' TERM/);
 
   const shipSource = fs.readFileSync(path.resolve(__dirname, "../scripts/ship-to-hetzner.js"), "utf8");
+  assert.match(shipSource, /ServerAliveInterval/);
+  assert.match(shipSource, /ServerAliveCountMax/);
+  assert.match(shipSource, /REMOTE_COMMAND_TIMEOUT_MS/);
+  assert.match(shipSource, /completionMarkers\.length !== 1/);
+  assert.match(shipSource, /classifyPublicCandidateFeeds/);
   assert.match(shipSource, /`\$\{HOST\}:\$\{stagingPath\}`/);
   assert.doesNotMatch(shipSource, /`\$\{HOST\}:\$\{REMOTE\}`/);
-  assert.throws(() => buildRemotePublishTransaction({ candidate, stagingName: "../unsafe" }), /unsafe remote staging/);
-  const incomplete = structuredClone(candidate);
+  const ambiguousFailure = shipSource.slice(shipSource.indexOf("const publishFeed"), shipSource.indexOf("const publicReadbackPath"));
+  assert.doesNotMatch(ambiguousFailure, /rm -rf/);
+  assert.throws(() => buildRemotePublishTransaction({ candidate: fixture.candidate, stagingName: "../unsafe" }), /unsafe remote staging/);
+  const incomplete = structuredClone(fixture.candidate);
   delete incomplete.artifacts["beta-mac.yml"];
   assert.throws(() => buildRemotePublishTransaction({ candidate: incomplete, stagingName }), /missing SHA256/);
-
-  const stable = structuredClone(candidate);
+  const stable = structuredClone(fixture.candidate);
   stable.release.channel = "latest";
+  stable.release.feed_name = "latest-mac.yml";
+  stable.artifacts["latest-mac.yml"] = stable.artifacts["beta-mac.yml"];
+  delete stable.artifacts["beta-mac.yml"];
   const stableCommand = buildRemotePublishTransaction({ candidate: stable, stagingName });
-  assert.match(stableCommand, /find .* -maxdepth 1 -type f -name/);
   assert.match(stableCommand, /\*\.zip\.blockmap/);
   assert.match(stableCommand, /-delete/);
+});
+
+test("candidate-specific cleared rollback tombstone rejects a stale staged publisher", (t) => {
+  const fixture = publisherFixture(t);
+  const stagingName = fixture.createStage("predates-rollback");
+  const clearedPath = path.join(
+    fixture.root,
+    realtorBetaRollbackClearedFile(fixture.candidate),
+  );
+  fs.writeFileSync(clearedPath, realtorBetaRollbackFreezeBytes(fixture.candidate));
+  const script = buildRemotePublishInnerScript({
+    candidate: fixture.candidate,
+    remote: fixture.root,
+    stagingName,
+    owner: null,
+  });
+  const result = spawnSync("bash", ["-c", script], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 47, result.stderr);
+  assert.match(result.stderr, /RELEASE_CANDIDATE_ALREADY_ROLLED_BACK/);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "beta-mac.yml"), "utf8"), fixture.oldFeeds.beta);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "latest-mac.yml"), "utf8"), fixture.oldFeeds.latest);
+  for (const alias of fixture.aliases) {
+    assert.equal(fs.readFileSync(path.join(fixture.root, alias), "utf8"), fixture.oldAliases[alias]);
+  }
+  for (const name of fixture.artifactNames) assert.equal(fs.existsSync(path.join(fixture.root, name)), false);
+  assert.equal(fs.existsSync(fixture.transactionPath), false);
+  assert.deepEqual(fs.readFileSync(clearedPath), realtorBetaRollbackFreezeBytes(fixture.candidate));
+});
+
+test("publisher resumes a journaled mixed-alias state after real SIGKILL", (t) => {
+  const fixture = publisherFixture(t);
+  const killed = fixture.run({ label: "midalias", crashAfter: 1 });
+  assert.equal(killed.status, null);
+  assert.equal(killed.signal, "SIGKILL");
+  assert.equal(fs.existsSync(fixture.transactionPath), true);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "beta-mac.yml"), "utf8"), fixture.oldFeeds.beta);
+  assert.equal(fs.readFileSync(path.join(fixture.root, fixture.aliases[0]), "utf8"), fixture.bytes[fixture.artifactNames[0]]);
+  if (fixture.caseVariantsCollide) {
+    assert.equal(fs.readFileSync(path.join(fixture.root, fixture.aliases[1]), "utf8"), fixture.bytes[fixture.artifactNames[0]]);
+  }
+  for (const alias of fixture.aliases.slice(fixture.caseVariantsCollide ? 2 : 1)) {
+    assert.equal(fs.readFileSync(path.join(fixture.root, alias), "utf8"), fixture.oldAliases[alias]);
+  }
+  assert.equal(fs.readFileSync(path.join(fixture.root, "latest-mac.yml"), "utf8"), fixture.oldFeeds.latest);
+
+  const resumed = fixture.run({ label: "resume" });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, /^REMOTE_PUBLISH_OK state=recovered_committed$/m);
+  assertPublisherCommitted(fixture);
+  assert.equal(fs.existsSync(fixture.transactionPath), false);
+});
+
+test("publisher seals exact committed state after disconnect at the feed acknowledgement boundary", (t) => {
+  const fixture = publisherFixture(t);
+  const killed = fixture.run({ label: "ackloss", crashAfter: fixture.aliases.length + 1 });
+  assert.equal(killed.status, null);
+  assert.equal(killed.signal, "SIGKILL");
+  assertPublisherCommitted(fixture);
+  assert.equal(fs.existsSync(fixture.transactionPath), true);
+
+  const resumed = fixture.run({ label: "seal" });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, /^REMOTE_PUBLISH_OK state=already_committed$/m);
+  assertPublisherCommitted(fixture);
+  assert.equal(fs.existsSync(fixture.transactionPath), false);
+});
+
+test("publisher compensates exact old pointers on a catchable disconnect", (t) => {
+  const fixture = publisherFixture(t);
+  const interrupted = fixture.run({ label: "term", crashAfter: 1, crashSignal: "TERM" });
+  assert.equal(interrupted.status, 143, interrupted.stderr);
+  assert.equal(interrupted.signal, null);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "latest-mac.yml"), "utf8"), fixture.oldFeeds.latest);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "beta-mac.yml"), "utf8"), fixture.oldFeeds.beta);
+  for (const alias of fixture.aliases) {
+    assert.equal(fs.readFileSync(path.join(fixture.root, alias), "utf8"), fixture.oldAliases[alias]);
+  }
+  assert.equal(fs.existsSync(fixture.transactionPath), true);
+  const resumed = fixture.run({ label: "afterterm" });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, /^REMOTE_PUBLISH_OK state=recovered_committed$/m);
+  assertPublisherCommitted(fixture);
+});
+
+test("beta publication retains the recovery package before any pointer move", (t) => {
+  const fixture = publisherFixture(t, { recovery: true });
+  const inner = buildRemotePublishInnerScript({
+    candidate: fixture.candidate,
+    remote: fixture.root,
+    stagingName: fixture.createStage("order"),
+    owner: null,
+  });
+  const retention = inner.indexOf("'RECOVERY_FINAL_COLLISION");
+  const candidateArtifacts = inner.indexOf("'FINAL_COLLISION");
+  const mutation = inner.indexOf("mutation_started=1");
+  assert.ok(retention >= 0 && retention < candidateArtifacts && candidateArtifacts < mutation);
+  assert.match(inner, /retained_feed_name/);
+
+  // Crash at the first pointer move: every recovery byte must already be
+  // final while the beta feed still holds the old release.
+  const crashed = fixture.run({ label: "retain", crashAfter: 1 });
+  assert.notEqual(crashed.status, 0);
+  for (const name of fixture.recoveryNames) {
+    assert.equal(
+      sha256File(path.join(fixture.root, name)),
+      fixture.candidate.recovery.artifacts[name].sha256,
+    );
+  }
+  assert.equal(fs.readFileSync(path.join(fixture.root, fixture.retainedFeedName), "utf8"), fixture.recoveryFeedBytes);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "beta-mac.yml"), "utf8"), fixture.oldFeeds.beta);
+
+  const resumed = fixture.run({ label: "resume" });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, /^REMOTE_PUBLISH_OK state=recovered_committed$/m);
+  assertPublisherCommitted(fixture);
+  assert.equal(fs.readFileSync(path.join(fixture.root, fixture.retainedFeedName), "utf8"), fixture.recoveryFeedBytes);
+
+  const rerun = fixture.run({ label: "rerun" });
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /^REMOTE_PUBLISH_OK state=already_committed$/m);
+});
+
+test("recovery retention fails closed on foreign bytes or missing staged recovery files", (t) => {
+  const fixture = publisherFixture(t, { recovery: true });
+  fs.writeFileSync(path.join(fixture.root, fixture.recoveryNames[0]), "foreign-bytes");
+  const collided = fixture.run({ label: "foreign" });
+  assert.notEqual(collided.status, 0);
+  assert.match(collided.stderr, /PUBLISH_RECOVERY_STATE_UNKNOWN/);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "beta-mac.yml"), "utf8"), fixture.oldFeeds.beta);
+  for (const [alias, value] of Object.entries(fixture.oldAliases)) {
+    assert.equal(fs.readFileSync(path.join(fixture.root, alias), "utf8"), value);
+  }
+
+  fs.rmSync(path.join(fixture.root, fixture.recoveryNames[0]));
+  const stagingName = fixture.createStage("missing");
+  fs.rmSync(path.join(fixture.root, stagingName, fixture.recoveryNames[1]));
+  const script = buildRemotePublishInnerScript({
+    candidate: fixture.candidate,
+    remote: fixture.root,
+    stagingName,
+    owner: null,
+  });
+  const missing = spawnSync("bash", ["-c", script], { encoding: "utf8", timeout: 30_000 });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /STAGED_HASH_FAILED Elevate-Beta-Recovery/);
+  assert.equal(fs.readFileSync(path.join(fixture.root, "beta-mac.yml"), "utf8"), fixture.oldFeeds.beta);
+});
+
+test("public feed classifier accepts only exact old or exact candidate-bound committed states", (t) => {
+  const fixture = publisherFixture(t);
+  const baseline = {
+    latest: { sha256: fixture.candidate.public_feeds_at_finalize.latest.sha256 },
+    beta: { sha256: fixture.candidate.public_feeds_at_finalize.beta.sha256 },
+  };
+  assert.equal(classifyPublicCandidateFeeds(fixture.candidate, baseline), "old");
+  const committed = structuredClone(baseline);
+  committed.beta.sha256 = fixture.candidate.artifacts["beta-mac.yml"].sha256;
+  assert.equal(classifyPublicCandidateFeeds(fixture.candidate, committed), "committed");
+  committed.latest.sha256 = "f".repeat(64);
+  assert.throws(() => classifyPublicCandidateFeeds(fixture.candidate, committed), /neither the exact finalized baseline/);
+});
+
+test("candidate build commands and npm toolchain stay pinned to the active Node", () => {
+  const npmCli = npmCliPath();
+  const commands = releaseCommandDefaults({ npmCli });
+  assert.deepEqual(commands.web, {
+    command: process.execPath,
+    args: [npmCli, "--prefix", "../cli/web", "run", "build"],
+  });
+  assert.deepEqual(commands.merge, {
+    command: process.execPath,
+    args: [npmCli, "run", "merge:mac-feed"],
+  });
+  assert.equal(commands.builder.command, process.execPath);
+  assert.match(commands.builder.args[0], /node_modules\/electron-builder\/cli\.js$/);
+  assert.throws(
+    () => releaseCommandDefaults({ npmCli: "npm" }),
+    /active npm CLI is missing or is not an absolute file/,
+  );
+  assert.throws(
+    () => releaseCommandDefaults({ npmCli: path.join(os.tmpdir(), "missing-npm-cli.js") }),
+    /active npm CLI is missing or is not an absolute file/,
+  );
+
+  const expectedNpm = spawnSync(process.execPath, [npmCli, "--version"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(expectedNpm.status, 0, expectedNpm.stderr);
+  const toolchain = captureToolchain({ npmCli });
+  assert.equal(toolchain.node, process.version);
+  assert.equal(toolchain.npm, expectedNpm.stdout.trim());
+  assert.notEqual(toolchain.electron_builder, "unavailable");
 });
 
 test("the real build runner exports one verified source ID into both builder configs", (t) => {
@@ -383,6 +710,11 @@ test("the real build runner exports one verified source ID into both builder con
       args: process.argv.slice(2),
       envId: process.env.ELEVATE_SOURCE_RECEIPT_ID,
       configId: config.extraMetadata.elevateSourceReceiptId,
+      nodeEnv: process.env.NODE,
+      nodeExecutable: process.execPath,
+      npmExecPath: process.env.npm_execpath,
+      npmNodeExecPath: process.env.npm_node_execpath,
+      pathHead: process.env.PATH.split(require("node:path").delimiter)[0],
       preSignEvidenceExists: ["x64", "arm64"].map((arch) =>
         fs.existsSync(process.env.TEST_PRE_SIGN_DIR + "/candidate-pre-sign-" + arch + ".json")),
     }) + "\\n");
@@ -391,6 +723,11 @@ test("the real build runner exports one verified source ID into both builder con
     require("node:fs").appendFileSync(process.env.TEST_BUILD_LOG, JSON.stringify({
       kind: "merge",
       envId: process.env.ELEVATE_SOURCE_RECEIPT_ID,
+      nodeEnv: process.env.NODE,
+      nodeExecutable: process.execPath,
+      npmExecPath: process.env.npm_execpath,
+      npmNodeExecPath: process.env.npm_node_execpath,
+      pathHead: process.env.PATH.split(require("node:path").delimiter)[0],
     }) + "\\n");
   `);
   fs.writeFileSync(web, `
@@ -399,11 +736,14 @@ test("the real build runner exports one verified source ID into both builder con
     fs.writeFileSync(process.env.TEST_WEB_OUTPUT + "/index.html", "source-bound web");
   `);
   const sourceReceiptId = "b".repeat(64);
+  const activeNpmCli = path.join(root, "active-npm-cli.js");
+  fs.writeFileSync(activeNpmCli, "// command identity fixture\n");
   fs.mkdirSync(preSignEvidenceDirectory);
   for (const arch of ["x64", "arm64"]) {
     fs.writeFileSync(preSignEvidencePath(preSignEvidenceDirectory, arch), "stale evidence");
   }
   assert.equal(runMacBuilders({
+    npmCli: activeNpmCli,
     verifySource: () => ({ source_receipt_id: sourceReceiptId }),
     builderCommand: process.execPath,
     builderPrefixArgs: [builder],
@@ -433,6 +773,13 @@ test("the real build runner exports one verified source ID into both builder con
   assert.ok(rows[0].args.includes("--x64"));
   assert.ok(rows[1].args.includes("--arm64"));
   assert.equal(rows[2].envId, sourceReceiptId);
+  for (const row of rows) {
+    assert.equal(row.nodeEnv, process.execPath);
+    assert.equal(row.nodeExecutable, process.execPath);
+    assert.equal(row.npmExecPath, activeNpmCli);
+    assert.equal(row.npmNodeExecPath, process.execPath);
+    assert.equal(row.pathHead, path.dirname(process.execPath));
+  }
   const generatedWebReceipt = JSON.parse(fs.readFileSync(webReceipt, "utf8"));
   assert.equal(generatedWebReceipt.source_receipt_id, sourceReceiptId);
   for (const arch of ["x64", "arm64"]) {
@@ -814,26 +1161,180 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   const receiptPath = path.join(root, "candidate-receipt.json");
   const candidateFeedPath = path.join(root, "desktop", "dist", "beta-mac.yml");
   fs.mkdirSync(path.dirname(candidateFeedPath), { recursive: true });
-  fs.writeFileSync(candidateFeedPath, "version: 1.2.67\n");
+  fs.writeFileSync(candidateFeedPath, "version: 1.2.73\n");
+  const profile = profileSnapshot(resolveReleaseProfile("beta"));
+  const sourceReceiptId = "d".repeat(64);
+  const hex = (seed) => crypto.createHash("sha256").update(seed).digest("hex");
+  const signerDetails = [
+    "Authority=Developer ID Application: Dartagnan Patricio (G5TK395RYH)",
+    "TeamIdentifier=G5TK395RYH",
+    "CodeDirectory v=20500 flags=0x10000(runtime)",
+  ].join("\n");
+  const signerRequirement = "designated => anchor apple generic and certificate leaf[subject.OU] = G5TK395RYH";
+  const makeSigningEvidence = (seed) => Object.fromEntries([
+    ["codesign_verify", ""],
+    ["codesign_details", signerDetails],
+    ["designated_requirement", signerRequirement],
+    ["gatekeeper", "accepted"],
+    ["staple", "The validate action worked!"],
+  ].map(([name, output]) => [name, { ok: true, status: 0, output, output_sha256: hex(`${seed}:${name}`) }]));
+  const trustFor = (evidence) => ({
+    signed: true,
+    notarized: true,
+    stapled: true,
+    verification_method: "codesign-gatekeeper-stapled-ticket",
+    signing_evidence_sha256: hex(canonicalJson(evidence)),
+    notarization_evidence_sha256: evidence.staple.output_sha256,
+    stapling_evidence_sha256: evidence.staple.output_sha256,
+  });
+  const recoveryRoot = path.join(root, "desktop", "dist", "recovery");
+  fs.mkdirSync(recoveryRoot, { recursive: true });
+  const recoveryArtifactNames = ["x64", "arm64"].flatMap((arch) => [
+    `Elevate-Beta-Recovery-1.2.74-mac-${arch}.zip`,
+    `Elevate-Beta-Recovery-1.2.74-mac-${arch}.dmg`,
+  ]);
+  const recoveryApps = {};
+  const recoveryDmgs = {};
+  for (const arch of ["x64", "arm64"]) {
+    const appSigning = makeSigningEvidence(`recovery-app-${arch}`);
+    const dmgSigning = makeSigningEvidence(`recovery-dmg-${arch}`);
+    recoveryApps[arch] = {
+      architecture: arch,
+      app_path: path.join("desktop", "dist", "recovery", arch === "x64" ? "mac" : "mac-arm64", profile.appBundleName),
+      info_plist: {
+        CFBundleIdentifier: profile.appId,
+        CFBundleName: profile.productName,
+        CFBundleShortVersionString: "1.2.74",
+      },
+      packaged_metadata: {
+        name: profile.packageName,
+        version: "1.2.74",
+        main: "src/recovery-main.js",
+        elevateReleaseChannel: "beta",
+        elevateRecoveryMode: true,
+        elevateRecoverySourceReceiptId: sourceReceiptId,
+        asar_sha256: hex(`recovery-asar-${arch}`),
+      },
+      app_update: {
+        provider: "generic",
+        channel: "beta",
+        url: "https://api.elevationrealestatehq.com/updates",
+        updaterCacheDirName: `${profile.packageName.toLowerCase()}-updater`,
+        sha256: hex(`recovery-app-update-${arch}`),
+      },
+      executable_architectures: [arch === "x64" ? "x86_64" : "arm64"],
+      bundle_manifest: { file_count: 9, size: 4096, sha256: hex(`recovery-bundle-${arch}`) },
+      embedded_recovery_sources: Object.fromEntries(RECOVERY_SOURCE_FILES.map((name) => [
+        name,
+        { size: 32, sha256: hex(`recovery-source-${name}`) },
+      ])),
+      signing: appSigning,
+      trust: trustFor(appSigning),
+    };
+    recoveryDmgs[arch] = {
+      artifact: `Elevate-Beta-Recovery-1.2.74-mac-${arch}.dmg`,
+      evidence: dmgSigning,
+      trust: trustFor(dmgSigning),
+    };
+  }
+  const recoveryArtifacts = {};
+  for (const name of recoveryArtifactNames) {
+    const architecture = name.includes("-arm64.") ? "arm64" : "x64";
+    const format = path.extname(name).slice(1);
+    fs.writeFileSync(path.join(recoveryRoot, name), `recovery-artifact:${name}\n`);
+    recoveryArtifacts[name] = {
+      ...fileRecord(path.join(recoveryRoot, name), root, { includeSha512: true }),
+      architecture,
+      format,
+      packaged_app: {
+        bundle_manifest_sha256: recoveryApps[architecture].bundle_manifest.sha256,
+        ...recoveryApps[architecture].trust,
+      },
+      container_trust: format === "dmg" ? recoveryDmgs[architecture].trust : null,
+    };
+  }
+  const primaryRecoveryZip = "Elevate-Beta-Recovery-1.2.74-mac-x64.zip";
+  const recoveryFeedPath = path.join(recoveryRoot, "beta-mac.yml");
+  fs.writeFileSync(recoveryFeedPath, yaml.dump({
+    version: "1.2.74",
+    files: recoveryArtifactNames.map((name) => ({
+      url: name,
+      sha512: recoveryArtifacts[name].sha512,
+      size: recoveryArtifacts[name].size,
+    })),
+    path: primaryRecoveryZip,
+    sha512: recoveryArtifacts[primaryRecoveryZip].sha512,
+  }));
+  const recoveryLocalFeed = {
+    ...fileRecord(recoveryFeedPath, root, { includeSha512: true }),
+    manifest: yaml.load(fs.readFileSync(recoveryFeedPath, "utf8")),
+  };
+  const recoveryPreSignContracts = {};
+  for (const arch of ["x64", "arm64"]) {
+    const preSign = {
+      schema_version: 1,
+      kind: "elevate-beta-roll-forward-recovery-pre-sign",
+      architecture: arch,
+      app_bundle_name: profile.appBundleName,
+      app_id: profile.appId,
+      package_name: profile.packageName,
+      protocol_scheme: profile.protocolScheme,
+      release_channel: "beta",
+      candidate_version: "1.2.73",
+      recovery_version: "1.2.74",
+      source_receipt_id: sourceReceiptId,
+      app_asar_sha256: recoveryApps[arch].packaged_metadata.asar_sha256,
+      updater_config_sha256: recoveryApps[arch].app_update.sha256,
+      runtime_policy: {
+        backend: false,
+        cli: false,
+        gateway: false,
+        runtime: false,
+        tools: false,
+        profile_preserved: true,
+      },
+      asar_source_files: RECOVERY_SOURCE_FILES.slice().sort(),
+    };
+    preSign.evidence_id = receiptId(preSign, "evidence_id");
+    fs.writeFileSync(path.join(recoveryRoot, `pre-sign-recovery-${arch}.json`), JSON.stringify(preSign));
+    recoveryPreSignContracts[arch] = preSign;
+  }
+  const recovery = {
+    schema_version: 1,
+    kind: "elevate-beta-recovery-package",
+    candidate_version: "1.2.73",
+    version: "1.2.74",
+    reserved_version: "1.2.74",
+    next_full_beta_minimum_exclusive: "1.2.74",
+    source_receipt_id: sourceReceiptId,
+    channel: "beta",
+    public_feed_name: "beta-mac.yml",
+    profile,
+    architectures: ["x64", "arm64"],
+    artifact_names: recoveryArtifactNames,
+    local_feed: recoveryLocalFeed,
+    artifacts: recoveryArtifacts,
+    apps: recoveryApps,
+    pre_sign_contracts: recoveryPreSignContracts,
+    signing: { dmgs: recoveryDmgs },
+  };
+  recovery.static_provenance = recoveryStaticProvenance(recovery);
   const receipt = {
     schema_version: CANDIDATE_RECEIPT_SCHEMA_VERSION,
     kind: "elevate-final-candidate",
-    source_receipt_id: "source-123",
+    source_receipt_id: sourceReceiptId,
     release: {
-      version: "1.2.67",
+      version: "1.2.73",
       channel: "beta",
       feed_name: "beta-mac.yml",
-      profile: {
-        appBundleName: "Elevate Beta.app",
-        productName: "Elevate Beta",
-        preferredPort: 9139,
-      },
+      profile,
     },
     artifacts: { "beta-mac.yml": fileRecord(candidateFeedPath, root) },
     apps: {
       x64: { bundle_manifest: { sha256: "app-x64" } },
       arm64: { bundle_manifest: { sha256: "app-arm64" } },
     },
+    recovery,
     required_evidence: {
       x64_smoke: "desktop/dist/evidence/smoke-x64.json",
       arm64_smoke: "desktop/dist/evidence/smoke-arm64.json",
@@ -926,7 +1427,7 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
       },
       profile: {
         identities_distinct: true,
-        preferred_port: 9139,
+        preferred_port: Number(profile.preferredPort),
         production_feed_untouched: true,
       },
       installed_runtime: { module_count: 7, python_major: 3, python_minor: 12 },
@@ -944,24 +1445,34 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
         message_count: 1,
         resume_pending_cleared: true,
       },
-      rollback: {
-        mode: "local-fixture-dry-run",
-        target_version: receipt.rollback_target.version,
-        target_feed_sha256: receipt.rollback_target.sha256,
+      recovery: {
+        mode: "local-fixture-roll-forward",
+        candidate_version: receipt.release.version,
+        recovery_version: receipt.recovery.version,
+        source_receipt_id: receipt.source_receipt_id,
+        recovery_feed_sha256: receipt.recovery.local_feed.sha256,
+        beta_after_sha256: receipt.recovery.local_feed.sha256,
         candidate_feed_sha256: receipt.artifacts["beta-mac.yml"].sha256,
-        beta_after_sha256: receipt.rollback_target.sha256,
         stable_before_sha256: receipt.public_feeds_at_finalize.latest.sha256,
         stable_after_sha256: receipt.public_feeds_at_finalize.latest.sha256,
         stable_expected_sha256: receipt.public_feeds_at_finalize.latest.sha256,
         stable_alias_count: 2,
-        beta_alias_count: 4,
-        rollback_dmg_count: 2,
+        recovery_alias_count: 4,
+        recovery_artifact_count: 4,
+        recovery_architecture_count: 2,
+        signed_app_count: 2,
+        notarized_app_count: 2,
+        stapled_app_count: 2,
+        runtime_actor_count: 0,
+        backend_actor_count: 0,
+        gateway_actor_count: 0,
+        tool_actor_count: 0,
         artifact_bytes_mode: "synthetic-local-fixture",
         remote_mutation: false,
         production_mutated: false,
         profile_data_mutations: 0,
         rpo_seconds: 0,
-        procedure_id: "realtor-beta-feed-and-alias-rollback-v1",
+        procedure_id: "realtor-beta-recovery-roll-forward-v1",
       },
     };
     evidence.evidence_integrity_sha256 = evidenceIntegrity(evidence);
@@ -1014,10 +1525,37 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     hostArchitecture: "arm64",
   }).candidate_id, receipt.candidate_id);
 
-  const invalidGate = makeRealtorBetaGateEvidence();
-  invalidGate.rollback.stable_after_sha256 = "f".repeat(64);
-  invalidGate.evidence_integrity_sha256 = evidenceIntegrity(invalidGate);
-  fs.writeFileSync(path.join(evidenceDir, "realtor-beta-gate.json"), JSON.stringify(invalidGate));
+  const assertGateRejected = (mutate, pattern) => {
+    const invalidGate = makeRealtorBetaGateEvidence();
+    mutate(invalidGate);
+    invalidGate.evidence_integrity_sha256 = evidenceIntegrity(invalidGate);
+    fs.writeFileSync(path.join(evidenceDir, "realtor-beta-gate.json"), JSON.stringify(invalidGate));
+    assert.throws(() => verifyCandidateReceipt({
+      receiptPath,
+      desktopRoot: root,
+      repoRoot: root,
+      requireApps: false,
+      requireSource: false,
+      requireEvidence: true,
+      evidenceHome: home,
+      hostArchitecture: "arm64",
+    }), pattern);
+  };
+  assertGateRejected((gate) => { gate.recovery.stable_after_sha256 = "f".repeat(64); }, /recovery roll-forward drill evidence is invalid/);
+  assertGateRejected((gate) => { delete gate.recovery; }, /recovery roll-forward drill evidence is invalid/);
+  assertGateRejected((gate) => { gate.recovery.recovery_version = receipt.release.version; }, /recovery roll-forward drill evidence is invalid/);
+  assertGateRejected((gate) => { gate.recovery.remote_mutation = true; }, /recovery roll-forward drill evidence is invalid/);
+
+  // Mutating the gate evidence body without recomputing its integrity digest
+  // must fail closed on the integrity branch. python_minor is covered by the
+  // digest but by no earlier field check, so the tamper reaches exactly that
+  // branch instead of tripping an unrelated validation first.
+  const staleIntegrityGate = makeRealtorBetaGateEvidence();
+  staleIntegrityGate.installed_runtime.python_minor += 1;
+  fs.writeFileSync(
+    path.join(evidenceDir, "realtor-beta-gate.json"),
+    JSON.stringify(staleIntegrityGate),
+  );
   assert.throws(() => verifyCandidateReceipt({
     receiptPath,
     desktopRoot: root,
@@ -1027,7 +1565,8 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     requireEvidence: true,
     evidenceHome: home,
     hostArchitecture: "arm64",
-  }), /rollback drill evidence is invalid/);
+  }), /Realtor Beta gate evidence integrity mismatch/);
+
   fs.writeFileSync(
     path.join(evidenceDir, "realtor-beta-gate.json"),
     JSON.stringify(makeRealtorBetaGateEvidence()),
@@ -1084,6 +1623,102 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   }), /missing required checks/);
 });
 
+test("recoveryStaticProvenance emits a pinned static-provenance key and shape contract", () => {
+  const artifactNames = ["x64", "arm64"].flatMap((arch) => [
+    `Elevate-Beta-Recovery-1.2.74-mac-${arch}.zip`,
+    `Elevate-Beta-Recovery-1.2.74-mac-${arch}.dmg`,
+  ]);
+  const runtimePolicy = {
+    backend: false,
+    cli: false,
+    gateway: false,
+    runtime: false,
+    tools: false,
+    profile_preserved: true,
+  };
+  const recovery = {
+    source_receipt_id: "d".repeat(64),
+    candidate_version: "1.2.73",
+    version: "1.2.74",
+    profile: { productName: "Elevate Beta", appId: "com.elevationrealestate.elevate.beta" },
+    local_feed: { sha256: "a".repeat(64), sha512: "ZmVlZC1zaGE1MTI=" },
+    artifact_names: artifactNames,
+    artifacts: Object.fromEntries(artifactNames.map((name) => {
+      const architecture = name.includes("-arm64.") ? "arm64" : "x64";
+      const format = name.endsWith(".dmg") ? "dmg" : "zip";
+      return [name, {
+        architecture,
+        format,
+        sha256: `sha256-${name}`,
+        sha512: `sha512-${name}`,
+        packaged_app: { bundle_manifest_sha256: `bundle-${architecture}` },
+        container_trust: format === "dmg" ? { signing_evidence_sha256: `dmgsig-${architecture}` } : null,
+      }];
+    })),
+    apps: Object.fromEntries(["x64", "arm64"].map((arch) => [arch, {
+      bundle_manifest: { sha256: `bundle-${arch}` },
+      trust: { signing_evidence_sha256: `appsig-${arch}` },
+    }])),
+    signing: {
+      dmgs: Object.fromEntries(["x64", "arm64"].map((arch) => [arch, {
+        trust: { signing_evidence_sha256: `dmgsig-${arch}` },
+      }])),
+    },
+    pre_sign_contracts: Object.fromEntries(["x64", "arm64"].map((arch) => [arch, {
+      evidence_id: `presign-${arch}`,
+      runtime_policy: runtimePolicy,
+    }])),
+  };
+
+  const provenance = recoveryStaticProvenance(recovery);
+  assert.deepEqual(Object.keys(provenance).sort(), [
+    "app_bundle_sha256",
+    "app_signing_sha256",
+    "artifact_provenance_sha256",
+    "artifact_sha256",
+    "artifact_sha512",
+    "candidate_version",
+    "dmg_signing_sha256",
+    "feed_sha256",
+    "feed_sha512",
+    "kind",
+    "pre_sign_evidence_id",
+    "profile_sha256",
+    "recovery_version",
+    "runtime_policy",
+    "schema_version",
+    "source_receipt_id",
+  ]);
+  assert.equal(provenance.schema_version, 1);
+  assert.equal(provenance.kind, "elevate-beta-recovery-static-provenance");
+  assert.equal(provenance.source_receipt_id, recovery.source_receipt_id);
+  assert.equal(provenance.candidate_version, "1.2.73");
+  assert.equal(provenance.recovery_version, "1.2.74");
+  assert.equal(provenance.feed_sha256, recovery.local_feed.sha256);
+  assert.equal(provenance.feed_sha512, recovery.local_feed.sha512);
+  assert.match(provenance.profile_sha256, /^[a-f0-9]{64}$/);
+  for (const map of [
+    provenance.artifact_sha256,
+    provenance.artifact_sha512,
+    provenance.artifact_provenance_sha256,
+  ]) {
+    assert.deepEqual(Object.keys(map).sort(), artifactNames.slice().sort());
+  }
+  for (const map of [
+    provenance.app_bundle_sha256,
+    provenance.app_signing_sha256,
+    provenance.dmg_signing_sha256,
+    provenance.pre_sign_evidence_id,
+  ]) {
+    assert.deepEqual(Object.keys(map).sort(), ["arm64", "x64"]);
+  }
+  assert.equal(provenance.app_bundle_sha256.x64, "bundle-x64");
+  assert.equal(provenance.app_signing_sha256.arm64, "appsig-arm64");
+  assert.equal(provenance.dmg_signing_sha256.x64, "dmgsig-x64");
+  assert.equal(provenance.pre_sign_evidence_id.arm64, "presign-arm64");
+  assert.deepEqual(provenance.runtime_policy, runtimePolicy);
+});
+
 test("immutable receipt creation is idempotent but refuses replacement", (t) => {
   const root = temporaryDirectory(t);
   const receiptPath = path.join(root, "candidate-receipt.json");
@@ -1095,7 +1730,7 @@ test("immutable receipt creation is idempotent but refuses replacement", (t) => 
   );
 });
 
-test("successful release archive preserves proof and clears only active pointers for the next release", (t) => {
+function successfulArchiveFixture(t, version = "1.2.67") {
   const root = temporaryDirectory(t);
   const dist = path.join(root, "dist");
   const evidenceDir = path.join(dist, "evidence");
@@ -1110,13 +1745,41 @@ test("successful release archive preserves proof and clears only active pointers
     source_receipt_id: source.source_receipt_id,
     source,
     web_build: web,
-    release: { channel: "beta", version: "1.2.67" },
+    release: {
+      channel: "beta",
+      version,
+      feed_name: "beta-mac.yml",
+      artifact_names: [
+        `Elevate-Beta-${version}-mac-x64.zip`,
+        `Elevate-Beta-${version}-mac-x64.dmg`,
+        `Elevate-Beta-${version}-mac-arm64.zip`,
+        `Elevate-Beta-${version}-mac-arm64.dmg`,
+      ],
+      download_aliases: [
+        "Elevate-Beta-mac-x64.dmg",
+        "Elevate-beta-mac-x64.dmg",
+        "Elevate-Beta-mac-arm64.dmg",
+        "Elevate-beta-mac-arm64.dmg",
+      ],
+    },
     required_evidence: {
       x64_smoke: "dist/evidence/smoke-x64.json",
       arm64_smoke: "dist/evidence/smoke-arm64.json",
       live_ai: "dist/evidence/live-ai.json",
       realtor_beta_gate: "dist/evidence/realtor-beta-gate.json",
     },
+    rollback_target: { channel: "beta", version: "1.2.65", sha256: "b".repeat(64) },
+  };
+  candidate.artifacts = Object.fromEntries(candidate.release.artifact_names.map((name, index) => [name, {
+    path: `dist/${name}`,
+    size: 100 + index,
+    sha256: crypto.createHash("sha256").update(name).digest("hex"),
+    sha512: Buffer.alloc(64, index + 1).toString("base64"),
+  }]));
+  candidate.artifacts["beta-mac.yml"] = {
+    path: "dist/beta-mac.yml",
+    size: 321,
+    sha256: "c".repeat(64),
   };
   candidate.candidate_id = receiptId(candidate, "candidate_id");
   const active = {
@@ -1133,18 +1796,82 @@ test("successful release archive preserves proof and clears only active pointers
   fs.writeFileSync(active.source, JSON.stringify(source));
   fs.writeFileSync(active.web, JSON.stringify(web));
   fs.writeFileSync(active.candidate, JSON.stringify(candidate));
-  for (const filePath of [active.x64, active.arm64, active.live, active.realtorGate, active.ship]) {
+  for (const filePath of [active.x64, active.arm64, active.live, active.realtorGate]) {
     fs.writeFileSync(filePath, JSON.stringify({ candidate_id: candidate.candidate_id }));
   }
+  const candidateReceiptSha256 = sha256File(active.candidate);
+  const publicArtifacts = Object.fromEntries(candidate.release.artifact_names.map((name) => [name, {
+    url: `https://api.elevationrealestatehq.com/updates/${name}`,
+    size: candidate.artifacts[name].size,
+    sha256: candidate.artifacts[name].sha256,
+  }]));
+  const publicAliases = Object.fromEntries(candidate.release.download_aliases.map((alias) => {
+    const arch = alias.includes("-arm64.") ? "arm64" : "x64";
+    const sourceName = candidate.release.artifact_names.find((name) => name.endsWith(`-mac-${arch}.dmg`));
+    return [alias, {
+      url: `https://api.elevationrealestatehq.com/updates/${alias}`,
+      size: candidate.artifacts[sourceName].size,
+      sha256: candidate.artifacts[sourceName].sha256,
+    }];
+  }));
+  fs.writeFileSync(active.public, JSON.stringify({
+    schema_version: 1,
+    kind: "elevate-public-readback",
+    candidate_id: candidate.candidate_id,
+    source_receipt_id: candidate.source_receipt_id,
+    candidate_receipt_sha256: candidateReceiptSha256,
+    channel: "beta",
+    version,
+    verified_at: "2026-07-10T09:59:59.000Z",
+    feed: {
+      url: "https://api.elevationrealestatehq.com/updates/beta-mac.yml",
+      size: candidate.artifacts["beta-mac.yml"].size,
+      sha256: candidate.artifacts["beta-mac.yml"].sha256,
+    },
+    artifacts: publicArtifacts,
+    aliases: publicAliases,
+  }));
+  fs.writeFileSync(active.ship, JSON.stringify({
+    schema_version: 1,
+    kind: "elevate-ship-record",
+    candidate_id: candidate.candidate_id,
+    source_receipt_id: candidate.source_receipt_id,
+    candidate_receipt_sha256: candidateReceiptSha256,
+    channel: "beta",
+    version,
+    shipped_at: "2026-07-10T10:00:00.000Z",
+    remote_publish_state: "committed",
+    rollback_target: candidate.rollback_target,
+    public_feed: "https://api.elevationrealestatehq.com/updates/beta-mac.yml",
+    public_artifacts: candidate.artifacts && Object.fromEntries(
+      candidate.release.artifact_names.map((name) => [name, candidate.artifacts[name]]),
+    ),
+    live_ai_evidence_sha256: sha256File(active.live),
+    public_readback_sha256: sha256File(active.public),
+    stable_pruner_status: null,
+  }));
   const unrelated = path.join(evidenceDir, "keep-me.txt");
   fs.writeFileSync(unrelated, "unrelated");
 
-  assert.throws(() => archiveSuccessfulRelease({ candidate, distRoot: dist, repoRoot: root }), /archive input is missing/);
-  for (const filePath of Object.values(active).filter((filePath) => filePath !== active.public)) {
-    assert.equal(fs.existsSync(filePath), true);
-  }
+  return { root, dist, evidenceDir, source, web, candidate, active, unrelated };
+}
 
-  fs.writeFileSync(active.public, JSON.stringify({ candidate_id: candidate.candidate_id }));
+test("successful release archive preserves proof and clears only active pointers for the next release", (t) => {
+  const { root, dist, candidate, active, unrelated } = successfulArchiveFixture(t);
+  let activeVerifierCalls = 0;
+  const beforeArchive = resolveReleaseCandidateForShip({
+    distRoot: dist,
+    channel: "beta",
+    version: candidate.release.version,
+    verifyActiveCandidate: () => {
+      activeVerifierCalls += 1;
+      return candidate;
+    },
+  });
+  assert.equal(beforeArchive.archiveRecovery, null);
+  assert.equal(beforeArchive.candidate.candidate_id, candidate.candidate_id);
+  assert.equal(activeVerifierCalls, 1);
+
   const archived = archiveSuccessfulRelease({
     candidate,
     distRoot: dist,
@@ -1166,6 +1893,75 @@ test("successful release archive preserves proof and clears only active pointers
 
   fs.writeFileSync(path.join(archived.archivePath, "evidence", "smoke-x64.json"), "tampered");
   assert.throws(() => verifyReleaseArchive(archived.archivePath), /mismatch/);
+});
+
+test("successful release archive resumes after its rename and every active unlink boundary", async (t) => {
+  for (let crashAfterStep = 1; crashAfterStep <= 10; crashAfterStep += 1) {
+    await t.test(`crash step ${crashAfterStep}`, (child) => {
+      const fixture = successfulArchiveFixture(child, `1.2.${70 + crashAfterStep}`);
+      assert.throws(
+        () => archiveSuccessfulRelease({
+          candidate: fixture.candidate,
+          distRoot: fixture.dist,
+          repoRoot: fixture.root,
+          crashAfterStep,
+        }),
+        /injected archive crash/,
+      );
+      let activeVerifierCalled = false;
+      const resolution = resolveReleaseCandidateForShip({
+        distRoot: fixture.dist,
+        channel: "beta",
+        version: fixture.candidate.release.version,
+        verifyActiveCandidate: () => {
+          activeVerifierCalled = true;
+          throw new Error("active verification must not run after a durable archive commit");
+        },
+      });
+      const recovered = resolution.archiveRecovery;
+      assert.equal(activeVerifierCalled, false);
+      assert.equal(recovered.candidate.candidate_id, fixture.candidate.candidate_id);
+      const adopted = archiveSuccessfulRelease({
+        candidate: recovered.candidate,
+        distRoot: fixture.dist,
+        repoRoot: fixture.root,
+      });
+      assert.equal(adopted.adopted, true);
+      assert.equal(adopted.archive.archive_id, recovered.archive.archive_id);
+      for (const filePath of Object.values(fixture.active)) assert.equal(fs.existsSync(filePath), false);
+      assert.equal(fs.readFileSync(fixture.unrelated, "utf8"), "unrelated");
+    });
+  }
+});
+
+test("archive adoption rejects corrupt proof and never removes a replaced active pointer", (t) => {
+  const fixture = successfulArchiveFixture(t, "1.2.91");
+  assert.throws(() => archiveSuccessfulRelease({
+    candidate: fixture.candidate,
+    distRoot: fixture.dist,
+    repoRoot: fixture.root,
+    crashAfterStep: 1,
+  }), /injected archive crash/);
+  fs.writeFileSync(fixture.active.public, JSON.stringify({ candidate_id: "foreign" }));
+  assert.throws(() => archiveSuccessfulRelease({
+    candidate: fixture.candidate,
+    distRoot: fixture.dist,
+    repoRoot: fixture.root,
+  }), /active evidence\/public-readback\.json .* mismatch/);
+  assert.equal(fs.existsSync(fixture.active.public), true);
+
+  const archivePath = path.join(
+    fixture.dist,
+    "release-receipts",
+    "beta",
+    `${fixture.candidate.release.version}-${fixture.candidate.candidate_id}`,
+  );
+  fs.writeFileSync(path.join(archivePath, "evidence", "ship.json"), "corrupt");
+  assert.throws(() => findSuccessfulReleaseArchive({
+    distRoot: fixture.dist,
+    channel: "beta",
+    version: fixture.candidate.release.version,
+  }), /mismatch|JSON/);
 });
 
 test("source verification rejects dirty or changed release inputs", (t) => {

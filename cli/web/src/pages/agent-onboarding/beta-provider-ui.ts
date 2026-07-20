@@ -7,7 +7,6 @@ export const REALTOR_BETA_ALLOWED_MODELS_VERSION = "2026-07-14-v1";
 export const REALTOR_BETA_WIZARD_STEP_IDS = [
   "models",
   "memory",
-  "inbound",
   "tools",
   "subagents",
 ] as const;
@@ -131,6 +130,11 @@ export function resolveBetaPrimaryUiContract({
   if (runtime.allowedModelsVersion !== REALTOR_BETA_ALLOWED_MODELS_VERSION) {
     return invalidContract(
       `This onboarding screen supports model policy ${REALTOR_BETA_ALLOWED_MODELS_VERSION}, but the runtime reported ${runtime.allowedModelsVersion || "no version"}. Update Elevation Beta, then reopen onboarding.`,
+    );
+  }
+  if (!runtime.runtimeReady) {
+    return invalidContract(
+      "Elevation has not finished preparing the Realtor Beta Codex runtime. Refresh onboarding; if this continues, reopen Elevation Beta and sign in again.",
     );
   }
 

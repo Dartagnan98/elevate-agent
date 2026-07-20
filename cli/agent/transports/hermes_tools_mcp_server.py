@@ -21,8 +21,8 @@ Scope (what we expose):
   - skill_view, skills_list              — Hermes' skill library
   - text_to_speech                       — TTS
   - kanban_* (complete/block/comment/    — kanban worker + orchestrator
-    heartbeat/show/list/create/            handoff (stateless: read env var,
-    unblock/link)                          write ~/.elevate/kanban.db)
+    heartbeat/show/list/recompute/         handoff (stateless: read env var,
+    create/unblock/link)                   write ~/.elevate/kanban.db)
 
 What we DO NOT expose:
   - terminal / shell                     — codex's own shell tool
@@ -95,6 +95,16 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_heartbeat",
     "kanban_show",
     "kanban_list",
+    # kanban_list's schema tells the model to "call kanban_recompute first"
+    # when it needs pending dependency promotions reflected, so the
+    # referenced tool must exist on this transport too. Its orchestrator
+    # gating carries over unchanged on both layers: the shared
+    # _check_kanban_orchestrator_mode check_fn (same one kanban_list
+    # registers) keeps it out of get_tool_definitions() — and therefore out
+    # of this server's advertised schemas — for dispatcher-spawned workers,
+    # and _require_orchestrator_tool inside the handler refuses worker
+    # dispatch even if a stale schema slips through.
+    "kanban_recompute",
     # NOTE: kanban_create / kanban_unblock / kanban_link are orchestrator-
     # only — the kanban tool gates them on ELEVATE_KANBAN_TASK being unset.
     # They're exposed here for orchestrator agents running on the codex
@@ -152,7 +162,6 @@ def _build_server() -> Any:
             continue
 
         description = spec.get("description") or f"Hermes {name} tool"
-        params_schema = spec.get("parameters") or {"type": "object", "properties": {}}
 
         # FastMCP wants a Python callable. Build a closure that takes the
         # arguments dict, dispatches via handle_function_call, and returns

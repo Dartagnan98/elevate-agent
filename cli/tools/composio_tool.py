@@ -217,6 +217,14 @@ COMPOSIO_SCHEMA = {
 
 from tools.registry import registry
 
+# Every composio action (status / accounts / toolkits, and the "status"
+# default) is a credentialed HTTP GET against the Composio API. The handler
+# reaches only get_status / list_all_connected_accounts / list_toolkits /
+# list_all_toolkits, which are pure reads: no cache, debug log, or filesystem
+# write on any branch, and no credential refresh/quarantine. The only .env
+# write in composio_client (_get_or_create_user_id) lives behind execute_tool,
+# which this tool never invokes. Reading the stored COMPOSIO_API_KEY and
+# sending it as x-api-key is the credential_access surface.
 registry.register(
     name="composio",
     toolset="composio",
@@ -228,4 +236,5 @@ registry.register(
     ),
     check_fn=check_composio_requirements,
     emoji="🔌",
+    effects={"read:composio", "credential_access:composio"},
 )

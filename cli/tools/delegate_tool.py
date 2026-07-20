@@ -26,6 +26,8 @@ import enum
 import json
 import logging
 
+from tools.dispatch_companion import DispatchCompanion
+
 logger = logging.getLogger(__name__)
 import os
 import threading
@@ -35,6 +37,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FuturesTimeoutError,
 )
+from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
 from agent.result_outcome import agent_result_error, agent_result_succeeded
@@ -155,9 +158,22 @@ _MAX_SPAWN_DEPTH_CAP = 3
 # deadlock (an orchestrator would hold a slot while its leaves can't get one).
 _DEFAULT_MAX_TOTAL_LEAF_CONCURRENCY = 3
 _LEAF_ACQUIRE_TIMEOUT_SECONDS = 120.0
+_LEAF_ACQUIRE_POLL_SECONDS = 0.1
+_CHILD_RESULT_POLL_SECONDS = 0.1
 _leaf_semaphore_lock = threading.Lock()
 _leaf_semaphore = None  # threading.BoundedSemaphore, lazily created
 _leaf_semaphore_size = 0
+
+
+class _DelegateChildInterrupted(RuntimeError):
+    """Internal control signal for a child stopped before provider exit."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(
+            "Delegated child interrupted before provider work completed "
+            f"({reason})."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +185,11 @@ _leaf_semaphore_size = 0
 # process, including nested orchestrator -> worker chains.
 # ---------------------------------------------------------------------------
 
-_spawn_pause_lock = threading.Lock()
+_delegate_worker_condition = threading.Condition(threading.RLock())
 _spawn_paused: bool = False
+_delegate_worker_records: Dict[str, Dict[str, Any]] = {}
+_delegate_provider_repair_generation = 0
+_active_delegate_provider_repair_generation: Optional[int] = None
 
 _active_subagents_lock = threading.Lock()
 # subagent_id -> mutable record tracking the live child agent.  Stays only
@@ -185,14 +204,109 @@ def set_spawn_paused(paused: bool) -> bool:
     with a "spawning paused" error until unblocked.  Returns the new state.
     """
     global _spawn_paused
-    with _spawn_pause_lock:
+    with _delegate_worker_condition:
+        if (
+            _active_delegate_provider_repair_generation is not None
+            and not paused
+        ):
+            # Provider repair owns the pause until its release phase. A UI
+            # resume racing that transaction must not reopen the spawn gate.
+            return True
         _spawn_paused = bool(paused)
+        _delegate_worker_condition.notify_all()
         return _spawn_paused
 
 
 def is_spawn_paused() -> bool:
-    with _spawn_pause_lock:
+    with _delegate_worker_condition:
         return _spawn_paused
+
+
+@dataclass(frozen=True)
+class DelegateProviderRepairLease:
+    """Opaque ownership token for one process-local provider-repair pause."""
+
+    generation: int
+    restore_spawn_paused: bool
+
+
+def begin_delegate_provider_repair() -> DelegateProviderRepairLease:
+    """Pause delegation atomically and interrupt every reserved/live child."""
+    global _spawn_paused
+    global _delegate_provider_repair_generation
+    global _active_delegate_provider_repair_generation
+
+    with _delegate_worker_condition:
+        if _active_delegate_provider_repair_generation is not None:
+            raise RuntimeError("delegate provider repair is already active")
+        _delegate_provider_repair_generation += 1
+        generation = _delegate_provider_repair_generation
+        restore_spawn_paused = _spawn_paused
+        _spawn_paused = True
+        _active_delegate_provider_repair_generation = generation
+        _delegate_worker_condition.notify_all()
+
+    lease = DelegateProviderRepairLease(
+        generation=generation,
+        restore_spawn_paused=restore_spawn_paused,
+    )
+    interrupt_delegate_provider_repair(lease)
+    return lease
+
+
+def interrupt_delegate_provider_repair(
+    lease: DelegateProviderRepairLease,
+) -> int:
+    """Re-interrupt every reserved/live child for this exact repair lease."""
+    with _delegate_worker_condition:
+        if _active_delegate_provider_repair_generation != lease.generation:
+            raise RuntimeError("delegate provider repair lease is not active")
+        agents = {
+            id(record.get("agent")): record.get("agent")
+            for record in _delegate_worker_records.values()
+            if record.get("agent") is not None
+        }
+
+    interrupted = 0
+    for agent in agents.values():
+        try:
+            agent.interrupt("Interrupted for Realtor Beta provider repair")
+            interrupted += 1
+        except Exception as exc:
+            logger.debug("provider repair child interrupt failed: %s", exc)
+    return interrupted
+
+
+def wait_for_delegate_provider_quiescence(
+    lease: DelegateProviderRepairLease,
+    timeout: float,
+) -> bool:
+    """Wait until all children reserved before the repair have actually exited."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    with _delegate_worker_condition:
+        if _active_delegate_provider_repair_generation != lease.generation:
+            raise RuntimeError("delegate provider repair lease is not active")
+        while _delegate_worker_records:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _delegate_worker_condition.wait(timeout=remaining)
+        return True
+
+
+def release_delegate_provider_repair(
+    lease: DelegateProviderRepairLease,
+) -> None:
+    """End repair ownership and restore the spawn pause state it replaced."""
+    global _spawn_paused
+    global _active_delegate_provider_repair_generation
+
+    with _delegate_worker_condition:
+        if _active_delegate_provider_repair_generation != lease.generation:
+            raise RuntimeError("delegate provider repair lease is not active")
+        _spawn_paused = lease.restore_spawn_paused
+        _active_delegate_provider_repair_generation = None
+        _delegate_worker_condition.notify_all()
 
 
 def _register_subagent(record: Dict[str, Any]) -> None:
@@ -1871,6 +1985,87 @@ def _cleanup_unstarted_beta_child(
         logger.debug("Failed to close partially built Beta child", exc_info=True)
 
 
+_DELEGATE_WORKER_REGISTRATION_ATTR = "_delegate_worker_registration_id"
+
+
+def _reserve_delegate_workers(children: list[tuple[Any, Any, Any]]) -> None:
+    """Atomically reserve every child before any executor/async thread starts."""
+    reserved: list[tuple[Any, str]] = []
+    with _delegate_worker_condition:
+        if _spawn_paused:
+            raise RuntimeError("Delegation spawning is paused for provider repair")
+        try:
+            for task_index, _task, child in children:
+                existing = vars(child).get(_DELEGATE_WORKER_REGISTRATION_ATTR)
+                if isinstance(existing, str) and existing in _delegate_worker_records:
+                    continue
+                raw_subagent_id = getattr(child, "_subagent_id", None)
+                worker_id = (
+                    raw_subagent_id
+                    if isinstance(raw_subagent_id, str) and raw_subagent_id
+                    else f"delegate-worker-{uuid.uuid4().hex}"
+                )
+                if worker_id in _delegate_worker_records:
+                    raise RuntimeError(f"duplicate delegate worker id: {worker_id}")
+                _delegate_worker_records[worker_id] = {
+                    "worker_id": worker_id,
+                    "task_index": task_index,
+                    "subagent_id": raw_subagent_id,
+                    "child_session_id": getattr(child, "session_id", None),
+                    "agent": child,
+                    "state": "reserved",
+                    "reserved_at": time.monotonic(),
+                }
+                setattr(child, _DELEGATE_WORKER_REGISTRATION_ATTR, worker_id)
+                reserved.append((child, worker_id))
+        except BaseException:
+            for child, worker_id in reversed(reserved):
+                _delegate_worker_records.pop(worker_id, None)
+                if vars(child).get(_DELEGATE_WORKER_REGISTRATION_ATTR) == worker_id:
+                    setattr(child, _DELEGATE_WORKER_REGISTRATION_ATTR, None)
+            _delegate_worker_condition.notify_all()
+            raise
+        _delegate_worker_condition.notify_all()
+
+
+def _claim_delegate_worker(child: Any, task_index: int) -> str:
+    """Mark a reserved child running, refusing starts while repair owns the gate."""
+    worker_id = vars(child).get(_DELEGATE_WORKER_REGISTRATION_ATTR)
+    if not isinstance(worker_id, str):
+        _reserve_delegate_workers([(task_index, {}, child)])
+        worker_id = vars(child).get(_DELEGATE_WORKER_REGISTRATION_ATTR)
+
+    with _delegate_worker_condition:
+        record = _delegate_worker_records.get(worker_id)
+        if record is None:
+            raise RuntimeError("delegate worker reservation is missing")
+        if _active_delegate_provider_repair_generation is not None:
+            raise RuntimeError("delegate worker start blocked by provider repair")
+        record["state"] = "running"
+        record["started_at"] = time.monotonic()
+        record["thread_ident"] = threading.get_ident()
+        _delegate_worker_condition.notify_all()
+        return worker_id
+
+
+def _retire_delegate_worker(child: Any) -> None:
+    """Retire one child only after its real worker and resources have stopped."""
+    worker_id = vars(child).get(_DELEGATE_WORKER_REGISTRATION_ATTR)
+    if not isinstance(worker_id, str):
+        return
+    with _delegate_worker_condition:
+        _delegate_worker_records.pop(worker_id, None)
+        if vars(child).get(_DELEGATE_WORKER_REGISTRATION_ATTR) == worker_id:
+            setattr(child, _DELEGATE_WORKER_REGISTRATION_ATTR, None)
+        _delegate_worker_condition.notify_all()
+
+
+def _release_unclaimed_delegate_workers(children) -> None:
+    """Retire reservations for children whose wrapper thread never started."""
+    for _task_index, _task, child in children:
+        _retire_delegate_worker(child)
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -2678,24 +2873,188 @@ def _run_single_child(
         )
 
     # Global leaf-concurrency gate. Only leaves acquire a slot (orchestrators
-    # run free — see _get_leaf_semaphore). Bounded wait, then proceed anyway so
-    # a saturated cap degrades to "slower" rather than "hung". The acquired
-    # semaphore object is captured locally and released in finally.
+    # run free — see _get_leaf_semaphore). The acquired semaphore object is
+    # captured locally and released in finally. Acquisition itself happens in
+    # the lifetime try/finally below so an interrupt/repair while queued can
+    # retire the child reservation and all owned resources truthfully.
     _is_leaf = getattr(child, "_delegate_role", None) != "orchestrator"
     _leaf_sem = _get_leaf_semaphore() if _is_leaf else None
     _leaf_slot = False
-    if _leaf_sem is not None:
-        _leaf_slot = _leaf_sem.acquire(timeout=_LEAF_ACQUIRE_TIMEOUT_SECONDS)
-        if not _leaf_slot:
-            logger.warning(
-                "delegate_task: leaf subagent %s proceeding without a global "
-                "concurrency slot after %.0fs (cap=%d saturated)",
-                task_index,
-                _LEAF_ACQUIRE_TIMEOUT_SECONDS,
-                _leaf_semaphore_size,
+
+    _child_future = None
+    _defer_lifetime_cleanup = False
+    _lifetime_cleanup_lock = threading.Lock()
+    _lifetime_cleanup_done = False
+    # Fail closed until the public child result proves a more specific
+    # terminal outcome. Deferred cleanup callbacks read this only after the
+    # result path has committed it, so a late provider return cannot rewrite a
+    # timeout/interruption into durable success.
+    _lifetime_end_reason = "delegation_failed"
+
+    def _set_lifetime_end_reason(reason: str) -> None:
+        nonlocal _lifetime_end_reason
+        with _lifetime_cleanup_lock:
+            if not _lifetime_cleanup_done:
+                _lifetime_end_reason = reason
+
+    def _finish_child_lifetime() -> None:
+        """Release child-owned resources exactly once after its real worker exits."""
+        nonlocal _lifetime_cleanup_done
+        with _lifetime_cleanup_lock:
+            if _lifetime_cleanup_done:
+                return
+            _lifetime_cleanup_done = True
+            terminal_reason = _lifetime_end_reason
+
+        try:
+            # Release the global leaf-concurrency slot only when the real child
+            # worker is gone. A timed-out provider call may ignore interrupt
+            # and must continue counting against the concurrency ceiling.
+            if _leaf_slot and _leaf_sem is not None:
+                try:
+                    _leaf_sem.release()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("leaf semaphore release failed: %s", exc)
+
+            # Keep the TUI registry and parent interrupt propagation truthful
+            # while a timed-out worker is still alive.
+            if _subagent_id:
+                _unregister_subagent(_subagent_id)
+
+            if child_pool is not None and leased_cred_id is not None:
+                try:
+                    child_pool.release_lease(leased_cred_id)
+                except Exception as exc:
+                    logger.debug("Failed to release credential lease: %s", exc)
+
+            if hasattr(parent_agent, "_active_children"):
+                try:
+                    lock = getattr(parent_agent, "_active_children_lock", None)
+                    if lock:
+                        with lock:
+                            parent_agent._active_children.remove(child)
+                    else:
+                        parent_agent._active_children.remove(child)
+                except (ValueError, UnboundLocalError) as exc:
+                    logger.debug("Could not remove child from active_children: %s", exc)
+
+            try:
+                child_db = getattr(child, "_session_db", None)
+                child_session_id = getattr(child, "session_id", None)
+                if child_db is not None and child_session_id:
+                    child_db.end_session(child_session_id, terminal_reason)
+            except Exception:
+                logger.debug("Failed to close child session after delegation")
+
+            try:
+                if hasattr(child, "close"):
+                    child.close()
+            except Exception:
+                logger.debug("Failed to close child agent after delegation")
+        finally:
+            # This process-wide registration is the provider-repair boundary.
+            # Retire it last, after the child and its owned resources have
+            # actually stopped, while leaving the parent TurnFence independent.
+            _retire_delegate_worker(child)
+
+    def _pre_provider_abort_reason() -> Optional[str]:
+        with _delegate_worker_condition:
+            if _active_delegate_provider_repair_generation is not None:
+                return "provider_repair"
+        if getattr(parent_agent, "_interrupt_requested", False) is True:
+            return "parent_interrupted"
+        if getattr(child, "_interrupt_requested", False) is True:
+            return "child_interrupted"
+        # Plain test doubles and a few legacy child implementations expose
+        # only this boolean while production AIAgent uses the field above.
+        if getattr(child, "interrupted", False) is True:
+            return "child_interrupted"
+        return None
+
+    def _pre_provider_result(reason: str) -> Dict[str, Any]:
+        duration = round(time.monotonic() - child_start, 2)
+        if reason == "capacity_timeout":
+            _set_lifetime_end_reason("delegation_timeout")
+            error = (
+                "Global delegation concurrency limit remained saturated for "
+                f"{_LEAF_ACQUIRE_TIMEOUT_SECONDS:g}s; child provider work did not start."
             )
+            beta_confined = (
+                getattr(child, "_beta_delegate_provider_confined", False) is True
+            )
+            if beta_confined:
+                error = f"Error [beta_delegate_capacity_timeout]: {error}"
+            status = "failed" if beta_confined else "timeout"
+            exit_reason = "capacity_timeout"
+        else:
+            _set_lifetime_end_reason("delegation_interrupted")
+            if reason == "provider_repair":
+                error = "Interrupted before provider start for Realtor Beta provider repair."
+            else:
+                error = "Interrupted while waiting for a delegation concurrency slot."
+            status = "interrupted"
+            exit_reason = "interrupted"
+        entry = {
+            "task_index": task_index,
+            "subagent_id": _subagent_id,
+            "child_session_id": getattr(child, "session_id", None),
+            "status": status,
+            "summary": None,
+            "error": error,
+            "exit_reason": exit_reason,
+            "api_calls": 0,
+            "duration_seconds": duration,
+            "_child_role": getattr(child, "_delegate_role", None),
+        }
+        if child_progress_cb:
+            try:
+                child_progress_cb(
+                    "subagent.complete",
+                    preview=error,
+                    status=status,
+                    duration_seconds=duration,
+                    summary=error,
+                    child_session_id=getattr(child, "session_id", None),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to relay pre-provider child completion",
+                    exc_info=True,
+                )
+        return entry
 
     try:
+        if _leaf_sem is not None:
+            deadline = time.monotonic() + max(
+                0.0,
+                float(_LEAF_ACQUIRE_TIMEOUT_SECONDS),
+            )
+            while not _leaf_slot:
+                abort_reason = _pre_provider_abort_reason()
+                if abort_reason is not None:
+                    return _pre_provider_result(abort_reason)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "delegate_task: leaf subagent %s did not start because "
+                        "the global concurrency cap=%d stayed saturated for %.1fs",
+                        task_index,
+                        _leaf_semaphore_size,
+                        _LEAF_ACQUIRE_TIMEOUT_SECONDS,
+                    )
+                    return _pre_provider_result("capacity_timeout")
+
+                _leaf_slot = _leaf_sem.acquire(
+                    timeout=min(_LEAF_ACQUIRE_POLL_SECONDS, remaining)
+                )
+
+            # Close the acquire/interrupt race. The slot remains owned until
+            # finally while this early return performs full child cleanup.
+            abort_reason = _pre_provider_abort_reason()
+            if abort_reason is not None:
+                return _pre_provider_result(abort_reason)
+
         _heartbeat_thread.start()
         if child_progress_cb:
             try:
@@ -2723,6 +3082,13 @@ def _run_single_child(
         # Run child with a hard timeout to prevent indefinite blocking
         # when the child's API call or tool-level HTTP request hangs.
         child_timeout = _get_child_timeout()
+        abort_reason = _pre_provider_abort_reason()
+        if abort_reason is not None:
+            return _pre_provider_result(abort_reason)
+        _claim_delegate_worker(child, task_index)
+        abort_reason = _pre_provider_abort_reason()
+        if abort_reason is not None:
+            return _pre_provider_result(abort_reason)
         _timeout_executor = ThreadPoolExecutor(
             max_workers=1,
             # Install a non-interactive approval callback in the worker thread
@@ -2738,15 +3104,53 @@ def _run_single_child(
 
         def _run_with_thread_capture():
             _worker_thread_holder["t"] = threading.current_thread()
-            return child.run_conversation(
-                user_message=goal,
-                task_id=child_task_id,
-            )
+            worker_abort_reason = _pre_provider_abort_reason()
+            if worker_abort_reason is not None:
+                raise _DelegateChildInterrupted(worker_abort_reason)
+            # Accepted-turn policy inheritance (package A4): bind EXACTLY the
+            # policy captured at delegate_task dispatch time around the
+            # child's whole run.  This worker thread is fresh per child today,
+            # but the binding is still mandatory: it (a) gives the child the
+            # parent-derived policy instead of a policyless run, (b) shadows
+            # any ambient policy a reused/pooled thread might carry from an
+            # unrelated (possibly wider) turn, and (c) restores the thread's
+            # prior state on every exit path.  A child without a stamped
+            # binding (direct _run_single_child callers, test doubles) binds
+            # explicit no-policy — never ambient.
+            from tools.approval import inherited_execution_policy_scope
+
+            with inherited_execution_policy_scope(
+                getattr(child, "_inherited_policy_binding", None)
+            ):
+                return child.run_conversation(
+                    user_message=goal,
+                    task_id=child_task_id,
+                )
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
         try:
-            result = _child_future.result(timeout=child_timeout)
+            child_deadline = time.monotonic() + max(0.0, float(child_timeout))
+            while True:
+                abort_reason = _pre_provider_abort_reason()
+                if abort_reason is not None:
+                    raise _DelegateChildInterrupted(abort_reason)
+                remaining = child_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise FuturesTimeoutError()
+                try:
+                    result = _child_future.result(
+                        timeout=min(_CHILD_RESULT_POLL_SECONDS, remaining)
+                    )
+                    break
+                except FuturesTimeoutError:
+                    # A polling timeout means the provider is legitimately
+                    # still running. If the Future itself is terminal, surface
+                    # its TimeoutError through the ordinary failure path.
+                    if _child_future.done():
+                        raise
+                    continue
         except Exception as _timeout_exc:
+            abort_before_child_signal = _pre_provider_abort_reason()
             # Signal the child to stop so its thread can exit cleanly.
             try:
                 if hasattr(child, "interrupt"):
@@ -2756,14 +3160,38 @@ def _run_single_child(
             except Exception:
                 pass
 
-            is_timeout = isinstance(_timeout_exc, (FuturesTimeoutError, TimeoutError))
+            # A provider request can ignore ``interrupt``. Defer child cleanup
+            # and process-registry retirement until the Future really finishes;
+            # otherwise session repair can rebuild the actor while old-provider
+            # inference is still executing in this worker.
+            _defer_lifetime_cleanup = not _child_future.done()
+
+            was_interrupted = isinstance(_timeout_exc, _DelegateChildInterrupted)
+            is_timeout = (
+                not was_interrupted
+                and isinstance(_timeout_exc, (FuturesTimeoutError, TimeoutError))
+            )
+            was_interrupted = was_interrupted or (
+                abort_before_child_signal is not None and not is_timeout
+            )
             beta_confined = (
                 getattr(child, "_beta_delegate_provider_confined", False) is True
             )
             failure_status = (
-                "failed"
-                if beta_confined
-                else ("timeout" if is_timeout else "error")
+                "interrupted"
+                if was_interrupted
+                else (
+                    "failed"
+                    if beta_confined
+                    else ("timeout" if is_timeout else "error")
+                )
+            )
+            _set_lifetime_end_reason(
+                "delegation_interrupted"
+                if was_interrupted
+                else (
+                    "delegation_timeout" if is_timeout else "delegation_failed"
+                )
             )
             duration = round(time.monotonic() - child_start, 2)
             logger.warning(
@@ -2834,7 +3262,7 @@ def _run_single_child(
                     )
             else:
                 _err = str(_timeout_exc)
-            if beta_confined:
+            if beta_confined and not was_interrupted:
                 code = (
                     "beta_delegate_timeout"
                     if is_timeout
@@ -2849,7 +3277,11 @@ def _run_single_child(
                 "status": failure_status,
                 "summary": None,
                 "error": _err,
-                "exit_reason": "timeout" if is_timeout else "error",
+                "exit_reason": (
+                    "interrupted"
+                    if was_interrupted
+                    else ("timeout" if is_timeout else "error")
+                ),
                 "api_calls": child_api_calls,
                 "duration_seconds": duration,
                 "_child_role": getattr(child, "_delegate_role", None),
@@ -3104,17 +3536,33 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback completion failed: %s", e)
 
+        _set_lifetime_end_reason(
+            "delegation_complete"
+            if status == "completed"
+            else (
+                "delegation_interrupted"
+                if status == "interrupted"
+                else "delegation_failed"
+            )
+        )
         return entry
 
     except Exception as exc:
         duration = round(time.monotonic() - child_start, 2)
+        abort_reason = _pre_provider_abort_reason()
+        durable_interrupted = abort_reason is not None
+        _set_lifetime_end_reason(
+            "delegation_interrupted"
+            if durable_interrupted
+            else "delegation_failed"
+        )
         logging.exception(f"[subagent-{task_index}] failed")
         if child_progress_cb:
             try:
                 child_progress_cb(
                     "subagent.complete",
                     preview=str(exc),
-                    status="failed",
+                    status="interrupted" if durable_interrupted else "failed",
                     duration_seconds=duration,
                     summary=str(exc),
                     child_session_id=getattr(child, "session_id", None),
@@ -3124,18 +3572,26 @@ def _run_single_child(
         beta_confined = (
             getattr(child, "_beta_delegate_provider_confined", False) is True
         )
-        visible_error = (
-            f"Error [beta_delegate_provider_failed]: {exc}"
-            if beta_confined
-            else str(exc)
-        )
+        if durable_interrupted:
+            visible_error = f"Delegation interrupted before completion: {exc}"
+        else:
+            visible_error = (
+                f"Error [beta_delegate_provider_failed]: {exc}"
+                if beta_confined
+                else str(exc)
+            )
         _error_entry: Dict[str, Any] = {
             "task_index": task_index,
             "subagent_id": _subagent_id,
             "child_session_id": getattr(child, "session_id", None),
-            "status": "failed" if beta_confined else "error",
+            "status": (
+                "interrupted"
+                if durable_interrupted
+                else ("failed" if beta_confined else "error")
+            ),
             "summary": None,
             "error": visible_error,
+            "exit_reason": "interrupted" if durable_interrupted else "error",
             "api_calls": 0,
             "duration_seconds": duration,
             "_child_role": getattr(child, "_delegate_role", None),
@@ -3154,24 +3610,6 @@ def _run_single_child(
         if _heartbeat_thread.ident is not None:
             _heartbeat_thread.join(timeout=5)
 
-        # Release the global leaf-concurrency slot (only if we acquired one).
-        if _leaf_slot and _leaf_sem is not None:
-            try:
-                _leaf_sem.release()
-            except Exception as exc:  # pragma: no cover — defensive
-                logger.debug("leaf semaphore release failed: %s", exc)
-
-        # Drop the TUI-facing registry entry.  Safe to call even if the
-        # child was never registered (e.g. ID missing on test doubles).
-        if _subagent_id:
-            _unregister_subagent(_subagent_id)
-
-        if child_pool is not None and leased_cred_id is not None:
-            try:
-                child_pool.release_lease(leased_cred_id)
-            except Exception as exc:
-                logger.debug("Failed to release credential lease: %s", exc)
-
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
         import model_tools
@@ -3180,43 +3618,16 @@ def _run_single_child(
         if isinstance(saved_tool_names, list):
             model_tools._last_resolved_tool_names = list(saved_tool_names)
 
-        # Remove child from active tracking
-
-        # Unregister child from interrupt propagation
-        if hasattr(parent_agent, "_active_children"):
-            try:
-                lock = getattr(parent_agent, "_active_children_lock", None)
-                if lock:
-                    with lock:
-                        parent_agent._active_children.remove(child)
-                else:
-                    parent_agent._active_children.remove(child)
-            except (ValueError, UnboundLocalError) as e:
-                logger.debug("Could not remove child from active_children: %s", e)
-
-        # Close the child's SESSION row (set ended_at + end_reason). A delegated
-        # child runs exactly once and is then finished, but nothing else marks
-        # its session ended — so the row stayed ended_at=NULL forever and the
-        # dashboard couldn't tell a running child from a finished one (the panel
-        # showed every past subagent as "running", and the status flickered
-        # running↔done on navigation). With a real end marker, status is
-        # authoritative: ended_at set = done, null = genuinely still running.
-        try:
-            _cdb = getattr(child, "_session_db", None)
-            _csid = getattr(child, "session_id", None)
-            if _cdb is not None and _csid:
-                _cdb.end_session(_csid, "delegation_complete")
-        except Exception:
-            logger.debug("Failed to close child session after delegation")
-
-        # Close tool resources (terminal sandboxes, browser daemons,
-        # background processes, httpx clients) so subagent subprocesses
-        # don't outlive the delegation.
-        try:
-            if hasattr(child, "close"):
-                child.close()
-        except Exception:
-            logger.debug("Failed to close child agent after delegation")
+        if _defer_lifetime_cleanup and _child_future is not None:
+            # ``add_done_callback`` is race-safe: if the worker exits between
+            # the timeout check and registration, Future invokes this
+            # immediately. Until then the child remains registered/interruptible
+            # and the process worker registry keeps provider repair fail-closed.
+            _child_future.add_done_callback(
+                lambda _future: _finish_child_lifetime()
+            )
+        else:
+            _finish_child_lifetime()
 
 
 def _recover_tasks_from_json_string(
@@ -3240,6 +3651,44 @@ def _recover_tasks_from_json_string(
             f"{type(parsed).__name__} instead."
         )
     return parsed, None
+
+
+def _record_policy_inheritance_evidence(children, binding) -> None:
+    """Project one durable derivation event per delegation (best-effort).
+
+    The authoritative durable trail is the effect-claim rows themselves
+    (child claims record the inherited ``accepted_policy``/``turn_id``/
+    ``policy_revision``, and the sessions table links child sessions to the
+    parent).  This diagnostics event additionally evidences the DERIVATION
+    moment — which children were bound to which parent turn/revision — for
+    the A5 shadow-evidence campaign.  Failure here never blocks delegation.
+    """
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        policy = getattr(binding, "policy", None)
+        payload = {
+            "parent_session_id": getattr(binding, "parent_session_id", None),
+            "accepted_turn_id": getattr(policy, "accepted_turn_id", None),
+            "policy_mode": getattr(
+                getattr(policy, "mode", None), "value", None
+            ),
+            "policy_revision": getattr(binding, "policy_revision", None),
+            "inherited": policy is not None,
+            "child_session_ids": [
+                getattr(child, "session_id", None)
+                for _i, _t, child in children
+            ],
+        }
+        record_session_event(
+            "delegation.policy_inheritance",
+            session_id=getattr(binding, "parent_session_id", None) or None,
+            payload=payload,
+            source="delegate_tool",
+            component="tools.delegate_tool",
+        )
+    except Exception:
+        logger.debug("policy inheritance evidence projection failed", exc_info=True)
 
 
 def delegate_task(
@@ -3309,6 +3758,24 @@ def delegate_task(
 
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
+
+    # --- Accepted-turn policy inheritance capture (package A4 / ERB-406) ---
+    # Snapshot the parent's accepted-turn policy + durable receipt revision
+    # HERE, on the dispatching thread, before any child is built.  Children
+    # run on fresh worker threads (single/batch/async lanes all funnel
+    # through _run_single_child's timeout executor), where contextvars start
+    # empty — so without this explicit capture a child would either run
+    # policyless or, worse on a reused pooled thread, under whatever stale
+    # binding that thread last carried.  The captured binding travels on the
+    # child object and is bound explicitly around its run; a parent with no
+    # bound policy captures explicit no-policy (never ambient).  Derivation
+    # is equal-or-narrower by construction (ExecutionPolicy.narrow) and is
+    # clamped at the exact-Beta ceiling.
+    from tools.approval import capture_inherited_execution_policy
+
+    inherited_policy_binding = capture_inherited_execution_policy(
+        parent_session_id=getattr(parent_agent, "session_id", None),
+    )
 
     # Operator-controlled kill switch — lets the TUI freeze new fan-out
     # when a runaway tree is detected, without interrupting already-running
@@ -3518,6 +3985,13 @@ def delegate_task(
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
+            # Stamp the dispatch-time policy capture on the child object —
+            # the ONLY channel to the child's worker thread.  Nested
+            # delegation chains naturally: a child's own delegate_task call
+            # re-captures from ITS bound (inherited) policy, so a grandchild
+            # derives equal-or-narrower from the child, transitively from
+            # the original accepted turn.
+            child._inherited_policy_binding = inherited_policy_binding
             children.append((i, t, child))
     except Exception as exc:
         if not beta_provider_active:
@@ -3539,6 +4013,31 @@ def delegate_task(
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
+
+    try:
+        # Reserve every child atomically before raw executor/async threads can
+        # start. Provider repair owns the same condition + spawn gate, so a
+        # child between construction and submission cannot escape its snapshot.
+        _reserve_delegate_workers(children)
+    except Exception as exc:
+        visible_error = _beta_delegate_error(exc) if beta_provider_active else str(exc)
+        for _i, _t, built_child in children:
+            _cleanup_unstarted_beta_child(
+                built_child,
+                parent_agent,
+                error=visible_error,
+            )
+        if not beta_provider_active:
+            raise
+        return tool_error(
+            visible_error,
+            code=str(
+                getattr(exc, "code", "")
+                or "beta_delegate_provider_policy_failed"
+            ),
+        )
+
+    _record_policy_inheritance_evidence(children, inherited_policy_binding)
 
     # Async (non-blocking) delegation: when the gateway has wired an async sink
     # onto the parent agent AND this is a TOP-LEVEL agent (depth 0), the parent
@@ -3624,9 +4123,21 @@ def delegate_task(
                         }
                     )
 
-        threading.Thread(
+        async_thread = threading.Thread(
             target=_run_async, name=f"delegate-async-{task_id}", daemon=True
-        ).start()
+        )
+        try:
+            async_thread.start()
+        except BaseException as exc:
+            _release_unclaimed_delegate_workers(children)
+            error = f"Delegation worker thread failed to start: {exc}"
+            for _i, _task, built_child in children:
+                _cleanup_unstarted_beta_child(
+                    built_child,
+                    parent_agent,
+                    error=error,
+                )
+            raise
         return json.dumps(
             {
                 "status": "dispatched",
@@ -3705,17 +4216,72 @@ def _execute_and_finalize_delegation(
         completed_count = 0
         spinner_ref = getattr(parent_agent, "_delegate_spinner", None)
 
-        with ThreadPoolExecutor(max_workers=max_children) as executor:
-            futures = {}
-            for i, t, child in children:
-                future = executor.submit(
-                    _run_single_child,
-                    task_index=i,
-                    goal=t["goal"],
-                    child=child,
-                    parent_agent=parent_agent,
+        def _cleanup_unstarted_children(
+            unstarted_children,
+            *,
+            error: str,
+        ) -> None:
+            # These children were built and process-reserved, but no wrapper
+            # will ever run their normal lifetime cleanup. Close their owned
+            # resources first, then retire the provider-repair registration.
+            for _idx, _task, unstarted_child in unstarted_children:
+                _cleanup_unstarted_beta_child(
+                    unstarted_child,
+                    parent_agent,
+                    error=error,
                 )
-                futures[future] = i
+            _release_unclaimed_delegate_workers(unstarted_children)
+
+        try:
+            executor = ThreadPoolExecutor(max_workers=max_children)
+        except BaseException as exc:
+            _cleanup_unstarted_children(
+                children,
+                error=f"Delegation executor failed to start: {exc}",
+            )
+            raise
+
+        futures = {}
+        child_by_future = {}
+        executor_shutdown = False
+        parent_interrupted = False
+        try:
+            try:
+                for i, t, child in children:
+                    future = executor.submit(
+                        _run_single_child,
+                        task_index=i,
+                        goal=t["goal"],
+                        child=child,
+                        parent_agent=parent_agent,
+                    )
+                    futures[future] = i
+                    child_by_future[future] = (i, t, child)
+            except BaseException as exc:
+                # ``submit`` can fail after earlier wrappers are already live.
+                # Do not wait for those workers, but cancel queued work before
+                # cleaning its child reservation. Running wrappers retain their
+                # registration and perform normal lifetime cleanup on real exit.
+                executor.shutdown(wait=False, cancel_futures=True)
+                executor_shutdown = True
+
+                error = f"Delegation executor submit failed: {exc}"
+                for submitted_future, submitted_child in child_by_future.items():
+                    if submitted_future.cancelled():
+                        _cleanup_unstarted_children(
+                            [submitted_child],
+                            error=error,
+                        )
+
+                # Submission is sequential. Everything from the first call
+                # that did not return a Future onward never became an owned
+                # wrapper and otherwise would remain process-reserved forever.
+                never_submitted = children[len(child_by_future):]
+                _cleanup_unstarted_children(
+                    never_submitted,
+                    error=error,
+                )
+                raise
 
             # Poll futures with interrupt checking.  as_completed() blocks
             # until ALL futures finish — if a child agent gets stuck,
@@ -3729,9 +4295,13 @@ def _execute_and_finalize_delegation(
             pending = set(futures.keys())
             while pending:
                 if getattr(parent_agent, "_interrupt_requested", False) is True:
+                    parent_interrupted = True
                     # Parent interrupted — collect whatever finished and
-                    # abandon the rest.  Children already received the
-                    # interrupt signal; we just can't wait forever.
+                    # abandon the rest. Children already received the
+                    # interrupt signal through parent propagation. A queued
+                    # wrapper can be cancelled and cleaned here; a running
+                    # wrapper stays process-registered until its real provider
+                    # worker exits.
                     for f in pending:
                         idx = futures[f]
                         if f.done():
@@ -3750,6 +4320,14 @@ def _execute_and_finalize_delegation(
                                     ),
                                 }
                         else:
+                            if f.cancel():
+                                _cleanup_unstarted_children(
+                                    [child_by_future[f]],
+                                    error=(
+                                        "Parent agent interrupted before child "
+                                        "worker started"
+                                    ),
+                                )
                             entry = {
                                 "task_index": idx,
                                 "status": "interrupted",
@@ -3818,6 +4396,18 @@ def _execute_and_finalize_delegation(
                             )
                         except Exception as e:
                             logger.debug("Spinner update_text failed: %s", e)
+
+        finally:
+            if not executor_shutdown:
+                # The context-manager form always calls shutdown(wait=True),
+                # which made Stop block for the full child timeout when a
+                # provider ignored interrupt. Normal completion still drains
+                # deterministically; Stop cancels queued wrappers and returns
+                # while genuinely running workers remain truthfully tracked.
+                executor.shutdown(
+                    wait=not parent_interrupted,
+                    cancel_futures=parent_interrupted,
+                )
 
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
@@ -4510,22 +5100,138 @@ DELEGATE_TASK_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry, tool_error
 
-registry.register(
-    name="delegate_task",
-    toolset="delegation",
-    schema=DELEGATE_TASK_SCHEMA,
-    handler=lambda args, **kw: delegate_task(
+# ---------------------------------------------------------------------------
+# Registry-routed dispatch seam (A2b lane 4 / ERB-406 step 4)
+#
+# The agent loop historically executed ``delegate_task`` through the direct
+# ``AIAgent._dispatch_delegate_task`` branch (``run_agent.py`` concurrent +
+# sequential switches and the ``agent/tool_executor.py`` +
+# ``agent/agent_runtime_helpers.py`` extractions), bypassing the atomic
+# registry shadow boundary entirely.  This seam moves that lane onto the common
+# adapter (``model_tools.dispatch_agent_owned_registry_tool``; per-lane recipe
+# in ``elevate-a2b-migration-recipe-2026-07-17.md``) so every delegation is
+# captured with a frozen registration identity, canonical args digest, and
+# accepted-turn policy context exactly like an ordinary registry tool.
+#
+# Scope: this is the DISPATCH SEAM ONLY.  Child-agent policy inheritance,
+# thread-pool context copying, and async daemon wake are package A4 and are
+# untouched here — the parent agent is read from the companion EAGERLY at
+# handler start and passed straight into ``delegate_task`` as an ordinary
+# argument, exactly as the direct branch passed ``parent_agent=self``.
+#
+# Effect honesty (ERB-404 doctrine; declaration != allowance): delegation
+# spawns child agents with their own tools/terminals — plainly not a read, and
+# no pure surface exists — so the registration carries NO effect declaration
+# (``effects``/``effect_resolver`` omitted -> UNKNOWN).  A restricted
+# accepted-turn policy therefore fails closed on ``delegate_task`` under exact
+# Realtor Beta instead of assuming a read.
+# ---------------------------------------------------------------------------
+
+# The parent AIAgent instance is process state on the agent, not tool-call
+# data, so it can never ride through the registry's JSON-frozen argument or
+# handler-kwargs snapshot.  Agent dispatch binds it here for exactly the
+# duration of one registry shadow dispatch; the registered handler is the only
+# consumer and resolves it eagerly.
+_DELEGATE_PARENT_COMPANION = DispatchCompanion("active_delegate_parent")
+
+
+def bind_active_delegate_parent(parent_agent):
+    """Expose *parent_agent* to the registered handler for one dispatch."""
+    return _DELEGATE_PARENT_COMPANION.bound(parent_agent)
+
+
+def _registered_delegate_task_handler(args, **_kw) -> str:
+    """Register-time handler: sources the parent agent from the companion.
+
+    The companion is resolved EAGERLY here and never stored for a lazy read.
+    On the adapter path the handler-kwargs snapshot is frozen to JSON
+    ``task_id``/``user_task`` only, so the live ``parent_agent`` object can
+    never ride through dispatch kwargs — it arrives EXCLUSIVELY through the
+    companion.  ``**kw`` is ignored for process state: a ``parent_agent``
+    smuggled through dispatch kwargs (the old legacy seam) can never reach the
+    spawn path.  Reached with no companion binding (a hallucinated call, an
+    agent-less ``registry.dispatch``), ``parent_agent`` is ``None`` and
+    ``delegate_task`` returns its typed "requires a parent agent context" error.
+
+    Companion-only channel: the lane-7 ``PluginContext.dispatch_tool`` migration
+    (``elevate_cli/plugins.py``) now binds the parent agent through this same
+    companion, so the temporary ``kw.get("parent_agent")`` fallback that kept
+    the pre-migration plugin path working has been retired — every caller
+    (agent loop AND plugins) delivers the parent through the companion.
+
+    Field forwarding: every model-facing field is forwarded exactly as
+    ``AIAgent._dispatch_delegate_task`` forwarded it, so the migrated AGENT-LOOP
+    lane is byte-identical to the pre-migration direct call.  This handler is
+    also shared by the lane-7 plugin path, whose previous registration lambda
+    forwarded only a subset (goal/context/toolsets/tasks/max_iterations/
+    acp_command/acp_args/role/agent); it now forwards the full set too.  The
+    six added handoff-metadata fields (``agent_id``/``expected_return``/
+    ``handoff_reason``/``priority``/``artifacts``/``parent_run_id``) are
+    advisory and unconsumed, so plugin behavior is unchanged for them;
+    ``cancel_task_id`` is now honored on the plugin path as well (it was
+    silently dropped before — a latent-bug fix, not an agent-loop change).
+    """
+    args = args if isinstance(args, dict) else {}
+    parent_agent = _DELEGATE_PARENT_COMPANION.get()
+    return delegate_task(
         goal=args.get("goal"),
         context=args.get("context"),
         toolsets=args.get("toolsets"),
+        agent=args.get("agent"),
+        agent_id=args.get("agent_id"),
+        expected_return=args.get("expected_return"),
+        handoff_reason=args.get("handoff_reason"),
+        priority=args.get("priority"),
+        artifacts=args.get("artifacts"),
+        parent_run_id=args.get("parent_run_id"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
-        agent=args.get("agent"),
-        parent_agent=kw.get("parent_agent"),
-    ),
+        cancel_task_id=args.get("cancel_task_id"),
+        parent_agent=parent_agent,
+    )
+
+
+def dispatch_delegate_task_via_registry(
+    function_args,
+    *,
+    parent_agent,
+    task_id=None,
+    session_id=None,
+    tool_call_id=None,
+    return_outcome=False,
+):
+    """Route one ``delegate_task`` invocation through the atomic registry boundary.
+
+    Every agent special-case branch calls this instead of ``delegate_task``
+    directly, so the call is captured with the same frozen identity,
+    args-digest, and policy context as ordinary registry tools.  The parent
+    agent is bound only for the duration of this dispatch and only the
+    registered handler can consume it.  ``return_outcome=True`` returns the
+    adapter's :class:`ToolDispatchOutcome` (truthful physical-start proof
+    for the exact-Beta loops); the default returns the raw result
+    byte-identically.
+    """
+    from model_tools import dispatch_agent_owned_registry_tool
+
+    return dispatch_agent_owned_registry_tool(
+        "delegate_task",
+        function_args if isinstance(function_args, dict) else {},
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        companions=(bind_active_delegate_parent(parent_agent),),
+        return_outcome=return_outcome,
+    )
+
+
+registry.register(
+    name="delegate_task",
+    toolset="delegation",
+    schema=DELEGATE_TASK_SCHEMA,
+    handler=_registered_delegate_task_handler,
     check_fn=check_delegate_requirements,
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,

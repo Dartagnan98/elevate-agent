@@ -96,7 +96,6 @@ describe("Realtor Beta onboarding provider UI", () => {
     expect(REALTOR_BETA_WIZARD_STEP_IDS).toEqual([
       "models",
       "memory",
-      "inbound",
       "tools",
       "subagents",
     ]);
@@ -267,6 +266,21 @@ describe("Realtor Beta onboarding provider UI", () => {
     expect(contract.error).toContain("Update Elevation Beta");
     expect(draft.primaryProvider).toBe(REALTOR_BETA_OAUTH_PROVIDER_ID);
     expect(draft.primaryModel).toBe("");
+  });
+
+  it("does not unlock onboarding while the backend runtime receipt is blocked", () => {
+    const primary = primaryItem();
+    const contract = resolveBetaPrimaryUiContract({
+      runtime: betaRuntime({
+        runtimeReady: false,
+        blockedReason: "beta_model_not_allowed",
+      }),
+      setupProvider: primary.provider,
+      setupValue: primary.value,
+    });
+
+    expect(contract.valid).toBe(false);
+    expect(contract.error).toContain("not finished preparing");
   });
 
   it("leaves Stable rows, refresh semantics, and drafts unchanged", async () => {

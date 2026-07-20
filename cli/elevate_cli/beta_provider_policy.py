@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -36,6 +37,9 @@ BETA_ALLOWED_MODELS = (
 
 _BETA_ALLOWED_CONFIG_PLATFORMS = frozenset({"telegram", "api_server"})
 _BETA_ENV_CONFIG_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_BETA_RUNTIME_REPAIR_STATE_LOCK = threading.Lock()
+_beta_runtime_repair_blocked_reason: str | None = None
+_beta_runtime_repair_generation: str | None = None
 
 
 class BetaProviderPolicyError(ValueError):
@@ -83,6 +87,136 @@ def beta_model_or_default(value: Any, *, source: str = "model") -> str:
             code="beta_model_not_allowed",
         )
     return model
+
+
+def validate_beta_primary_model_unchanged(
+    prospective_config: Mapping[str, Any],
+    current_config: Mapping[str, Any],
+    *,
+    source: str = "settings",
+) -> None:
+    """Keep primary-model writes on the coordinated OAuth/onboarding path.
+
+    Generic config surfaces may persist unrelated Realtor Beta settings, but
+    they do not own the cross-process provider-repair barrier. An otherwise
+    valid model change there would update disk while live actors kept the old
+    runtime.
+    """
+    if not beta_provider_policy_active():
+        return
+    current_model = (
+        current_config.get("model")
+        if isinstance(current_config, Mapping)
+        else None
+    )
+    prospective_model = (
+        prospective_config.get("model")
+        if isinstance(prospective_config, Mapping)
+        else None
+    )
+    if prospective_model != current_model:
+        raise BetaProviderPolicyError(
+            "Realtor Beta changes its Codex model through in-app onboarding "
+            f"or AI settings, not {source}.",
+            code="beta_app_onboarding_required",
+        )
+
+
+def validate_beta_runtime_overrides(
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Reject ambient primary overrides that the exact Beta runtime would reject."""
+    env = os.environ if environ is None else environ
+    provider = str(env.get("ELEVATE_INFERENCE_PROVIDER") or "").strip()
+    model = str(env.get("ELEVATE_MODEL") or "").strip()
+    if provider:
+        canonical_beta_provider(provider, source="ELEVATE_INFERENCE_PROVIDER")
+    if model:
+        beta_model_or_default(model, source="ELEVATE_MODEL")
+
+
+def mark_beta_runtime_repair_pending(generation: str | None = None) -> bool:
+    """Fail readiness closed while the current process repairs live actors."""
+    global _beta_runtime_repair_blocked_reason, _beta_runtime_repair_generation
+    with _BETA_RUNTIME_REPAIR_STATE_LOCK:
+        if (
+            generation is not None
+            and _beta_runtime_repair_generation not in (None, generation)
+        ):
+            return False
+        _beta_runtime_repair_blocked_reason = "beta_provider_repair_pending"
+        if generation is not None:
+            _beta_runtime_repair_generation = generation
+        return True
+
+
+def mark_beta_runtime_repair_failed(generation: str | None = None) -> bool:
+    """Keep readiness closed after an incomplete current-process repair."""
+    global _beta_runtime_repair_blocked_reason, _beta_runtime_repair_generation
+    with _BETA_RUNTIME_REPAIR_STATE_LOCK:
+        if (
+            generation is not None
+            and _beta_runtime_repair_generation not in (None, generation)
+        ):
+            return False
+        _beta_runtime_repair_blocked_reason = "beta_provider_repair_failed"
+        if generation is not None:
+            _beta_runtime_repair_generation = generation
+        return True
+
+
+def mark_beta_runtime_auth_required(generation: str) -> bool:
+    """Keep the retained repair generation closed after an intentional logout."""
+    global _beta_runtime_repair_blocked_reason, _beta_runtime_repair_generation
+    with _BETA_RUNTIME_REPAIR_STATE_LOCK:
+        if _beta_runtime_repair_generation not in (None, generation):
+            return False
+        _beta_runtime_repair_blocked_reason = "beta_codex_auth_required"
+        _beta_runtime_repair_generation = generation
+        return True
+
+
+def clear_beta_runtime_repair_state(
+    expected_generation: str | None = None,
+) -> bool:
+    """Clear the process-local gate after the expected repair generation.
+
+    A late completion from an older provider transition must never reopen
+    admission for a newer repair that is still pending.  Existing callers
+    that do not coordinate generations retain the old unconditional reset.
+    """
+    global _beta_runtime_repair_blocked_reason, _beta_runtime_repair_generation
+    with _BETA_RUNTIME_REPAIR_STATE_LOCK:
+        if (
+            expected_generation is not None
+            and _beta_runtime_repair_generation != expected_generation
+        ):
+            return False
+        _beta_runtime_repair_blocked_reason = None
+        _beta_runtime_repair_generation = None
+        return True
+
+
+def beta_runtime_repair_blocked_reason() -> str | None:
+    """Return the public-safe current-process repair gate, if any."""
+    with _BETA_RUNTIME_REPAIR_STATE_LOCK:
+        return _beta_runtime_repair_blocked_reason
+
+
+def beta_runtime_repair_generation() -> str | None:
+    """Return the process-local provider-repair generation, if any."""
+    with _BETA_RUNTIME_REPAIR_STATE_LOCK:
+        return _beta_runtime_repair_generation
+
+
+def require_beta_runtime_repair_complete() -> None:
+    """Reject setup completion while live actors are pending or failed repair."""
+    reason = beta_runtime_repair_blocked_reason()
+    if reason:
+        raise BetaProviderPolicyError(
+            "Realtor Beta has not finished refreshing its live Codex sessions.",
+            code=reason,
+        )
 
 
 def validate_beta_memory_provider(
@@ -424,6 +558,16 @@ def validate_beta_config_for_persistence(
             code="beta_model_configuration_incomplete",
         )
 
+    openai_runtime = str(
+        model_config.get("openai_runtime") or ""
+    ).strip().lower()
+    if openai_runtime not in {"", "auto"}:
+        raise BetaProviderPolicyError(
+            "Realtor Beta runs Codex through its registered in-app Responses "
+            "runtime and does not allow the external Codex app-server.",
+            code="beta_codex_app_server_not_allowed",
+        )
+
     provider = str(model_config.get("provider") or "").strip().lower()
     model = str(
         model_config.get("default")
@@ -616,6 +760,11 @@ def validate_beta_primary_item(
     auth_status: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate and canonicalize one prospective Beta primary setup item."""
+    # Onboarding readiness must match the actor factory. A durable auth/config
+    # repair that failed before retiring a hostile process override is not a
+    # usable runtime, even though the token and canonical config now exist.
+    validate_beta_runtime_overrides()
+    require_beta_runtime_repair_complete()
     value = item.get("value")
     value = dict(value) if isinstance(value, Mapping) else {}
     provider = str(item.get("provider") or "").strip()

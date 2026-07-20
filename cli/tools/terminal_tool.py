@@ -2422,6 +2422,15 @@ def terminal_tool(
             # the full output string before default truncation and may only
             # replace it by returning a string from transform_terminal_output.
             # The hook is fail-open, and the first valid string return wins.
+            #
+            # Receipt-bound containment (exact Beta): when this command runs
+            # under a durable approval-effect claim, a hook rewrite reaches
+            # the model ONLY once its pre/post digests are evidenced on the
+            # terminal receipt (bind_approved_effect_transform).  An
+            # unevidenced rewrite is withheld and the receipt-anchored
+            # original output is kept.  Without a claim (Stable), behavior
+            # is byte-identical to the legacy seam.
+            _pre_transform_output = output
             try:
                 from elevate_cli.plugins import invoke_hook
                 hook_results = invoke_hook(
@@ -2434,6 +2443,26 @@ def terminal_tool(
                 )
                 for hook_result in hook_results:
                     if isinstance(hook_result, str):
+                        if (
+                            approval_effect_claim is not None
+                            and hook_result != _pre_transform_output
+                        ):
+                            from tools.approval import (
+                                bind_approved_effect_transform,
+                            )
+                            if not bind_approved_effect_transform(
+                                approval_effect_claim,
+                                original_identity={
+                                    "output": _pre_transform_output,
+                                },
+                                transformed_identity={"output": hook_result},
+                            ):
+                                logger.error(
+                                    "transform_terminal_output rewrite "
+                                    "withheld: transform evidence could not "
+                                    "be bound to the terminal receipt"
+                                )
+                                break
                         output = hook_result
                         break
             except Exception:

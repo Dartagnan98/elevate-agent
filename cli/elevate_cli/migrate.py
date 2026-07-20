@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from elevate_cli.colors import Colors, color
-from elevate_cli.config import load_config
+from elevate_cli.config import load_config, reject_beta_cli_config_mutation
 
 
 def cmd_migrate(args: Any) -> int:
@@ -35,6 +35,12 @@ def cmd_migrate_xai(args: Any) -> int:
 
     apply = bool(getattr(args, "apply", False))
     no_backup = bool(getattr(args, "no_backup", False))
+
+    if apply:
+        # This migration round-trips YAML directly so it cannot participate in
+        # the dashboard's live-provider repair barrier. Exact Beta keeps model
+        # changes on the app-owned onboarding/settings path.
+        reject_beta_cli_config_mutation("apply a model migration")
 
     config = load_config()
     issues = find_retired_xai_refs(config)

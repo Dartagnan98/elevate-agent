@@ -85,10 +85,10 @@ def _patch_normal_kanban_calls(monkeypatch, conn):
     ("name", "handler", "args", "expected_calls"),
     [
         (
-            "kanban_list",
-            kanban_tools._handle_list,
-            {"board": "legacy-board", "limit": 1},
-            ["recompute_ready", "list_tasks"],
+            "kanban_recompute",
+            kanban_tools._handle_recompute,
+            {"board": "legacy-board"},
+            ["recompute_ready"],
         ),
         (
             "kanban_complete",
@@ -178,7 +178,7 @@ def test_normal_handlers_enter_and_exit_connection_context(
     assert contexts[0].entered == 1
     assert contexts[0].exited == 1
     assert calls == expected_calls
-    if name == "kanban_list":
+    if name == "kanban_recompute":
         assert result["promoted"] == 2
 
 
@@ -316,28 +316,205 @@ def test_show_runs_inside_postgres_read_only_transaction(monkeypatch):
     assert set(observed_modes) == {"on"}
 
 
-def test_show_is_read_only_and_every_other_registration_remains_unknown():
-    expected = frozenset({Effect.parse("read:kanban")})
-    show = registry.get_entry("kanban_show")
-
-    assert show is not None
-    assert show.effects == expected
-    assert show.effect_resolver is None
-    assert registry.resolve_effects("kanban_show", {"task_id": "t_show"}) == expected
-
-    decision = authorize_effects(
-        ExecutionPolicy.for_mode(
-            "turn-kanban-show",
-            ExecutionPolicyMode.READ_ONLY,
-        ),
-        expected,
+def _summary_task():
+    return SimpleNamespace(
+        id="t_list",
+        title="List me",
+        assignee="worker",
+        status="todo",
+        priority=0,
+        tenant=None,
+        workspace_kind="scratch",
+        workspace_path=None,
+        created_by="tester",
+        created_at=1,
+        started_at=None,
+        completed_at=None,
+        current_run_id=None,
+        model_override=None,
     )
-    assert decision.allowed is True
-    assert decision.reason == "allowed"
+
+
+def test_list_enters_read_only_context_and_never_recomputes(monkeypatch):
+    conn = ConnectionSentinel()
+    read_context = TrackingContext(conn)
+    calls: list[str] = []
+
+    def assert_conn(name, result):
+        def fake(call_conn, *_args, **_kwargs):
+            assert call_conn is conn
+            assert not isinstance(call_conn, TrackingContext)
+            calls.append(name)
+            return result
+
+        return fake
+
+    monkeypatch.setattr(
+        connection_module,
+        "connect_ready_read_only",
+        lambda: read_context,
+    )
+    monkeypatch.setattr(
+        connection_module,
+        "connect",
+        lambda: pytest.fail("kanban_list used general data connect"),
+    )
+    monkeypatch.setattr(
+        kb,
+        "connect",
+        lambda **_kwargs: pytest.fail("kanban_list used normal kanban connect"),
+    )
+    monkeypatch.setattr(
+        kb,
+        "recompute_ready",
+        lambda *_a, **_k: pytest.fail("kanban_list recomputed readiness"),
+    )
+    monkeypatch.setattr(kb, "list_tasks", assert_conn("list_tasks", [_summary_task()]))
+    monkeypatch.setattr(kb, "parent_ids", assert_conn("parent_ids", []))
+    monkeypatch.setattr(kb, "child_ids", assert_conn("child_ids", []))
+
+    result = json.loads(
+        kanban_tools._handle_list({"board": "ignored", "limit": 5})
+    )
+
+    assert "error" not in result
+    assert [t["id"] for t in result["tasks"]] == ["t_list"]
+    assert result["count"] == 1
+    assert result["truncated"] is False
+    assert "promoted" not in result
+    assert read_context.entered == 1
+    assert read_context.exited == 1
+    assert calls == ["list_tasks", "parent_ids", "child_ids"]
+
+
+def test_cold_list_returns_structured_error_without_bootstrap(monkeypatch):
+    def unexpected_bootstrap(*_args, **_kwargs):
+        raise AssertionError("kanban_list attempted write-side bootstrap")
+
+    monkeypatch.setattr(connection_module, "_get_pool", unexpected_bootstrap)
+    monkeypatch.setattr(
+        connection_module,
+        "_maybe_adopt_legacy",
+        unexpected_bootstrap,
+    )
+    monkeypatch.setattr(
+        connection_module.pg_server,
+        "ensure_database",
+        unexpected_bootstrap,
+    )
+    monkeypatch.setattr(connection_module, "_ensure_schema", unexpected_bootstrap)
+    monkeypatch.setattr(kb, "connect", unexpected_bootstrap)
+    monkeypatch.setattr(kb, "recompute_ready", unexpected_bootstrap)
+    monkeypatch.setattr(kb, "list_tasks", unexpected_bootstrap)
+
+    result = json.loads(kanban_tools._handle_list({}))
+
+    assert result["success"] is False
+    assert result["error"] == "operational_store_not_ready"
+    assert "startup" in result["message"].lower()
+
+
+def test_list_runs_inside_postgres_read_only_transaction(monkeypatch):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Read-only Kanban list proof",
+            created_by="test",
+        )
+
+    observed_modes: list[str] = []
+    original_list_tasks = kb.list_tasks
+
+    def audited_list_tasks(conn, **kwargs):
+        observed_modes.append(
+            conn.execute("SHOW transaction_read_only").fetchone()[0]
+        )
+        return original_list_tasks(conn, **kwargs)
+
+    monkeypatch.setattr(kb, "list_tasks", audited_list_tasks)
+
+    result = json.loads(kanban_tools._handle_list({}))
+
+    assert "error" not in result
+    assert task_id in {t["id"] for t in result["tasks"]}
+    assert observed_modes
+    assert set(observed_modes) == {"on"}
+
+
+def test_list_never_promotes_and_recompute_is_the_explicit_mutation():
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="Parent dependency",
+            created_by="test",
+        )
+        child_id = kb.create_task(
+            conn,
+            title="Dependent child",
+            created_by="test",
+            parents=(parent_id,),
+        )
+        # Clear the dependency outside every recomputing code path,
+        # simulating "parent finished since the last dispatcher tick".
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (parent_id,)
+        )
+
+    listing = json.loads(kanban_tools._handle_list({"limit": 200}))
+    assert "error" not in listing
+    assert "promoted" not in listing
+    by_id = {t["id"]: t for t in listing["tasks"]}
+    assert by_id[child_id]["status"] == "todo"
+
+    # Board truth unchanged after the read: still todo, no promoted event.
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (child_id,)
+        ).fetchone()
+        assert row["status"] == "todo"
+        events = kb.list_events(conn, child_id)
+        assert all(e.kind != "promoted" for e in events)
+
+    # Freshness is preserved through the explicit mutation path.
+    recompute = json.loads(kanban_tools._handle_recompute({}))
+    assert recompute["ok"] is True
+    assert recompute["promoted"] == 1
+
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (child_id,)
+        ).fetchone()
+        assert row["status"] == "ready"
+        events = kb.list_events(conn, child_id)
+        assert any(e.kind == "promoted" for e in events)
+
+
+def test_show_and_list_are_read_only_and_every_other_registration_remains_unknown():
+    expected = frozenset({Effect.parse("read:kanban")})
+
+    for name, sample_args in (
+        ("kanban_show", {"task_id": "t_show"}),
+        ("kanban_list", {"limit": 5}),
+    ):
+        entry = registry.get_entry(name)
+        assert entry is not None
+        assert entry.effects == expected
+        assert entry.effect_resolver is None
+        assert registry.resolve_effects(name, sample_args) == expected
+
+        decision = authorize_effects(
+            ExecutionPolicy.for_mode(
+                f"turn-{name.replace('_', '-')}",
+                ExecutionPolicyMode.READ_ONLY,
+            ),
+            expected,
+        )
+        assert decision.allowed is True
+        assert decision.reason == "allowed"
 
     unknown = frozenset({Effect(EffectKind.UNKNOWN)})
     for name in (
-        "kanban_list",
+        "kanban_recompute",
         "kanban_complete",
         "kanban_block",
         "kanban_heartbeat",
@@ -351,6 +528,16 @@ def test_show_is_read_only_and_every_other_registration_remains_unknown():
         assert entry.effects is None
         assert entry.effect_resolver is None
         assert registry.resolve_effects(name, {}) == unknown
+
+    denial = authorize_effects(
+        ExecutionPolicy.for_mode(
+            "turn-kanban-recompute",
+            ExecutionPolicyMode.READ_ONLY,
+        ),
+        registry.resolve_effects("kanban_recompute", {}),
+    )
+    assert denial.allowed is False
+    assert denial.reason == "unknown_effect"
 
 
 def test_board_schema_admits_legacy_value_without_claiming_routing():

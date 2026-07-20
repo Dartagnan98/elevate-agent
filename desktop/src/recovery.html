@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+    <title>Elevate Beta Recovery</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0c1017; color: #f6f7f9; }
+      main { width: min(620px, calc(100vw - 56px)); padding: 42px; border: 1px solid #303846; border-radius: 20px; background: #151b25; box-shadow: 0 24px 80px #0008; }
+      .eyebrow { color: #90a4c5; font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+      h1 { margin: 14px 0 12px; font-size: 31px; letter-spacing: -.03em; }
+      p { color: #c4cad4; line-height: 1.65; }
+      .status { margin: 28px 0; padding: 16px; border-radius: 12px; background: #0e141d; border: 1px solid #283243; }
+      .status.error { background: #251316; border-color: #70333d; }
+      .status strong { display: block; color: #f6f7f9; margin-bottom: 5px; }
+      button { border: 0; border-radius: 10px; padding: 11px 15px; margin-right: 8px; color: #071019; background: #9ed3ff; font-weight: 700; cursor: pointer; }
+      button.secondary { color: #e9edf3; background: #293344; }
+      button:disabled { opacity: .45; cursor: default; }
+      small { display: block; margin-top: 22px; color: #8994a5; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">Elevate Beta · Recovery mode</div>
+      <h1 id="heading">Verifying that the agent runtime is contained…</h1>
+      <p id="summary">The updater will remain off until Elevate proves that every exact-Beta runtime actor has stopped.</p>
+      <div class="status" id="status" aria-live="polite">
+        <strong id="title">Checking local runtime safety…</strong>
+        <span id="detail">Your Beta profile is being preserved.</span>
+      </div>
+      <button id="check" disabled>Check again</button>
+      <button class="secondary" id="install" disabled>Restart into fixed release</button>
+      <small id="containment">No backend, gateway, terminal, or tool is started by this recovery build.</small>
+    </main>
+    <script>
+      const heading = document.getElementById("heading");
+      const summary = document.getElementById("summary");
+      const statusBox = document.getElementById("status");
+      const title = document.getElementById("title");
+      const detail = document.getElementById("detail");
+      const check = document.getElementById("check");
+      const install = document.getElementById("install");
+      const containment = document.getElementById("containment");
+      let containmentOk = false;
+
+      function renderUpdater(value = {}) {
+        if (!containmentOk) return;
+        const status = value.status || "idle";
+        const version = value.info && value.info.version ? ` ${value.info.version}` : "";
+        const labels = {
+          idle: "Recovery mode is active.", checking: "Checking for a fixed release…",
+          available: `Fixed release${version} is available.`, downloading: `Downloading fixed release${version}…`,
+          ready: `Fixed release${version} is ready.`, current: "No newer fixed release is available yet.",
+          error: "The update check could not complete.",
+        };
+        title.textContent = labels[status] || "Recovery mode is active.";
+        detail.textContent = value.error || (status === "ready"
+          ? "Restart when you are ready. Your Beta profile will be preserved."
+          : "The agent runtime remains off while the updater waits.");
+        install.disabled = status !== "ready";
+      }
+
+      function renderContainmentFailure(error) {
+        containmentOk = false;
+        statusBox.classList.add("error");
+        heading.textContent = "Containment could not be proven.";
+        summary.textContent = "Elevate remains blocked and the updater was not started. Quit this recovery build and contact support before using the Beta again.";
+        title.textContent = "Recovery stopped safely.";
+        detail.textContent = error || "An exact-Beta runtime actor could not be verified as stopped.";
+        containment.textContent = "The recovery build did not modify your ~/.elevate-beta profile or the Stable Elevate app.";
+        check.disabled = true;
+        install.disabled = true;
+      }
+
+      check.addEventListener("click", async () => {
+        if (containmentOk) renderUpdater(await window.elevateRecovery.checkForUpdates());
+      });
+      install.addEventListener("click", () => {
+        if (containmentOk) window.elevateRecovery.installUpdate();
+      });
+
+      async function initialize() {
+        let state;
+        try {
+          state = await window.elevateRecovery.containment();
+        } catch (error) {
+          renderContainmentFailure(error && error.message ? error.message : String(error));
+          return;
+        }
+        if (!state || state.ok !== true) {
+          renderContainmentFailure(state && state.error);
+          return;
+        }
+
+        containmentOk = true;
+        statusBox.classList.remove("error");
+        heading.textContent = "The agent runtime has been safely contained.";
+        summary.textContent = "This recovery build does not start the backend, gateway, terminal, or tools. Your ~/.elevate-beta profile remains in place while Elevate waits for a fixed Beta release.";
+        containment.textContent = "The exact Beta runtime is absent. Its launch agent definition and profile are preserved so the fixed release can start normally. Stable Elevate is untouched.";
+        check.disabled = false;
+        window.elevateRecovery.onStatus(renderUpdater);
+        try {
+          renderUpdater(await window.elevateRecovery.status());
+        } catch (error) {
+          renderUpdater({ status: "error", error: error && error.message ? error.message : String(error) });
+        }
+      }
+
+      initialize();
+    </script>
+  </body>
+</html>

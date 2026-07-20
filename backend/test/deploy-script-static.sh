@@ -25,8 +25,19 @@ grep -Fq -- "npm ci --ignore-scripts" scripts/deploy.sh
 grep -Fq -- "verify-entitlement-health.ts" scripts/deploy.sh
 grep -Fq -- "./node_modules/.bin/next build" scripts/deploy.sh
 grep -Fq -- "--expected-build-id \"\$DEPLOY_ID\"" scripts/deploy.sh
+grep -Fq -- "--expected-active-kid \"\$EXPECTED_ACTIVE_KID\"" scripts/deploy.sh
+grep -Fq -- 'readonly EXPECTED_ACTIVE_KID="ent-2026-07-a"' scripts/deploy.sh
+grep -Fq -- 'EXPECTED_ACTIVE_KID_FOR_DEPLOY="$expected_active_kid"' scripts/deploy.sh
+grep -Fq -- 'readiness.activeKid !== process.env.EXPECTED_ACTIVE_KID_FOR_DEPLOY' scripts/deploy.sh
+grep -Fq -- 'readiness.configurationMode !== "key-ring"' scripts/deploy.sh
+grep -Fq -- 'readiness.completeKeyRingReady !== true' scripts/deploy.sh
+
+precheck_prefix=$'NODE_ENV=production \\\n  EXPECTED_ACTIVE_KID_FOR_DEPLOY="$expected_active_kid" \\\n  node --import tsx --input-type=module'
+grep -Fq -- "$precheck_prefix" scripts/deploy.sh
 grep -Fq -- "--consecutive 3" scripts/deploy.sh
-grep -Fq -- 'readonly -a dotenv_names=(.env .env.local .env.production.local)' scripts/deploy.sh
+grep -Fq -- \
+  'readonly -a dotenv_names=(.env .env.local .env.production .env.production.local)' \
+  scripts/deploy.sh
 grep -Fq -- "trap remove_dotenv_links EXIT" scripts/deploy.sh
 grep -Fq -- 'mkdir -m 700 -- "$lock_dir"' scripts/deploy.sh
 grep -Fq -- '[[ -d "$rollback_backend/.next/server" ]]' scripts/deploy.sh

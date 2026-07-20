@@ -201,6 +201,34 @@ def _wizard_runtime_provider(provider: str, value: Dict[str, Any]) -> str:
     return _WIZARD_PROVIDER_TO_CONFIG.get(provider, provider)
 
 
+def _require_beta_setup_primary_matches_config(
+    item: Dict[str, Any],
+    config: Dict[str, Any],
+) -> None:
+    """Verify setup readiness without becoming a second model writer."""
+    if not beta_provider_policy_active():
+        return
+    value = item.get("value")
+    value = dict(value) if isinstance(value, dict) else {}
+    provider = _wizard_runtime_provider(
+        str(item.get("provider") or "").strip(),
+        value,
+    )
+    model = str(value.get("model") or "").strip()
+    current = config.get("model") if isinstance(config, dict) else None
+    current = current if isinstance(current, dict) else {}
+    current_provider = str(current.get("provider") or "").strip()
+    current_model = str(
+        current.get("default") or current.get("model") or ""
+    ).strip()
+    if provider != current_provider or model != current_model:
+        raise BetaProviderPolicyError(
+            "Realtor Beta Agent setup must match the Codex model already "
+            "configured by in-app OAuth onboarding.",
+            code="beta_app_onboarding_required",
+        )
+
+
 _WIZARD_MEMORY_TO_CONFIG = {
     "sqlite_local": "holographic",
     "supabase": "supabase",
@@ -477,6 +505,10 @@ def _preflight_beta_agent_setup_update(
             submitted_primary,
             auth_status,
         )
+        _require_beta_setup_primary_matches_config(
+            canonical_primary,
+            load_config(),
+        )
         canonical_items = [
             canonical_primary if item.get("key") == "model_primary" else item
             for item in canonical_items
@@ -564,14 +596,25 @@ def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
     model = str(mp_value.get("model") or "").strip()
     if prov and model:
         canon = _wizard_runtime_provider(prov, mp_value)
-        mc = cfg.get("model")
-        if not isinstance(mc, dict):
-            mc = {}
-            cfg["model"] = mc
-        mc["provider"] = canon
-        mc["default"] = model
-        changed = True
-        applied["model"] = {"provider": canon, "model": model}
+        if beta_provider_policy_active():
+            _require_beta_setup_primary_matches_config(mp, cfg)
+            # OAuth onboarding already coordinated the live-session repair.
+            # This legacy readiness materializer verifies, but never rewrites,
+            # the primary model.
+            applied["model"] = {
+                "provider": canon,
+                "model": model,
+                "status": "verified",
+            }
+        else:
+            mc = cfg.get("model")
+            if not isinstance(mc, dict):
+                mc = {}
+                cfg["model"] = mc
+            mc["provider"] = canon
+            mc["default"] = model
+            changed = True
+            applied["model"] = {"provider": canon, "model": model}
 
     me = items.get("model_embedding") or {}
     eprov = str(me.get("provider") or "").strip()

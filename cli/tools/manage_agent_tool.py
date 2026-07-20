@@ -307,6 +307,34 @@ MANAGE_AGENT_SCHEMA = {
 
 from tools.registry import registry
 
+
+def _manage_agent_effect_resolver(args: dict):
+    """Declare only the pure catalog read; every reconfiguration stays unknown.
+
+    ``available``/``available_toolsets``/``catalog`` return the valid toolset
+    catalog from ``_valid_toolsets`` — the static ``TOOLSETS`` map unioned with
+    the in-process ``registry.get_registered_toolset_names()``. No config load,
+    no filesystem, no bootstrap: a pure in-process read that resolves to an
+    exact ``read:agents``.
+
+    ``list``/``get`` LOOK like reads but call ``load_config()`` ->
+    ``ensure_elevate_home()``, which mkdirs the profile tree and seeds
+    ``SOUL.md`` on a cold home — a hidden bootstrap write. They therefore stay
+    unknown/fail-closed until a ready-only config read exists, alongside every
+    mutating (add/remove/set/create) and destructive (retire) action and any
+    unrecognized action. This mirrors the handler's action normalization
+    (``(action or "").strip().lower().replace("-", "_")``) exactly so the
+    declared surface can never diverge from the dispatch.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    act = (action or "").strip().lower().replace("-", "_")
+    if act in {"available", "available_toolsets", "catalog"}:
+        return {"read:agents"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="manage_agent",
     toolset="agent_management",
@@ -324,4 +352,5 @@ registry.register(
     ),
     check_fn=check_manage_agent_requirements,
     emoji="🛠️",
+    effect_resolver=_manage_agent_effect_resolver,
 )

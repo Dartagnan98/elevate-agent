@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from elevate_cli import config as config_module
+from elevate_cli.beta_provider_policy import BetaProviderPolicyError
 from elevate_cli.data import agent_setup as agent_setup_data
 from elevate_cli.web_routes import admin_setup
 
@@ -47,6 +48,15 @@ def _primary_item():
     }
 
 
+def _current_primary_config():
+    return {
+        "model": {
+            "provider": "openai-codex",
+            "default": "gpt-5.5",
+        }
+    }
+
+
 def test_beta_agent_setup_recovers_remote_memory_without_secret_side_effects(
     monkeypatch,
 ):
@@ -60,6 +70,11 @@ def test_beta_agent_setup_recovers_remote_memory_without_secret_side_effects(
         admin_setup,
         "read_beta_codex_auth_status",
         lambda _home: {"logged_in": True},
+    )
+    monkeypatch.setattr(
+        admin_setup,
+        "load_config",
+        lambda: deepcopy(_current_primary_config()),
     )
     monkeypatch.setattr(
         admin_setup,
@@ -127,6 +142,11 @@ def test_beta_agent_setup_canonicalizes_local_memory_and_skips_embeddings(
         admin_setup,
         "read_beta_codex_auth_status",
         lambda _home: {"logged_in": True},
+    )
+    monkeypatch.setattr(
+        admin_setup,
+        "load_config",
+        lambda: deepcopy(_current_primary_config()),
     )
     monkeypatch.setattr(admin_setup, "save_env_value", env_write)
     monkeypatch.setattr(
@@ -301,3 +321,132 @@ def test_non_exact_beta_keeps_agent_setup_items_unchanged(monkeypatch):
         _NoQueryConnection(),
         items,
     ) == items
+
+
+def test_beta_agent_setup_route_rejects_allowed_model_drift_before_db_write(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    connection = _NoQueryConnection()
+    client, data_module = _client(monkeypatch, connection)
+    setup_writer = MagicMock()
+    materializer = MagicMock()
+    env_writer = MagicMock()
+    monkeypatch.setattr(
+        admin_setup,
+        "read_beta_codex_auth_status",
+        lambda _home: {"logged_in": True},
+    )
+    monkeypatch.setattr(
+        admin_setup,
+        "load_config",
+        lambda: {
+            "model": {
+                "provider": "openai-codex",
+                "default": "gpt-5.5",
+            }
+        },
+    )
+    monkeypatch.setattr(data_module, "update_agent_setup", setup_writer)
+    monkeypatch.setattr(
+        admin_setup,
+        "_materialize_agent_setup_to_config",
+        materializer,
+    )
+    monkeypatch.setattr(admin_setup, "save_env_value", env_writer)
+    drifted = _primary_item()
+    drifted["value"]["model"] = "gpt-5.4"
+
+    response = client.put("/api/agent/setup", json={"items": [drifted]})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "beta_app_onboarding_required"
+    setup_writer.assert_not_called()
+    materializer.assert_not_called()
+    env_writer.assert_not_called()
+
+
+def test_beta_config_materializer_rejects_model_drift_without_config_write(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    config = {
+        "model": {
+            "provider": "openai-codex",
+            "default": "gpt-5.5",
+        }
+    }
+    before = deepcopy(config)
+    rows = [
+        {
+            "key": "model_primary",
+            "status": "configured",
+            "provider": "openai-codex",
+            "value_json": json.dumps(
+                {
+                    "model": "gpt-5.4",
+                    "runtimeProvider": "openai-codex",
+                    "apiKey": "",
+                }
+            ),
+        }
+    ]
+    saved = []
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+    monkeypatch.setattr(config_module, "save_config", saved.append)
+
+    with pytest.raises(BetaProviderPolicyError) as caught:
+        admin_setup._materialize_agent_setup_to_config(
+            _SetupRowsConnection(rows)
+        )
+
+    assert getattr(caught.value, "code", None) == "beta_app_onboarding_required"
+    assert config == before
+    assert saved == []
+
+
+def test_beta_config_materializer_only_verifies_matching_primary_model(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    config = {
+        "model": {
+            "provider": "openai-codex",
+            "default": "gpt-5.5",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_mode": "codex_responses",
+        }
+    }
+    before = deepcopy(config)
+    rows = [
+        {
+            "key": "model_primary",
+            "status": "configured",
+            "provider": "openai-codex",
+            "value_json": json.dumps(
+                {
+                    "model": "gpt-5.5",
+                    "runtimeProvider": "openai-codex",
+                    "apiKey": "",
+                }
+            ),
+        }
+    ]
+    saved = []
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+    monkeypatch.setattr(config_module, "save_config", saved.append)
+
+    applied = admin_setup._materialize_agent_setup_to_config(
+        _SetupRowsConnection(rows)
+    )
+
+    assert applied["model"] == {
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+        "status": "verified",
+    }
+    assert applied["embedding"] == {"status": "skipped"}
+    assert applied["memory"] == {"provider": "holographic"}
+    assert config["model"] == before["model"]
+    assert saved[0]["model"] == before["model"]
+    assert len(saved) == 1

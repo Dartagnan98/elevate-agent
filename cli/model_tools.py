@@ -22,13 +22,15 @@ Public API (signatures preserved from the original 2,400-line version):
 
 import json
 import asyncio
+import contextlib
+import contextvars
 import copy
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, ContextManager, Dict, List, Optional, Sequence, Tuple
 
 from tools.registry import (
     PreparedToolCall,
@@ -200,11 +202,36 @@ def _run_async(coro):
 
     if loop and loop.is_running():
         # Inside an async context (gateway, RL env) — run in a fresh thread.
+        # Propagate the caller's contextvars into that thread: a fresh thread
+        # starts with an EMPTY context, so without this copy a dispatch-scoped
+        # companion binding (clarify callback, active memory manager — see
+        # tools/dispatch_companion.py) silently vanishes for async handlers
+        # dispatched from the threaded gateway's running loop, while the
+        # persistent-loop branches below already see it (run_until_complete
+        # snapshots the current context at task creation).  All three
+        # branches now behave identically.
+        #
+        # Timeout semantics: past the deadline the worker thread is
+        # ABANDONED, not stopped — the coroutine may keep running inside the
+        # copied context.  That copied context holds companion *tokens*, but
+        # generation-stamped bindings (tools/dispatch_companion.py) are
+        # retired when the dispatch unwinds, so the abandoned task can no
+        # longer resolve any companion state.  The deadline itself is
+        # configurable for legitimately long-running async tools via
+        # ELEVATE_ASYNC_TOOL_TIMEOUT_S (default preserves the historical
+        # 300 s contract).
         import concurrent.futures
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(asyncio.run, coro)
         try:
-            return future.result(timeout=300)
+            timeout_s = float(os.getenv("ELEVATE_ASYNC_TOOL_TIMEOUT_S", "300"))
+        except ValueError:
+            timeout_s = 300.0
+        if not timeout_s > 0:
+            timeout_s = 300.0
+        ctx = contextvars.copy_context()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(ctx.run, asyncio.run, coro)
+        try:
+            return future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError:
             future.cancel()
             raise
@@ -959,10 +986,10 @@ def exact_beta_tool_preflight_block(
 ) -> Optional[str]:
     """Return a fail-closed Beta block before agent/plugin side effects.
 
-    Agent-owned tools such as ``todo`` and ``delegate_task`` are registered
-    without typed effects today.  Calling this gate before their direct
-    branches therefore blocks stale or hallucinated invocations just like an
-    undeclared registry handler.
+    Agent-owned tools such as ``todo`` and ``delegate_task`` are dispatched
+    through direct agent-loop branches today.  Calling this gate before their
+    direct branches therefore blocks stale or hallucinated invocations just
+    like an undeclared registry handler.
     """
     _prepared, block = _prepare_exact_beta_registry_call(
         function_name,
@@ -979,6 +1006,165 @@ def exact_beta_tool_containment_active() -> bool:
     return _exact_beta_registry_enforcement_active()
 
 
+def dispatch_agent_owned_registry_tool(
+    function_name: str,
+    function_args: Dict[str, Any],
+    *,
+    task_id: Optional[str] = None,
+    user_task: Optional[str] = None,
+    session_id: Optional[str] = None,
+    tool_call_id: Optional[str] = None,
+    companions: Sequence[ContextManager[Any]] = (),
+    return_outcome: bool = False,
+):
+    """THE common adapter routing agent-owned tool branches to the registry.
+
+    The AIAgent dispatch switches historically executed a set of tools
+    (``clarify``, memory/provider tools, ``todo``, ``session_search``,
+    ``lcm_*``, built-in ``memory``, ``delegate_task``) via direct callbacks,
+    bypassing the atomic shadow-dispatch boundary entirely.  Every one of
+    those branches migrates onto this entry point (ERB-406 step 4 / package
+    A2a; the per-lane recipe lives in
+    ``elevate-a2b-migration-recipe-2026-07-17.md``).
+
+    Contract, in dispatch order:
+
+    1. **Exact-Beta preflight** — under exact Realtor Beta the call is frozen
+       (registration ``entry_id``, canonical sorted-key JSON args + SHA-256
+       digest, JSON-only handler-kwargs snapshot, accepted-turn policy and
+       revision) BEFORE any observer or handler can run.  Hard-denied tools,
+       disallowed/unknown effects, and a missing or invalid durable identity
+       all return fail-closed typed block payloads; the frozen call is the
+       exact call executed later, never re-read state.
+    2. **Atomic shadow execution** — with a complete durable identity
+       (``session_id`` + ``tool_call_id`` + current ``ExecutionPolicy`` +
+       non-negative revision) the call runs through
+       ``registry.execute_shadow`` / ``execute_prepared_shadow``: locked
+       identity capture, start linearization, stale-registration fail-closed,
+       and the captured handler exactly as authorized.
+    3. **Byte-parity legacy fallback** — without a durable identity (and
+       outside Beta enforcement) the result is exactly
+       ``registry.dispatch(...)``'s legacy payload, including the legacy
+       unknown-tool payload for hallucinated names.
+    4. **Companion bindings** — *companions* is the one supported channel for
+       process-state handler dependencies that must never ride in the JSON
+       snapshots (clarify's UI callback, the active memory manager).  Pass
+       ``DispatchCompanion.bound(value)`` context managers
+       (``tools/dispatch_companion.py``); they are entered before the
+       preflight and exited LIFO on every exit path — returns, handler error
+       payloads, exceptions, and ``BaseException`` control flow such as
+       ``asyncio.CancelledError`` — so a binding is scoped to exactly this
+       one dispatch.  Each ``bound(...)`` context manager is single-use:
+       build a fresh *companions* tuple for every dispatch attempt (retries
+       included); reusing one across dispatches fails at enter.  Re-entrancy
+       is supported via stacked tokens: a handler performing a nested
+       dispatch may rebind the same companion and the outer value is
+       restored when the nested dispatch exits.
+
+    ``asyncio.CancelledError`` (and other ``BaseException``) raised by a
+    handler propagates to the caller — cancellation is never converted into
+    a tool result — with all companion bindings already unbound.
+
+    ``return_outcome`` — the exact-Beta loops require an immutable
+    physical-start proof, not a bare string.  When True, every exit wraps
+    the exact same result bytes in a :class:`ToolDispatchOutcome`.  Under
+    exact Realtor Beta (the only production consumer) the evidence is
+    TRUTHFUL: typed preflight refusals and registry start blocks are
+    ``started=False``; a dispatch whose handler physically started is
+    ``started=True``.  Outside Beta enforcement ``started=True`` follows
+    the legacy dispatch contract (the observational shadow path and the
+    ``registry.dispatch`` fallback report a completed dispatch, not a
+    proven physical start).  When False (the default and every
+    pre-existing caller) the raw result is returned byte-identically.
+    """
+    handler_kwargs = {"task_id": task_id, "user_task": user_task}
+    with contextlib.ExitStack() as companion_stack:
+        for companion in companions:
+            companion_stack.enter_context(companion)
+        prepared_call, beta_preflight_block = _prepare_exact_beta_registry_call(
+            function_name,
+            function_args,
+            handler_kwargs=handler_kwargs,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+        if beta_preflight_block is not None:
+            return _dispatch_return(
+                beta_preflight_block,
+                started=False,
+                block_reason="beta_preflight_block",
+                return_outcome=return_outcome,
+            )
+        result, dispatch_blocked, effect_receipt = _dispatch_model_registry_call(
+            function_name,
+            function_args,
+            handler_kwargs=handler_kwargs,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            prepared_call=prepared_call,
+        )
+        result = _guard_beta_result_integrity(function_name, effect_receipt, result)
+        if dispatch_blocked:
+            return _dispatch_return(
+                result,
+                started=False,
+                block_reason="registry_start_blocked",
+                return_outcome=return_outcome,
+            )
+        return _dispatch_return(
+            result,
+            started=True,
+            return_outcome=return_outcome,
+        )
+
+
+def _guard_beta_result_integrity(
+    function_name: str,
+    effect_receipt: Any,
+    result: Any,
+):
+    """Fail closed when a receipt-bound Beta result was rewritten unevidenced.
+
+    ``effect_receipt`` exists only when the exact-Beta effect broker claimed
+    this invocation.  The model-visible result leaving the governed boundary
+    must then carry a receipt-anchored digest (the executed result, or a
+    rewrite evidenced via ``tools.effect_broker.bind_transformed_result``).
+    Anything else is an unevidenced post-execution rewrite: the tampered
+    output is withheld and replaced with a typed error.  ``None`` receipts
+    (read-only calls, refused starts, Stable dispatch) pass through
+    untouched, preserving byte parity.
+    """
+    if effect_receipt is None:
+        return result
+    from tools.effect_broker import (
+        durable_transformed_digest,
+        model_result_digest,
+        result_tamper_payload,
+    )
+
+    digest = model_result_digest(result)
+    expected = getattr(effect_receipt, "expected_result_digests", None)
+    if expected and digest in expected:
+        return result
+    # A rewrite evidenced on the durable receipt (bind_transformed_result)
+    # is the one legitimate divergence from the executed result.
+    try:
+        bound = durable_transformed_digest(
+            getattr(effect_receipt, "claim_id", "")
+        )
+    except Exception:
+        bound = None
+    if bound is not None and digest == bound:
+        return result
+    logger.error(
+        "beta result integrity violation for tool %s: model-visible result "
+        "does not match its receipt-bound digest (claim_id=%s)",
+        function_name,
+        getattr(effect_receipt, "claim_id", "?"),
+    )
+    return result_tamper_payload(function_name)
+
+
 def _dispatch_model_registry_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -987,8 +1173,13 @@ def _dispatch_model_registry_call(
     session_id: Optional[str],
     tool_call_id: Optional[str],
     prepared_call: Optional[PreparedToolCall] = None,
-) -> Tuple[Any, bool]:
-    """Use the observational atomic path only with a complete durable identity."""
+) -> Tuple[Any, bool, Any]:
+    """Use the observational atomic path only with a complete durable identity.
+
+    Returns ``(result, start_blocked, effect_receipt)`` where
+    ``effect_receipt`` is the exact-Beta broker anchor from the atomic
+    execution (``None`` whenever the broker did not engage).
+    """
     from tools.approval import (
         ExecutionPolicy,
         get_current_execution_policy,
@@ -1017,12 +1208,24 @@ def _dispatch_model_registry_call(
             ",".join(missing),
         )
         if _exact_beta_registry_enforcement_active():
-            return _beta_registry_context_block(function_name, "unavailable"), True
-        return registry.dispatch(function_name, function_args, **handler_kwargs), False
+            return (
+                _beta_registry_context_block(function_name, "unavailable"),
+                True,
+                None,
+            )
+        return (
+            registry.dispatch(function_name, function_args, **handler_kwargs),
+            False,
+            None,
+        )
 
     if _exact_beta_registry_enforcement_active():
         if prepared_call is None:
-            return _beta_registry_context_block(function_name, "unprepared"), True
+            return (
+                _beta_registry_context_block(function_name, "unprepared"),
+                True,
+                None,
+            )
         if (
             prepared_call.tool_name != function_name
             or prepared_call.execution_policy is not policy
@@ -1030,7 +1233,7 @@ def _dispatch_model_registry_call(
             or prepared_call.context.session_id != durable_session_id
             or prepared_call.context.invocation_id != durable_invocation_id
         ):
-            return _beta_registry_context_block(function_name, "stale"), True
+            return _beta_registry_context_block(function_name, "stale"), True, None
         outcome = registry.execute_prepared_shadow(prepared_call)
         authorization = outcome.prepared.authorization
         if getattr(outcome, "execution_error", None):
@@ -1043,13 +1246,21 @@ def _dispatch_model_registry_call(
                 "registry shadow start blocked: reason=%s",
                 authorization.reason,
             )
-        return outcome.result, not outcome.started
+        return (
+            outcome.result,
+            not outcome.started,
+            getattr(outcome, "effect_receipt", None),
+        )
 
     # Hallucinated or stale tool names retain the exact legacy unknown-tool
     # payload. Atomic shadow status is internal metadata, not model output.
     if registry.get_entry(function_name) is None:
         logger.debug("registry shadow fallback: tool registration unavailable")
-        return registry.dispatch(function_name, function_args, **handler_kwargs), False
+        return (
+            registry.dispatch(function_name, function_args, **handler_kwargs),
+            False,
+            None,
+        )
 
     try:
         context = ToolCallContext(
@@ -1061,8 +1272,16 @@ def _dispatch_model_registry_call(
     except (TypeError, ValueError):
         logger.debug("registry shadow fallback: invalid durable identity")
         if _exact_beta_registry_enforcement_active():
-            return _beta_registry_context_block(function_name, "invalid"), True
-        return registry.dispatch(function_name, function_args, **handler_kwargs), False
+            return (
+                _beta_registry_context_block(function_name, "invalid"),
+                True,
+                None,
+            )
+        return (
+            registry.dispatch(function_name, function_args, **handler_kwargs),
+            False,
+            None,
+        )
 
     outcome = registry.execute_shadow(
         function_name,
@@ -1091,7 +1310,7 @@ def _dispatch_model_registry_call(
             outcome.started,
             str(enforced).lower(),
         )
-    return outcome.result, False
+    return outcome.result, False, getattr(outcome, "effect_receipt", None)
 
 
 def handle_function_call(
@@ -1218,7 +1437,7 @@ def handle_function_call(
             except Exception:
                 pass  # file_tools may not be loaded yet
 
-        result, dispatch_blocked = _dispatch_model_registry_call(
+        result, dispatch_blocked, effect_receipt = _dispatch_model_registry_call(
             function_name,
             function_args,
             handler_kwargs=handler_kwargs,
@@ -1235,6 +1454,14 @@ def handle_function_call(
             )
 
         if exact_beta:
+            # Last governed point before the result reaches the model: a
+            # receipt-bound result must still carry a receipt-anchored digest
+            # (fail closed on any unevidenced downstream rewrite).
+            result = _guard_beta_result_integrity(
+                function_name,
+                effect_receipt,
+                result,
+            )
             return _dispatch_return(
                 result,
                 started=True,

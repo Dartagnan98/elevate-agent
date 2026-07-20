@@ -8,6 +8,7 @@ This module is the single source of truth for the dangerous command system:
 - Permanent allowlist persistence (config.yaml)
 """
 
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -1647,6 +1648,209 @@ def get_current_execution_policy_revision() -> Optional[int]:
     return _current_execution_policy_revision.get()
 
 
+# ---------------------------------------------------------------------------
+# Accepted-turn policy inheritance (package A4 / ERB-406)
+#
+# Child agents, retries, and resumed executions must never re-resolve their
+# capability from AMBIENT state (whatever policy happens to be bound on the
+# thread that runs them — a pooled worker can carry a stale binding from an
+# unrelated, possibly wider turn).  Inheritance is therefore an explicit
+# three-step contract:
+#
+#   1. ``capture_inherited_execution_policy()`` snapshots the CURRENT
+#      accepted-turn policy + durable receipt revision at dispatch time, on
+#      the dispatching thread, and derives the child policy through the
+#      ``ExecutionPolicy.narrow`` lattice — equal-or-narrower by
+#      construction, never wider (``PolicyWideningError`` is structural).
+#   2. The frozen :class:`InheritedPolicyBinding` travels WITH the child (an
+#      ordinary attribute on the child agent object), not through any
+#      contextvar, thread-local, or global.
+#   3. ``inherited_execution_policy_scope(binding)`` binds EXACTLY the
+#      captured values around the child's run.  A missing/invalid binding
+#      binds an explicit no-policy state — the absence of a parent policy is
+#      itself inherited; ambient thread state never is, in either direction.
+#
+# Under exact Realtor Beta both the capture and the bind clamp the derived
+# policy at the Beta cohort ceiling (draft-only): a wider captured binding —
+# for example one replayed into a Beta process from a non-Beta capture —
+# degrades to explicit no-policy, so every beyond-read dispatch fails closed
+# at the adapter's durable-identity gate rather than executing wide.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class InheritedPolicyBinding:
+    """Frozen dispatch-time capture of one parent accepted-turn policy.
+
+    ``policy`` is the DERIVED child policy (equal-or-narrower than the
+    parent's, same accepted-turn identity) or ``None`` when the parent had
+    no bound policy.  ``policy_revision`` is the parent's durable receipt
+    revision at capture time.  ``parent_session_id`` completes the durable
+    trail: child effect claims record ``accepted_policy``/``turn_id``/
+    ``policy_revision`` from this binding, and the sessions table links the
+    child session back to this parent session.
+    """
+
+    policy: Optional[ExecutionPolicy]
+    policy_revision: Optional[int]
+    parent_session_id: Optional[str] = None
+
+
+def derive_child_execution_policy(
+    parent_policy: ExecutionPolicy,
+    *,
+    allowed_effects=None,
+    mode: "ExecutionPolicyMode | str | None" = None,
+) -> ExecutionPolicy:
+    """Derive one child policy from a parent accepted-turn policy.
+
+    The result is equal-or-narrower by construction (set-intersection via
+    :meth:`ExecutionPolicy.narrow`); any widening attempt — extra effects or
+    a more permissive mode — raises :class:`PolicyWideningError`.  The
+    accepted-turn identity is inherited and can never be replaced.
+    """
+    if not isinstance(parent_policy, ExecutionPolicy):
+        raise TypeError("parent_policy must be an ExecutionPolicy")
+    derived = parent_policy.narrow(
+        parent_policy.allowed_effects if allowed_effects is None else allowed_effects,
+        mode=parent_policy.mode if mode is None else mode,
+    )
+    # Post-derivation lattice re-verification that does NOT trust ``narrow``:
+    # a forged subclass overriding ``narrow`` (or a corrupt policy object)
+    # must not be able to hand a child more capability than the parent holds.
+    # Checked from first principles with the raw effect lattice.
+    if type(derived) is not ExecutionPolicy:
+        raise PolicyWideningError(
+            "derived child policy must be an exact ExecutionPolicy"
+        )
+    escaped_effects = {
+        effect
+        for effect in derived.allowed_effects
+        if not any(
+            _effect_is_within(effect, capability)
+            for capability in parent_policy.allowed_effects
+        )
+    }
+    parent_ceiling = _POLICY_MODE_CEILINGS[ExecutionPolicyMode.parse(parent_policy.mode)]
+    derived_ceiling = _POLICY_MODE_CEILINGS[derived.mode]
+    escaped_mode = any(
+        not any(_effect_is_within(effect, limit) for limit in parent_ceiling)
+        for effect in derived_ceiling
+    )
+    if escaped_effects or escaped_mode:
+        rendered = ", ".join(sorted(map(str, escaped_effects))) or derived.mode.value
+        raise PolicyWideningError(
+            f"derived child policy escaped the parent lattice: {rendered}"
+        )
+    return derived
+
+
+def _beta_ceiling_rejects(policy: ExecutionPolicy) -> bool:
+    """True when *policy* exceeds the exact-Beta draft-only cohort ceiling."""
+    ceiling = ExecutionPolicy.for_mode(
+        policy.accepted_turn_id,
+        ExecutionPolicyMode.DRAFT_ONLY,
+    )
+    try:
+        return ceiling.narrow(policy.allowed_effects, mode=policy.mode) != policy
+    except PolicyWideningError:
+        return True
+
+
+def _validated_inherited_revision(revision: object) -> Optional[int]:
+    """Return a valid durable revision or ``None`` (fail to less identity)."""
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return None
+    return revision
+
+
+def capture_inherited_execution_policy(
+    *,
+    parent_session_id: Optional[str] = None,
+) -> InheritedPolicyBinding:
+    """Capture the current accepted-turn policy for child-agent inheritance.
+
+    Must be called on the DISPATCHING thread (inside the parent's tool
+    dispatch), never from the child's worker thread.  No bound policy — or a
+    policy above the exact-Beta ceiling — captures as explicit no-policy so
+    the child cannot fall back to ambient state.
+    """
+    session = (
+        parent_session_id.strip()
+        if isinstance(parent_session_id, str) and parent_session_id.strip()
+        else None
+    )
+    policy = get_current_execution_policy()
+    if not isinstance(policy, ExecutionPolicy):
+        return InheritedPolicyBinding(None, None, session)
+    revision = _validated_inherited_revision(
+        get_current_execution_policy_revision()
+    )
+    try:
+        derived = derive_child_execution_policy(policy)
+    except Exception:
+        # A policy that cannot round-trip its own narrowing is corrupt;
+        # inherit nothing rather than something unproven.
+        logger.error("inherited policy derivation failed closed", exc_info=True)
+        return InheritedPolicyBinding(None, None, session)
+    if _beta_approval_policy_active() and _beta_ceiling_rejects(derived):
+        logger.error(
+            "inherited policy exceeds the exact-Beta ceiling; child agents "
+            "inherit no policy and fail closed"
+        )
+        return InheritedPolicyBinding(None, None, session)
+    return InheritedPolicyBinding(derived, revision, session)
+
+
+@contextlib.contextmanager
+def inherited_execution_policy_scope(binding):
+    """Bind exactly one captured :class:`InheritedPolicyBinding` for a child run.
+
+    Anything other than a valid binding — ``None``, a foreign object, a
+    non-policy payload — binds an EXPLICIT no-policy state.  Either way the
+    worker thread's prior ambient policy is shadowed for the duration and
+    restored on every exit path, so a pooled thread's stale binding from an
+    unrelated turn can never widen (or narrow) a child, and a child's
+    inherited binding can never leak into later work on the same thread.
+    """
+    policy: Optional[ExecutionPolicy] = None
+    revision: Optional[int] = None
+    if isinstance(binding, InheritedPolicyBinding):
+        if isinstance(binding.policy, ExecutionPolicy):
+            policy = binding.policy
+            revision = _validated_inherited_revision(binding.policy_revision)
+    if (
+        policy is not None
+        and _beta_approval_policy_active()
+        and _beta_ceiling_rejects(policy)
+    ):
+        # Bind-time re-clamp: a binding captured outside Beta (or replayed
+        # across a channel change) can never widen a Beta child.
+        logger.error(
+            "inherited policy binding exceeds the exact-Beta ceiling at bind "
+            "time; the child runs with no policy and fails closed"
+        )
+        policy = None
+        revision = None
+    policy_token = _current_execution_policy.set(policy)
+    try:
+        revision_token = _current_execution_policy_revision.set(revision)
+    except BaseException:
+        _current_execution_policy.reset(policy_token)
+        raise
+    try:
+        yield InheritedPolicyBinding(
+            policy,
+            revision,
+            binding.parent_session_id
+            if isinstance(binding, InheritedPolicyBinding)
+            else None,
+        )
+    finally:
+        _current_execution_policy_revision.reset(revision_token)
+        _current_execution_policy.reset(policy_token)
+
+
 @dataclass(frozen=True, slots=True)
 class EffectAuthorization:
     """Auditable result from the pure effect-policy evaluator."""
@@ -1890,6 +2094,42 @@ def complete_approved_effect_claim(
         result_digest=result_digest,
         failure_code=failure_code,
     )
+    return isinstance(count, int) and not isinstance(count, bool) and count == 1
+
+
+def bind_approved_effect_transform(
+    claim: ApprovalEffectClaim,
+    *,
+    original_identity: object,
+    transformed_identity: object,
+) -> bool:
+    """Evidence one post-receipt output rewrite for a terminal approval effect.
+
+    The durable CAS only annotates an already-terminal receipt with the
+    pre/post content digests and is single-set; it structurally cannot
+    modify the receipt's recorded outcome.  ``False`` means the rewrite is
+    unevidenced — exact-Beta callers must then withhold the rewritten
+    output rather than show the model an unaccounted transformation.
+    """
+    if not isinstance(claim, ApprovalEffectClaim):
+        raise TypeError("claim must be an ApprovalEffectClaim")
+    recorder = getattr(claim.store, "record_approval_effect_result_transform", None)
+    if not callable(recorder):
+        return False
+    try:
+        count = recorder(
+            claim_id=claim.claim_id,
+            request_id=claim.request_id,
+            boot_id=claim.boot_id,
+            transform_pre_digest=_approval_sha256(original_identity),
+            transform_post_digest=_approval_sha256(transformed_identity),
+        )
+    except Exception:
+        logger.error(
+            "Approval effect transform evidence persistence failed",
+            exc_info=True,
+        )
+        return False
     return isinstance(count, int) and not isinstance(count, bool) and count == 1
 
 

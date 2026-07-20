@@ -29,10 +29,12 @@ import inspect
 import logging
 import os
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
-from tools.registry import tool_error
+from tools.dispatch_companion import DispatchCompanion
+from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,235 @@ def _beta_memory_tool_effects(tool_name: str, args: Any) -> set[str]:
             return {"write_local:memory"}
         return {"unknown"}
     return {"unknown"}
+
+
+# ---------------------------------------------------------------------------
+# Registry-routed provider tools
+#
+# Every memory-provider tool historically dispatched straight into
+# MemoryManager, bypassing the registry's atomic shadow boundary.  They are
+# now registered and every agent invocation routes through
+# ``dispatch_memory_tool_via_registry`` so the call is captured with a frozen
+# registration identity, canonical args digest, and policy context exactly
+# like ordinary registry tools.  The live MemoryManager instance is process
+# state, not tool-call data, so it is bound through a context variable for
+# the duration of one dispatch instead of riding in handler kwargs.
+#
+# Effect honesty: only ``fact_store`` / ``fact_feedback`` (holographic
+# memory) have a hand-verified per-action effect classifier — every one of
+# their actions mutates local memory, so their static floor is
+# ``write_local:memory``.  Every OTHER provider tool (``hindsight_*``,
+# ``honcho_*``, ``mem0_*``, …) is routed for identity/digest capture but left
+# UNKNOWN (undeclared) because no pure-read path has been proven for it; a
+# restricted accepted-turn policy therefore fails closed on those tools
+# instead of assuming a read (ERB-404 doctrine; declaration ≠ allowance).
+# The lane is inert under exact Realtor Beta (``has_tool`` → False), so these
+# declarations are defensive: they only ever bind if enforcement is later
+# extended to memory.
+# ---------------------------------------------------------------------------
+
+# Dispatch-only registry toolset. It is listed in
+# ``toolsets.HIDDEN_REGISTRY_TOOLSETS`` so the process-global registration
+# never surfaces through toolset enumeration, model schemas
+# (``get_tool_definitions`` on any path, including ``enabled_toolsets=None``),
+# or UI toolset listings — schema visibility for these tools is owned
+# entirely by the provider path and its exact-Beta hiding gate.
+MEMORY_PROVIDER_TOOLSET = "memory-provider"
+
+# Serializes the get_entry()-then-register() sequence below. Registration is
+# process-global and idempotent, so the unlocked race was benign (a second
+# thread could only re-run an idempotent register), but the lock makes the
+# check-and-register atomic instead of relying on that reasoning.
+_REGISTRY_ROUTED_REGISTRATION_LOCK = threading.Lock()
+
+_MEMORY_MANAGER_COMPANION = DispatchCompanion("active_memory_manager")
+
+
+def bind_active_memory_manager(manager: Optional["MemoryManager"]):
+    """Expose *manager* to the registered memory handlers for one dispatch."""
+    return _MEMORY_MANAGER_COMPANION.bound(manager)
+
+
+def _registry_routed_memory_tool_handler(tool_name: str):
+    """Build the registered handler for one registry-routed provider tool.
+
+    The companion is resolved eagerly at handler start, never stored for
+    lazy reads.
+    """
+
+    def _handler(args, **_kwargs) -> str:
+        manager = _MEMORY_MANAGER_COMPANION.get()
+        if manager is None:
+            return tool_error(
+                f"Memory tool '{tool_name}' has no active memory provider "
+                "in this execution context."
+            )
+        return manager.handle_tool_call(
+            tool_name, args if isinstance(args, dict) else {}
+        )
+
+    return _handler
+
+
+def _fact_store_effect_resolver(args: Any) -> set[str]:
+    return _beta_memory_tool_effects("fact_store", args)
+
+
+def _fact_feedback_effect_resolver(args: Any) -> set[str]:
+    return _beta_memory_tool_effects("fact_feedback", args)
+
+
+# Provider tools with a hand-verified per-action effect classifier.  Only
+# these declare a truthful non-``unknown`` effect surface; anything not in
+# this map is registered UNKNOWN (see ``_ensure_registry_routed_memory_tool``).
+_MEMORY_TOOL_EFFECT_RESOLVERS = {
+    "fact_store": _fact_store_effect_resolver,
+    "fact_feedback": _fact_feedback_effect_resolver,
+}
+
+
+def _ensure_registry_routed_memory_tool(name: str, schema: Dict[str, Any]) -> None:
+    """Idempotently register one provider tool so it can traverse the atomic
+    registry shadow boundary, declaring effects only as truthfully proven.
+
+    ``fact_store`` / ``fact_feedback`` have a hand-verified classifier: every
+    classified action mutates local memory state — ``fact_store`` reads
+    persist retrieval/activity telemetry and ``fact_feedback`` mutates trust
+    scores — so their static declaration is honestly ``write_local:memory``,
+    never a bare read, and the action-dependent resolver refines that with
+    ``read:memory`` for retrieval actions and ``unknown`` for unclassified
+    ones so a restricted policy fails closed.
+
+    Every OTHER provider tool is registered with NO effect declaration
+    (``effects=None``, no resolver).  The registry treats that as UNKNOWN, so
+    a restricted accepted-turn policy denies it — the honest, fail-closed
+    state until the tool's effects are individually proven (ERB-404).  It is
+    still registered so the dispatch is captured on the common adapter with a
+    frozen identity and canonical args digest.
+
+    A name that collides with an entry from a DIFFERENT toolset is left alone
+    (not re-registered under ``memory-provider``): such a tool keeps the
+    direct provider path in ``dispatch_memory_tool_via_registry`` so a
+    provider tool never silently dispatches to an unrelated core tool.
+    """
+    existing = registry.get_entry(name)
+    if existing is not None:
+        if existing.toolset != MEMORY_PROVIDER_TOOLSET:
+            logger.warning(
+                "Memory provider tool '%s' name collides with an existing "
+                "'%s' registry entry; leaving it on the direct provider path.",
+                name,
+                existing.toolset,
+            )
+        return
+    resolver = _MEMORY_TOOL_EFFECT_RESOLVERS.get(name)
+    # Classified tools declare their truthful write floor; unclassified
+    # provider tools stay UNKNOWN (undeclared) rather than claim a read.
+    static_effects = {"write_local:memory"} if resolver is not None else None
+    try:
+        registry.register(
+            name=name,
+            toolset=MEMORY_PROVIDER_TOOLSET,
+            schema=dict(schema),
+            handler=_registry_routed_memory_tool_handler(name),
+            is_async=False,
+            description=str(schema.get("description") or ""),
+            effects=static_effects,
+            effect_resolver=resolver,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not register memory provider tool '%s' in the tool "
+            "registry: %s",
+            name,
+            exc,
+        )
+
+
+def dispatch_memory_tool_via_registry(
+    manager: Optional["MemoryManager"],
+    function_name: str,
+    function_args: Dict[str, Any],
+    *,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    tool_call_id: Optional[str] = None,
+    return_outcome: bool = False,
+):
+    """Route one registry-routed provider tool through the atomic boundary.
+
+    The manager is bound only for the duration of this dispatch, so the
+    registered handler cannot reach a provider outside the shadow boundary.
+    The routed entry must belong to the ``memory-provider`` toolset — if
+    registration is genuinely impossible (malformed provider schema) or the
+    tool name collides with an unrelated toolset's entry, the direct provider
+    path is preserved (byte-identical to the pre-migration branch) and the
+    routing gap is logged instead of dispatching to the wrong handler.
+
+    ``return_outcome=True`` returns the adapter's ``ToolDispatchOutcome``
+    (truthful physical-start proof for the exact-Beta loops).  On that
+    contract the no-provider refusal is ``started=False``, and the direct
+    provider fallback — which cannot traverse the governed boundary, so it
+    can never produce physical-start proof — fails closed under exact Beta
+    instead of executing ungoverned.  Outside Beta enforcement the fallback
+    reports ``started=True`` under the legacy dispatch contract (a
+    dispatched direct call, even one ``handle_tool_call`` refuses
+    internally — not a proven physical provider start).  The default
+    raw-string path is byte-identical to the pre-existing behavior on
+    every branch.
+    """
+    if manager is None:
+        result = tool_error(f"No memory provider handles tool '{function_name}'")
+        if return_outcome:
+            from model_tools import ToolDispatchOutcome
+
+            return ToolDispatchOutcome(result, False, "no_memory_provider")
+        return result
+    manager.ensure_registry_routed_tools_registered()
+    entry = registry.get_entry(function_name)
+    if entry is None or entry.toolset != MEMORY_PROVIDER_TOOLSET:
+        logger.warning(
+            "Registry routing unavailable for memory tool '%s' (entry=%s); "
+            "using direct provider dispatch",
+            function_name,
+            None if entry is None else entry.toolset,
+        )
+        if return_outcome:
+            from model_tools import (
+                ToolDispatchOutcome,
+                exact_beta_tool_containment_active,
+            )
+
+            if exact_beta_tool_containment_active():
+                # An ungoverned direct dispatch can never yield the immutable
+                # physical-start proof the exact-Beta loop requires: refuse
+                # before the provider runs rather than invert evidence.
+                blocked = tool_error(
+                    f"Memory tool '{function_name}' is not routable through "
+                    "the atomic registry boundary in Realtor Beta. No "
+                    "handler was run."
+                )
+                return ToolDispatchOutcome(
+                    blocked, False, "registry_routing_unavailable"
+                )
+            return ToolDispatchOutcome(
+                manager.handle_tool_call(function_name, function_args),
+                True,
+                "",
+            )
+        return manager.handle_tool_call(function_name, function_args)
+
+    from model_tools import dispatch_agent_owned_registry_tool
+
+    return dispatch_agent_owned_registry_tool(
+        function_name,
+        function_args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        companions=(bind_active_memory_manager(manager),),
+        return_outcome=return_outcome,
+    )
 
 
 def _beta_memory_authorization(tool_name: str, args: Any, kwargs: Dict[str, Any]):
@@ -519,11 +750,49 @@ class MemoryManager:
                     provider.name,
                 )
 
+        # Registry-routed provider tools must be dispatchable through the
+        # atomic registry shadow boundary; registration is process-global and
+        # idempotent while the handler resolves the live manager per dispatch.
+        self.ensure_registry_routed_tools_registered()
+
         logger.info(
             "Memory provider '%s' registered (%d tools)",
             provider.name,
             len(provider.get_tool_schemas()),
         )
+
+    def ensure_registry_routed_tools_registered(self) -> None:
+        """Idempotently register EVERY provider tool this manager routes.
+
+        All memory-provider tools traverse the atomic registry shadow
+        boundary now, not just the hand-classified ``fact_*`` pair.  The
+        module-level lock makes the get-then-register sequence atomic across
+        threads; without it two threads could both observe a missing entry
+        and register twice (benign — same idempotent registration — but no
+        longer possible).  Registration failure for any one tool (malformed
+        schema, provider inventory error) is swallowed so the direct-dispatch
+        fallback in ``dispatch_memory_tool_via_registry`` still handles it.
+        """
+        with _REGISTRY_ROUTED_REGISTRATION_LOCK:
+            # Snapshot the mapping so a concurrent add_provider cannot mutate
+            # it mid-iteration; the provider inventory is per-manager.
+            for name, provider in list(self._tool_to_provider.items()):
+                if provider is None or registry.get_entry(name) is not None:
+                    continue
+                try:
+                    schemas = provider.get_tool_schemas()
+                except Exception as exc:
+                    logger.debug(
+                        "Memory provider '%s' get_tool_schemas() failed during "
+                        "registry registration: %s",
+                        provider.name,
+                        exc,
+                    )
+                    continue
+                for schema in schemas:
+                    if isinstance(schema, dict) and schema.get("name") == name:
+                        _ensure_registry_routed_memory_tool(name, schema)
+                        break
 
     @property
     def providers(self) -> List[MemoryProvider]:

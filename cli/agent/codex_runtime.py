@@ -41,6 +41,42 @@ def run_codex_app_server_turn(
     Called from run_conversation() when agent.api_mode == "codex_app_server".
     Returns the same dict shape as the chat_completions path.
     """
+    # Exact Realtor Beta never hands a turn to the external codex
+    # app-server: that runtime owns its own tool loop (exec/patch,
+    # optional elicitation auto-accept) entirely outside the accepted-turn
+    # registry/effect-broker boundary.  Construction, config, and runtime
+    # switching already reject the api_mode under Beta
+    # (``beta_codex_app_server_not_allowed``); this entry-point gate fails
+    # the lane closed even if a future rewiring reaches it directly, BEFORE
+    # any subprocess session can be created (ERB-406 provider-owned lane /
+    # package A5).  Stable behavior is unchanged.
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        _beta_app_server_blocked = beta_provider_policy_active()
+    except Exception:
+        _beta_app_server_blocked = (
+            os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+        )
+    if _beta_app_server_blocked:
+        logger.error(
+            "[beta_codex_app_server_not_allowed] Realtor Beta refused the "
+            "external codex app-server runtime; no subprocess was started."
+        )
+        return {
+            "final_response": (
+                "Error [beta_codex_app_server_not_allowed]: Realtor Beta "
+                "runs Codex through its registered in-app Responses runtime "
+                "and does not allow the external Codex app-server. No "
+                "subprocess was started."
+            ),
+            "messages": messages,
+            "api_calls": 0,
+            "completed": False,
+            "partial": True,
+            "error": "beta_codex_app_server_not_allowed",
+        }
+
     from agent.transports.codex_app_server_session import CodexAppServerSession
 
     # Lazy session: one CodexAppServerSession per AIAgent instance.

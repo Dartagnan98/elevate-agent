@@ -12,7 +12,10 @@ from elevate_cli.beta_provider_policy import (
     BETA_ALLOWED_PROVIDER,
     BETA_DEFAULT_MODEL,
     BETA_PROVIDER_POLICY_VERSION,
+    clear_beta_runtime_repair_state,
+    mark_beta_runtime_repair_pending,
 )
+from elevate_cli.web_routes import status as status_module
 from elevate_cli.web_routes.status import (
     _beta_runtime_receipt,
     create_status_router,
@@ -176,6 +179,41 @@ def test_beta_runtime_receipt_blocks_when_entitlement_verifier_is_unavailable(
     assert receipt["entitlementVerifierReady"] is False
     assert receipt["runtimeReady"] is False
     assert receipt["blockedReason"] == "beta_entitlement_verifier_unavailable"
+
+
+def test_beta_runtime_receipt_blocks_hostile_ambient_provider_override(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("ELEVATE_INFERENCE_PROVIDER", "gemini")
+
+    receipt = _beta_runtime_receipt(
+        elevate_home=tmp_path,
+        config=_config(),
+        auth_status=_auth(),
+    )
+
+    assert receipt["runtimeReady"] is False
+    assert receipt["blockedReason"] == "beta_provider_not_allowed"
+
+
+def test_beta_repair_gate_bypasses_a_cached_ready_status(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    cached = {"beta_runtime": {"runtimeReady": True, "blockedReason": None}}
+    monkeypatch.setattr(status_module, "_status_cache_payload", cached)
+    monkeypatch.setattr(
+        status_module,
+        "_status_cache_expires_at",
+        status_module.time.monotonic() + 60,
+    )
+    clear_beta_runtime_repair_state()
+    try:
+        assert status_module._cached_status_payload() == cached
+        mark_beta_runtime_repair_pending()
+        assert status_module._cached_status_payload() is None
+    finally:
+        clear_beta_runtime_repair_state()
 
 
 @pytest.mark.parametrize("channel", ["latest", "Beta", "BETA", " beta"])

@@ -2102,6 +2102,35 @@ async def _send_yuanbao(chat_id, message, media_files=None):
 # --- Registry ---
 from tools.registry import registry, tool_error
 
+
+def _send_message_effect_resolver(args: dict):
+    """Declare only the pure ``list`` read; every send stays unknown.
+
+    ``list`` formats the on-disk channel directory: ``_handle_list`` calls
+    ``format_directory_for_display`` -> ``load_directory``, which reads
+    ``channel_directory.json`` when present (via the side-effect-free
+    ``get_elevate_home``) and returns an empty map otherwise. No connector,
+    no bootstrap, no seed, no network, no credential — a pure local read that
+    resolves to an exact ``read:channels``.
+
+    Every other action delivers a message to an external platform. The handler
+    reads ``action = args.get("action", "send")`` and routes to ``_handle_list``
+    IFF that value is exactly ``"list"`` (no strip/lower); anything else —
+    including a missing action, which defaults to ``send`` — falls through to
+    ``_handle_send``. This resolver mirrors that branch byte-for-byte so the
+    declared surface can never diverge from the handler, and leaves the send
+    path unknown/fail-closed until ``message_external`` classification lands
+    with its own authorization evidence.
+    """
+    from tools.approval import EffectKind
+
+    if not isinstance(args, dict):
+        return {EffectKind.UNKNOWN}
+    if args.get("action", "send") == "list":
+        return {"read:channels"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="send_message",
     toolset="messaging",
@@ -2109,4 +2138,5 @@ registry.register(
     handler=send_message_tool,
     check_fn=_check_send_message,
     emoji="📨",
+    effect_resolver=_send_message_effect_resolver,
 )

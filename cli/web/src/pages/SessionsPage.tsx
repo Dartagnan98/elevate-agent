@@ -304,6 +304,17 @@ function SessionRow({
     : null) ?? { icon: Globe, color: "text-muted-foreground" };
   const SourceIcon = sourceInfo.icon;
   const hasTitle = session.title && session.title !== "Untitled";
+  const currentModel = (session.runtime_model ?? session.model ?? t.common.unknown)
+    .split("/")
+    .pop();
+  const historicalModel = (
+    session.historical_model ??
+    (session.runtime_model && session.runtime_model !== session.model
+      ? session.model
+      : null)
+  )
+    ?.split("/")
+    .pop();
 
   return (
     <div
@@ -343,8 +354,15 @@ function SessionRow({
               )}
             </div>
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="truncate max-w-[120px] sm:max-w-[180px]">
-                {(session.model ?? t.common.unknown).split("/").pop()}
+              <span
+                className="truncate max-w-[120px] sm:max-w-[180px]"
+                title={
+                  historicalModel && historicalModel !== currentModel
+                    ? `Current Beta model: ${currentModel}. Originally created with ${historicalModel}.`
+                    : session.runtime_model ?? session.model ?? t.common.unknown
+                }
+              >
+                {currentModel}
               </span>
               <span className="text-border">&#183;</span>
               <span>

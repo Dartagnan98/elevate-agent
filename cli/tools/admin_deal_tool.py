@@ -86,11 +86,19 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
         set_deal_fields,
         set_deal_toggle,
     )
-    from elevate_cli.data.connection import connect
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect,
+        connect_ready_read_only,
+    )
 
-    try:
-        with connect() as conn:
-            if action == "show":
+    # ``show`` only reads the deal context (deal row + checklist + attachments +
+    # computed gate). Run it over the already-ready forced-READ-ONLY store so
+    # inspecting a deal never bootstraps/migrates the operational store as a
+    # cold-connect side effect. The mutating actions below keep ``connect()``.
+    if action == "show":
+        try:
+            with connect_ready_read_only() as conn:
                 ctx = get_deal_context(conn, deal_id)
                 deal = ctx.get("deal") or {}
                 return tool_result(
@@ -103,7 +111,20 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                     },
                     gate=_gate_brief(ctx),
                 )
+        except LookupError as exc:
+            return tool_error(str(exc))
+        except OperationalStoreNotReady:
+            return tool_result(
+                success=False,
+                error="operational_store_not_ready",
+                message=(
+                    "Deal data is still starting for the active account. "
+                    "Wait for Elevate startup to complete, then retry once."
+                ),
+            )
 
+    try:
+        with connect() as conn:
             if action == "set_checklist":
                 # Accept either one cell (field + value) or many in one call
                 # (cells: {id: value}). Bulk avoids the "tick one cell and stop"
@@ -411,6 +432,26 @@ ADMIN_DEAL_SCHEMA = {
 }
 
 
+def _admin_deal_effect_resolver(args: dict):
+    """Declare only the pure ``show`` read; every board write stays unknown.
+
+    ``show`` runs over ``connect_ready_read_only()`` and only reads the deal
+    context (deal row + checklist + attachments + computed gate — all SELECTs),
+    so it is a truthful ``read:deals``. ``set_checklist``/``set_fields``/
+    ``attach``/``complete_run``/``advance``/``move`` all mutate deal state and
+    any unrecognized action stays unknown/fail-closed. The normalization
+    mirrors the handler's ``str(args.get("action") or "").strip().lower()``
+    exactly so the declared surface can never diverge from the dispatch.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    act = str(action or "").strip().lower()
+    if act == "show":
+        return {"read:deals"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="admin_deal",
     toolset="admin_deal",
@@ -421,4 +462,5 @@ registry.register(
         "stage) so an in-session finalize syncs to the board."
     ),
     emoji="",
+    effect_resolver=_admin_deal_effect_resolver,
 )

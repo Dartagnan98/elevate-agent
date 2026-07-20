@@ -4902,6 +4902,9 @@ class AIAgent:
         # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand)
         self._context_engine_tool_names: set = set()
         if hasattr(self, "context_compressor") and self.context_compressor and self.tools is not None:
+            from agent.context_engine_dispatch import (
+                ensure_registry_routed_context_engine_tool,
+            )
             for _schema in self.context_compressor.get_tool_schemas():
                 _wrapped = {"type": "function", "function": _schema}
                 self.tools.append(_wrapped)
@@ -4909,6 +4912,12 @@ class AIAgent:
                 if _tname:
                     self.valid_tool_names.add(_tname)
                     self._context_engine_tool_names.add(_tname)
+                    # Route this agent-owned tool through the atomic registry
+                    # shadow boundary (ERB-406): register it in the hidden
+                    # ``context-engine`` toolset with a truthful (UNKNOWN)
+                    # effect declaration so a restricted policy fails closed.
+                    if isinstance(_schema, dict):
+                        ensure_registry_routed_context_engine_tool(_tname, _schema)
 
         # Notify context engine of session start
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -14733,16 +14742,64 @@ class AIAgent:
                     try:
                         args = json.loads(tc.function.arguments)
                         flush_target = args.get("target", "memory")
-                        from tools.memory_tool import memory_tool as _memory_tool
-                        _memory_tool(
-                            action=args.get("action"),
-                            target=flush_target,
-                            content=args.get("content"),
-                            old_text=args.get("old_text"),
-                            store=self._memory_store,
-                        )
-                        if not self.quiet_mode:
-                            print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
+                        from model_tools import exact_beta_tool_containment_active
+                        if exact_beta_tool_containment_active():
+                            # ERB A3: the exit-time flush write is a memory
+                            # write like any other tool effect.  Route it
+                            # through the atomic registry policy boundary
+                            # instead of writing the store directly.  The
+                            # built-in memory tool is deliberately undeclared
+                            # (UNKNOWN effect), so under every exact-Beta
+                            # cohort ceiling this returns a typed refusal
+                            # BEFORE any write; if a future declared policy
+                            # ever sanctions memory writes, the flush then
+                            # executes with the full claim/receipt trail.
+                            # The provider bridge stays off (manager=None),
+                            # matching the legacy flush path exactly.
+                            from tools.memory_tool import (
+                                dispatch_builtin_memory_via_registry,
+                            )
+                            flush_result = dispatch_builtin_memory_via_registry(
+                                {
+                                    "action": args.get("action"),
+                                    "target": flush_target,
+                                    "content": args.get("content"),
+                                    "old_text": args.get("old_text"),
+                                },
+                                store=self._memory_store,
+                                manager=None,
+                                metadata_factory=None,
+                                task_id=None,
+                                session_id=self.session_id or "",
+                                tool_call_id=str(getattr(tc, "id", "") or ""),
+                            )
+                            refused = False
+                            try:
+                                parsed_flush = json.loads(flush_result)
+                                refused = isinstance(parsed_flush, dict) and bool(
+                                    parsed_flush.get("error")
+                                )
+                            except (TypeError, ValueError):
+                                pass
+                            if refused:
+                                logger.debug(
+                                    "Memory flush refused by the exact-Beta "
+                                    "policy boundary: %s",
+                                    flush_result,
+                                )
+                            elif not self.quiet_mode:
+                                print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
+                        else:
+                            from tools.memory_tool import memory_tool as _memory_tool
+                            _memory_tool(
+                                action=args.get("action"),
+                                target=flush_target,
+                                content=args.get("content"),
+                                old_text=args.get("old_text"),
+                                store=self._memory_store,
+                            )
+                            if not self.quiet_mode:
+                                print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
                         logger.debug("Memory flush tool call failed: %s", e)
         except Exception as e:
@@ -15025,34 +15082,37 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
-    def _dispatch_delegate_task(self, function_args: dict) -> str:
+    def _dispatch_delegate_task(
+        self,
+        function_args: dict,
+        *,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        return_outcome: bool = False,
+    ):
         """Single call site for delegate_task dispatch.
 
-        New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
-        invocation paths (concurrent, sequential, inline).
+        Every agent-loop branch (concurrent ``_invoke_tool``, sequential,
+        ``tool_executor``, ``agent_runtime_helpers``) funnels through here, so
+        this one method routes the whole lane onto the atomic registry shadow
+        boundary (A2b lane 4; ERB-406 step 4).  ``delegate_task``'s registered
+        handler forwards every model-facing field exactly as this method used
+        to, and the parent agent (this instance) rides through the
+        ``delegate_task`` module companion for exactly one dispatch, so the
+        routed call is byte-identical to the pre-migration direct call.
+
+        Child-agent policy inheritance / async wake are package A4 and are not
+        touched here — only the dispatch seam moves.
         """
-        from tools.delegate_tool import delegate_task as _delegate_task
-        return _delegate_task(
-            goal=function_args.get("goal"),
-            context=function_args.get("context"),
-            toolsets=function_args.get("toolsets"),
-            # Spawn-as-specialist (persona + full loadout). Distinct from
-            # ``agent_id`` below, which is advisory handoff metadata — routing
-            # the model's ``agent`` arg there dropped the loadout binding.
-            agent=function_args.get("agent"),
-            agent_id=function_args.get("agent_id"),
-            expected_return=function_args.get("expected_return"),
-            handoff_reason=function_args.get("handoff_reason"),
-            priority=function_args.get("priority"),
-            artifacts=function_args.get("artifacts"),
-            parent_run_id=function_args.get("parent_run_id"),
-            tasks=function_args.get("tasks"),
-            max_iterations=function_args.get("max_iterations"),
-            acp_command=function_args.get("acp_command"),
-            acp_args=function_args.get("acp_args"),
-            role=function_args.get("role"),
-            cancel_task_id=function_args.get("cancel_task_id"),
+        from tools.delegate_tool import dispatch_delegate_task_via_registry
+        return dispatch_delegate_task_via_registry(
+            function_args,
             parent_agent=self,
+            task_id=task_id,
+            session_id=session_id if session_id is not None else (self.session_id or ""),
+            tool_call_id=tool_call_id,
+            return_outcome=return_outcome,
         )
 
     def _memory_policy_block(self, action: Any) -> Optional[str]:
@@ -15067,12 +15127,23 @@ class AIAgent:
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
+                     pre_tool_block_checked: bool = False,
                      return_outcome: bool = False):
         """Invoke a single tool and return the result string. No display logic.
 
         Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
         tools. Used by the concurrent execution path; the sequential path retains
         its own inline invocation for backward-compatible display handling.
+
+        ``pre_tool_block_checked`` skips the plugin pre-tool block re-check when
+        the caller (e.g. ``agent.tool_executor``) already performed it — same
+        contract as ``agent_runtime_helpers.invoke_tool``.  ``return_outcome``
+        returns a :class:`ToolDispatchOutcome` carrying truthful physical-start
+        evidence on EVERY branch, including the agent-owned lane branches
+        (todo, session_search, memory, memory-provider, clarify,
+        delegate_task): typed refusals are ``started=False``; a dispatch whose
+        handler physically started is ``started=True``.  With
+        ``return_outcome`` absent the raw result is returned byte-identically.
         """
         from model_tools import (
             ToolDispatchOutcome,
@@ -15100,7 +15171,7 @@ class AIAgent:
 
         # Check plugin hooks for a block directive before executing anything.
         block_message: Optional[str] = None
-        if not exact_beta:
+        if not exact_beta and not pre_tool_block_checked:
             try:
                 from elevate_cli.plugins import get_pre_tool_call_block_message
                 block_message = get_pre_tool_call_block_message(
@@ -15135,59 +15206,113 @@ class AIAgent:
             )
 
         if function_name == "todo":
-            from tools.todo_tool import todo_tool as _todo_tool
-            return _todo_tool(
-                todos=function_args.get("todos"),
-                merge=function_args.get("merge", False),
+            from tools.todo_tool import dispatch_todo_via_registry
+            return dispatch_todo_via_registry(
+                function_args,
                 store=self._todo_store,
+                task_id=effective_task_id,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id,
+                return_outcome=return_outcome,
             )
         elif function_name == "session_search":
             if not self._session_db:
-                return json.dumps({"success": False, "error": "Session database not available."})
-            from tools.session_search_tool import session_search as _session_search
-            return _session_search(
-                query=function_args.get("query", ""),
-                role_filter=function_args.get("role_filter"),
-                limit=function_args.get("limit", 3),
+                result = json.dumps({"success": False, "error": "Session database not available."})
+                return (
+                    ToolDispatchOutcome(result, False, "session_db_unavailable")
+                    if return_outcome
+                    else result
+                )
+            # ERB-406 lane 6: route the injected write-capable SessionDB through
+            # the atomic registry boundary via a dispatch-scoped companion (the
+            # DB + current session id can never ride the JSON handler-kwargs
+            # snapshot). This branch forwards only query/role_filter/limit
+            # (discovery + browse) exactly as before — scroll/sort args are not
+            # passed here, so the shared handler reads only what this copy sent.
+            from tools.session_search_tool import dispatch_session_search_via_registry
+            return dispatch_session_search_via_registry(
+                {
+                    "query": function_args.get("query", ""),
+                    "role_filter": function_args.get("role_filter"),
+                    "limit": function_args.get("limit", 3),
+                },
                 db=self._session_db,
                 current_session_id=self.session_id,
+                task_id=effective_task_id,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id,
+                return_outcome=return_outcome,
             )
         elif function_name == "memory":
-            target = function_args.get("target", "memory")
             block_message = self._memory_policy_block(function_args.get("action"))
             if block_message:
-                return json.dumps({"success": False, "error": block_message}, ensure_ascii=False)
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
+                result = json.dumps({"success": False, "error": block_message}, ensure_ascii=False)
+                return (
+                    ToolDispatchOutcome(result, False, "memory_policy_block")
+                    if return_outcome
+                    else result
+                )
+            # Route the built-in memory write through the atomic registry shadow
+            # boundary (ERB-406 lane 5). The store + manager + bridge metadata
+            # factory ride through a dispatch-scoped companion; the provider
+            # bridge (and its metadata build) fires INSIDE the registered handler
+            # so a blocked/stale dispatch cannot fire it. The metadata factory is
+            # invoked only for add/replace, after the store write.
+            from tools.memory_tool import dispatch_builtin_memory_via_registry
+            return dispatch_builtin_memory_via_registry(
+                function_args,
                 store=self._memory_store,
+                manager=self._memory_manager,
+                metadata_factory=lambda: {"session_id": self.session_id, "agent_id": self._agent_id},
+                task_id=effective_task_id,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id,
+                return_outcome=return_outcome,
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata={"session_id": self.session_id, "agent_id": self._agent_id},
-                    )
-                except Exception:
-                    pass
-            return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
-            return self._memory_manager.handle_tool_call(function_name, function_args)
+            # Every memory-provider tool (fact_store/fact_feedback plus
+            # hindsight_*, honcho_*, mem0_*, … ) traverses the atomic registry
+            # shadow boundary (ERB-406). The wrapper falls back to the direct
+            # manager path only when registration is genuinely impossible.
+            #
+            # NOTE: context-engine (``lcm_*``) tools are intentionally absent
+            # here. They were never dispatched through ``_invoke_tool`` (nor the
+            # concurrent path — they are not parallel-safe and mutate the shared
+            # ``messages`` list); their only dispatch site was the sequential
+            # inline loop, which is where the migrated wrapper now lives. Under
+            # exact Beta the sequential loop routes here via ``_invoke_tool``,
+            # whose preflight (the same ``_prepare_exact_beta_registry_call``
+            # the adapter uses) fail-closes a registered ``lcm_*`` tool on its
+            # UNKNOWN effect before any branch — so the bypass is closed without
+            # a redundant branch.
+            from agent.memory_manager import dispatch_memory_tool_via_registry
+            return dispatch_memory_tool_via_registry(
+                self._memory_manager,
+                function_name,
+                function_args,
+                task_id=effective_task_id,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id,
+                return_outcome=return_outcome,
+            )
         elif function_name == "clarify":
-            from tools.clarify_tool import clarify_tool as _clarify_tool
-            return _clarify_tool(
-                question=function_args.get("question", ""),
-                choices=function_args.get("choices"),
+            from tools.clarify_tool import dispatch_clarify_via_registry
+            return dispatch_clarify_via_registry(
+                function_args,
                 callback=self.clarify_callback,
+                task_id=effective_task_id,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id,
+                return_outcome=return_outcome,
             )
         elif function_name == "delegate_task":
-            return self._dispatch_delegate_task(function_args)
+            return self._dispatch_delegate_task(
+                function_args,
+                task_id=effective_task_id,
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id,
+                return_outcome=return_outcome,
+            )
         else:
             dispatch_kwargs = {
                 "tool_call_id": tool_call_id,
@@ -16323,6 +16448,8 @@ class AIAgent:
             elif exact_beta:
                 from model_tools import ToolDispatchOutcome
 
+                dispatch_outcome = None
+                invoke_error = None
                 try:
                     dispatch_outcome = self._invoke_tool(
                         function_name,
@@ -16333,10 +16460,7 @@ class AIAgent:
                         return_outcome=True,
                     )
                 except Exception as tool_error:
-                    dispatch_outcome = None
-                    function_result = (
-                        f"Error executing tool '{function_name}': {tool_error}"
-                    )
+                    invoke_error = tool_error
                     logger.error(
                         "_invoke_tool raised for %s: %s",
                         function_name,
@@ -16348,14 +16472,38 @@ class AIAgent:
                     _execution_blocked = not dispatch_outcome.started
                 else:
                     # Legacy/raw results are not physical-start proof in Beta.
+                    # ``function_result`` MUST be assigned on every arm of this
+                    # branch: leaving it unbound here crashed the first tool of
+                    # a batch (UnboundLocalError) and silently delivered the
+                    # PREVIOUS iteration's stale result for later tools.
+                    if invoke_error is not None:
+                        function_result = (
+                            f"Error executing tool '{function_name}': "
+                            f"{invoke_error}"
+                        )
+                    elif dispatch_outcome is not None:
+                        function_result = dispatch_outcome
+                    else:
+                        function_result = json.dumps(
+                            {
+                                "error": (
+                                    f"Tool '{function_name}' returned no "
+                                    "exact-Beta dispatch outcome. No physical "
+                                    "start was proven."
+                                )
+                            },
+                            ensure_ascii=False,
+                        )
                     _execution_blocked = True
                 tool_duration = time.time() - tool_start_time
             elif function_name == "todo":
-                from tools.todo_tool import todo_tool as _todo_tool
-                function_result = _todo_tool(
-                    todos=function_args.get("todos"),
-                    merge=function_args.get("merge", False),
+                from tools.todo_tool import dispatch_todo_via_registry
+                function_result = dispatch_todo_via_registry(
+                    function_args,
                     store=self._todo_store,
+                    task_id=effective_task_id,
+                    session_id=self.session_id or "",
+                    tool_call_id=tool_call.id,
                 )
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
@@ -16364,51 +16512,56 @@ class AIAgent:
                 if not self._session_db:
                     function_result = json.dumps({"success": False, "error": "Session database not available."})
                 else:
-                    from tools.session_search_tool import session_search as _session_search
-                    function_result = _session_search(
-                        query=function_args.get("query", ""),
-                        role_filter=function_args.get("role_filter"),
-                        limit=function_args.get("limit", 3),
+                    # ERB-406 lane 6: route the injected write-capable SessionDB
+                    # through the atomic registry boundary via a dispatch-scoped
+                    # companion. This branch forwards only query/role_filter/limit
+                    # (discovery + browse) exactly as before.
+                    from tools.session_search_tool import dispatch_session_search_via_registry
+                    function_result = dispatch_session_search_via_registry(
+                        {
+                            "query": function_args.get("query", ""),
+                            "role_filter": function_args.get("role_filter"),
+                            "limit": function_args.get("limit", 3),
+                        },
                         db=self._session_db,
                         current_session_id=self.session_id,
+                        task_id=effective_task_id,
+                        session_id=self.session_id or "",
+                        tool_call_id=tool_call.id,
                     )
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
-                target = function_args.get("target", "memory")
                 block_message = self._memory_policy_block(function_args.get("action"))
                 if block_message:
                     function_result = json.dumps({"success": False, "error": block_message}, ensure_ascii=False)
                 else:
-                    from tools.memory_tool import memory_tool as _memory_tool
-                    function_result = _memory_tool(
-                        action=function_args.get("action"),
-                        target=target,
-                        content=function_args.get("content"),
-                        old_text=function_args.get("old_text"),
+                    # Route the built-in memory write through the atomic registry
+                    # shadow boundary (ERB-406 lane 5). Store + manager + bridge
+                    # metadata factory ride a dispatch-scoped companion; the
+                    # provider bridge fires INSIDE the registered handler.
+                    from tools.memory_tool import dispatch_builtin_memory_via_registry
+                    function_result = dispatch_builtin_memory_via_registry(
+                        function_args,
                         store=self._memory_store,
+                        manager=self._memory_manager,
+                        metadata_factory=lambda: {"session_id": self.session_id, "agent_id": self._agent_id},
+                        task_id=effective_task_id,
+                        session_id=self.session_id or "",
+                        tool_call_id=tool_call.id,
                     )
-                    # Bridge: notify external memory provider of built-in memory writes
-                    if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                        try:
-                            self._memory_manager.on_memory_write(
-                                function_args.get("action", ""),
-                                target,
-                                function_args.get("content", ""),
-                                metadata={"session_id": self.session_id, "agent_id": self._agent_id},
-                            )
-                        except Exception:
-                            pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
             elif function_name == "clarify":
-                from tools.clarify_tool import clarify_tool as _clarify_tool
-                function_result = _clarify_tool(
-                    question=function_args.get("question", ""),
-                    choices=function_args.get("choices"),
+                from tools.clarify_tool import dispatch_clarify_via_registry
+                function_result = dispatch_clarify_via_registry(
+                    function_args,
                     callback=self.clarify_callback,
+                    task_id=effective_task_id,
+                    session_id=self.session_id or "",
+                    tool_call_id=tool_call.id,
                 )
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
@@ -16428,7 +16581,12 @@ class AIAgent:
                 self._delegate_spinner = spinner
                 _delegate_result = None
                 try:
-                    function_result = self._dispatch_delegate_task(function_args)
+                    function_result = self._dispatch_delegate_task(
+                        function_args,
+                        task_id=effective_task_id,
+                        session_id=self.session_id or "",
+                        tool_call_id=tool_call.id,
+                    )
                     _delegate_result = function_result
                 finally:
                     self._delegate_spinner = None
@@ -16449,7 +16607,16 @@ class AIAgent:
                     spinner.start()
                 _ce_result = None
                 try:
-                    function_result = self.context_compressor.handle_tool_call(function_name, function_args, messages=messages)
+                    from agent.context_engine_dispatch import dispatch_context_engine_tool_via_registry
+                    function_result = dispatch_context_engine_tool_via_registry(
+                        self.context_compressor,
+                        messages,
+                        function_name,
+                        function_args,
+                        task_id=effective_task_id,
+                        session_id=self.session_id or "",
+                        tool_call_id=tool_call.id,
+                    )
                     _ce_result = function_result
                 except Exception as tool_error:
                     function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
@@ -16463,8 +16630,10 @@ class AIAgent:
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
-                # Memory provider tools (hindsight_retain, honcho_search, etc.)
-                # These are not in the tool registry — route through MemoryManager.
+                # Memory provider tools (fact_store/fact_feedback, hindsight_*,
+                # honcho_*, mem0_*, …). Every one traverses the atomic registry
+                # shadow boundary (ERB-406); the wrapper falls back to the
+                # direct manager path only when registration is impossible.
                 spinner = None
                 if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
                     face = random.choice(KawaiiSpinner.get_waiting_faces())
@@ -16474,7 +16643,15 @@ class AIAgent:
                     spinner.start()
                 _mem_result = None
                 try:
-                    function_result = self._memory_manager.handle_tool_call(function_name, function_args)
+                    from agent.memory_manager import dispatch_memory_tool_via_registry
+                    function_result = dispatch_memory_tool_via_registry(
+                        self._memory_manager,
+                        function_name,
+                        function_args,
+                        task_id=effective_task_id,
+                        session_id=self.session_id or "",
+                        tool_call_id=tool_call.id,
+                    )
                     _mem_result = function_result
                 except Exception as tool_error:
                     function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})

@@ -654,10 +654,31 @@ class TestToolDefinitionContainment:
         names = {tool["function"]["name"] for tool in definitions}
 
         assert {"deals_overview", "skills_list"} <= names
+
+        # lead_status is now effect-declared: its ``show`` action resolves to an
+        # exact read:leads over connect_ready_read_only, so Beta advertises it.
+        # The schema being visible does NOT grant writes — every mutating action
+        # still resolves to ``unknown`` and is denied under a read-only policy,
+        # so the declaration expands what the model can *read*, never what it can
+        # mutate under a restricted cohort.
+        from tools.approval import authorize_effects
+
+        assert "lead_status" in names
+        read_only = ExecutionPolicy.for_mode(
+            "turn-beta-advertise-check", ExecutionPolicyMode.READ_ONLY
+        )
+        for write_action in ("set", "heat", "follow_up", "classify"):
+            resolved = registry.resolve_effects(
+                "lead_status", {"action": write_action, "contact_id": "c"}
+            )
+            assert authorize_effects(read_only, resolved).allowed is False
+
+        # Still-undeclared tools must never leak into the Beta surface.
+        # (send_message is declared but its messaging check_fn fails in the
+        # unconfigured test profile, so it stays out here too.)
         assert not {
             "write_file",
             "patch",
-            "lead_status",
             "send_message",
             "skill_manage",
             "skill_view",
@@ -686,7 +707,17 @@ class TestToolDefinitionContainment:
         }
 
         assert "write_file" in stable_names
-        assert beta_names == set()
+        # The file toolset now exposes two effect-declared reads — read_file and
+        # search_files both declare an exact read:files — so a read-only Beta
+        # advertises exactly those, while the still-UNKNOWN mutating file tools
+        # (write_file/patch) never leak into the restricted surface. The channels
+        # therefore still resolve to different sets (release-channel scoping).
+        assert beta_names == {"read_file", "search_files"}
+        assert not {"write_file", "patch"}.intersection(beta_names)
+        assert beta_names != stable_names
+        assert all(
+            registry.get_effect_metadata(name)["declared"] for name in beta_names
+        )
 
 
 # =========================================================================
@@ -820,3 +851,60 @@ class TestBackwardCompat:
     def test_tool_to_toolset_map(self):
         assert isinstance(TOOL_TO_TOOLSET_MAP, dict)
         assert len(TOOL_TO_TOOLSET_MAP) > 0
+
+
+# =========================================================================
+# Agent-owned registry routing adapter (ERB-406)
+# =========================================================================
+
+class TestDispatchAgentOwnedRegistryTool:
+    """The adapter agent special-case branches use to reach the registry
+    shadow boundary must preserve legacy result payloads for callers."""
+
+    def test_unknown_tool_keeps_exact_legacy_payload(self):
+        import json as _json
+
+        from model_tools import dispatch_agent_owned_registry_tool
+
+        result = _json.loads(
+            dispatch_agent_owned_registry_tool(
+                "totally_nonexistent_tool",
+                {"anything": 1},
+                task_id="task-x",
+                session_id="session-x",
+                tool_call_id="call-x",
+            )
+        )
+        assert result == {"error": "Unknown tool: totally_nonexistent_tool"}
+
+    def test_registered_tool_result_matches_legacy_dispatch(self):
+        from model_tools import dispatch_agent_owned_registry_tool
+        from tools.registry import registry
+
+        name = "_test_agent_owned_adapter_tool"
+        calls = []
+        registry.register(
+            name=name,
+            toolset="_test-agent-owned-adapter",
+            schema={
+                "name": name,
+                "description": "adapter parity tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kwargs: calls.append((args, kwargs))
+            or '{"ok": true}',
+        )
+        try:
+            result = dispatch_agent_owned_registry_tool(
+                name,
+                {"value": 3},
+                task_id="task-adapter",
+                session_id="session-adapter",
+                tool_call_id="call-adapter",
+            )
+        finally:
+            registry.deregister(name)
+
+        assert result == '{"ok": true}'
+        assert len(calls) == 1
+        assert calls[0][0] == {"value": 3}

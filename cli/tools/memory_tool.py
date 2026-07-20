@@ -31,9 +31,10 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from elevate_constants import get_elevate_home
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, NamedTuple, Optional
 
 from utils import atomic_replace
+from tools.dispatch_companion import DispatchCompanion
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 msvcrt = None
@@ -597,16 +598,199 @@ MEMORY_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry, tool_error
 
+# ---------------------------------------------------------------------------
+# Registry-routed built-in ``memory`` lane (ERB-406 step 4 / A2b lane 5)
+#
+# The agent loop historically dispatched the built-in ``memory`` tool straight
+# into ``memory_tool(store=self._memory_store)`` and then fired the external
+# provider bridge (``MemoryManager.on_memory_write``) inline in the branch,
+# bypassing the atomic registry shadow boundary entirely.  This seam moves that
+# lane onto the common adapter (``model_tools.dispatch_agent_owned_registry_tool``;
+# per-lane recipe in ``elevate-a2b-migration-recipe-2026-07-17.md``) so every
+# built-in memory write is captured with a frozen registration identity,
+# canonical args digest, and accepted-turn policy context exactly like an
+# ordinary registry tool.
+#
+# Process state — the per-agent ``MemoryStore`` (``self._memory_store``), the
+# live ``MemoryManager`` (``self._memory_manager``) used for the provider
+# bridge, and the caller-built bridge metadata — is on the AIAgent, not
+# tool-call data, so it can never ride through the registry's JSON-frozen
+# argument or handler-kwargs snapshot.  All three ride together through one
+# dispatch-scoped :class:`~tools.dispatch_companion.DispatchCompanion` holding a
+# small immutable binding struct; the registered handler resolves it EAGERLY at
+# handler start and never stores it for a lazy read.  A caller that reaches the
+# registered handler outside the binding (legacy ``registry.dispatch`` without
+# an agent, plugin dispatch, hallucinated calls) sees ``None``, so the store is
+# absent and ``memory_tool`` returns its long-standing "Memory is not available"
+# typed error — byte-identical to the pre-migration lambda that read
+# ``kw.get("store")`` (which was likewise ``None`` off the agent loop).
+#
+# Two traps preserved byte-identically (recipe lane notes):
+#  1. ``_memory_policy_block`` (the agent's per-agent recall/write policy) stays
+#     in the CALLER, exactly where and when each branch ran it today.  The four
+#     agent-loop copies diverge on whether they apply that gate — the concurrent
+#     and sequential ``run_agent`` branches do; the extracted
+#     ``tool_executor``/``agent_runtime_helpers`` copies never did — so folding
+#     it into the shared handler would silently ADD the gate to the copies that
+#     lacked it.  Keeping it in the caller preserves each copy's exact behavior
+#     while still running BEFORE any effect (the refusal short-circuits before
+#     this wrapper is ever called).
+#  2. The ``on_memory_write`` provider bridge is a hidden POST-result effect.
+#     It moves INSIDE the registered handler (after the store write, same
+#     swallow-exceptions semantics, same add/replace-only condition) so a
+#     blocked / stale / denied dispatch — whose handler never starts — can never
+#     fire it.  The bridge metadata differs per caller (an inline
+#     ``{session_id, agent_id}`` dict vs the module-level
+#     ``agent.background_review.build_memory_write_metadata(agent, …)``),
+#     so each caller builds its own metadata under the SAME add/replace guard it
+#     used before and passes it through the binding.
+#
+# Effect honesty (ERB-404 doctrine; declaration != allowance): every valid
+# built-in memory action (add / replace / remove) writes local memory files,
+# and the ``on_memory_write`` bridge reaches an arbitrary external provider
+# whose effect surface is unproven (local for holographic, potentially remote
+# for honcho/mem0/…).  No pure-read surface exists and the write floor cannot be
+# honestly bounded, so the registration carries NO effect declaration
+# (``effects=None`` -> UNKNOWN), matching the pre-migration state.  A restricted
+# accepted-turn policy therefore fails closed on ``memory`` under exact Realtor
+# Beta instead of assuming a bounded write.  ``memory`` is in
+# ``model_tools._AGENT_LOOP_TOOLS`` — ``handle_function_call`` keeps refusing it
+# (that guard stays; the adapter enters the registry directly, not via
+# ``handle_function_call``).
+# ---------------------------------------------------------------------------
+
+
+class _MemoryToolBinding(NamedTuple):
+    """One dispatch's worth of built-in ``memory`` process state.
+
+    ``store`` is the per-agent :class:`MemoryStore` (may be ``None`` when memory
+    is disabled — distinct from "no binding at all", which is why a struct is
+    bound rather than the bare store).  ``manager`` is the live
+    :class:`~agent.memory_manager.MemoryManager` (or ``None``) used for the
+    provider bridge; ``metadata_factory`` is a caller-supplied zero-arg callable
+    (or ``None``) that BUILDS the ``on_memory_write`` metadata.  It is a factory,
+    not a pre-built dict, so the build runs INSIDE the handler's bridge
+    ``try/except`` — after the store write and only when the bridge actually
+    fires — byte-identical to the pre-migration branches that built the metadata
+    as an argument to ``on_memory_write`` (a raising builder was swallowed and
+    never blocked the store write).
+    """
+
+    store: Any
+    manager: Any
+    metadata_factory: Any
+
+
+_MEMORY_TOOL_COMPANION = DispatchCompanion("active_builtin_memory")
+
+
+def bind_active_memory_tool(store, manager, metadata_factory):
+    """Expose the memory store / manager / bridge metadata factory for one dispatch."""
+    return _MEMORY_TOOL_COMPANION.bound(
+        _MemoryToolBinding(store, manager, metadata_factory)
+    )
+
+
+def _registered_memory_tool_handler(args, **_kwargs) -> str:
+    """Register-time handler: sources the store from the companion and fires the
+    provider bridge INSIDE the shadow boundary.
+
+    The companion is resolved eagerly here and never stored for a lazy read.
+    ``**_kwargs`` (the JSON handler-kwargs snapshot) is ignored for process
+    state so a ``MemoryStore`` / ``MemoryManager`` smuggled through dispatch
+    kwargs (the old ``kw.get("store")`` seam) can never reach the memory files.
+
+    Argument forwarding matches the pre-migration direct branch exactly
+    (``action`` has no default, so a missing action yields the same
+    ``memory_tool`` "Unknown action 'None'" error the direct branch produced).
+    With no binding (legacy / plugin / hallucinated dispatch) the store is
+    ``None`` and ``memory_tool`` returns "Memory is not available" before the
+    action is even inspected — byte-identical to the old registration lambda.
+
+    The ``on_memory_write`` bridge fires only for add/replace when a manager is
+    bound (truthiness, matching the branches' ``if agent._memory_manager and``
+    gate), after the store write, swallowing exceptions raised by either the
+    metadata build or the provider — so it never runs on a blocked / stale /
+    denied dispatch (whose handler never starts) and never fails the tool.
+    """
+    args = args if isinstance(args, dict) else {}
+    binding = _MEMORY_TOOL_COMPANION.get()
+    store = binding.store if binding is not None else None
+    result = memory_tool(
+        action=args.get("action"),
+        target=args.get("target", "memory"),
+        content=args.get("content"),
+        old_text=args.get("old_text"),
+        store=store,
+    )
+    if (
+        binding is not None
+        and binding.manager
+        and args.get("action") in ("add", "replace")
+    ):
+        try:
+            metadata = (
+                binding.metadata_factory()
+                if binding.metadata_factory is not None
+                else None
+            )
+            binding.manager.on_memory_write(
+                args.get("action", ""),
+                args.get("target", "memory"),
+                args.get("content", ""),
+                metadata=metadata,
+            )
+        except Exception:
+            pass
+    return result
+
+
+def dispatch_builtin_memory_via_registry(
+    function_args,
+    *,
+    store,
+    manager=None,
+    metadata_factory=None,
+    task_id=None,
+    session_id=None,
+    tool_call_id=None,
+    return_outcome=False,
+):
+    """Route one built-in ``memory`` invocation through the atomic boundary.
+
+    Every agent special-case branch calls this instead of ``memory_tool``
+    directly, so the call is captured with the same frozen identity,
+    args-digest, and policy context as ordinary registry tools.  The store /
+    manager / bridge metadata factory are bound only for the duration of this
+    dispatch and only the registered handler can consume them.  ``memory`` is
+    statically registered at import, so there is no direct fallback: the entry
+    always exists and the adapter's own legacy fallback preserves off-agent
+    behavior.  ``metadata_factory`` is a zero-arg callable that is invoked INSIDE
+    the handler's swallow-exceptions bridge block (only for add/replace, after
+    the store write), so a raising metadata build can never lose or block the
+    memory write — byte-identical to the pre-migration inline branches.
+    ``return_outcome=True`` returns the adapter's :class:`ToolDispatchOutcome`
+    (truthful physical-start proof for the exact-Beta loops); the default
+    returns the raw result byte-identically.
+    """
+    from model_tools import dispatch_agent_owned_registry_tool
+
+    return dispatch_agent_owned_registry_tool(
+        "memory",
+        function_args if isinstance(function_args, dict) else {},
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        companions=(bind_active_memory_tool(store, manager, metadata_factory),),
+        return_outcome=return_outcome,
+    )
+
+
 registry.register(
     name="memory",
     toolset="memory",
     schema=MEMORY_SCHEMA,
-    handler=lambda args, **kw: memory_tool(
-        action=args.get("action", ""),
-        target=args.get("target", "memory"),
-        content=args.get("content"),
-        old_text=args.get("old_text"),
-        store=kw.get("store")),
+    handler=_registered_memory_tool_handler,
     check_fn=check_memory_requirements,
     emoji="🧠",
 )

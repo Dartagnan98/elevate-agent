@@ -14,10 +14,77 @@ a thin dispatcher that delegates to a platform-provided callback.
 import json
 from typing import List, Optional, Callable
 
+from tools.dispatch_companion import DispatchCompanion
+from tools.registry import registry, tool_error
+
 
 # Maximum number of predefined choices the agent can offer.
 # A 5th "Other (type your answer)" option is always appended by the UI.
 MAX_CHOICES = 4
+
+# The platform-provided UI callback is process state, not tool-call data, so it
+# can never ride through the registry's JSON-frozen argument/handler-kwargs
+# snapshot.  Agent dispatch binds it here for exactly the duration of one
+# registry shadow dispatch; the registered handler is the only consumer.  A
+# caller that reaches the registered handler outside that binding (legacy
+# ``registry.dispatch`` without an agent, plugin dispatch, hallucinated calls)
+# gets the long-standing "not available" typed error and the callback can
+# never run outside the shadow-dispatch boundary.
+_CLARIFY_CALLBACK_COMPANION = DispatchCompanion("active_clarify_callback")
+
+
+def bind_clarify_callback(callback: Optional[Callable]):
+    """Expose *callback* to the registered clarify handler for one dispatch."""
+    return _CLARIFY_CALLBACK_COMPANION.bound(callback)
+
+
+def _registered_clarify_handler(args, **_kwargs) -> str:
+    """Register-time handler: consumes only the bound platform callback.
+
+    Handler kwargs are deliberately ignored — the registry's frozen
+    handler-kwargs snapshot is JSON-only, so a callable smuggled through
+    dispatch kwargs must never reach the callback seam.  The companion is
+    resolved eagerly here, never stored for lazy reads.
+    """
+    args = args if isinstance(args, dict) else {}
+    return clarify_tool(
+        question=args.get("question", ""),
+        choices=args.get("choices"),
+        callback=_CLARIFY_CALLBACK_COMPANION.get(),
+    )
+
+
+def dispatch_clarify_via_registry(
+    function_args,
+    *,
+    callback: Optional[Callable],
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    tool_call_id: Optional[str] = None,
+    return_outcome: bool = False,
+):
+    """Route one clarify invocation through the atomic registry boundary.
+
+    Every agent special-case branch calls this instead of ``clarify_tool``
+    directly, so the call is captured with the same frozen identity,
+    args-digest, and policy context as ordinary registry tools.  The UI
+    callback is bound only for the duration of this dispatch and only the
+    registered handler can consume it.  ``return_outcome=True`` returns the
+    adapter's :class:`ToolDispatchOutcome` (truthful physical-start proof
+    for the exact-Beta loops); the default returns the raw result
+    byte-identically.
+    """
+    from model_tools import dispatch_agent_owned_registry_tool
+
+    return dispatch_agent_owned_registry_tool(
+        "clarify",
+        function_args if isinstance(function_args, dict) else {},
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        companions=(bind_clarify_callback(callback),),
+        return_outcome=return_outcome,
+    )
 
 
 def clarify_tool(
@@ -126,16 +193,11 @@ CLARIFY_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry, tool_error
-
 registry.register(
     name="clarify",
     toolset="clarify",
     schema=CLARIFY_SCHEMA,
-    handler=lambda args, **kw: clarify_tool(
-        question=args.get("question", ""),
-        choices=args.get("choices"),
-        callback=kw.get("callback")),
+    handler=_registered_clarify_handler,
     check_fn=check_clarify_requirements,
     emoji="❓",
 )

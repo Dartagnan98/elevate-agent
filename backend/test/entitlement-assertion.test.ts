@@ -410,18 +410,36 @@ describe("signed entitlement assertions", () => {
     assert.deepEqual(entitlementSignerReadiness(legacyEnvironment(signingA.privateKeyB64)), {
       ready: true,
       activeKid: KEY_A,
+      configurationMode: "legacy",
+      completeKeyRingReady: false,
       publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     });
     assert.deepEqual(entitlementSignerReadiness(ringEnvironment(KEY_B)), {
       ready: true,
       activeKid: KEY_B,
+      configurationMode: "key-ring",
+      completeKeyRingReady: true,
       publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     });
+    assert.deepEqual(
+      entitlementSignerReadiness(
+        ringEnvironment(KEY_A, undefined, { NODE_ENV: "production" }),
+      ),
+      {
+        ready: false,
+        activeKid: KEY_A,
+        configurationMode: "key-ring",
+        completeKeyRingReady: false,
+        publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+      },
+    );
     assert.deepEqual(
       entitlementSignerReadiness({ NODE_ENV: "test", [ACTIVE_KID_ENV]: KEY_A }),
       {
         ready: false,
         activeKid: KEY_A,
+        configurationMode: "key-ring",
+        completeKeyRingReady: false,
         publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
       },
     );
@@ -434,12 +452,16 @@ describe("signed entitlement assertions", () => {
       {
         ready: false,
         activeKid: null,
+        configurationMode: "key-ring",
+        completeKeyRingReady: false,
         publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
       },
     );
     assert.deepEqual(entitlementSignerReadiness({ NODE_ENV: "test" }), {
       ready: false,
       activeKid: KEY_A,
+      configurationMode: "legacy",
+      completeKeyRingReady: false,
       publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     });
   });

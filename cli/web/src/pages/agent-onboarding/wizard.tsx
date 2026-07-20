@@ -223,31 +223,25 @@ const REALTOR_BETA_WIZARD_STEPS: Array<
 > = [
   {
     id: "models",
-    eyebrow: "Step 1 of 5",
+    eyebrow: "Step 1 of 4",
     title: "Connect Elevation",
     subtitle: "Sign in to OpenAI Codex for this Realtor Beta profile.",
   },
   {
     id: "memory",
-    eyebrow: "Step 2 of 5",
+    eyebrow: "Step 2 of 4",
     title: "Local memory",
     subtitle: "Your working memory stays in this Elevation profile on your Mac.",
   },
   {
-    id: "inbound",
-    eyebrow: "Step 3 of 5",
-    title: "Connect Telegram",
-    subtitle: "Connect the private Telegram lane used for requests and approvals.",
-  },
-  {
     id: "tools",
-    eyebrow: "Step 4 of 5",
+    eyebrow: "Step 3 of 4",
     title: "Realtor accounts",
     subtitle: "Your selected realtor pack controls the accounts and tools available here.",
   },
   {
     id: "subagents",
-    eyebrow: "Step 5 of 5",
+    eyebrow: "Step 4 of 4",
     title: "Your agent team",
     subtitle: "Elevation activates only the specialist agents included in your signed pack.",
   },
@@ -303,7 +297,7 @@ export function AgentOnboardingWelcome({
         </h1>
         <p className="onboarding-rise-delay-2 mt-4 max-w-lg text-[15px] leading-7 text-muted-foreground">
           {realtorBeta
-            ? "Connect OpenAI Codex, confirm your local memory, and choose how you want Elevation to reach you."
+            ? "Connect OpenAI Codex, confirm your local memory, and review the signed realtor tools and agent team available in this Beta."
             : "Pick a model, give it a memory store, and tell it which channels to listen on. Same form you'd find buried in Settings — guided."}
         </p>
         <Button
@@ -334,6 +328,7 @@ export function AgentOnboardingWelcome({
 export function AgentOnboardingWizard({
   setup,
   onSetupUpdated,
+  onRuntimeRefresh,
   onFinishLater,
   onFinish,
   realtorBeta = false,
@@ -341,6 +336,7 @@ export function AgentOnboardingWizard({
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
+  onRuntimeRefresh?: () => Promise<void>;
   onFinishLater: () => void;
   onFinish: () => void;
   realtorBeta?: boolean;
@@ -393,7 +389,10 @@ export function AgentOnboardingWizard({
       setOauthProviders(providers);
       if (providers === null) return;
       setError(null);
-      if (realtorBeta) return;
+      if (realtorBeta) {
+        void onRuntimeRefresh?.();
+        return;
+      }
 
       // Preserve Stable's convenience default when a CLI provider is already
       // signed in and the operator has not selected one yet.
@@ -411,8 +410,13 @@ export function AgentOnboardingWizard({
           : { ...prev, primaryProvider: resolvePrimaryWizardProvider(pick.id) },
       );
     },
-    [realtorBeta],
+    [onRuntimeRefresh, realtorBeta],
   );
+
+  const handleOAuthSuccess = useCallback(() => {
+    setError(null);
+    if (realtorBeta) void onRuntimeRefresh?.();
+  }, [onRuntimeRefresh, realtorBeta]);
 
   const connectedProviderIds = useMemo(() => {
     if (!oauthProviders) return new Set<string>();
@@ -796,7 +800,7 @@ export function AgentOnboardingWizard({
                       realtorBeta
                       onProvidersChange={handleOAuthProvidersChange}
                       onError={(msg) => setError(msg)}
-                      onSuccess={() => setError(null)}
+                      onSuccess={handleOAuthSuccess}
                     />
                   </div>
                   {!betaPrimaryContract.valid && (
@@ -1391,7 +1395,7 @@ export function AgentOnboardingWizard({
                 title={realtorBeta ? "Signed realtor agent roster" : "Agent Hub roster"}
                 hint={
                   realtorBeta
-                    ? "Your selected pack activates only its included realtor agents. Their roles, tools, and Telegram lanes cannot be expanded from this generic setup screen."
+                    ? "Your selected pack activates only its included realtor agents. Their roles, tools, and access cannot be expanded from this generic setup screen."
                     : "Configure every Agent Hub agent inline: enable, skills, toolsets, platforms, system prompt, and per-agent Telegram bot. No /hub redirect — everything stays in setup."
                 }
               >

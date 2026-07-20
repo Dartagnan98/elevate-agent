@@ -19,8 +19,10 @@ from elevate_cli.beta_provider_policy import (
     BETA_ALLOWED_PROVIDER,
     BETA_PROVIDER_POLICY_VERSION,
     BetaProviderPolicyError,
+    beta_runtime_repair_blocked_reason,
     beta_provider_policy_active,
     read_beta_codex_auth_status,
+    validate_beta_runtime_overrides,
     validate_beta_config_for_persistence,
 )
 from elevate_cli.config import (
@@ -75,6 +77,11 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
 
 def _cached_status_payload() -> dict[str, Any] | None:
     if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    # Never let a pre-repair ready receipt survive the transition into a
+    # pending/failed process state.  Recompute so callers immediately receive
+    # the fail-closed Beta receipt instead of up to one cache TTL of stale true.
+    if beta_provider_policy_active() and beta_runtime_repair_blocked_reason():
         return None
     now = time.monotonic()
     with _status_cache_lock:
@@ -154,6 +161,14 @@ def _beta_runtime_receipt(
         )
     except BetaProviderPolicyError as exc:
         blocked_reason = exc.code
+
+    if blocked_reason is None:
+        try:
+            validate_beta_runtime_overrides()
+        except BetaProviderPolicyError as exc:
+            blocked_reason = exc.code
+    if blocked_reason is None:
+        blocked_reason = beta_runtime_repair_blocked_reason()
 
     if blocked_reason is None and not configured_provider:
         blocked_reason = "missing_beta_provider"

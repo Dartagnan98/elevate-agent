@@ -17,7 +17,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agent.cwd import safe_getcwd
 from agent.memory_manager import sanitize_context
@@ -166,6 +166,30 @@ _session_registry_lock = threading.RLock()
 _session_aliases: dict[str, str] = {}
 _resume_reservations: dict[str, _ResumeReservation] = {}
 _RESUME_RESERVATION_WAIT_S = 15.0
+_BETA_RUNTIME_REPAIR_WAIT_S = 90.0
+_BETA_RUNTIME_REPAIR_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_beta_runtime_repair_targets_lock = threading.RLock()
+_beta_runtime_repair_targets: dict[str, list[tuple[str, dict]]] = {}
+_beta_runtime_repair_completed: set[str] = set()
+_beta_runtime_delegate_repair_leases: dict[str, object] = {}
+_beta_runtime_control_receipts: collections.OrderedDict[
+    tuple[str, int, str, str], dict[str, object]
+] = collections.OrderedDict()
+_beta_runtime_control_attempts: dict[str, tuple[int, str, str]] = {}
+_BETA_RUNTIME_CONTROL_RECEIPTS_MAX = 256
+_exact_beta_sidecar_registration_check: Callable[[], bool] | None = None
+
+
+class _StaleBetaRuntimeControl(ValueError):
+    """A delayed control frame must not alter the current repair attempt."""
+
+
+def install_exact_beta_sidecar_registration_check(
+    check: Callable[[], bool] | None,
+) -> None:
+    """Bind PTY admission to its authenticated dashboard registration."""
+    global _exact_beta_sidecar_registration_check
+    _exact_beta_sidecar_registration_check = check
 
 
 def _session_registry_ids(*values, identity: dict | None = None) -> set[str]:
@@ -380,6 +404,26 @@ def _publish_resume_reservation(
 ) -> None:
     """Publish the shared session without releasing construction ownership."""
     with _session_registry_lock:
+        from elevate_cli.beta_provider_policy import (
+            beta_provider_policy_active,
+            beta_runtime_repair_blocked_reason,
+            beta_runtime_repair_generation,
+        )
+
+        blocked = (
+            beta_provider_policy_active()
+            and beta_runtime_repair_blocked_reason() is not None
+        )
+        repair_republication = (
+            blocked
+            and session.get("beta_runtime_repair_building") is True
+            and session.get("beta_runtime_repair_id")
+            == beta_runtime_repair_generation()
+        )
+        if blocked and not repair_republication:
+            raise RuntimeError(
+                "Realtor Beta provider repair blocked session publication"
+            )
         existing_session = _sessions.get(sid)
         if existing_session is not None and existing_session is not session:
             raise RuntimeError("gateway session id is already live")
@@ -2188,19 +2232,31 @@ def _persist_model_switch(result) -> None:
 
 
 def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
-    from elevate_cli.model_switch import parse_model_flags, switch_model
-
-    model_input, explicit_provider, persist_global = parse_model_flags(raw_input)
-    if not model_input:
-        raise ValueError("model value required")
-
     from elevate_cli.beta_provider_policy import (
+        BetaProviderPolicyError,
         beta_model_or_default,
         beta_provider_policy_active,
         canonical_beta_provider,
     )
 
     beta_active = beta_provider_policy_active()
+    if beta_active:
+        # Per-session switching cannot update every dashboard/PTY actor under
+        # the global repair barrier. The Beta product intentionally exposes no
+        # model picker, so stop before parsing, provider discovery, env writes,
+        # actor mutation, or persistence.
+        raise BetaProviderPolicyError(
+            "Realtor Beta changes its Codex model in Elevate app onboarding "
+            "or AI settings (beta_app_onboarding_required).",
+            code="beta_app_onboarding_required",
+        )
+
+    from elevate_cli.model_switch import parse_model_flags, switch_model
+
+    model_input, explicit_provider, persist_global = parse_model_flags(raw_input)
+    if not model_input:
+        raise ValueError("model value required")
+
     if beta_active:
         canonical_beta_provider(explicit_provider, source="TUI model-switch provider")
         beta_model_or_default(model_input, source="TUI model-switch model")
@@ -3397,6 +3453,7 @@ def _reset_session_agent(
     session: dict,
     *,
     allow_running: bool = False,
+    preserve_history: bool = False,
 ) -> dict:
     """Replace one actor while fencing prompt admission for its whole rebuild.
 
@@ -3452,19 +3509,26 @@ def _reset_session_agent(
         session["agent"] = new_agent
         session.pop("agent_base_ephemeral", None)
         session.pop("agent_lane_id", None)
-        session["attached_images"] = []
-        session["attached_videos"] = []
-        session["attached_files"] = []
-        session["edit_snapshots"] = {}
-        session["image_counter"] = 0
+        if not preserve_history:
+            # Context resets intentionally discard the old compose state.
+            # Provider repair is different: it swaps only the runtime actor,
+            # so files the user staged for their next prompt must survive.
+            session["attached_images"] = []
+            session["attached_videos"] = []
+            session["attached_files"] = []
+            session["edit_snapshots"] = {}
+            session["image_counter"] = 0
         session["running"] = was_running if allow_running else False
         session["show_reasoning"] = _load_show_reasoning()
         session["tool_progress_mode"] = _load_tool_progress_mode()
         session["tool_started_at"] = {}
         session["running_tools"] = {}
-        with history_lock:
-            session["history"] = []
-            session["history_version"] = int(session.get("history_version", 0)) + 1
+        if not preserve_history:
+            with history_lock:
+                session["history"] = []
+                session["history_version"] = int(
+                    session.get("history_version", 0)
+                ) + 1
         _publish_resume_reservation(
             reset_reservation,
             sid,
@@ -3507,6 +3571,573 @@ def _reset_session_agent(
     _emit("session.info", sid, info)
     _restart_slash_worker(session)
     return info
+
+
+def _validated_beta_runtime_repair_id(repair_id: object) -> str:
+    value = str(repair_id or "").strip()
+    if not _BETA_RUNTIME_REPAIR_ID_RE.fullmatch(value):
+        raise ValueError("invalid Realtor Beta runtime repair generation")
+    return value
+
+
+def _begin_exact_beta_delegate_repair(repair_id: str) -> object:
+    """Pause new child actors and interrupt the exact active registry."""
+    from tools.delegate_tool import (
+        begin_delegate_provider_repair,
+        interrupt_delegate_provider_repair,
+    )
+
+    with _beta_runtime_repair_targets_lock:
+        lease = _beta_runtime_delegate_repair_leases.get(repair_id)
+        if lease is None:
+            lease = begin_delegate_provider_repair()
+            _beta_runtime_delegate_repair_leases[repair_id] = lease
+            return lease
+
+    # A same-generation aggregate retry must not acquire a second lease, but
+    # it should reissue interruption in case a child ignored the first signal.
+    interrupt_delegate_provider_repair(lease)
+    return lease
+
+
+def _wait_for_exact_beta_delegate_repair(
+    repair_id: str,
+    *,
+    timeout_s: float,
+) -> None:
+    """Require the reserved/running child registry to be exactly empty."""
+    from tools.delegate_tool import wait_for_delegate_provider_quiescence
+
+    with _beta_runtime_repair_targets_lock:
+        lease = _beta_runtime_delegate_repair_leases.get(repair_id)
+    if lease is None:
+        raise RuntimeError("Realtor Beta delegate repair was not prepared")
+    if not wait_for_delegate_provider_quiescence(
+        lease,
+        timeout=max(0.0, float(timeout_s)),
+    ):
+        raise TimeoutError(
+            "delegated agent did not quiesce before provider-repair timeout"
+        )
+
+
+def _release_exact_beta_delegate_repair(repair_id: str) -> None:
+    """Restore the prior spawn-pause state only after aggregate release."""
+    from tools.delegate_tool import release_delegate_provider_repair
+
+    with _beta_runtime_repair_targets_lock:
+        lease = _beta_runtime_delegate_repair_leases.get(repair_id)
+    if lease is None:
+        raise RuntimeError("Realtor Beta delegate repair was not prepared")
+    release_delegate_provider_repair(lease)
+    with _beta_runtime_repair_targets_lock:
+        if _beta_runtime_delegate_repair_leases.get(repair_id) is lease:
+            _beta_runtime_delegate_repair_leases.pop(repair_id, None)
+
+
+def _beta_runtime_repair_admission_error(rid) -> dict | None:
+    """Fail actor admission closed for the whole prepare/commit barrier."""
+    from elevate_cli.beta_provider_policy import (
+        beta_provider_policy_active,
+        beta_runtime_repair_blocked_reason,
+    )
+
+    if not beta_provider_policy_active():
+        return None
+    registration_check = _exact_beta_sidecar_registration_check
+    if callable(registration_check) and not registration_check():
+        return _err(
+            rid,
+            5032,
+            "Realtor Beta lost its Elevate app session registration; reconnecting.",
+        )
+    if beta_runtime_repair_blocked_reason():
+        return _err(
+            rid,
+            5032,
+            "Realtor Beta is finishing the Codex provider repair; retry shortly.",
+        )
+    return None
+
+
+def prepare_exact_beta_runtime_sessions(
+    repair_id: str,
+    *,
+    timeout_s: float = _BETA_RUNTIME_REPAIR_WAIT_S,
+) -> dict[str, object]:
+    """Fence and quiesce the exact actor snapshot before auth/config mutation."""
+    from elevate_cli.beta_provider_policy import (
+        beta_provider_policy_active,
+        beta_runtime_repair_generation,
+        mark_beta_runtime_repair_pending,
+    )
+
+    repair_id = _validated_beta_runtime_repair_id(repair_id)
+    if not beta_provider_policy_active():
+        return {"repair_id": repair_id, "marked": 0, "running": 0}
+
+    generation = beta_runtime_repair_generation()
+    if generation not in (None, repair_id):
+        raise RuntimeError("another Realtor Beta runtime repair is already active")
+    if not mark_beta_runtime_repair_pending(repair_id):
+        raise RuntimeError("another Realtor Beta runtime repair is already active")
+    _begin_exact_beta_delegate_repair(repair_id)
+
+    with _beta_runtime_repair_targets_lock:
+        _beta_runtime_repair_completed.discard(repair_id)
+        existing = _beta_runtime_repair_targets.get(repair_id)
+        if existing is not None:
+            # Same-generation retry takes a fresh exact snapshot while the
+            # process gate remains closed. This reissues Stop after a prepare
+            # failure and naturally drops actors the user closed before retry.
+            _beta_runtime_repair_targets.pop(repair_id, None)
+
+        with _session_registry_lock:
+            snapshot = [
+                (sid, session)
+                for sid, session in _sessions.items()
+                if isinstance(session, dict)
+            ]
+
+        # Publish every per-session marker before trying to interrupt any one
+        # actor. The process-wide gate above also blocks create/resume/branch,
+        # so this is an exact admission snapshot rather than a best-effort scan.
+        marked: list[tuple[str, dict]] = []
+        running: list[tuple[str, dict]] = []
+        for sid, session in snapshot:
+            history_lock = session.get("history_lock")
+            if history_lock is None:
+                raise RuntimeError("live session has no provider-repair lock")
+            with history_lock:
+                # Do not nest the registry and actor locks. Close/reset paths
+                # use both in different lifecycle phases; identity is checked
+                # atomically enough here and any subsequent removal makes the
+                # commit receipt fail closed.
+                if _sessions.get(sid) is not session:
+                    raise RuntimeError(
+                        "live session changed during provider-repair snapshot"
+                    )
+                marker = session.get("beta_runtime_repair_id")
+                if marker not in (None, repair_id):
+                    raise RuntimeError(
+                        "live session belongs to another provider repair"
+                    )
+                session["beta_runtime_repair_id"] = repair_id
+                is_running = bool(session.get("running"))
+            marked.append((sid, session))
+            if is_running:
+                running.append((sid, session))
+
+        _beta_runtime_repair_targets[repair_id] = marked
+
+    for sid, session in running:
+        _request_session_stop(
+            sid,
+            session,
+            reason="beta_provider_repair_prepare",
+            stage="provider_repair_prepare",
+            expected_repair_id=repair_id,
+        )
+
+    # A prepare ACK is the authorization to mutate provider credentials. It
+    # must therefore prove that no cached-token inference or delegated child
+    # is still running, while deliberately retaining every marker and delegate
+    # lease for the later commit/release transaction.
+    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    _wait_for_exact_beta_delegate_repair(
+        repair_id,
+        timeout_s=max(0.0, deadline - time.monotonic()),
+    )
+    for sid, session in marked:
+        _wait_for_exact_beta_runtime_session_idle(
+            sid,
+            session,
+            repair_id,
+            deadline,
+        )
+
+    return {
+        "repair_id": repair_id,
+        "marked": len(marked),
+        "running": len(running),
+        "quiesced": len(marked),
+        "pending": 0,
+    }
+
+
+def _wait_for_exact_beta_runtime_session_idle(
+    sid: str,
+    session: dict,
+    repair_id: str,
+    deadline: float,
+) -> None:
+    while time.monotonic() < deadline:
+        history_lock = session.get("history_lock")
+        if history_lock is None:
+            raise RuntimeError("live session lost its provider-repair lock")
+        with history_lock:
+            if _sessions.get(sid) is not session:
+                raise RuntimeError("live session closed during provider repair")
+            if session.get("beta_runtime_repair_id") != repair_id:
+                raise RuntimeError("live session lost its provider-repair generation")
+            running = bool(session.get("running"))
+            agent_ready = session.get("agent_ready")
+            turn_fence = session.get("turn_fence")
+            turn_token = session.get("turn_token")
+        # create/resume publish a placeholder before their async _make_agent
+        # finishes. Prepare snapshots that placeholder. Commit must wait for
+        # the old builder's publication reservation to finish, then rebuild it;
+        # otherwise the old builder can overwrite the repaired actor after the
+        # global gate clears.
+        if isinstance(agent_ready, threading.Event) and not agent_ready.is_set():
+            agent_ready.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+            continue
+        if not running:
+            return
+        if isinstance(turn_fence, TurnFence) and turn_token is not None:
+            try:
+                turn_fence.wait_generation_quiesced(turn_token, timeout=0.5)
+            except Exception:
+                pass
+        else:
+            time.sleep(0.05)
+    raise TimeoutError("live session did not quiesce before provider-repair timeout")
+
+
+def complete_exact_beta_runtime_sessions(
+    repair_id: str,
+    *,
+    timeout_s: float = _BETA_RUNTIME_REPAIR_WAIT_S,
+) -> dict[str, object]:
+    """Rebuild every prepared actor and return only after marked == rebuilt."""
+    from elevate_cli.beta_provider_policy import beta_runtime_repair_generation
+
+    repair_id = _validated_beta_runtime_repair_id(repair_id)
+    if beta_runtime_repair_generation() != repair_id:
+        raise RuntimeError("Realtor Beta runtime repair generation changed")
+    with _beta_runtime_repair_targets_lock:
+        targets = list(_beta_runtime_repair_targets.get(repair_id, ()))
+        if repair_id not in _beta_runtime_repair_targets:
+            raise RuntimeError("Realtor Beta runtime repair was not prepared")
+
+    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    _wait_for_exact_beta_delegate_repair(
+        repair_id,
+        timeout_s=max(0.0, deadline - time.monotonic()),
+    )
+    rebuilt = 0
+    for sid, session in targets:
+        _wait_for_exact_beta_runtime_session_idle(
+            sid, session, repair_id, deadline
+        )
+        if not _finish_exact_beta_runtime_session_repair(sid, session, repair_id):
+            raise RuntimeError("live session actor was not rebuilt")
+        agent = session.get("agent")
+        model = str(getattr(agent, "model", "") or "")
+        provider = str(getattr(agent, "provider", "") or "")
+        from elevate_cli.beta_provider_policy import (
+            beta_model_or_default,
+            canonical_beta_provider,
+        )
+
+        beta_model_or_default(model, source="rebuilt TUI actor model")
+        canonical_beta_provider(provider, source="rebuilt TUI actor provider")
+        rebuilt += 1
+
+    if rebuilt != len(targets):
+        raise RuntimeError("not every prepared live session was rebuilt")
+    with _beta_runtime_repair_targets_lock:
+        _beta_runtime_repair_targets.pop(repair_id, None)
+        _beta_runtime_repair_completed.add(repair_id)
+    return {
+        "repair_id": repair_id,
+        "marked": len(targets),
+        "rebuilt": rebuilt,
+        "pending": 0,
+    }
+
+
+def release_exact_beta_runtime_sessions(repair_id: str) -> dict[str, object]:
+    """Release the process-local delegate lease after aggregate completion.
+
+    This intentionally does not clear the shared provider-repair admission
+    gate. The dashboard/auth coordinator owns that aggregate decision after
+    every in-process and PTY participant has completed successfully.
+    """
+    repair_id = _validated_beta_runtime_repair_id(repair_id)
+    with _beta_runtime_repair_targets_lock:
+        if repair_id not in _beta_runtime_repair_completed:
+            raise RuntimeError("provider repair was not rebuilt before release")
+    _release_exact_beta_delegate_repair(repair_id)
+    with _beta_runtime_repair_targets_lock:
+        _beta_runtime_repair_completed.discard(repair_id)
+    return {"repair_id": repair_id, "released": True}
+
+
+def retire_exact_beta_runtime_process_overrides() -> None:
+    """Retire inherited stale provider state inside one PTY gateway child."""
+    global _cfg_cache, _cfg_mtime
+    for key in ("ELEVATE_MODEL", "ELEVATE_INFERENCE_PROVIDER"):
+        os.environ.pop(key, None)
+    with _cfg_lock:
+        _cfg_cache = None
+        _cfg_mtime = None
+    from elevate_cli.beta_provider_policy import validate_beta_runtime_overrides
+
+    validate_beta_runtime_overrides()
+
+
+def handle_exact_beta_runtime_control(message: dict) -> dict[str, object]:
+    """Handle one authenticated dashboard control frame in the PTY child."""
+    from elevate_cli.beta_provider_policy import (
+        clear_beta_runtime_repair_state,
+        mark_beta_runtime_repair_failed,
+    )
+
+    if not isinstance(message, dict):
+        raise ValueError("invalid provider-repair control frame")
+    repair_id = _validated_beta_runtime_repair_id(message.get("repair_id"))
+    attempt = _validated_beta_runtime_repair_id(message.get("attempt"))
+    attempt_seq = message.get("attempt_seq")
+    if (
+        not isinstance(attempt_seq, int)
+        or isinstance(attempt_seq, bool)
+        or attempt_seq < 1
+    ):
+        raise ValueError("invalid provider-repair attempt sequence")
+    phase = message.get("phase")
+    phase = str(phase or "")
+    receipt_key = (repair_id, attempt_seq, attempt, phase)
+    with _beta_runtime_repair_targets_lock:
+        cached = _beta_runtime_control_receipts.get(receipt_key)
+        if cached is not None:
+            _beta_runtime_control_receipts.move_to_end(receipt_key)
+            return dict(cached)
+        active_attempt = _beta_runtime_control_attempts.get(repair_id)
+        if phase == "prepare":
+            if active_attempt is None or attempt_seq > active_attempt[0]:
+                _beta_runtime_control_attempts[repair_id] = (
+                    attempt_seq,
+                    attempt,
+                    "prepare",
+                )
+            elif (
+                attempt_seq < active_attempt[0]
+                or attempt != active_attempt[1]
+                or active_attempt[2] != "prepare"
+            ):
+                raise _StaleBetaRuntimeControl(
+                    "stale provider-repair prepare attempt"
+                )
+        elif phase == "commit":
+            if (
+                active_attempt is None
+                or attempt_seq != active_attempt[0]
+                or attempt != active_attempt[1]
+                or active_attempt[2] not in {"prepare", "commit"}
+            ):
+                raise _StaleBetaRuntimeControl(
+                    "stale provider-repair commit attempt"
+                )
+        elif phase == "release":
+            if (
+                active_attempt is None
+                or attempt_seq != active_attempt[0]
+                or attempt != active_attempt[1]
+                or active_attempt[2] not in {"commit", "release"}
+            ):
+                raise _StaleBetaRuntimeControl(
+                    "stale provider-repair release attempt"
+                )
+        else:
+            raise ValueError("unsupported provider-repair control phase")
+    try:
+        if phase == "prepare":
+            result = prepare_exact_beta_runtime_sessions(repair_id)
+        elif phase == "commit":
+            retire_exact_beta_runtime_process_overrides()
+            result = complete_exact_beta_runtime_sessions(repair_id)
+        elif phase == "release":
+            # Restore the process-local delegate lease while shared prompt
+            # admission is still closed. If lease release fails, the outer
+            # handler marks this generation failed and admission never opens.
+            result = release_exact_beta_runtime_sessions(repair_id)
+            if not clear_beta_runtime_repair_state(
+                expected_generation=repair_id
+            ):
+                raise RuntimeError("provider-repair completion was superseded")
+        with _beta_runtime_repair_targets_lock:
+            _beta_runtime_control_attempts[repair_id] = (
+                attempt_seq,
+                attempt,
+                phase,
+            )
+            _beta_runtime_control_receipts[receipt_key] = dict(result)
+            _beta_runtime_control_receipts.move_to_end(receipt_key)
+            while (
+                len(_beta_runtime_control_receipts)
+                > _BETA_RUNTIME_CONTROL_RECEIPTS_MAX
+            ):
+                _beta_runtime_control_receipts.popitem(last=False)
+        return result
+    except Exception:
+        mark_beta_runtime_repair_failed(repair_id)
+        raise
+
+
+def _finish_exact_beta_runtime_session_repair(
+    sid: str,
+    session: dict,
+    repair_id: str,
+) -> bool:
+    """Rebuild one idle Beta actor without rewriting its transcript."""
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        return False
+    with history_lock:
+        if (
+            _sessions.get(sid) is not session
+            or session.get("beta_runtime_repair_id") != repair_id
+            or session.get("running")
+            or session.get("beta_runtime_repair_building")
+        ):
+            return False
+        session["beta_runtime_repair_building"] = True
+
+    try:
+        _reset_session_agent(
+            sid,
+            session,
+            preserve_history=True,
+        )
+    except Exception:
+        logger.exception(
+            "Realtor Beta live-session runtime repair failed session=%s",
+            session.get("session_key") or sid,
+        )
+        return False
+    finally:
+        with history_lock:
+            session.pop("beta_runtime_repair_building", None)
+
+    with history_lock:
+        if session.get("beta_runtime_repair_id") == repair_id:
+            session.pop("beta_runtime_repair_id", None)
+    return True
+
+
+def _await_exact_beta_runtime_session_repair(
+    sid: str,
+    session: dict,
+    repair_id: str,
+) -> None:
+    """Wait for an interrupted turn to quiesce, then replace its actor."""
+    deadline = time.monotonic() + _BETA_RUNTIME_REPAIR_WAIT_S
+    while _sessions.get(sid) is session and time.monotonic() < deadline:
+        history_lock = session.get("history_lock")
+        if history_lock is None:
+            return
+        with history_lock:
+            if session.get("beta_runtime_repair_id") != repair_id:
+                return
+            running = bool(session.get("running"))
+            turn_fence = session.get("turn_fence")
+            turn_token = session.get("turn_token")
+        if not running:
+            _finish_exact_beta_runtime_session_repair(sid, session, repair_id)
+            return
+        if isinstance(turn_fence, TurnFence) and turn_token is not None:
+            try:
+                turn_fence.wait_generation_quiesced(turn_token, timeout=1.0)
+            except Exception:
+                logger.debug(
+                    "Beta runtime repair is still waiting for session quiescence",
+                    exc_info=True,
+                )
+        else:
+            time.sleep(0.05)
+    if (
+        _sessions.get(sid) is session
+        and session.get("beta_runtime_repair_id") == repair_id
+    ):
+        # Leave the admission marker intact.  A later prompt retry will finish
+        # the rebuild once the actor is truly idle, without leaking a daemon
+        # waiter forever when a provider turn refuses to quiesce.
+        logger.error(
+            "Realtor Beta live-session runtime repair timed out session=%s",
+            session.get("session_key") or sid,
+        )
+
+
+def invalidate_exact_beta_runtime_sessions() -> dict[str, int]:
+    """Refresh every live TUI actor after canonical Beta Codex onboarding.
+
+    Idle actors are rebuilt synchronously. Active turns are cancelled through
+    the same fenced Stop primitive used by the UI, then rebuilt only after the
+    worker and its already-started operations have quiesced. The durable
+    transcript and its original ``sessions.model`` value remain untouched;
+    the replacement agent reports the current canonical Codex runtime.
+    """
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if not beta_provider_policy_active():
+        return {"marked": 0, "rebuilt": 0, "draining": 0}
+
+    counts = {"marked": 0, "rebuilt": 0, "draining": 0}
+    marked_sessions: list[tuple[str, dict, str, bool]] = []
+
+    # Gate every actor before touching any one of them.  A stop/rebuild can
+    # invoke provider code and fail independently; marking in a separate first
+    # phase guarantees a failure on one session cannot leave later sessions
+    # eligible to accept a stale-provider prompt after the process overrides
+    # have already been cleared.
+    for sid, session in list(_sessions.items()):
+        if not isinstance(session, dict):
+            continue
+        history_lock = session.get("history_lock")
+        if history_lock is None:
+            continue
+        repair_id = uuid.uuid4().hex
+        with history_lock:
+            if _sessions.get(sid) is not session:
+                continue
+            session["beta_runtime_repair_id"] = repair_id
+            was_running = bool(session.get("running"))
+        counts["marked"] += 1
+        marked_sessions.append((sid, session, repair_id, was_running))
+
+    for sid, session, repair_id, was_running in marked_sessions:
+        if was_running:
+            try:
+                _request_session_stop(
+                    sid,
+                    session,
+                    reason="beta_provider_repaired",
+                    stage="provider_repair",
+                    expected_repair_id=repair_id,
+                )
+            except Exception:
+                # Keep the admission gate in place and still watch for natural
+                # quiescence.  One broken actor must not abort repair of the
+                # remaining registry.
+                logger.exception(
+                    "Realtor Beta live-session stop failed session=%s",
+                    session.get("session_key") or sid,
+                )
+            threading.Thread(
+                target=_await_exact_beta_runtime_session_repair,
+                args=(sid, session, repair_id),
+                name=f"tui-beta-runtime-repair-{sid[:12]}",
+                daemon=True,
+            ).start()
+            counts["draining"] += 1
+        elif _finish_exact_beta_runtime_session_repair(
+            sid,
+            session,
+            repair_id,
+        ):
+            counts["rebuilt"] += 1
+    return counts
 
 
 def _reset_tui_context_overflow_session(sid: str, session: dict, db) -> None:
@@ -4174,6 +4805,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
 
 @method("session.create")
 def _(rid, params: dict) -> dict:
+    if repair_error := _beta_runtime_repair_admission_error(rid):
+        return repair_error
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
     cols = int(params.get("cols", 80))
@@ -4597,6 +5230,8 @@ def _live_session_resume_response(
 
 @method("session.resume")
 def _session_resume(rid, params: dict) -> dict:
+    if repair_error := _beta_runtime_repair_admission_error(rid):
+        return repair_error
     actor_retry_value = params.get("_actor_lifecycle_retry", 0)
     actor_retry = actor_retry_value if isinstance(actor_retry_value, int) else 0
     target = params.get("session_id", "")
@@ -5234,6 +5869,8 @@ def _(rid, params: dict) -> dict:
 
 @method("session.branch")
 def _(rid, params: dict) -> dict:
+    if repair_error := _beta_runtime_repair_admission_error(rid):
+        return repair_error
     session, err = _sess(params, rid)
     if err:
         return err
@@ -5331,6 +5968,7 @@ def _request_session_stop(
     reason: str = "session_stopped",
     stage: str = "stop",
     close_after_turn: bool = False,
+    expected_repair_id: str | None = None,
 ) -> dict:
     """Cancel one accepted turn without projecting false terminal state.
 
@@ -5349,6 +5987,21 @@ def _request_session_stop(
     if history_lock is not None:
         history_lock.acquire()
     try:
+        if (
+            expected_repair_id is not None
+            and session.get("beta_runtime_repair_id") != expected_repair_id
+        ):
+            # Provider repair may have rebuilt the old actor and admitted a
+            # new turn before this delayed Stop acquired the admission lock.
+            # Never let a stale repair snapshot cancel that newer generation.
+            running_now = bool(session.get("running"))
+            return {
+                "status": "superseded",
+                "interrupted": False,
+                "killed": 0,
+                "quiesced": not running_now,
+                "running": running_now,
+            }
         # Serialize Stop against prompt admission's running/token publication.
         # Once a submit has admitted a generation under this lock, Stop must
         # observe and cancel that exact generation rather than report a stale
@@ -7248,6 +7901,8 @@ def _(rid, params: dict) -> dict:
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
+    if repair_error := _beta_runtime_repair_admission_error(rid):
+        return repair_error
     sid, text = params.get("session_id", ""), params.get("text", "")
     if isinstance(text, str):
         text = re.sub(r"[\ud800-\udfff]", "\ufffd", text)
@@ -7277,6 +7932,18 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    repair_id = session.get("beta_runtime_repair_id")
+    if isinstance(repair_id, str) and repair_id:
+        if session.get("running") or not _finish_exact_beta_runtime_session_repair(
+            sid,
+            session,
+            repair_id,
+        ):
+            return _err(
+                rid,
+                5032,
+                "Realtor Beta is finishing the Codex provider repair; retry the prompt.",
+            )
     if not _license_signed_in():
         _emit_sign_in_nag(sid)
         return _ok(rid, {"status": "sign_in_required"})
@@ -7324,6 +7991,21 @@ def _(rid, params: dict) -> dict:
             or _sessions.get(sid) is not session
         ):
             return _err(rid, 5032, "session context changed; retry the prompt")
+        if repair_error := _beta_runtime_repair_admission_error(rid):
+            # Linearize process-wide repair admission with turn admission. A
+            # request that passed the fast check before prepare cannot publish
+            # a turn after the process gate closed but before its session
+            # marker was installed.
+            return repair_error
+        if session.get("beta_runtime_repair_id"):
+            # The repair marker is published under this same admission lock.
+            # Recheck it here so a repair that begins after the earlier fast
+            # path cannot race a stale actor into one more accepted turn.
+            return _err(
+                rid,
+                5032,
+                "Realtor Beta is finishing the Codex provider repair; retry the prompt.",
+            )
         unknown_outcome = session.get("prompt_outcome_unknown")
         if session.get("running") and isinstance(unknown_outcome, dict):
             unknown_user_id = str(

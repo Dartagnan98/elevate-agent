@@ -31,7 +31,9 @@ support.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Union
+
+from tools.dispatch_companion import DispatchCompanion
 
 # Sources that are excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with ELEVATE_SESSION_SOURCE=tool
@@ -582,11 +584,113 @@ SESSION_SEARCH_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry, tool_error
 
-registry.register(
-    name="session_search",
-    toolset="session_search",
-    schema=SESSION_SEARCH_SCHEMA,
-    handler=lambda args, **kw: session_search(
+# ---------------------------------------------------------------------------
+# ERB-406 lane 6 — routing the agent-loop ``session_search`` special case onto
+# the common atomic adapter (``model_tools.dispatch_agent_owned_registry_tool``;
+# per-lane recipe ``elevate-a2b-migration-recipe-2026-07-17.md``).
+#
+# The agent loop historically special-cased ``session_search`` BEFORE the
+# registry: it injected the agent's write-capable :class:`SessionDB`
+# (``self._session_db`` / ``agent._get_session_db_for_recall()``) plus the
+# current session id straight into ``session_search(db=…, current_session_id=…)``,
+# bypassing the shadow-dispatch boundary.  The old registration lambda read
+# those two from ``kw.get("db")`` / ``kw.get("current_session_id")`` — process
+# state that can NEVER ride the atomic path (the shadow handler-kwargs snapshot
+# is JSON-only: ``task_id`` / ``user_task`` / ``enabled_tools``).  Worse, on the
+# fallback ``db=None`` the tool BOOTSTRAPS a fresh ``SessionDB()`` (mkdir + WAL +
+# schema-init, and ``list_sessions_rich``'s PG-first reader on a bootstrapping
+# ``connect()``) — a hidden write masquerading as a recall read.
+#
+# The migrated lane:
+#  * binds the injected DB + current session id through ONE dispatch-scoped
+#    :class:`~tools.dispatch_companion.DispatchCompanion` holding a small
+#    immutable struct (a struct, not the bare DB, so "no binding at all" is
+#    distinguishable from "bound but DB is None" — both are refused, neither
+#    bootstraps);
+#  * the registered handler resolves the companion EAGERLY at handler start,
+#    ignores ``**_kwargs`` for process state (so a ``SessionDB`` smuggled through
+#    dispatch kwargs can never reach the recall seam), and NEVER constructs a
+#    fallback ``SessionDB``: with no binding (legacy ``registry.dispatch``,
+#    plugin dispatch, hallucinated call) or a bound-but-``None`` DB it returns
+#    the typed ``{"success": false, "error": "Session database not available."}``
+#    payload — byte-identical to the ``run_agent`` agent-loop branch's own
+#    pre-dispatch refusal — instead of bootstrapping a store off the agent loop.
+#
+# Effect honesty (ERB-404 doctrine; declaration != allowance): the registration
+# carries NO effect declaration (``effects`` defaults to ``None`` -> UNKNOWN).
+# ``session_search`` presents as a recall read, but its readers still ride the
+# bootstrapping ``connect()`` (``list_sessions_rich`` is PG-first) and the
+# db=None fallback bootstraps — a truthful ``read:*`` declaration would require
+# the ready-read-only repair of those readers, which is OUT OF SCOPE for this
+# lane.  UNKNOWN therefore fails closed under exact Realtor Beta, which is the
+# honest state.  ``session_search`` is in ``model_tools._AGENT_LOOP_TOOLS`` —
+# ``handle_function_call`` keeps refusing it (that guard stays; the adapter
+# enters the registry directly, not via ``handle_function_call``).
+#
+# Caller-visible divergence preserved (recipe lane note): the four agent-loop
+# copies diverge and each is kept byte-identical in the CALLER, not folded into
+# the shared handler —
+#  * DB source + not-available refusal: the concurrent + sequential ``run_agent``
+#    branches read ``self._session_db`` and refuse with the bare
+#    ``"Session database not available."``; the extracted
+#    ``tool_executor`` / ``agent_runtime_helpers`` copies read
+#    ``agent._get_session_db_for_recall()`` and refuse with
+#    ``format_session_db_unavailable()`` (a richer message when SessionDB init
+#    captured a cause).  Both refusals still run BEFORE any dispatch.
+#  * Call-arg width: the ``run_agent`` branches forward only
+#    ``query`` / ``role_filter`` / ``limit`` (discovery + browse only — scroll
+#    and sort are unreachable there today), while the extracted copies forward
+#    the full shape (adding ``session_id`` / ``around_message_id`` / ``window`` /
+#    ``sort``).  Each caller passes exactly the args it forwarded before, so the
+#    shared handler reads only what that copy supplied.
+# ---------------------------------------------------------------------------
+
+
+class _SessionSearchBinding(NamedTuple):
+    """One dispatch's worth of ``session_search`` process state.
+
+    ``db`` is the agent's injected write-capable :class:`SessionDB` (may be
+    ``None`` when session persistence is disabled — distinct from "no binding at
+    all", which is why a struct is bound rather than the bare DB).
+    ``current_session_id`` is the active session id used to exclude the caller's
+    own lineage from recall results.
+    """
+
+    db: Any
+    current_session_id: Any
+
+
+_SESSION_SEARCH_COMPANION = DispatchCompanion("active_session_search_db")
+
+
+def bind_active_session_search(db, current_session_id):
+    """Expose the injected SessionDB + current session id for one dispatch."""
+    return _SESSION_SEARCH_COMPANION.bound(
+        _SessionSearchBinding(db, current_session_id)
+    )
+
+
+def _registered_session_search_handler(args, **_kwargs) -> str:
+    """Register-time handler: sources the DB from the companion, never bootstraps.
+
+    The companion is resolved eagerly here and never stored for a lazy read.
+    ``**_kwargs`` (the JSON handler-kwargs snapshot) is ignored for process
+    state so a ``SessionDB`` smuggled through dispatch kwargs (the old
+    ``kw.get("db")`` seam) can never reach the recall seam.
+
+    With no binding — or a binding whose DB is ``None`` — the handler returns the
+    typed "Session database not available." payload rather than falling through
+    to ``session_search(db=None)``, which would BOOTSTRAP a fresh ``SessionDB``
+    (mkdir + WAL + schema-init + PG-first reader).  Argument forwarding matches
+    the pre-migration registration exactly.
+    """
+    args = args if isinstance(args, dict) else {}
+    binding = _SESSION_SEARCH_COMPANION.get()
+    if binding is None or binding.db is None:
+        return json.dumps(
+            {"success": False, "error": "Session database not available."}
+        )
+    return session_search(
         query=args.get("query") or "",
         role_filter=args.get("role_filter"),
         limit=args.get("limit", 3),
@@ -594,9 +698,55 @@ registry.register(
         around_message_id=args.get("around_message_id"),
         window=args.get("window", 5),
         sort=args.get("sort"),
-        db=kw.get("db"),
-        current_session_id=kw.get("current_session_id"),
-    ),
+        db=binding.db,
+        current_session_id=binding.current_session_id,
+    )
+
+
+def dispatch_session_search_via_registry(
+    function_args,
+    *,
+    db,
+    current_session_id=None,
+    task_id=None,
+    session_id=None,
+    tool_call_id=None,
+    return_outcome=False,
+):
+    """Route one ``session_search`` invocation through the atomic boundary.
+
+    Every agent special-case branch calls this instead of ``session_search``
+    directly, so the call is captured with the same frozen identity,
+    args-digest, and policy context as ordinary registry tools.  The injected
+    DB + current session id are bound only for the duration of this dispatch and
+    only the registered handler can consume them.  Callers pass exactly the args
+    dict they forwarded before (the ``run_agent`` branches pass a narrowed
+    ``query`` / ``role_filter`` / ``limit`` view; the extracted copies pass the
+    full shape) so the shared handler reproduces each copy's call shape.
+    ``session_search`` is statically registered at import, so the entry always
+    exists and the adapter's own legacy fallback preserves off-agent behavior.
+    ``return_outcome=True`` returns the adapter's :class:`ToolDispatchOutcome`
+    (truthful physical-start proof for the exact-Beta loops); the default
+    returns the raw result byte-identically.
+    """
+    from model_tools import dispatch_agent_owned_registry_tool
+
+    return dispatch_agent_owned_registry_tool(
+        "session_search",
+        function_args if isinstance(function_args, dict) else {},
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        companions=(bind_active_session_search(db, current_session_id),),
+        return_outcome=return_outcome,
+    )
+
+
+registry.register(
+    name="session_search",
+    toolset="session_search",
+    schema=SESSION_SEARCH_SCHEMA,
+    handler=_registered_session_search_handler,
     check_fn=check_session_search_requirements,
     emoji="🔍",
 )

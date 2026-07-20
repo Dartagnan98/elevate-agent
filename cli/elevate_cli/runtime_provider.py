@@ -323,11 +323,20 @@ def _maybe_apply_codex_app_server_runtime(
     rerouted through codex.
 
     Returns the (possibly-rewritten) api_mode."""
+    runtime = str(
+        (model_cfg or {}).get("openai_runtime") or ""
+    ).strip().lower()
+    if beta_provider_policy_active():
+        if runtime not in {"", "auto"}:
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow the external Codex app-server runtime.",
+                code="beta_codex_app_server_not_allowed",
+            )
+        return api_mode
     if not model_cfg:
         return api_mode
     if provider not in {"openai", "openai-codex"}:
         return api_mode
-    runtime = str(model_cfg.get("openai_runtime") or "").strip().lower()
     if runtime == "codex_app_server":
         return "codex_app_server"
     return api_mode

@@ -2510,6 +2510,8 @@ export interface SessionInfo {
   id: string;
   source: string | null;
   model: string | null;
+  historical_model?: string | null;
+  runtime_model?: string | null;
   title: string | null;
   started_at: number;
   ended_at: number | null;

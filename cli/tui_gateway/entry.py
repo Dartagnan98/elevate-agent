@@ -4,6 +4,9 @@ import signal
 import sys
 import time
 import traceback
+import re
+import uuid
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from tui_gateway import server
 from tui_gateway.server import _CRASH_LOG, dispatch, resolve_skin, write_json
@@ -19,14 +22,52 @@ def _install_sidecar_publisher() -> None:
     """
     url = os.environ.get("ELEVATE_TUI_SIDECAR_URL")
 
+    from elevate_constants import exact_realtor_beta_active
+
+    exact_beta = exact_realtor_beta_active()
     if not url:
+        if exact_beta:
+            raise RuntimeError(
+                "Realtor Beta terminal sessions must be launched from the Elevate app"
+            )
         return
 
     from tui_gateway.event_publisher import WsPublisherTransport
 
-    server._stdio_transport = TeeTransport(
-        server._stdio_transport, WsPublisherTransport(url)
+    instance_values = parse_qs(urlsplit(url).query).get("instance", [])
+    instance_id = instance_values[0] if len(instance_values) == 1 else ""
+    if not re.fullmatch(r"[a-f0-9]{32}", instance_id):
+        if exact_beta:
+            raise RuntimeError(
+                "dashboard sidecar instance identity is missing or invalid"
+            )
+        # Stable keeps supporting older/custom sidecar URLs that predate PTY
+        # repair identity. Upgrade the URL locally without changing its event
+        # semantics.
+        instance_id = uuid.uuid4().hex
+        parsed = urlsplit(url)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        query.append(("instance", instance_id))
+        url = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+        )
+
+    publisher = WsPublisherTransport(
+        url,
+        instance_id=instance_id,
+        control_handler=server.handle_exact_beta_runtime_control,
+        require_registration_ack=exact_beta,
     )
+    if exact_beta and not publisher.connected:
+        publisher.close()
+        raise RuntimeError(
+            "Realtor Beta terminal could not register with the Elevate app"
+        )
+    if exact_beta:
+        server.install_exact_beta_sidecar_registration_check(
+            lambda: publisher.connected
+        )
+    server._stdio_transport = TeeTransport(server._stdio_transport, publisher)
 
 
 def _log_signal(signum: int, frame) -> None:

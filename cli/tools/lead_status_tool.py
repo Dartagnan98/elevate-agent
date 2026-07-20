@@ -57,16 +57,38 @@ def _lead_status_handler(args: dict[str, Any], **_: Any) -> str:
         set_pipeline_status,
         update_flags,
     )
-    from elevate_cli.data.connection import connect
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect,
+        connect_ready_read_only,
+    )
+
+    # ``show`` is a pure read: run it over the already-ready forced-READ-ONLY
+    # store so inspecting a lead never bootstraps/migrates the operational
+    # store as a cold-connect side effect. The write actions below keep the
+    # general ``connect()`` because they must mutate.
+    if action == "show":
+        try:
+            with connect_ready_read_only() as conn:
+                contact = get_contact(conn, contact_id)
+                if contact is None:
+                    return tool_error(f"contact {contact_id!r} not found")
+                return tool_result(success=True, lead=_brief(contact))
+        except OperationalStoreNotReady:
+            return tool_result(
+                success=False,
+                error="operational_store_not_ready",
+                message=(
+                    "Lead data is still starting for the active account. "
+                    "Wait for Elevate startup to complete, then retry once."
+                ),
+            )
 
     try:
         with connect() as conn:
             contact = get_contact(conn, contact_id)
             if contact is None:
                 return tool_error(f"contact {contact_id!r} not found")
-
-            if action == "show":
-                return tool_result(success=True, lead=_brief(contact))
 
             if action == "set":
                 status = str(args.get("status") or "").strip().lower()
@@ -217,6 +239,26 @@ LEAD_STATUS_SCHEMA = {
 }
 
 
+def _lead_status_effect_resolver(args: dict):
+    """Declare only the pure ``show`` read; every label write stays unknown.
+
+    ``show`` runs over ``connect_ready_read_only()`` and only reads the contact
+    row, so it is a truthful ``read:leads``. ``set``/``heat``/``follow_up``/
+    ``classify`` all mutate contact state (and ``set`` can push to an external
+    CRM) and any unrecognized action stays unknown/fail-closed. The
+    normalization mirrors the handler's
+    ``str(args.get("action") or "").strip().lower()`` exactly so the declared
+    surface can never diverge from the dispatch.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    act = str(action or "").strip().lower()
+    if act == "show":
+        return {"read:leads"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="lead_status",
     toolset="lead_status",
@@ -227,4 +269,5 @@ registry.register(
         "board and the next heartbeat reflect where it's at."
     ),
     emoji="",
+    effect_resolver=_lead_status_effect_resolver,
 )

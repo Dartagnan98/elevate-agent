@@ -135,3 +135,140 @@ class TestTodoToolFunction:
     def test_no_store_returns_error(self):
         result = json.loads(todo_tool())
         assert "error" in result
+
+
+class TestTodoEffectClassification:
+    """The todo tool's effects are argument-resolved against the per-session
+    in-memory plan store: reads are ``read:session_plan``, writes are the
+    ``write_local:session_plan`` capability the PLAN / DRAFT_ONLY policy
+    ceilings sanction."""
+
+    def _policy(self, mode):
+        from tools.approval import ExecutionPolicy
+
+        return ExecutionPolicy.for_mode("turn-todo", mode)
+
+    def test_todo_is_declared_via_resolver_only(self):
+        import tools.todo_tool as todo_module
+        from tools.registry import registry
+
+        entry = registry.get_entry("todo")
+        assert entry is not None
+        assert entry.effects is None
+        assert entry.effect_resolver is todo_module._todo_effect_resolver
+        assert registry.get_effect_metadata("todo") == {
+            "declared": True,
+            "effects": frozenset(),
+            "has_resolver": True,
+        }
+
+    def test_todo_read_resolves_to_session_plan_read(self):
+        from tools.approval import (
+            Effect,
+            ExecutionPolicyMode,
+            authorize_effects,
+        )
+        from tools.registry import registry
+
+        expected = frozenset({Effect.parse("read:session_plan")})
+        for args in ({}, {"merge": True}, {"todos": None}):
+            resolved = registry.resolve_effects("todo", args)
+            assert resolved == expected
+
+        decision = authorize_effects(
+            self._policy(ExecutionPolicyMode.READ_ONLY),
+            registry.resolve_effects("todo", {}),
+        )
+        assert decision.allowed is True
+        assert decision.denied_effects == frozenset()
+
+    def test_todo_write_resolves_to_session_plan_write(self):
+        from tools.approval import Effect
+        from tools.registry import registry
+
+        expected = frozenset({Effect.parse("write_local:session_plan")})
+        write_args = (
+            {"todos": [{"id": "1", "content": "x", "status": "pending"}]},
+            {"todos": []},  # empty list still REPLACES the plan — a write
+            {"todos": [], "merge": True},
+        )
+        for args in write_args:
+            assert registry.resolve_effects("todo", args) == expected
+
+    def test_todo_write_denied_read_only_allowed_plan_and_draft(self):
+        from tools.approval import (
+            Effect,
+            ExecutionPolicyMode,
+            authorize_effects,
+        )
+        from tools.registry import registry
+
+        resolved = registry.resolve_effects(
+            "todo", {"todos": [{"id": "1", "content": "x", "status": "pending"}]}
+        )
+
+        denied = authorize_effects(
+            self._policy(ExecutionPolicyMode.READ_ONLY), resolved
+        )
+        assert denied.allowed is False
+        assert denied.denied_effects == frozenset(
+            {Effect.parse("write_local:session_plan")}
+        )
+
+        for mode in (
+            ExecutionPolicyMode.PLAN,
+            ExecutionPolicyMode.DRAFT_ONLY,
+            ExecutionPolicyMode.DEFAULT,
+        ):
+            decision = authorize_effects(self._policy(mode), resolved)
+            assert decision.allowed is True, mode
+            assert decision.denied_effects == frozenset()
+
+    def test_todo_resolver_branch_matches_handler_write_condition(self):
+        """The resolver must classify a call as a write exactly when the
+        handler would mutate the store."""
+        from tools.approval import Effect
+        from tools.registry import registry
+
+        read_effect = frozenset({Effect.parse("read:session_plan")})
+        write_effect = frozenset({Effect.parse("write_local:session_plan")})
+
+        # Read branch: handler leaves the store untouched.
+        store = TodoStore()
+        seeded = [{"id": "1", "content": "keep", "status": "pending"}]
+        store.write(seeded)
+        args = {"merge": False}
+        assert registry.resolve_effects("todo", args) == read_effect
+        before = store.read()
+        json.loads(todo_tool(todos=args.get("todos"), store=store))
+        assert store.read() == before
+
+        # Write branch: same handler condition (todos is not None) mutates.
+        args = {"todos": []}
+        assert registry.resolve_effects("todo", args) == write_effect
+        json.loads(todo_tool(todos=args.get("todos"), store=store))
+        assert store.read() == []
+
+    def test_todo_read_never_touches_filesystem(self, tmp_path, monkeypatch):
+        """Adversarial: a declared-read todo call must not create files or
+        spawn anything, even with a populated store."""
+        import subprocess
+
+        def unexpected_effect(*_args, **_kwargs):
+            raise AssertionError("todo read attempted a non-read effect")
+
+        monkeypatch.setattr(subprocess, "Popen", unexpected_effect)
+        monkeypatch.chdir(tmp_path)
+
+        store = TodoStore()
+        store.write(
+            [
+                {"id": "1", "content": "First", "status": "in_progress"},
+                {"id": "2", "content": "Second", "status": "pending"},
+            ]
+        )
+        before = sorted(str(p) for p in tmp_path.rglob("*"))
+        result = json.loads(todo_tool(store=store))
+
+        assert result["summary"]["total"] == 2
+        assert sorted(str(p) for p in tmp_path.rglob("*")) == before

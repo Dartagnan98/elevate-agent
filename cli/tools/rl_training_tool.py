@@ -150,6 +150,35 @@ _last_status_check: Dict[str, float] = {}
 # Rate limiting for status checks (30 minutes)
 MIN_STATUS_CHECK_INTERVAL = 30 * 60
 
+# Process-stable snapshot of optional W&B SDK importability.  ``None`` means
+# "not probed yet"; the first probe result is reused for the process lifetime.
+_WANDB_SDK_AVAILABLE: Optional[bool] = None
+
+
+def _wandb_sdk_available() -> bool:
+    """Process-stable probe for the optional Weights & Biases SDK.
+
+    ``wandb`` is not an Elevate dependency — when present it was installed by
+    the user, so its version (and therefore its import-time and ``Api()``
+    behavior: credential resolution from env/netrc/settings files, GraphQL
+    network calls, error-telemetry setup) is an unpinned third-party boundary
+    that cannot be classified as a pure read.
+
+    The first call snapshots ``importlib.util.find_spec("wandb")`` and every
+    later call reuses that snapshot, so the effect resolver and the handler
+    are guaranteed to agree for the lifetime of the process: a call resolved
+    as a pure local read can never reach the SDK even if ``wandb`` is
+    installed mid-session (a restart is required to pick it up).  A probe
+    failure fails closed by reporting the SDK as present.
+    """
+    global _WANDB_SDK_AVAILABLE
+    if _WANDB_SDK_AVAILABLE is None:
+        try:
+            _WANDB_SDK_AVAILABLE = importlib.util.find_spec("wandb") is not None
+        except Exception:
+            _WANDB_SDK_AVAILABLE = True
+    return _WANDB_SDK_AVAILABLE
+
 
 # ============================================================================
 # Environment Discovery
@@ -878,25 +907,29 @@ async def rl_check_status(run_id: str) -> str:
     if run_state.error_message:
         result["error"] = run_state.error_message
     
-    # Try to get WandB metrics if available
-    try:
-        import wandb
-        api = wandb.Api()
-        runs = api.runs(
-            f"{os.getenv('WANDB_ENTITY', 'nousresearch')}/{run_state.wandb_project}",
-            filters={"display_name": run_state.wandb_run_name}
-        )
-        if runs:
-            wandb_run = runs[0]
-            result["wandb_url"] = wandb_run.url
-            result["metrics"] = {
-                "step": wandb_run.summary.get("_step", 0),
-                "reward_mean": wandb_run.summary.get("train/reward_mean"),
-                "percent_correct": wandb_run.summary.get("train/percent_correct"),
-                "eval_percent_correct": wandb_run.summary.get("eval/percent_correct"),
-            }
-    except Exception as e:
-        result["wandb_error"] = str(e)
+    # Try to get WandB metrics if available.  The gate is the process-stable
+    # snapshot so a mid-session SDK install cannot open the boundary.
+    if not _wandb_sdk_available():
+        result["wandb_error"] = "wandb SDK is not installed"
+    else:
+        try:
+            import wandb
+            api = wandb.Api()
+            runs = api.runs(
+                f"{os.getenv('WANDB_ENTITY', 'nousresearch')}/{run_state.wandb_project}",
+                filters={"display_name": run_state.wandb_run_name}
+            )
+            if runs:
+                wandb_run = runs[0]
+                result["wandb_url"] = wandb_run.url
+                result["metrics"] = {
+                    "step": wandb_run.summary.get("_step", 0),
+                    "reward_mean": wandb_run.summary.get("train/reward_mean"),
+                    "percent_correct": wandb_run.summary.get("train/percent_correct"),
+                    "eval_percent_correct": wandb_run.summary.get("eval/percent_correct"),
+                }
+        except Exception as e:
+            result["wandb_error"] = str(e)
     
     return json.dumps(result, indent=2)
 
@@ -958,21 +991,25 @@ async def rl_get_results(run_id: str) -> str:
         "wandb_run_name": run_state.wandb_run_name,
     }
     
-    # Get WandB metrics
-    try:
-        import wandb
-        api = wandb.Api()
-        runs = api.runs(
-            f"{os.getenv('WANDB_ENTITY', 'nousresearch')}/{run_state.wandb_project}",
-            filters={"display_name": run_state.wandb_run_name}
-        )
-        if runs:
-            wandb_run = runs[0]
-            result["wandb_url"] = wandb_run.url
-            result["final_metrics"] = dict(wandb_run.summary)
-            result["history"] = [dict(row) for row in wandb_run.history(samples=10)]
-    except Exception as e:
-        result["wandb_error"] = str(e)
+    # Get WandB metrics.  The gate is the process-stable snapshot so a call
+    # whose effects resolved to a pure local read can never reach the SDK.
+    if not _wandb_sdk_available():
+        result["wandb_error"] = "wandb SDK is not installed"
+    else:
+        try:
+            import wandb
+            api = wandb.Api()
+            runs = api.runs(
+                f"{os.getenv('WANDB_ENTITY', 'nousresearch')}/{run_state.wandb_project}",
+                filters={"display_name": run_state.wandb_run_name}
+            )
+            if runs:
+                wandb_run = runs[0]
+                result["wandb_url"] = wandb_run.url
+                result["final_metrics"] = dict(wandb_run.summary)
+                result["history"] = [dict(row) for row in wandb_run.history(samples=10)]
+        except Exception as e:
+            result["wandb_error"] = str(e)
     
     return json.dumps(result, indent=2)
 
@@ -1373,6 +1410,24 @@ RL_TEST_INFERENCE_SCHEMA = {"name": "rl_test_inference", "description": "Quick i
 
 _rl_env = ["TINKER_API_KEY", "WANDB_API_KEY"]
 
+
+def _rl_get_results_effect_resolver(args: dict):
+    """Resolve ``rl_get_results`` from the process-stable W&B boundary.
+
+    Without the optional ``wandb`` SDK the handler only reads the in-memory
+    ``_active_runs`` map and serializes it — an exact ``read:rl``.  When the
+    SDK is importable, the call crosses an unpinned third-party boundary
+    (credential resolution, network, telemetry) that has not been proven
+    read-only, so it fails closed to unknown.  The handler consults the same
+    ``_wandb_sdk_available()`` snapshot, so the resolved classification and
+    the executed branch cannot diverge within one process.
+    """
+    from tools.approval import EffectKind
+
+    if _wandb_sdk_available():
+        return {EffectKind.UNKNOWN}
+    return {"read:rl"}
+
 registry.register(name="rl_list_environments", emoji="🧪", toolset="rl", schema=RL_LIST_ENVIRONMENTS_SCHEMA,
     handler=lambda args, **kw: rl_list_environments(), check_fn=check_rl_python_version, requires_env=[],
     is_async=True, effects={"read:rl"})
@@ -1390,7 +1445,8 @@ registry.register(name="rl_check_status", emoji="🧪", toolset="rl", schema=RL_
 registry.register(name="rl_stop_training", emoji="🧪", toolset="rl", schema=RL_STOP_TRAINING_SCHEMA,
     handler=lambda args, **kw: rl_stop_training(run_id=args.get("run_id", "")), check_fn=check_rl_api_keys, requires_env=_rl_env, is_async=True)
 registry.register(name="rl_get_results", emoji="🧪", toolset="rl", schema=RL_GET_RESULTS_SCHEMA,
-    handler=lambda args, **kw: rl_get_results(run_id=args.get("run_id", "")), check_fn=check_rl_api_keys, requires_env=_rl_env, is_async=True)
+    handler=lambda args, **kw: rl_get_results(run_id=args.get("run_id", "")), check_fn=check_rl_api_keys, requires_env=_rl_env, is_async=True,
+    effect_resolver=_rl_get_results_effect_resolver)
 registry.register(name="rl_list_runs", emoji="🧪", toolset="rl", schema=RL_LIST_RUNS_SCHEMA,
     handler=lambda args, **kw: rl_list_runs(), check_fn=check_rl_python_version, requires_env=[],
     is_async=True, effects={"read:rl"})

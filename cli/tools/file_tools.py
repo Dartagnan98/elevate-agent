@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import shlex
 import tempfile
 import threading
 from pathlib import Path
@@ -12,7 +13,7 @@ from pathlib import Path
 from agent.cwd import safe_getcwd
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import has_binary_extension
-from tools.file_materialize import FileNotReadyError, materialize_if_dataless
+from tools.file_materialize import FileNotResidentError, require_resident
 from tools.file_operations import (
     ShellFileOperations,
     normalize_read_pagination,
@@ -50,8 +51,14 @@ def _get_max_read_chars() -> int:
     if _max_read_chars_cached is not None:
         return _max_read_chars_cached
     try:
-        from elevate_cli.config import load_config
-        cfg = load_config()
+        # read_raw_config() reads config.yaml as-is; unlike load_config() it
+        # does NOT call ensure_elevate_home(), so the declared read_file path
+        # never bootstraps (mkdir/seed) the profile tree. Behaviour is
+        # identical: file_read_max_chars defaults to 100_000 in both
+        # DEFAULT_CONFIG and _DEFAULT_MAX_READ_CHARS below, so an unset value
+        # falls back to the same number either way.
+        from elevate_cli.config import read_raw_config
+        cfg = read_raw_config()
         val = cfg.get("file_read_max_chars")
         if isinstance(val, (int, float)) and val > 0:
             _max_read_chars_cached = int(val)
@@ -535,19 +542,28 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         _resolved = _resolve_path_for_task(path, task_id)
 
-        # ── iCloud placeholder guard ──────────────────────────────────
-        # Files offloaded to iCloud are dataless placeholders; reading one
-        # can return EDEADLK ("Resource deadlock avoided") until macOS faults
-        # it in. Materialize first so the read below doesn't deadlock.
+        # ── iCloud residency guard (pure — no download, no subprocess) ──
+        # Files offloaded to iCloud are dataless placeholders whose bytes live
+        # in the cloud. The declared-read lane must stay a provably pure read,
+        # so it REFUSES a placeholder instead of materializing it (a
+        # brctl-download subprocess + iCloud residency change, which would make
+        # the effect unclassifiable from args). Callers who genuinely need the
+        # bytes materialize explicitly through the effect-bearing terminal lane.
         try:
-            materialize_if_dataless(_resolved)
-        except FileNotReadyError as exc:
+            require_resident(_resolved)
+        except FileNotResidentError:
             return json.dumps({
                 "error": (
-                    f"Cannot read '{path}': file is stored in iCloud and could "
-                    f"not be downloaded in time ({exc})."
+                    f"Cannot read '{path}': the file is stored in iCloud and "
+                    "its data is not downloaded to this machine (a 'dataless' "
+                    "placeholder). read_file will not trigger an iCloud "
+                    "download. Materialize it first, then read again — e.g. "
+                    f"run `brctl download {shlex.quote(str(_resolved))}` with "
+                    "the terminal tool, or open it in Finder."
                 ),
-            })
+                "error_code": "file_not_resident",
+                "path": path,
+            }, ensure_ascii=False)
 
         # ── Binary file guard ─────────────────────────────────────────
         # Block binary files by extension (no I/O).
@@ -1253,7 +1269,48 @@ def _handle_search_files(args, **kw):
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
 
-registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)
+# ── Truthful effect declarations (ERB-404) ─────────────────────────────────
+# ``read_file`` and ``search_files`` are local reads and declare an exact
+# ``read:files``. Their read is performed over the SAME shared local-execution
+# substrate as the already-declared ``terminal`` READ lane: both acquire a
+# terminal environment through ``_get_file_ops`` -> ``_create_environment``
+# (the identical ``_active_environments`` machinery ``terminal`` uses), and a
+# read runs the environment's read-only backend (rg/head/sed/wc for local).
+# That substrate — env provisioning, which idempotently ensures ELEVATE_HOME
+# exactly as ``terminal``'s declared ``ls``/``cat`` reads do, and foreground
+# read-only subprocesses — is accepted for a READ declaration by the terminal
+# precedent, not a per-tool effect (a foreground read never adds SPAWN; only a
+# background/durable process would, mirroring ``_terminal_effect_resolver``).
+#
+# What WAS a per-tool, read_file-specific side effect is the old iCloud
+# ``materialize_if_dataless`` call: an active ``brctl download`` subprocess that
+# changed a file's residency. That is the disqualifier this batch repaired —
+# ``read_file`` now refuses a dataless placeholder via the stat-only
+# ``require_resident`` guard (no subprocess, no residency change), and its
+# ``_get_max_read_chars`` size guard reads config through the bootstrap-free
+# ``read_raw_config`` rather than ``load_config``. ``search_files`` never had an
+# active materializer (it declares no residency guard because it performs no
+# active residency change; ripgrep's passive OS fault-in on a byte read is the
+# same substrate behaviour as ``terminal``'s ``grep``/``cat``).
+#
+# DECLARATION-ROT COUPLING: the ``read:files`` truthfulness above is explicitly
+# coupled to ``terminal``'s READ declaration over this shared substrate (its
+# ``_terminal_effect_resolver`` declares bare READ for cat/grep/ls/rg, which hit
+# the identical env-init ELEVATE_HOME bootstrap). If anyone ever revokes or
+# narrows ``terminal``'s READ-over-substrate stance, revisit these two
+# declarations in lockstep — the repair would land on the terminal precedent
+# first, not here. (One intended asymmetry: ``read_file`` fails closed on a
+# dataless placeholder while ``search_files`` lets ripgrep passively fault one
+# in — that is ``read_file`` being STRICTER than the accepted substrate floor,
+# never an under-declaration; search matches the floor exactly as terminal grep
+# does.)
+#
+# ``write_file`` and ``patch`` mutate the filesystem and stay UNKNOWN
+# (undeclared → fail closed) until write-effect classification lands with its
+# own evidence. The materializing helper ``materialize_if_dataless`` remains an
+# explicit, undeclared (UNKNOWN) opt-in path for effect-bearing callers
+# (e.g. ``vision_analyze``), whose behaviour this batch left byte-identical.
+registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000, effects={"read:files"})
 registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
 registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
-registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)
+registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000, effects={"read:files"})

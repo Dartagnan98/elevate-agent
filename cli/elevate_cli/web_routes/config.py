@@ -11,6 +11,7 @@ from elevate_cli.beta_provider_policy import (
     BetaProviderPolicyError,
     beta_provider_policy_active,
     canonical_beta_provider,
+    validate_beta_primary_model_unchanged,
 )
 from elevate_cli.config import (
     get_config_path,
@@ -58,6 +59,7 @@ def _denormalize_config_from_web(
     config: Dict[str, Any],
     *,
     load_config_func=load_config,
+    current_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     config = dict(config)
     config.pop("_model_meta", None)
@@ -72,9 +74,16 @@ def _denormalize_config_from_web(
     model_val = config.get("model")
     if isinstance(model_val, str) and model_val:
         try:
-            disk_config = load_config_func()
+            disk_config = (
+                current_config
+                if current_config is not None
+                else load_config_func()
+            )
             disk_model = disk_config.get("model")
             if isinstance(disk_model, dict):
+                # Never mutate the reference used by the Beta immutability
+                # comparison below (or a caller's cached config object).
+                disk_model = dict(disk_model)
                 disk_model["default"] = model_val
                 if ctx_override > 0:
                     disk_model["context_length"] = ctx_override
@@ -112,11 +121,18 @@ def create_config_router(
     @router.put("/api/config")
     async def update_config(body: ConfigUpdate):
         try:
+            current_config = load_config_func()
             prospective = _denormalize_config_from_web(
                 body.config,
                 load_config_func=load_config_func,
+                current_config=current_config,
             )
             validate_config_for_persistence(prospective)
+            validate_beta_primary_model_unchanged(
+                prospective,
+                current_config,
+                source="the generic config API",
+            )
             save_config_func(prospective)
             return {"ok": True}
         except BetaProviderPolicyError as exc:
@@ -304,6 +320,11 @@ def create_config_router(
             if not isinstance(parsed, dict):
                 raise HTTPException(status_code=400, detail="YAML must be a mapping")
             validate_config_for_persistence(parsed)
+            validate_beta_primary_model_unchanged(
+                parsed,
+                load_config_func(),
+                source="the raw config editor",
+            )
             save_config_func(parsed)
             return {"ok": True}
         except BetaProviderPolicyError as exc:

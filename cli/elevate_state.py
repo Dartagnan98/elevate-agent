@@ -356,6 +356,8 @@ CREATE TABLE IF NOT EXISTS approval_effect_receipts (
     completed_at REAL,
     result_digest TEXT,
     failure_code TEXT,
+    transform_pre_digest TEXT,
+    transform_post_digest TEXT,
     FOREIGN KEY(request_id) REFERENCES approval_grants(request_id),
     UNIQUE(session_id, invocation_id),
     CHECK (completed_at IS NULL OR completed_at >= claimed_at),
@@ -373,6 +375,46 @@ CREATE TABLE IF NOT EXISTS approval_effect_receipts (
 
 CREATE INDEX IF NOT EXISTS idx_approval_effect_receipts_status
 ON approval_effect_receipts(status, claim_boot_id, claimed_at);
+
+CREATE TABLE IF NOT EXISTS tool_effect_receipts (
+    claim_id TEXT PRIMARY KEY,
+    boot_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    entry_id INTEGER,
+    registry_generation INTEGER,
+    canonical_args_digest TEXT NOT NULL,
+    handler_kwargs_digest TEXT,
+    accepted_policy_digest TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    effect_set_json TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('claimed', 'succeeded', 'failed', 'unknown')),
+    claimed_at REAL NOT NULL,
+    completed_at REAL,
+    result_digest TEXT,
+    transformed_result_digest TEXT,
+    failure_code TEXT,
+    UNIQUE(session_id, invocation_id),
+    CHECK (completed_at IS NULL OR completed_at >= claimed_at),
+    CHECK (
+        (status = 'claimed' AND completed_at IS NULL
+            AND result_digest IS NULL AND transformed_result_digest IS NULL
+            AND failure_code IS NULL)
+        OR (status = 'succeeded' AND completed_at IS NOT NULL
+            AND result_digest IS NOT NULL AND failure_code IS NULL)
+        OR (status = 'failed' AND completed_at IS NOT NULL
+            AND failure_code IS NOT NULL)
+        OR (status = 'unknown' AND completed_at IS NOT NULL
+            AND result_digest IS NULL AND transformed_result_digest IS NULL
+            AND failure_code IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_effect_receipts_status
+ON tool_effect_receipts(status, boot_id, claimed_at);
 
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
@@ -3681,6 +3723,472 @@ class SessionDB:
             if row is not None
             else None
         )
+
+    def record_approval_effect_result_transform(
+        self,
+        *,
+        claim_id: str,
+        request_id: str,
+        boot_id: str,
+        transform_pre_digest: str,
+        transform_post_digest: str,
+    ) -> int:
+        """Bind one evidenced output rewrite to a terminal approval receipt.
+
+        The CAS can only annotate an already-terminal (succeeded/failed)
+        receipt and can never touch the recorded outcome columns (status,
+        completed_at, result_digest, failure_code).  It is single-set: a
+        second, different rewrite for the same claim is refused, so a
+        transform chain cannot silently launder what the receipt recorded.
+        Returns 1 exactly when the evidence row was bound.
+        """
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        digest_re = re.compile(r"^[0-9a-f]{64}$")
+        for name, value in (
+            ("claim_id", claim_id),
+            ("request_id", request_id),
+            ("boot_id", boot_id),
+        ):
+            if not isinstance(value, str) or not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        for name, value in (
+            ("transform_pre_digest", transform_pre_digest),
+            ("transform_post_digest", transform_post_digest),
+        ):
+            if not isinstance(value, str) or not digest_re.fullmatch(value):
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return 0
+            if active_boot != boot_id:
+                return 0
+            cursor = conn.execute(
+                "UPDATE approval_effect_receipts "
+                "SET transform_pre_digest = ?, transform_post_digest = ? "
+                "WHERE claim_id = ? AND request_id = ? AND claim_boot_id = ? "
+                "AND status IN ('succeeded', 'failed') "
+                "AND ("
+                "  (transform_pre_digest IS NULL AND transform_post_digest IS NULL)"
+                "  OR (transform_pre_digest = ? AND transform_post_digest = ?)"
+                ")",
+                (
+                    transform_pre_digest,
+                    transform_post_digest,
+                    claim_id,
+                    request_id,
+                    boot_id,
+                    transform_pre_digest,
+                    transform_post_digest,
+                ),
+            )
+            return 1 if cursor.rowcount == 1 else 0
+
+        return int(self._execute_write(_do))
+
+    # ── General registry tool-effect receipts (exact Beta) ──
+
+    @staticmethod
+    def _decode_tool_effect_receipt(row: sqlite3.Row) -> Dict[str, Any]:
+        receipt = dict(row)
+        raw_effects = receipt.pop("effect_set_json", "[]")
+        try:
+            effects = json.loads(raw_effects)
+        except (json.JSONDecodeError, TypeError):
+            effects = None
+        receipt["effect_set"] = effects
+        return receipt
+
+    def claim_tool_effect(
+        self,
+        *,
+        claim_id: str,
+        boot_id: str,
+        session_id: str,
+        invocation_id: str,
+        turn_id: str,
+        tool_name: str,
+        entry_id: Optional[int],
+        registry_generation: Optional[int],
+        canonical_args_digest: str,
+        handler_kwargs_digest: Optional[str],
+        accepted_policy: Dict[str, Any],
+        policy_revision: int,
+        effect_set: List[str],
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically claim one accepted-turn registry effect exactly once.
+
+        This is the general-registry sibling of :meth:`claim_approval_effect`
+        for effects that do not ride a human Approval Grant: any accepted-turn
+        tool invocation whose resolved effects go beyond pure read.  A
+        successful return is the only authorization to invoke the handler.
+        A duplicate durable invocation identity (same session + invocation),
+        a foreign boot lease, or a policy the effect set exceeds returns
+        ``None`` without claiming.  Storage errors raise so callers can
+        fail closed distinctly from a duplicate.
+        """
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        digest_re = re.compile(r"^[0-9a-f]{64}$")
+        for name, value in (("claim_id", claim_id), ("boot_id", boot_id)):
+            if not isinstance(value, str) or not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        if not isinstance(canonical_args_digest, str) or not digest_re.fullmatch(
+            canonical_args_digest
+        ):
+            raise ValueError("canonical_args_digest must be a SHA-256 hex digest")
+        if handler_kwargs_digest is not None and (
+            not isinstance(handler_kwargs_digest, str)
+            or not digest_re.fullmatch(handler_kwargs_digest)
+        ):
+            raise ValueError("handler_kwargs_digest must be a SHA-256 hex digest")
+        for name, value in (
+            ("session_id", session_id),
+            ("invocation_id", invocation_id),
+            ("turn_id", turn_id),
+            ("tool_name", tool_name),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        for name, value in (
+            ("entry_id", entry_id),
+            ("registry_generation", registry_generation),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ValueError(f"{name} must be an integer or None")
+        if (
+            isinstance(policy_revision, bool)
+            or not isinstance(policy_revision, int)
+            or policy_revision < 0
+        ):
+            raise ValueError("policy_revision must be a non-negative integer")
+        claimed_at = time.time() if now is None else float(now)
+        if not math.isfinite(claimed_at):
+            raise ValueError("claim timestamp must be finite")
+
+        from tools.approval import ExecutionPolicy, authorize_effects
+
+        restored_policy = ExecutionPolicy.from_dict(accepted_policy)
+        if restored_policy.accepted_turn_id != turn_id:
+            raise ValueError("effect claim turn must match accepted policy")
+        canonical_effects = sorted(set(effect_set))
+        if not canonical_effects or not all(
+            isinstance(effect, str) and effect.strip()
+            for effect in canonical_effects
+        ):
+            raise ValueError("effect_set must contain declared effects")
+        authorization = authorize_effects(restored_policy, canonical_effects)
+        if not authorization.allowed:
+            raise ValueError("effect claim exceeds the accepted policy")
+        accepted_policy_json = json.dumps(
+            restored_policy.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        accepted_policy_digest = hashlib.sha256(
+            accepted_policy_json.encode("utf-8")
+        ).hexdigest()
+        effect_set_json = json.dumps(
+            canonical_effects,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            if lease is None:
+                raise RuntimeError("Approval Grant boot lease is not active")
+            try:
+                active_boot = str(json.loads(lease["value"])["boot_id"])
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise RuntimeError("Approval Grant boot lease is corrupt") from exc
+            if active_boot != boot_id:
+                return None
+
+            duplicate = conn.execute(
+                "SELECT claim_id FROM tool_effect_receipts "
+                "WHERE session_id = ? AND invocation_id = ? LIMIT 1",
+                (session_id, invocation_id),
+            ).fetchone()
+            if duplicate is not None:
+                return None
+
+            conn.execute(
+                "INSERT INTO tool_effect_receipts "
+                "(claim_id, boot_id, session_id, invocation_id, turn_id, "
+                "tool_name, entry_id, registry_generation, "
+                "canonical_args_digest, handler_kwargs_digest, "
+                "accepted_policy_digest, policy_revision, effect_set_json, "
+                "status, claimed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?)",
+                (
+                    claim_id,
+                    boot_id,
+                    session_id,
+                    invocation_id,
+                    turn_id,
+                    tool_name,
+                    entry_id,
+                    registry_generation,
+                    canonical_args_digest,
+                    handler_kwargs_digest,
+                    accepted_policy_digest,
+                    policy_revision,
+                    effect_set_json,
+                    claimed_at,
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM tool_effect_receipts WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+
+        row = self._execute_write(_do)
+        return self._decode_tool_effect_receipt(row) if row is not None else None
+
+    def complete_tool_effect(
+        self,
+        *,
+        claim_id: str,
+        boot_id: str,
+        status: str,
+        result_digest: Optional[str],
+        failure_code: Optional[str],
+        completed_at: Optional[float] = None,
+    ) -> int:
+        """Durably finish one claimed registry effect without allowing replay."""
+        if status not in {"succeeded", "failed", "unknown"}:
+            raise ValueError("invalid tool effect completion status")
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        for name, value in (("claim_id", claim_id), ("boot_id", boot_id)):
+            if not isinstance(value, str) or not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        if result_digest is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", result_digest
+        ):
+            raise ValueError("result_digest must be a SHA-256 hex digest")
+        if failure_code is not None and not (
+            isinstance(failure_code, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", failure_code)
+        ):
+            raise ValueError("failure_code must be a content-free reason code")
+        if status == "succeeded" and failure_code is not None:
+            raise ValueError("successful effect receipts cannot have a failure code")
+        if status == "succeeded" and result_digest is None:
+            raise ValueError("successful effect receipts require a result digest")
+        if status in {"failed", "unknown"} and failure_code is None:
+            raise ValueError(f"{status} effect receipts require a failure code")
+        if status == "unknown" and result_digest is not None:
+            raise ValueError("unknown effect receipts cannot claim a result digest")
+        finished_at = time.time() if completed_at is None else float(completed_at)
+        if not math.isfinite(finished_at):
+            raise ValueError("completion timestamp must be finite")
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return 0
+            if active_boot != boot_id:
+                return 0
+            claimed = conn.execute(
+                "SELECT claimed_at FROM tool_effect_receipts "
+                "WHERE claim_id = ? AND boot_id = ? AND status = 'claimed'",
+                (claim_id, boot_id),
+            ).fetchone()
+            if claimed is None:
+                return 0
+            if finished_at < float(claimed["claimed_at"]):
+                raise ValueError("completion cannot precede effect claim")
+            cursor = conn.execute(
+                "UPDATE tool_effect_receipts SET status = ?, completed_at = ?, "
+                "result_digest = ?, failure_code = ? "
+                "WHERE claim_id = ? AND boot_id = ? AND status = 'claimed'",
+                (
+                    status,
+                    finished_at,
+                    result_digest,
+                    failure_code,
+                    claim_id,
+                    boot_id,
+                ),
+            )
+            return 1 if cursor.rowcount == 1 else 0
+
+        return int(self._execute_write(_do))
+
+    def mark_prior_boot_tool_effects_unknown(
+        self,
+        current_boot_id: str,
+        *,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Terminalize registry-effect crash-window claims from older boots."""
+        if not isinstance(current_boot_id, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", current_boot_id
+        ):
+            raise ValueError("current_boot_id must be an opaque identifier")
+        completed_at = time.time() if now is None else float(now)
+        if not math.isfinite(completed_at):
+            raise ValueError("cleanup timestamp must be finite")
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise RuntimeError("Approval Grant boot lease is corrupt") from exc
+            if active_boot != current_boot_id:
+                raise RuntimeError("Approval Grant boot lease changed")
+            rows = conn.execute(
+                "SELECT * FROM tool_effect_receipts "
+                "WHERE status = 'claimed' AND boot_id <> ? "
+                "ORDER BY claimed_at",
+                (current_boot_id,),
+            ).fetchall()
+            terminal = []
+            for row in rows:
+                if completed_at < float(row["claimed_at"]):
+                    raise ValueError("cleanup cannot precede effect claim")
+                cursor = conn.execute(
+                    "UPDATE tool_effect_receipts SET status = 'unknown', "
+                    "completed_at = ?, failure_code = 'prior_boot_crash_window' "
+                    "WHERE claim_id = ? AND status = 'claimed' AND boot_id <> ?",
+                    (completed_at, row["claim_id"], current_boot_id),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                updated = dict(row)
+                updated.update(
+                    status="unknown",
+                    completed_at=completed_at,
+                    failure_code="prior_boot_crash_window",
+                )
+                terminal.append(updated)
+            return terminal
+
+        return [
+            self._decode_tool_effect_receipt(row)
+            for row in self._execute_write(_do)
+        ]
+
+    def record_tool_effect_result_transform(
+        self,
+        *,
+        claim_id: str,
+        boot_id: str,
+        original_result_digest: str,
+        transformed_result_digest: str,
+    ) -> int:
+        """Bind one evidenced result rewrite to a terminal tool-effect receipt.
+
+        Anchored to the receipt's recorded pre-transform ``result_digest`` and
+        single-set: the CAS refuses when the receipt is not terminal, when the
+        supplied original digest does not match what actually ran, or when a
+        different rewrite was already bound.  It structurally cannot modify
+        the recorded outcome columns.  Returns 1 exactly on bind.
+        """
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        digest_re = re.compile(r"^[0-9a-f]{64}$")
+        for name, value in (("claim_id", claim_id), ("boot_id", boot_id)):
+            if not isinstance(value, str) or not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        for name, value in (
+            ("original_result_digest", original_result_digest),
+            ("transformed_result_digest", transformed_result_digest),
+        ):
+            if not isinstance(value, str) or not digest_re.fullmatch(value):
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return 0
+            if active_boot != boot_id:
+                return 0
+            cursor = conn.execute(
+                "UPDATE tool_effect_receipts "
+                "SET transformed_result_digest = ? "
+                "WHERE claim_id = ? AND boot_id = ? "
+                "AND status IN ('succeeded', 'failed') "
+                "AND result_digest = ? "
+                "AND (transformed_result_digest IS NULL "
+                "     OR transformed_result_digest = ?)",
+                (
+                    transformed_result_digest,
+                    claim_id,
+                    boot_id,
+                    original_result_digest,
+                    transformed_result_digest,
+                ),
+            )
+            return 1 if cursor.rowcount == 1 else 0
+
+        return int(self._execute_write(_do))
+
+    def get_tool_effect_receipt(
+        self,
+        claim_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tool_effect_receipts WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+        return self._decode_tool_effect_receipt(row) if row is not None else None
+
+    def get_tool_effect_receipt_for_invocation(
+        self,
+        session_id: str,
+        invocation_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tool_effect_receipts "
+                "WHERE session_id = ? AND invocation_id = ?",
+                (session_id, invocation_id),
+            ).fetchone()
+        return self._decode_tool_effect_receipt(row) if row is not None else None
 
     @staticmethod
     def _canonical_prompt_policy(

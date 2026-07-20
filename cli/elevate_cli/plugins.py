@@ -34,6 +34,7 @@ so plugin-defined tools appear alongside the built-in tools.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -500,33 +501,95 @@ class PluginContext:
     # -- tool dispatch -------------------------------------------------------
 
     def dispatch_tool(self, tool_name: str, args: dict, **kwargs) -> str:
-        """Dispatch a tool call through the registry, with parent agent context.
+        """Dispatch a tool call through the atomic registry boundary, with parent
+        agent context.
 
         This is the public interface for plugin slash commands that need to call
         tools like ``delegate_task`` without reaching into framework internals.
         The parent agent (if available) is resolved automatically — plugins never
         need to access the agent directly.
 
+        Routing (A2b lane 7; recipe ``elevate-a2b-migration-recipe-2026-07-17.md``):
+        this migrates plugin dispatch onto the common atomic dispatch model every
+        agent-loop tool branch uses, instead of the old raw ``registry.dispatch``
+        that also carried the parent agent as a plain dispatch kwarg.
+
+        * **Durable identity present** (``session_id`` + ``tool_call_id`` — a
+          plugin that threads them) → the call goes through
+          ``model_tools.dispatch_agent_owned_registry_tool`` for full
+          args-digest / registration-identity / accepted-turn-policy capture and
+          the atomic shadow path.
+        * **Durable identity absent** (the typical plugin slash command) → the
+          adapter's own byte-parity legacy fallback: ``registry.dispatch`` with
+          the same frozen ``task_id``/``user_task`` handler-kwargs, run inside the
+          parent binding.  This keeps the legacy path byte-identical to the
+          pre-migration call in BOTH Stable and exact Realtor Beta (where
+          ``registry.dispatch`` still fail-closes with ``legacy_dispatch_block``
+          before any handler) — the adapter's preflight would otherwise
+          substitute a different fail-closed payload for this identity-less case.
+
+        Either way the parent agent — process state on the live agent, never
+        tool-call data — rides the ``delegate_task`` module companion for exactly
+        one dispatch (the one supported channel for handler process state; the
+        adapter's JSON-frozen snapshots reject it as a kwarg), and only
+        ``delegate_task``'s registered handler consumes it.  In gateway mode
+        (``_cli_ref`` is None) it stays unset and tools degrade gracefully
+        (workspace hints fall back to TERMINAL_CWD, no spinner).
+
         Args:
             tool_name: Registry name of the tool (e.g. ``"delegate_task"``).
             args: Tool arguments dict (same as what the model would pass).
-            **kwargs: Extra keyword args forwarded to the registry dispatch.
+            **kwargs: Optional durable-identity fields (``task_id``,
+                ``user_task``, ``session_id``, ``tool_call_id``) and/or an
+                explicit ``parent_agent`` override.  Any other key cannot cross
+                the dispatch boundary (the registry rejects process-state
+                smuggling through dispatch kwargs by design) and is ignored.
 
         Returns:
             JSON string from the tool handler (same format as model tool calls).
         """
-        from tools.registry import registry
-
-        # Wire up parent agent context when available (CLI mode).
-        # In gateway mode _cli_ref is None — tools degrade gracefully
-        # (workspace hints fall back to TERMINAL_CWD, no spinner).
-        if "parent_agent" not in kwargs:
+        # Resolve the parent agent context (CLI mode).  An explicit
+        # ``parent_agent`` kwarg — even ``None`` — wins over the CLI agent,
+        # matching the previous "not in kwargs" semantics.
+        if "parent_agent" in kwargs:
+            parent_agent = kwargs["parent_agent"]
+        else:
             cli = self._manager._cli_ref
             agent = getattr(cli, "agent", None) if cli else None
-            if agent is not None:
-                kwargs["parent_agent"] = agent
+            parent_agent = agent if agent is not None else None
 
-        return registry.dispatch(tool_name, args, **kwargs)
+        companions = ()
+        if parent_agent is not None:
+            from tools.delegate_tool import bind_active_delegate_parent
+
+            companions = (bind_active_delegate_parent(parent_agent),)
+
+        task_id = kwargs.get("task_id")
+        user_task = kwargs.get("user_task")
+        session_id = kwargs.get("session_id")
+        tool_call_id = kwargs.get("tool_call_id")
+
+        if session_id and tool_call_id:
+            from model_tools import dispatch_agent_owned_registry_tool
+
+            return dispatch_agent_owned_registry_tool(
+                tool_name,
+                args,
+                task_id=task_id,
+                user_task=user_task,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                companions=companions,
+            )
+
+        from tools.registry import registry
+
+        with contextlib.ExitStack() as companion_stack:
+            for companion in companions:
+                companion_stack.enter_context(companion)
+            return registry.dispatch(
+                tool_name, args, task_id=task_id, user_task=user_task
+            )
 
     # -- context engine registration -----------------------------------------
 

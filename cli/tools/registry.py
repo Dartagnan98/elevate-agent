@@ -251,7 +251,13 @@ class PreparedToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ShadowToolExecution:
-    """Result of one atomic prepared execution and its start decision."""
+    """Result of one atomic prepared execution and its start decision.
+
+    ``effect_receipt`` is the in-process anchor
+    (:class:`tools.effect_broker.ToolEffectReceiptRef`) to the durable
+    claim/receipt trail when the exact-Beta effect broker engaged for this
+    call, or ``None`` (read-only calls, refused starts, Stable dispatch).
+    """
 
     prepared: PreparedToolCall
     result: Any
@@ -259,6 +265,7 @@ class ShadowToolExecution:
     start_generation: int
     stale_reason: Optional[str] = None
     execution_error: Optional[str] = None
+    effect_receipt: Any = None
 
 
 def _validate_json_value(value: Any, path: str = "$") -> None:
@@ -868,7 +875,31 @@ class ToolRegistry:
                 f"{prepared.authorization.reason}",
             )
 
+        # Exact Beta binds every beyond-read start to a durable one-winner
+        # claim and a terminal receipt (the ``0bbb80997`` terminal machinery
+        # generalized to the whole registry shadow path).  A refused claim —
+        # duplicate invocation identity, failed revalidation, or an
+        # unavailable store — fails closed before the handler can run.
+        # Stable dispatch never reaches this block (byte parity).
+        effect_claim = None
+        if exact_beta:
+            from tools.effect_broker import (
+                acquire_prepared_effect_claim,
+                claim_required_for_effects,
+            )
+
+            if claim_required_for_effects(prepared.resolved_effects):
+                decision = acquire_prepared_effect_claim(prepared)
+                if decision.claim is None:
+                    return self._shadow_start_error(
+                        prepared,
+                        decision.status_code,
+                        decision.detail,
+                    )
+                effect_claim = decision.claim
+
         execution_error = None
+        invocation_outcome_unknowable = False
         try:
             handler = prepared.captured_handler
             if handler is None:  # defensive; a valid entry always has one
@@ -896,6 +927,83 @@ class ToolRegistry:
                 sanitized = raw
             execution_error = f"handler_exception:{type(exc).__name__}"
             result = json.dumps({"error": sanitized})
+            # _run_async's running-loop branch ABANDONS its worker on
+            # timeout: the coroutine may still be applying the effect.  A
+            # 'failed' receipt would falsely assert the effect did not occur
+            # and invite an automatic retry that double-applies on top of
+            # the still-running abandoned write.  Terminalize this window as
+            # 'unknown', exactly like the terminal tool's
+            # invocation-started outcome handling.
+            import concurrent.futures
+
+            invocation_outcome_unknowable = isinstance(
+                exc,
+                concurrent.futures.TimeoutError,
+            )
+        except BaseException:
+            # Cancellation / interpreter shutdown propagate, but the durable
+            # trail must not be left in the claimed crash-window state when
+            # this process survives: the outcome is genuinely unknowable.
+            if effect_claim is not None:
+                from tools.effect_broker import finish_effect_claim
+
+                finish_effect_claim(
+                    effect_claim,
+                    status="unknown",
+                    failure_code="execution_interrupted",
+                )
+            raise
+
+        effect_receipt = None
+        if effect_claim is not None:
+            from tools.effect_broker import (
+                ToolEffectReceiptRef,
+                effect_outcome_unknown_payload,
+                effect_receipt_unavailable_payload,
+                finish_effect_claim,
+                model_result_digest,
+            )
+
+            if execution_error is None:
+                final_status = finish_effect_claim(
+                    effect_claim,
+                    status="succeeded",
+                    result_identity=result,
+                )
+                if final_status != "succeeded":
+                    # Receipt loss is never success: replace the handler's
+                    # output with the typed unknown-outcome payload.
+                    execution_error = "effect_receipt_unavailable"
+                    result = effect_receipt_unavailable_payload(
+                        prepared.tool_name
+                    )
+            elif invocation_outcome_unknowable:
+                final_status = finish_effect_claim(
+                    effect_claim,
+                    status="unknown",
+                    failure_code="execution_timeout_abandoned",
+                )
+                # The plain error text would invite an automatic retry under
+                # a fresh invocation id; the typed do-not-retry payload is
+                # the only honest model-visible outcome here.
+                result = effect_outcome_unknown_payload(prepared.tool_name)
+            else:
+                final_status = finish_effect_claim(
+                    effect_claim,
+                    status="failed",
+                    result_identity=result,
+                    failure_code="handler_exception",
+                )
+            effect_receipt = ToolEffectReceiptRef(
+                claim_id=effect_claim.claim_id,
+                session_id=effect_claim.session_id,
+                invocation_id=effect_claim.invocation_id,
+                tool_name=effect_claim.tool_name,
+                final_status=final_status,
+                expected_result_digests=frozenset(
+                    {model_result_digest(result)}
+                ),
+            )
 
         return ShadowToolExecution(
             prepared=prepared,
@@ -903,6 +1011,7 @@ class ToolRegistry:
             started=True,
             start_generation=start_generation,
             execution_error=execution_error,
+            effect_receipt=effect_receipt,
         )
 
     def execute_prepared_shadow(

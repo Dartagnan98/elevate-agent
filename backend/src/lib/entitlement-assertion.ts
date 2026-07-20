@@ -64,9 +64,13 @@ export type EntitlementSigner = Readonly<{
 
 export type EntitlementSigningEnvironment = Readonly<Record<string, string | undefined>>;
 
+export type EntitlementSigningConfigurationMode = "legacy" | "key-ring";
+
 export type EntitlementSignerReadiness = Readonly<{
   ready: boolean;
   activeKid: string | null;
+  configurationMode: EntitlementSigningConfigurationMode;
+  completeKeyRingReady: boolean;
   publicKeysetSha256: typeof ENTITLEMENT_ASSERTION_KEYSET_SHA256;
 }>;
 
@@ -500,17 +504,26 @@ function configuredActiveKidForHealth(
 export function entitlementSignerReadiness(
   environment: EntitlementSigningEnvironment = process.env,
 ): EntitlementSignerReadiness {
+  const configurationMode: EntitlementSigningConfigurationMode =
+    hasEnvironmentVariable(environment, ACTIVE_KID_ENV) ||
+    hasEnvironmentVariable(environment, PRIVATE_KEY_RING_ENV)
+      ? "key-ring"
+      : "legacy";
   try {
     const signer = loadEntitlementSigner(environment);
     return Object.freeze({
       ready: true,
       activeKid: signer.keyId,
+      configurationMode,
+      completeKeyRingReady: configurationMode === "key-ring",
       publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     });
   } catch {
     return Object.freeze({
       ready: false,
       activeKid: configuredActiveKidForHealth(environment),
+      configurationMode,
+      completeKeyRingReady: false,
       publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
     });
   }

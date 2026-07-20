@@ -26,7 +26,9 @@ function createBackendRunner({
   }
 
   function scheduleGatewaySelfHeal(launcher, baseEnv) {
-    if (!launcher) return;
+    // Exact Beta cleanup is an awaited startup precondition in ensureBackend.
+    // Only Stable keeps the delayed install/repair self-heal path.
+    if (runtimeMetadata.releaseChannel === "beta" || !launcher) return;
     setTimeout(async () => {
       try {
         await ensureGatewayInstalled(launcher, baseEnv);
@@ -38,10 +40,18 @@ function createBackendRunner({
 
   async function ensureBackend() {
     markStartup("backend:ensure-start");
+    const launcher = resolveElevateLauncher();
+    if (runtimeMetadata.releaseChannel === "beta") {
+      markStartup("backend:beta-gateway-cleanup-start");
+      await ensureGatewayInstalled(launcher, {
+        ELEVATE_RELEASE_CHANNEL: "beta",
+      });
+      markStartup("backend:beta-gateway-cleanup-complete");
+    }
+
     await chooseBackendPort();
     markStartup("backend:port-selected", String(getBackendPort()));
 
-    const launcher = resolveElevateLauncher();
     const baseEnv = {
       ELEVATE_DESKTOP_APP: "1",
       // Foreground desktop drains the SMS spool; headless backend cannot drive Messages.

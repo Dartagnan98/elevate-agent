@@ -173,11 +173,25 @@ def _probe_single_server(
     Raises on connection failure.
     """
     from tools.mcp_tool import (
+        BETA_MCP_SERVERS_DISABLED_CODE,
+        BETA_MCP_SERVERS_DISABLED_MESSAGE,
+        _beta_mcp_lane_disabled,
         _ensure_mcp_loop,
         _run_on_mcp_loop,
         _connect_server,
         _stop_mcp_loop,
     )
+
+    # Exact Realtor Beta fails the operator-CLI probe path closed too
+    # (``mcp add``/``test``/``login`` all funnel through this single
+    # temporary-connect helper): no loop thread, no spawn, no connection —
+    # the same contract as ``discover_mcp_tools``/``register_mcp_servers``
+    # (ERB-406 MCP lane / package A5).
+    if _beta_mcp_lane_disabled():
+        raise RuntimeError(
+            f"Error [{BETA_MCP_SERVERS_DISABLED_CODE}]: "
+            f"{BETA_MCP_SERVERS_DISABLED_MESSAGE}"
+        )
 
     _ensure_mcp_loop()
 

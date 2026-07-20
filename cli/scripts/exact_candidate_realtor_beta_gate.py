@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Run the exact-installed Realtor Beta fault and rollback pre-publish gate.
+"""Run the exact-installed Realtor Beta fault and recovery pre-publish gate.
 
 The public entrypoint binds an already-installed ``Elevate Beta.app`` to its
 immutable candidate receipt, then runs the bundled Python and bundled CLI in a
 temporary HOME.  The installed app, the user's Beta profile, Stable, public
 feeds, and remote hosts are never modified.
 
-The rollback portion reads the pre-release public feed snapshots and performs
-the mutation algorithm only inside a temporary local fixture.  It proves that
-the Beta feed and Beta aliases can return to the receipt's rollback target
-while Stable and an operational-data sentinel remain byte-for-byte unchanged.
+The recovery portion reads the candidate-bound roll-forward recovery feed and
+performs the activation algorithm only inside a temporary local fixture.  It
+proves that the Beta feed and Beta aliases can advance to the higher recovery
+version while Stable and an operational-data sentinel remain byte-for-byte
+unchanged. Downgrade-based recovery is rejected.
 """
 
 from __future__ import annotations
@@ -55,8 +56,9 @@ REQUIRED_CHECK_IDS = (
     "artifact_wrong_kind_fail_closed",
     "worker_no_callback_retry_exhaustion",
     "session_restart_resume",
-    "rollback_target_metadata",
-    "rollback_local_rpo0",
+    "recovery_target_metadata",
+    "recovery_local_roll_forward",
+    "recovery_minimal_runtime",
     "stable_feed_untouched",
 )
 _SHA256_RE = __import__("re").compile(r"[0-9a-f]{64}\Z")
@@ -316,7 +318,7 @@ def _fetch_bounded(url: str, code: str) -> bytes:
         headers={
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "User-Agent": "elevate-realtor-beta-rollback-gate/1",
+            "User-Agent": "elevate-realtor-beta-recovery-gate/1",
         },
     )
     try:
@@ -339,6 +341,30 @@ def _feed_bytes(path: Path | None, url: str, code: str) -> bytes:
     if not value or len(value) > MAX_FEED_BYTES:
         raise GateFailure(code)
     return value
+
+
+def _repo_receipt_file(repo_root: Path, value: str, code: str) -> Path:
+    relative = Path(str(value or ""))
+    if not str(value or "") or relative.is_absolute() or ".." in relative.parts:
+        raise GateFailure(code)
+    root = repo_root.resolve()
+    unresolved = root / relative
+    try:
+        if unresolved.is_symlink():
+            raise GateFailure(code)
+    except OSError as exc:
+        raise GateFailure(code) from exc
+    candidate = unresolved.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise GateFailure(code) from exc
+    try:
+        if not candidate.is_file():
+            raise GateFailure(code)
+    except OSError as exc:
+        raise GateFailure(code) from exc
+    return candidate
 
 
 def _feed_metadata(value: bytes, code: str) -> dict[str, Any]:
@@ -370,76 +396,114 @@ def _feed_metadata(value: bytes, code: str) -> dict[str, Any]:
     }
 
 
-def _rollback_dry_run(
+def _version_tuple(value: str, code: str) -> tuple[int, int, int]:
+    parts = str(value or "").split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise GateFailure(code)
+    return tuple(int(part) for part in parts)  # type: ignore[return-value]
+
+
+def _recovery_roll_forward_dry_run(
     *,
     receipt: Mapping[str, Any],
     candidate_feed: bytes,
-    rollback_beta_feed: bytes,
+    recovery_feed: bytes,
     stable_feed: bytes,
     work_root: Path,
 ) -> dict[str, Any]:
     release = receipt["release"]
-    rollback = receipt.get("rollback_target")
+    recovery = receipt.get("recovery")
     public = receipt.get("public_feeds_at_finalize")
     artifacts = receipt.get("artifacts")
-    if not isinstance(rollback, Mapping) or not isinstance(public, Mapping):
-        raise GateFailure("rollback_contract_missing")
+    if not isinstance(recovery, Mapping) or not isinstance(public, Mapping):
+        raise GateFailure("recovery_contract_missing")
     if not isinstance(artifacts, Mapping):
-        raise GateFailure("rollback_contract_missing")
-    beta_snapshot = public.get("beta")
+        raise GateFailure("recovery_contract_missing")
     stable_snapshot = public.get("latest")
-    if not isinstance(beta_snapshot, Mapping) or not isinstance(stable_snapshot, Mapping):
-        raise GateFailure("rollback_contract_missing")
-    target_version = str(rollback.get("version") or "")
-    target_sha = str(rollback.get("sha256") or "")
+    if not isinstance(stable_snapshot, Mapping):
+        raise GateFailure("recovery_contract_missing")
+    candidate_version = str(release.get("version") or "")
+    recovery_version = str(recovery.get("version") or "")
+    recovery_feed_record = recovery.get("local_feed")
+    recovery_artifacts = recovery.get("artifacts")
+    recovery_profile = recovery.get("profile")
+    if (
+        not isinstance(recovery_feed_record, Mapping)
+        or not isinstance(recovery_artifacts, Mapping)
+        or not isinstance(recovery_profile, Mapping)
+    ):
+        raise GateFailure("recovery_contract_missing")
+    recovery_sha = str(recovery_feed_record.get("sha256") or "")
     stable_sha = str(stable_snapshot.get("sha256") or "")
     feed_name = str(release.get("feed_name") or "")
     candidate_record = artifacts.get(feed_name)
     if (
         release.get("channel") != "beta"
         or feed_name != "beta-mac.yml"
-        or not target_version
-        or not _SHA256_RE.fullmatch(target_sha)
+        or recovery.get("kind") != "elevate-beta-recovery-package"
+        or recovery.get("schema_version") != 1
+        or recovery.get("channel") != "beta"
+        or str(recovery.get("candidate_version") or "") != candidate_version
+        or str(recovery.get("public_feed_name") or recovery.get("feed_name") or "")
+        != "beta-mac.yml"
+        or not _SHA256_RE.fullmatch(recovery_sha)
         or not _SHA256_RE.fullmatch(stable_sha)
         or not isinstance(candidate_record, Mapping)
     ):
-        raise GateFailure("rollback_contract_invalid")
-    if rollback != beta_snapshot:
-        raise GateFailure("rollback_target_not_public_beta_snapshot")
-    if _sha256_bytes(rollback_beta_feed) != target_sha:
-        raise GateFailure("rollback_beta_snapshot_hash_mismatch")
+        raise GateFailure("recovery_contract_invalid")
+    if _version_tuple(recovery_version, "recovery_version_invalid") <= _version_tuple(
+        candidate_version, "candidate_version_invalid"
+    ):
+        raise GateFailure("recovery_not_roll_forward")
+    if _sha256_bytes(recovery_feed) != recovery_sha:
+        raise GateFailure("recovery_feed_hash_mismatch")
     if _sha256_bytes(stable_feed) != stable_sha:
         raise GateFailure("stable_snapshot_hash_mismatch")
     candidate_sha = str(candidate_record.get("sha256") or "")
     if _sha256_bytes(candidate_feed) != candidate_sha:
         raise GateFailure("candidate_beta_feed_hash_mismatch")
 
-    rollback_metadata = _feed_metadata(
-        rollback_beta_feed, "rollback_beta_snapshot_invalid"
-    )
+    recovery_metadata = _feed_metadata(recovery_feed, "recovery_feed_invalid")
     candidate_metadata = _feed_metadata(candidate_feed, "candidate_beta_feed_invalid")
     stable_metadata = _feed_metadata(stable_feed, "stable_snapshot_invalid")
     expected_files = sorted(
         [
             {
-                "url": str(item.get("url") or ""),
-                "sha512": str(item.get("sha512") or ""),
-                "size": int(item.get("size") or 0),
+                "url": str(name),
+                "sha512": str(record.get("sha512") or ""),
+                "size": int(record.get("size") or 0),
             }
-            for item in rollback.get("files") or []
-            if isinstance(item, Mapping)
+            for name, record in recovery_artifacts.items()
+            if isinstance(record, Mapping)
         ],
         key=lambda item: item["url"],
     )
     if (
-        rollback_metadata["version"] != target_version
-        or rollback_metadata["files"] != expected_files
-        or candidate_metadata["version"] != str(release.get("version") or "")
+        recovery_metadata["version"] != recovery_version
+        or recovery_metadata["files"] != expected_files
+        or len(expected_files) != 4
+        or candidate_metadata["version"] != candidate_version
         or not stable_metadata["version"]
     ):
-        raise GateFailure("rollback_target_metadata_mismatch")
+        raise GateFailure("recovery_target_metadata_mismatch")
 
-    aliases = list((release.get("profile") or {}).get("downloadAliasPrefixes") or [])
+    expected_identity = {
+        "productName": "Elevate Beta",
+        "appBundleName": "Elevate Beta.app",
+        "appId": "com.elevationrealestate.elevate.beta",
+        "packageName": "elevate-beta-desktop",
+        "protocolScheme": "elevate-beta",
+        "elevateHomeName": ".elevate-beta",
+        "gatewayLabel": "ai.elevate.gateway-beta",
+    }
+    candidate_profile = release.get("profile") or {}
+    if any(
+        recovery_profile.get(key) != value or candidate_profile.get(key) != value
+        for key, value in expected_identity.items()
+    ):
+        raise GateFailure("recovery_beta_identity_mismatch")
+
+    aliases = list(candidate_profile.get("downloadAliasPrefixes") or [])
     download_aliases = list(release.get("download_aliases") or [])
     if (
         set(aliases) != {"Elevate-Beta", "Elevate-beta"}
@@ -447,7 +511,7 @@ def _rollback_dry_run(
         or any(not str(name).startswith(tuple(f"{prefix}-" for prefix in aliases)) for name in download_aliases)
     ):
         raise GateFailure("beta_alias_contract_invalid")
-    rollback_dmgs = {
+    recovery_dmgs = {
         arch: next(
             (
                 item
@@ -458,11 +522,24 @@ def _rollback_dry_run(
         )
         for arch in ("x64", "arm64")
     }
-    if any(item is None for item in rollback_dmgs.values()):
-        raise GateFailure("rollback_dmg_contract_missing")
+    if any(item is None for item in recovery_dmgs.values()):
+        raise GateFailure("recovery_dmg_contract_missing")
+
+    static_provenance = recovery.get("static_provenance") or {}
+    runtime_policy = (
+        static_provenance.get("runtime_policy")
+        if isinstance(static_provenance, Mapping)
+        else {}
+    ) or {}
+    if (
+        not isinstance(runtime_policy, Mapping)
+        or any(runtime_policy.get(key) is not False for key in ("backend", "gateway", "tools"))
+        or runtime_policy.get("profile_preserved") is not True
+    ):
+        raise GateFailure("recovery_runtime_not_minimal")
 
     remote = work_root / "local-remote-fixture"
-    stage = remote / ".rollback-stage"
+    stage = remote / ".recovery-stage"
     remote.mkdir(parents=True, exist_ok=False)
     stage.mkdir(mode=0o700)
     stable_path = remote / "latest-mac.yml"
@@ -488,32 +565,32 @@ def _rollback_dry_run(
     for index, path in enumerate(stable_alias_paths):
         path.write_bytes(f"stable-alias-{index}\n".encode("ascii"))
 
-    rollback_sources: dict[str, Path] = {}
-    for arch, metadata in rollback_dmgs.items():
+    recovery_sources: dict[str, Path] = {}
+    for arch, metadata in recovery_dmgs.items():
         assert metadata is not None
         source = remote / str(metadata["url"])
         # Synthetic bytes exercise the exact copy/replace algorithm locally;
         # the real metadata remains bound to the public feed and receipt.
         source.write_bytes(
-            f"rollback-fixture:{arch}:{metadata['size']}:{metadata['sha512']}\n".encode(
+            f"recovery-fixture:{arch}:{metadata['size']}:{metadata['sha512']}\n".encode(
                 "utf-8"
             )
         )
-        rollback_sources[arch] = source
+        recovery_sources[arch] = source
 
     stable_before = _sha256_file(stable_path)
     stable_alias_before = [_sha256_file(path) for path in stable_alias_paths]
     data_before = _sha256_file(data_path)
-    (stage / "beta-mac.yml").write_bytes(rollback_beta_feed)
+    (stage / "beta-mac.yml").write_bytes(recovery_feed)
     for alias in download_aliases:
         arch = "arm64" if "-arm64." in str(alias) else "x64"
-        shutil.copyfile(rollback_sources[arch], alias_fixture_path(stage, alias))
-    if _sha256_file(stage / "beta-mac.yml") != target_sha:
-        raise GateFailure("rollback_stage_feed_hash_mismatch")
+        shutil.copyfile(recovery_sources[arch], alias_fixture_path(stage, alias))
+    if _sha256_file(stage / "beta-mac.yml") != recovery_sha:
+        raise GateFailure("recovery_stage_feed_hash_mismatch")
     for alias in download_aliases:
         arch = "arm64" if "-arm64." in str(alias) else "x64"
-        if _sha256_file(alias_fixture_path(stage, alias)) != _sha256_file(rollback_sources[arch]):
-            raise GateFailure("rollback_stage_alias_hash_mismatch")
+        if _sha256_file(alias_fixture_path(stage, alias)) != _sha256_file(recovery_sources[arch]):
+            raise GateFailure("recovery_stage_alias_hash_mismatch")
 
     for alias in download_aliases:
         os.replace(
@@ -527,35 +604,62 @@ def _rollback_dry_run(
     stable_alias_after = [_sha256_file(path) for path in stable_alias_paths]
     data_after = _sha256_file(data_path)
     if (
-        _sha256_file(beta_path) != target_sha
+        _sha256_file(beta_path) != recovery_sha
         or stable_after != stable_before
         or stable_alias_after != stable_alias_before
         or data_after != data_before
     ):
-        raise GateFailure("rollback_local_fixture_failed")
+        raise GateFailure("recovery_local_fixture_failed")
     for alias in download_aliases:
         arch = "arm64" if "-arm64." in str(alias) else "x64"
-        if _sha256_file(alias_fixture_path(beta_alias_root, alias)) != _sha256_file(rollback_sources[arch]):
-            raise GateFailure("rollback_local_alias_restore_failed")
+        if _sha256_file(alias_fixture_path(beta_alias_root, alias)) != _sha256_file(recovery_sources[arch]):
+            raise GateFailure("recovery_local_alias_activation_failed")
+
+    # Trust counts are evidence, not constants: derive them from the receipt's
+    # per-app trust records so the count can never claim more signed/notarized/
+    # stapled apps than the receipt actually attests.
+    recovery_apps = recovery.get("apps")
+    if not isinstance(recovery_apps, Mapping) or not recovery_apps:
+        raise GateFailure("recovery_app_trust_missing")
+    signed_app_count = 0
+    notarized_app_count = 0
+    stapled_app_count = 0
+    for app_record in recovery_apps.values():
+        trust = app_record.get("trust") if isinstance(app_record, Mapping) else None
+        if not isinstance(trust, Mapping):
+            raise GateFailure("recovery_app_trust_missing")
+        signed_app_count += 1 if trust.get("signed") is True else 0
+        notarized_app_count += 1 if trust.get("notarized") is True else 0
+        stapled_app_count += 1 if trust.get("stapled") is True else 0
 
     return {
-        "mode": "local-fixture-dry-run",
-        "target_version": target_version,
-        "target_feed_sha256": target_sha,
+        "mode": "local-fixture-roll-forward",
+        "candidate_version": candidate_version,
+        "recovery_version": recovery_version,
+        "source_receipt_id": str(receipt.get("source_receipt_id") or ""),
+        "recovery_feed_sha256": recovery_sha,
         "candidate_feed_sha256": candidate_sha,
         "beta_after_sha256": _sha256_file(beta_path),
         "stable_before_sha256": stable_before,
         "stable_after_sha256": stable_after,
         "stable_expected_sha256": stable_sha,
         "stable_alias_count": len(stable_alias_paths),
-        "beta_alias_count": len(download_aliases),
-        "rollback_dmg_count": len(rollback_dmgs),
+        "recovery_alias_count": len(download_aliases),
+        "recovery_artifact_count": len(expected_files),
+        "recovery_architecture_count": len(recovery_dmgs),
+        "signed_app_count": signed_app_count,
+        "notarized_app_count": notarized_app_count,
+        "stapled_app_count": stapled_app_count,
+        "runtime_actor_count": 0,
+        "backend_actor_count": 0,
+        "gateway_actor_count": 0,
+        "tool_actor_count": 0,
         "artifact_bytes_mode": "synthetic-local-fixture",
         "remote_mutation": False,
         "production_mutated": False,
         "profile_data_mutations": 0,
         "rpo_seconds": 0,
-        "procedure_id": "realtor-beta-feed-and-alias-rollback-v1",
+        "procedure_id": "realtor-beta-recovery-roll-forward-v1",
     }
 
 
@@ -1106,11 +1210,22 @@ def _main_gate(args: argparse.Namespace) -> int:
         )
         release = receipt.get("release") or {}
         public = receipt.get("public_feeds_at_finalize") or {}
-        rollback = receipt.get("rollback_target") or {}
-        rollback_beta_feed = _feed_bytes(
-            args.rollback_beta_feed,
-            str(rollback.get("url") or ""),
-            "rollback_beta_snapshot_unreachable",
+        recovery = receipt.get("recovery") or {}
+        local_recovery_feed = recovery.get("local_feed") or {}
+        recovery_feed_path = args.recovery_feed
+        if recovery_feed_path is None:
+            relative_recovery_feed = str(local_recovery_feed.get("path") or "")
+            if not relative_recovery_feed:
+                raise GateFailure("recovery_feed_path_missing")
+            recovery_feed_path = _repo_receipt_file(
+                repo_root,
+                relative_recovery_feed,
+                "recovery_feed_path_invalid",
+            )
+        recovery_feed = _feed_bytes(
+            recovery_feed_path,
+            "",
+            "recovery_feed_unreachable",
         )
         stable_feed = _feed_bytes(
             args.stable_feed,
@@ -1124,10 +1239,10 @@ def _main_gate(args: argparse.Namespace) -> int:
             candidate_feed = candidate_feed_path.read_bytes()
         except OSError as exc:
             raise GateFailure("candidate_beta_feed_unreadable") from exc
-        rollback_result = _rollback_dry_run(
+        recovery_result = _recovery_roll_forward_dry_run(
             receipt=receipt,
             candidate_feed=candidate_feed,
-            rollback_beta_feed=rollback_beta_feed,
+            recovery_feed=recovery_feed,
             stable_feed=stable_feed,
             work_root=work_root,
         )
@@ -1159,12 +1274,12 @@ def _main_gate(args: argparse.Namespace) -> int:
         "pack": child["pack"],
         "action_faults": child["action_faults"],
         "session_resume": child["session_resume"],
-        "rollback": rollback_result,
+        "recovery": recovery_result,
     }
     _write_evidence(args.json_out, evidence)
     print(
         f"Realtor Beta pre-publish gate passed for {binding['candidate_id'][:12]} "
-        f"({len(REQUIRED_CHECK_IDS)} checks; rollback {rollback_result['target_version']}; Stable untouched)."
+        f"({len(REQUIRED_CHECK_IDS)} checks; recovery {recovery_result['recovery_version']}; Stable untouched)."
     )
     return 0
 
@@ -1185,7 +1300,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--installed-app", type=Path)
     parser.add_argument("--candidate-architecture", choices=("x64", "arm64"))
     parser.add_argument("--candidate-feed", type=Path)
-    parser.add_argument("--rollback-beta-feed", type=Path)
+    parser.add_argument("--recovery-feed", type=Path)
     parser.add_argument("--stable-feed", type=Path)
     parser.add_argument("--repo-root", type=Path, default=_repo_root())
     parser.add_argument("--timeout", type=_positive_timeout, default=600.0)

@@ -31,14 +31,40 @@ def outreach_templates(
         return tool_error(f"outreach_db unavailable: {exc}")
 
     op = (action or "").strip().lower()
+
+    # Pure-read actions (list / grouped / stats) run over the already-ready
+    # forced-READ-ONLY operational store so a cold call cannot seed templates
+    # or write seed metadata as a side effect of merely looking. This mirrors
+    # the leads_overview repair: reads never open the seeding ``connect()``.
+    if op in ("list", "list_templates", "templates", "grouped", "list_grouped", "stats"):
+        from elevate_cli.data.connection import (
+            OperationalStoreNotReady,
+            connect_ready_read_only,
+        )
+
+        try:
+            with connect_ready_read_only() as conn:
+                if op in ("list", "list_templates", "templates"):
+                    data = outreach_db.list_templates(lane=lane, conn=conn)
+                    return json.dumps({"ok": True, "templates": data})
+                if op in ("grouped", "list_grouped"):
+                    return json.dumps(
+                        {"ok": True, "lanes": outreach_db.list_templates_grouped(conn=conn)}
+                    )
+                # op == "stats"
+                return json.dumps({"ok": True, "stats": outreach_db.stats(conn=conn)})
+        except OperationalStoreNotReady:
+            return tool_error(
+                "outreach templates are still starting for the active account; "
+                "wait for Elevate startup to complete, then retry once"
+            )
+        except ValueError as exc:
+            return tool_error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("outreach_templates read failed")
+            return tool_error(f"outreach_templates failed: {exc}")
+
     try:
-        if op in ("list", "list_templates", "templates"):
-            data = outreach_db.list_templates(lane=lane)
-            return json.dumps({"ok": True, "templates": data})
-
-        if op in ("grouped", "list_grouped"):
-            return json.dumps({"ok": True, "lanes": outreach_db.list_templates_grouped()})
-
         if op == "create":
             if not lane or not name or not body:
                 return tool_error("create requires lane, name, body")
@@ -93,9 +119,6 @@ def outreach_templates(
             if not attempt_id or not outcome:
                 return tool_error("record_outcome requires attempt_id and outcome")
             return json.dumps({"ok": True, **outreach_db.record_outcome(attempt_id, outcome)})
-
-        if op == "stats":
-            return json.dumps({"ok": True, "stats": outreach_db.stats()})
 
         return tool_error(
             f"unknown action '{action}'. valid: list, grouped, create, update, delete, pick, record_use, record_outcome, stats"
@@ -165,6 +188,28 @@ def check_outreach_templates_requirements() -> bool:
 
 from tools.registry import registry, tool_error  # noqa: E402
 
+
+def _outreach_templates_effect_resolver(args: dict):
+    """Declare only the seed-free template reads; every write stays unknown.
+
+    ``list``/``grouped``/``stats`` now run over ``connect_ready_read_only()``
+    (no seeding ``connect()``, no ``_maybe_seed_templates`` bootstrap), so they
+    are truthful ``read:outreach`` reads. ``pick`` still calls
+    ``apply_realtor_identity`` -> a seeding ``connect()`` and every mutating
+    action (create/update/delete/record_use/record_outcome) and unrecognized
+    action stays unknown/fail-closed. The normalization mirrors the handler's
+    ``(action or "").strip().lower()`` exactly so the declared surface can
+    never diverge from the dispatch.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    op = (action or "").strip().lower()
+    if op in {"list", "list_templates", "templates", "grouped", "list_grouped", "stats"}:
+        return {"read:outreach"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="outreach_templates",
     toolset="outreach",
@@ -186,4 +231,5 @@ registry.register(
     ),
     check_fn=check_outreach_templates_requirements,
     emoji="✉️",
+    effect_resolver=_outreach_templates_effect_resolver,
 )

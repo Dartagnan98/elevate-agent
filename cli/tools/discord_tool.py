@@ -488,6 +488,32 @@ _ACTIONS = {
     "remove_role": _remove_role,
 }
 
+# GET-only actions: every one of these hits a Discord REST GET endpoint with
+# the bot token and returns data without mutating the server. They are the
+# only truthful credentialed-read actions. Kept as an explicit allowlist (not
+# derived) so a future write action added to _ACTIONS defaults to UNKNOWN
+# rather than silently inheriting a read declaration.
+#   list_guilds     GET /users/@me/guilds
+#   server_info     GET /guilds/{guild_id}
+#   list_channels   GET /guilds/{guild_id}/channels
+#   channel_info    GET /channels/{channel_id}
+#   list_roles      GET /guilds/{guild_id}/roles
+#   member_info     GET /guilds/{guild_id}/members/{user_id}
+#   search_members  GET /guilds/{guild_id}/members/search
+#   fetch_messages  GET /channels/{channel_id}/messages
+#   list_pins       GET /channels/{channel_id}/pins
+_READ_ONLY_ACTIONS = frozenset({
+    "list_guilds",
+    "server_info",
+    "list_channels",
+    "channel_info",
+    "list_roles",
+    "member_info",
+    "search_members",
+    "fetch_messages",
+    "list_pins",
+})
+
 _CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread"})
 _ADMIN_ACTION_NAMES = frozenset(_ACTIONS.keys()) - _CORE_ACTION_NAMES
 
@@ -549,10 +575,22 @@ def _load_allowed_actions_config() -> Optional[List[str]]:
 
     Accepts either a comma-separated string or a YAML list.
     Unknown action names are dropped with a log warning.
+
+    Bootstrap-free: this reads the raw config via ``read_raw_config`` rather
+    than ``load_config`` on purpose. ``load_config`` calls
+    ``ensure_elevate_home`` (mkdir + SOUL.md seed, plus ``pgdata/`` on a cold
+    home), which is a hidden filesystem write. This helper runs on EVERY
+    Discord action (defense-in-depth allowlist gate in ``_run_discord_action``)
+    and at schema-build time, so it must never materialize the profile tree —
+    otherwise the GET-only reads (``fetch_messages``/``search_members``/list/
+    info) could not truthfully declare a pure credentialed read. The default
+    (``server_actions`` unset ⇒ all actions allowed) is preserved because both
+    a missing ``discord`` key and the deep-merged default empty string resolve
+    to ``None`` here.
     """
     try:
-        from elevate_cli.config import load_config
-        cfg = load_config()
+        from elevate_cli.config import read_raw_config
+        cfg = read_raw_config()
     except Exception as exc:
         logger.debug("discord: could not load config (%s); allowing all actions.", exc)
         return None
@@ -933,6 +971,35 @@ def _make_handler(handler_fn):
     )
 
 
+def _discord_effect_resolver(args: dict):
+    """Declare the GET-only Discord actions as credentialed reads.
+
+    Every action in :data:`_READ_ONLY_ACTIONS` is a Discord REST ``GET`` that
+    reads server/channel/member/message data using the bot token — a truthful
+    ``read:discord`` + ``credential_access:discord`` (the ha_*/feishu_*
+    credentialed-read precedent). The token is required (``credential_access``),
+    which is why READ_ONLY policy denies the read (READ_ONLY's ceiling is a
+    bare ``read``) while DEFAULT allows it.
+
+    Every mutating action (``pin_message``/``unpin_message``/``delete_message``/
+    ``create_thread``/``add_role``/``remove_role``) and any unrecognized/empty
+    action stays ``UNKNOWN`` and fails closed. The read path is only truthful
+    after the ``_load_allowed_actions_config`` → ``read_raw_config`` repair
+    above removed the ``ensure_elevate_home`` bootstrap that ran on every
+    action. The normalization mirrors the dispatch: ``_run_discord_action``
+    looks the raw ``action`` string up in ``_ACTIONS`` with no case-folding, so
+    the resolver compares the raw value (no ``.lower()``) to stay byte-aligned
+    with the handler — an odd-cased ``Fetch_Messages`` is not a known action to
+    the handler and must not resolve to a read here.
+    """
+    action = args.get("action") if isinstance(args, dict) else None
+    if isinstance(action, str) and action in _READ_ONLY_ACTIONS:
+        return {"read:discord", "credential_access:discord"}
+    from tools.approval import EffectKind
+
+    return {EffectKind.UNKNOWN}
+
+
 _STATIC_CORE_SCHEMA = _build_schema(
     list(_CORE_ACTIONS.keys()), caps={"detected": False}, tool_name="discord",
 )
@@ -947,6 +1014,7 @@ registry.register(
     handler=_make_handler(discord_core),
     check_fn=check_discord_tool_requirements,
     requires_env=["DISCORD_BOT_TOKEN"],
+    effect_resolver=_discord_effect_resolver,
 )
 
 registry.register(
@@ -956,4 +1024,5 @@ registry.register(
     handler=_make_handler(discord_admin_handler),
     check_fn=check_discord_tool_requirements,
     requires_env=["DISCORD_BOT_TOKEN"],
+    effect_resolver=_discord_effect_resolver,
 )

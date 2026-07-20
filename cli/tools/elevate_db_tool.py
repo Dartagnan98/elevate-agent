@@ -36,7 +36,7 @@ the single writer lock; now it's a regular MVCC read.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from typing import Any
 
 from tools.registry import registry, tool_error, tool_result
 
@@ -234,11 +234,23 @@ def _action_query(args: dict[str, Any]) -> str:
     else:
         sql_to_run = sql.rstrip().rstrip(";")
 
-    from elevate_cli.data.connection import connect
-    with connect() as conn:
-        cur = conn.execute(sql_to_run)
-        rows = cur.fetchall()
-        cols = [d.name for d in (cur.description or [])]
+    # ``query`` is read-only (SELECT / WITH, guarded above): run it over the
+    # already-ready forced-READ-ONLY store so inspecting data never bootstraps/
+    # migrates/adopts the operational store as a cold-connect side effect the
+    # way the general ``connect()`` would. PostgreSQL's SET TRANSACTION READ
+    # ONLY is the hard backstop behind the keyword guard. ``call`` keeps the
+    # general ``connect()`` because it must open a write transaction.
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect_ready_read_only,
+    )
+    try:
+        with connect_ready_read_only() as conn:
+            cur = conn.execute(sql_to_run)
+            rows = cur.fetchall()
+            cols = [d.name for d in (cur.description or [])]
+    except OperationalStoreNotReady:
+        return _not_ready_result()
     serialized = [
         {c: (v.isoformat() if hasattr(v, "isoformat") else v) for c, v in dict(r).items()}
         for r in rows
@@ -246,11 +258,31 @@ def _action_query(args: dict[str, Any]) -> str:
     return tool_result(success=True, columns=cols, row_count=len(serialized), rows=serialized)
 
 
+def _not_ready_result() -> str:
+    """Typed refusal when the operational store has not finished startup.
+
+    Read actions ride ``connect_ready_read_only()`` and never fall back to the
+    bootstrapping ``connect()``; on a cold store they surface this structured
+    error instead of silently materializing the store.
+    """
+    return tool_result(
+        success=False,
+        error="operational_store_not_ready",
+        message=(
+            "The operational store is still starting for the active account. "
+            "Wait for Elevate startup to complete, then retry once."
+        ),
+    )
+
+
 def _action_describe(args: dict[str, Any]) -> str:
     table = (args.get("table") or "").strip().lower() or None
     allowed = _allowed_tables_for(None)
 
-    from elevate_cli.data.connection import connect
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect_ready_read_only,
+    )
     if table is None:
         # Group by pack so the AI can see what's owned vs locked behind upgrades.
         from elevate_cli.access import (
@@ -284,31 +316,34 @@ def _action_describe(args: dict[str, Any]) -> str:
             required_pack=_table_pack(table),
         )
 
-    with connect() as conn:
-        cols = conn.execute(
-            "SELECT column_name, data_type, is_nullable, column_default "
-            "FROM information_schema.columns "
-            "WHERE table_schema='public' AND table_name=%s "
-            "ORDER BY ordinal_position",
-            (table,),
-        ).fetchall()
-        if not cols:
-            return tool_error(f"table not present in schema: {table}")
-        fks = conn.execute(
-            """
-            SELECT kcu.column_name, ccu.table_name AS ref_table, ccu.column_name AS ref_column
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-            JOIN information_schema.constraint_column_usage ccu
-              ON tc.constraint_name = ccu.constraint_name
-            WHERE tc.table_schema='public'
-              AND tc.constraint_type='FOREIGN KEY'
-              AND tc.table_name=%s
-            """,
-            (table,),
-        ).fetchall()
-        row_count = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    try:
+        with connect_ready_read_only() as conn:
+            cols = conn.execute(
+                "SELECT column_name, data_type, is_nullable, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=%s "
+                "ORDER BY ordinal_position",
+                (table,),
+            ).fetchall()
+            if not cols:
+                return tool_error(f"table not present in schema: {table}")
+            fks = conn.execute(
+                """
+                SELECT kcu.column_name, ccu.table_name AS ref_table, ccu.column_name AS ref_column
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                JOIN information_schema.constraint_column_usage ccu
+                  ON tc.constraint_name = ccu.constraint_name
+                WHERE tc.table_schema='public'
+                  AND tc.constraint_type='FOREIGN KEY'
+                  AND tc.table_name=%s
+                """,
+                (table,),
+            ).fetchall()
+            row_count = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    except OperationalStoreNotReady:
+        return _not_ready_result()
 
     return tool_result(
         success=True,
@@ -463,6 +498,32 @@ ELEVATE_DB_SCHEMA = {
 }
 
 
+def _elevate_db_effect_resolver(args: dict):
+    """Declare the two read actions; ``call`` (writes) stays unknown.
+
+    ``query`` (SELECT/WITH only) and ``describe`` (``information_schema`` +
+    ``COUNT(*)``) are pure reads of the operational store — after the repair
+    that routes them over ``connect_ready_read_only()`` (forced PG
+    ``SET TRANSACTION READ ONLY``) instead of the bootstrapping ``connect()``,
+    so an inspect never adopts a legacy DB, creates the account DB, or runs
+    migrations. They span every pack-entitled table, so the honest scope is the
+    operational database as a whole: ``read:database``.
+
+    ``call`` invokes a curated ``elevate_cli.data.*`` write function inside a
+    write ``transaction()`` — it stays ``UNKNOWN`` and fails closed, as does any
+    unrecognized/empty action. The normalization mirrors the handler's
+    ``str(args.get("action") or "").strip().lower()`` exactly so the declared
+    surface can never diverge from dispatch.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    act = str(action or "").strip().lower()
+    if act in ("query", "describe"):
+        return {"read:database"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="elevate_db",
     toolset="elevate_db",
@@ -473,4 +534,5 @@ registry.register(
         "gated; structured writes only."
     ),
     emoji="",
+    effect_resolver=_elevate_db_effect_resolver,
 )

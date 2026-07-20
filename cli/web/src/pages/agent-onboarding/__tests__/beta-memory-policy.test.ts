@@ -32,11 +32,12 @@ describe("Realtor Beta onboarding memory policy", () => {
     const wizard = source("../wizard.tsx");
 
     expect(page).toContain("Photo and listing media");
-    expect(page).toContain("Private Telegram lane");
+    expect(page).toContain("In-app chat");
+    expect(page).toContain("Telegram pairing is not enabled in this Beta build.");
     expect(page).toContain("Signed realtor agent team");
     expect(wizard).toContain("REALTOR_BETA_WIZARD_STEPS");
-    expect(wizard).toContain("Realtor Beta supports Telegram only");
     expect(wizard).toContain("Tools are assigned automatically");
     expect(wizard).toContain("Signed realtor agent roster");
+    expect(wizard).toContain("roles, tools, and access cannot be expanded");
   });
 });

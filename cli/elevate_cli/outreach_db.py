@@ -17,15 +17,12 @@ unchanged.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
-
-import psycopg
 
 from elevate_cli.config import load_config
 from elevate_cli.source_connectors import _candidate_tools_root
@@ -314,26 +311,45 @@ def _normalize_lane(lane: str) -> str:
     return lane
 
 
-def list_templates(lane: str | None = None, include_inactive: bool = True) -> list[dict[str, Any]]:
-    with connect() as conn:
-        params: list[Any] = []
-        sql = "SELECT * FROM templates"
-        clauses: list[str] = []
-        if lane:
-            clauses.append("lane = ?")
-            params.append(_normalize_lane(lane))
-        if not include_inactive:
-            clauses.append("active = 1")
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY lane, created_at"
-        rows = conn.execute(sql, params).fetchall()
+def _list_templates_over(conn, lane: str | None, include_inactive: bool) -> list[dict[str, Any]]:
+    """Run the templates SELECT on an already-open connection."""
+    params: list[Any] = []
+    sql = "SELECT * FROM templates"
+    clauses: list[str] = []
+    if lane:
+        clauses.append("lane = ?")
+        params.append(_normalize_lane(lane))
+    if not include_inactive:
+        clauses.append("active = 1")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY lane, created_at"
+    rows = conn.execute(sql, params).fetchall()
     return [_row_to_template(r) for r in rows]
 
 
-def list_templates_grouped() -> dict[str, list[dict[str, Any]]]:
+def list_templates(
+    lane: str | None = None,
+    include_inactive: bool = True,
+    *,
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    """List templates, optionally filtered by lane.
+
+    Pass ``conn`` to reuse an existing connection — read-only tool callers
+    hand in the already-ready forced-READ-ONLY connection so this SELECT
+    cannot trigger the seeding ``connect()`` path.
+    """
+    if conn is not None:
+        return _list_templates_over(conn, lane, include_inactive)
+    with connect() as own:
+        return _list_templates_over(own, lane, include_inactive)
+
+
+def list_templates_grouped(*, conn: Any | None = None) -> dict[str, list[dict[str, Any]]]:
+    """All lanes keyed by lane. ``conn`` threads through to :func:`list_templates`."""
     grouped: dict[str, list[dict[str, Any]]] = {lane: [] for lane in LANES}
-    for tpl in list_templates():
+    for tpl in list_templates(conn=conn):
         grouped.setdefault(tpl["lane"], []).append(tpl)
     return grouped
 
@@ -508,14 +524,27 @@ def record_outcome(attempt_id: str, outcome: str) -> dict[str, Any]:
     return {"attemptId": attempt_id, "outcome": outcome, "template": _row_to_template(tpl)}
 
 
-def stats() -> dict[str, Any]:
-    with connect() as conn:
-        templates = conn.execute("SELECT COUNT(*) AS n FROM templates").fetchone()["n"]
-        attempts = conn.execute("SELECT COUNT(*) AS n FROM draft_attempts").fetchone()["n"]
-        replies = conn.execute(
-            "SELECT COUNT(*) AS n FROM draft_attempts WHERE outcome IN ('replied','won')"
-        ).fetchone()["n"]
+def _stats_over(conn) -> dict[str, Any]:
+    """Run the three template/attempt COUNT reads on an already-open connection."""
+    templates = conn.execute("SELECT COUNT(*) AS n FROM templates").fetchone()["n"]
+    attempts = conn.execute("SELECT COUNT(*) AS n FROM draft_attempts").fetchone()["n"]
+    replies = conn.execute(
+        "SELECT COUNT(*) AS n FROM draft_attempts WHERE outcome IN ('replied','won')"
+    ).fetchone()["n"]
     return {"templates": templates, "attempts": attempts, "replies": replies}
+
+
+def stats(*, conn: Any | None = None) -> dict[str, Any]:
+    """Counts of templates / attempts / replies.
+
+    Pass ``conn`` to reuse an existing connection — read-only tool callers
+    hand in the already-ready forced-READ-ONLY connection so these SELECTs
+    cannot trigger the seeding ``connect()`` path.
+    """
+    if conn is not None:
+        return _stats_over(conn)
+    with connect() as own:
+        return _stats_over(own)
 
 
 # ---------------------------------------------------------------------------
@@ -828,24 +857,31 @@ def list_recent_sends(
     *,
     statuses: tuple[str, ...] = (SEND_STATUS_SENT,),
     limit: int = 100,
+    conn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return send_queue rows across all sources, newest first.
 
     Powers the /leads "Sent" tab. Defaults to status=sent only so the UI
     shows confirmed deliveries; callers can pass other statuses (queued,
     sending, retrying, failed) for an "outbound activity" view.
+
+    Pass ``conn`` to reuse an existing connection — read-only tool
+    callers hand in the already-ready forced-READ-ONLY connection so
+    this SELECT cannot trigger the seeding ``connect()`` path.
     """
     placeholders = ",".join("?" for _ in statuses) or "''"
-    with connect() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT * FROM send_queue
-            WHERE status IN ({placeholders})
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (*statuses, max(1, min(int(limit or 100), 500))),
-        ).fetchall()
+    query = f"""
+        SELECT * FROM send_queue
+        WHERE status IN ({placeholders})
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """
+    params = (*statuses, max(1, min(int(limit or 100), 500)))
+    if conn is not None:
+        rows = conn.execute(query, params).fetchall()
+    else:
+        with connect() as owned:
+            rows = owned.execute(query, params).fetchall()
     return [s for s in (_row_to_send(r) for r in rows) if s is not None]
 
 
@@ -1223,11 +1259,19 @@ def mark_failed(queue_id: str, *, error: str) -> dict[str, Any] | None:
     return _row_to_send(row)
 
 
-def send_queue_stats() -> dict[str, int]:
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM send_queue GROUP BY status"
-        ).fetchall()
+def send_queue_stats(conn: Any | None = None) -> dict[str, int]:
+    """Status → count map for the send queue.
+
+    Pass ``conn`` to reuse an existing connection — read-only tool
+    callers hand in the already-ready forced-READ-ONLY connection so
+    this SELECT cannot trigger the seeding ``connect()`` path.
+    """
+    query = "SELECT status, COUNT(*) AS n FROM send_queue GROUP BY status"
+    if conn is not None:
+        rows = conn.execute(query).fetchall()
+    else:
+        with connect() as owned:
+            rows = owned.execute(query).fetchall()
     out = {row["status"]: int(row["n"]) for row in rows}
     return out
 

@@ -66,6 +66,17 @@ def _enforce_pack(entity_kind: str) -> str | None:
 # ─── Action handlers ────────────────────────────────────────────────
 
 
+def _store_not_ready_result() -> str:
+    return tool_result(
+        success=False,
+        error="operational_store_not_ready",
+        message=(
+            "Working-state data is still starting for the active account. "
+            "Wait for Elevate startup to complete, then retry once."
+        ),
+    )
+
+
 def _action_recall(args: dict[str, Any]) -> str:
     entity_kind = str(args.get("entity_kind") or "").strip().lower()
     entity_id = str(args.get("entity_id") or "").strip()
@@ -75,14 +86,19 @@ def _action_recall(args: dict[str, Any]) -> str:
     if gated is not None:
         return gated
 
-    from elevate_cli.data.connection import connect
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect_ready_read_only,
+    )
     from elevate_cli.data.working_state import recall_working_state
 
     try:
-        with connect() as conn:
+        with connect_ready_read_only() as conn:
             row = recall_working_state(
                 conn, entity_kind=entity_kind, entity_id=entity_id
             )
+    except OperationalStoreNotReady:
+        return _store_not_ready_result()
     except ValueError as exc:
         return tool_error(str(exc))
     except Exception as exc:  # pragma: no cover — safety net
@@ -208,14 +224,19 @@ def _action_list_active(args: dict[str, Any]) -> str:
     limit = int(args.get("limit") or 30)
     limit = max(1, min(limit, 100))
 
-    from elevate_cli.data.connection import connect
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect_ready_read_only,
+    )
     from elevate_cli.data.working_state import list_active_working_state
 
     try:
-        with connect() as conn:
+        with connect_ready_read_only() as conn:
             rows = list_active_working_state(
                 conn, entity_kinds=kinds, limit=limit
             )
+    except OperationalStoreNotReady:
+        return _store_not_ready_result()
     except ValueError as exc:
         return tool_error(str(exc))
     except Exception as exc:  # pragma: no cover — safety net
@@ -233,6 +254,25 @@ _ACTIONS = {
     "resolve": _action_resolve,
     "list_active": _action_list_active,
 }
+
+
+def _working_state_effect_resolver(args: dict):
+    """Declare only the pure read actions; every mutation stays unknown.
+
+    ``recall`` and ``list_active`` ride the already-ready forced-READ-ONLY
+    operational boundary (no bootstrap, no migration, no seeding), so they
+    resolve to an exact ``read:working_state``. ``update``/``resolve`` write
+    the notes table and remain unclassified (fail closed) until write-effect
+    classification lands with its own evidence. Unrecognized actions are
+    unknown by construction.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    normalized = str(action or "").strip().lower()
+    if normalized in {"recall", "list_active"}:
+        return {"read:working_state"}
+    return {EffectKind.UNKNOWN}
 
 
 def _working_state_handler(args: dict[str, Any], **_: Any) -> str:
@@ -380,4 +420,5 @@ registry.register(
         "system-prompt digest."
     ),
     emoji="",
+    effect_resolver=_working_state_effect_resolver,
 )

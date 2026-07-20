@@ -19,13 +19,23 @@ from elevate_cli.beta_provider_policy import (
 
 @pytest.fixture
 def beta_home(tmp_path, monkeypatch):
+    from elevate_cli.beta_provider_policy import clear_beta_runtime_repair_state
+    from elevate_cli.web_routes import chat_websockets
+
     home = tmp_path / "beta-profile"
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setenv("ELEVATE_HOME", str(home))
     monkeypatch.setenv("ELEVATE_INFERENCE_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "hostile-ambient-value")
     monkeypatch.setenv("ELEVATE_CODEX_BASE_URL", "https://hostile.invalid/v1")
-    return home
+    monkeypatch.setattr(
+        chat_websockets,
+        "_dashboard_repair_control_plane_ready",
+        False,
+    )
+    clear_beta_runtime_repair_state()
+    yield home
+    clear_beta_runtime_repair_state()
 
 
 def _write_auth(home, *, suppressed=False):
@@ -76,7 +86,7 @@ def test_beta_auth_add_rejects_non_codex_before_any_mutation(
     monkeypatch.setattr(auth_commands, "load_pool", _unexpected)
     monkeypatch.setattr(auth_commands.auth_mod, "_codex_device_code_login", _unexpected)
 
-    with pytest.raises(SystemExit, match="beta_provider_not_allowed"):
+    with pytest.raises(SystemExit, match="beta_app_onboarding_required"):
         auth_commands.auth_add_command(
             SimpleNamespace(
                 provider=provider,
@@ -96,7 +106,7 @@ def test_beta_auth_add_rejects_api_key_before_prompt_or_pool(beta_home, monkeypa
     monkeypatch.setattr(auth_commands, "getpass", _unexpected)
     monkeypatch.setattr(auth_commands.auth_mod, "_codex_device_code_login", _unexpected)
 
-    with pytest.raises(SystemExit, match="beta_primary_api_key_not_allowed"):
+    with pytest.raises(SystemExit, match="beta_app_onboarding_required"):
         auth_commands.auth_add_command(
             SimpleNamespace(
                 provider=BETA_ALLOWED_PROVIDER,
@@ -109,17 +119,13 @@ def test_beta_auth_add_rejects_api_key_before_prompt_or_pool(beta_home, monkeypa
     assert not beta_home.exists()
 
 
-def test_beta_auth_add_invalid_login_result_is_nonmutating(beta_home, monkeypatch):
+def test_beta_auth_add_stops_before_device_login(beta_home, monkeypatch):
     from elevate_cli import auth_commands
 
-    monkeypatch.setattr(
-        auth_commands.auth_mod,
-        "_codex_device_code_login",
-        lambda: {"tokens": {"access_token": "access-only"}},
-    )
+    monkeypatch.setattr(auth_commands.auth_mod, "_codex_device_code_login", _unexpected)
     monkeypatch.setattr(auth_commands, "load_pool", _unexpected)
 
-    with pytest.raises(SystemExit, match="beta_codex_auth_invalid"):
+    with pytest.raises(SystemExit, match="beta_app_onboarding_required"):
         auth_commands.auth_add_command(
             SimpleNamespace(
                 provider=BETA_ALLOWED_PROVIDER,
@@ -132,46 +138,28 @@ def test_beta_auth_add_invalid_login_result_is_nonmutating(beta_home, monkeypatc
     assert not beta_home.exists()
 
 
-def test_beta_auth_add_saves_current_profile_state_not_pool(
+def test_beta_auth_add_preserves_current_profile_state_for_in_app_onboarding(
     beta_home,
     monkeypatch,
 ):
     from elevate_cli import auth_commands
 
     _write_auth(beta_home, suppressed=True)
+    before = _tree_snapshot(beta_home)
     monkeypatch.setattr(auth_commands, "load_pool", _unexpected)
-    monkeypatch.setattr(
-        auth_commands.auth_mod,
-        "_codex_device_code_login",
-        lambda: {
-            "tokens": {
-                "access_token": "new-local-access",
-                "refresh_token": "new-local-refresh",
-            },
-            "base_url": "https://hostile.invalid/from-login",
-            "last_refresh": "2026-07-14T00:00:00Z",
-        },
-    )
+    monkeypatch.setattr(auth_commands.auth_mod, "_codex_device_code_login", _unexpected)
 
-    auth_commands.auth_add_command(
-        SimpleNamespace(
-            provider=BETA_ALLOWED_PROVIDER,
-            auth_type="oauth",
-            api_key=None,
-            label=None,
+    with pytest.raises(SystemExit, match="beta_app_onboarding_required"):
+        auth_commands.auth_add_command(
+            SimpleNamespace(
+                provider=BETA_ALLOWED_PROVIDER,
+                auth_type="oauth",
+                api_key=None,
+                label=None,
+            )
         )
-    )
 
-    payload = json.loads((beta_home / "auth.json").read_text(encoding="utf-8"))
-    state = payload["providers"][BETA_ALLOWED_PROVIDER]
-    assert state["tokens"] == {
-        "access_token": "new-local-access",
-        "refresh_token": "new-local-refresh",
-    }
-    assert state["auth_mode"] == "chatgpt"
-    assert "credential_pool" not in payload
-    assert BETA_ALLOWED_PROVIDER not in payload.get("suppressed_sources", {})
-    assert read_beta_codex_auth_status(beta_home)["logged_in"] is True
+    assert _tree_snapshot(beta_home) == before
 
 
 def test_beta_auth_list_and_status_do_not_enumerate_inference_pools(
@@ -226,11 +214,11 @@ def test_beta_model_missing_auth_uses_no_provider_discovery_or_filesystem(
 
     main_module.select_provider_and_model()
 
-    assert "beta_codex_auth_required" in capsys.readouterr().out
+    assert "beta_app_onboarding_required" in capsys.readouterr().out
     assert _tree_snapshot(beta_home) == before
 
 
-def test_beta_model_picker_exposes_only_allowlist_and_repairs_legacy_provider(
+def test_beta_classic_model_picker_refuses_legacy_provider_mutation(
     beta_home,
     monkeypatch,
 ):
@@ -255,17 +243,10 @@ def test_beta_model_picker_exposes_only_allowlist_and_repairs_legacy_provider(
 
     main_module.select_provider_and_model()
 
-    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert seen == {
-        "models": BETA_ALLOWED_MODELS,
-        "current": BETA_ALLOWED_MODELS[0],
-    }
-    assert written["model"] == {
-        "provider": BETA_ALLOWED_PROVIDER,
-        "default": BETA_ALLOWED_MODELS[2],
-        "base_url": BETA_CODEX_BASE_URL,
-        "api_mode": "codex_responses",
-    }
+    assert seen == {}
+    assert config_path.read_text(encoding="utf-8") == (
+        "model:\n  provider: gemini\n  default: gemini-2.5-flash\n"
+    )
 
 
 def test_beta_model_rejects_unlisted_picker_result_without_mutation(
@@ -287,7 +268,7 @@ def test_beta_model_rejects_unlisted_picker_result_without_mutation(
 
     main_module.select_provider_and_model()
 
-    assert "beta_model_not_allowed" in capsys.readouterr().out
+    assert "beta_app_onboarding_required" in capsys.readouterr().out
     assert config_path.read_bytes() == before
 
 
@@ -310,7 +291,7 @@ def test_beta_model_revalidates_auth_before_write(beta_home, monkeypatch, capsys
 
     main_module.select_provider_and_model()
 
-    assert "beta_codex_auth_required" in capsys.readouterr().out
+    assert "beta_app_onboarding_required" in capsys.readouterr().out
     assert config_path.read_bytes() == before
 
 
@@ -337,7 +318,7 @@ def test_beta_model_rejects_hostile_fallback_without_rewriting_bytes(
 
     main_module.select_provider_and_model()
 
-    assert "beta_fallback_not_allowed" in capsys.readouterr().out
+    assert "beta_app_onboarding_required" in capsys.readouterr().out
     assert config_path.read_bytes() == before
 
 
@@ -361,25 +342,21 @@ def test_beta_low_level_provider_update_rejects_alternate_without_mutation(beta_
     assert (beta_home / "auth.json").read_bytes() == auth_before
 
 
-def test_beta_low_level_codex_update_uses_canonical_runtime_without_auth_mutation(
+def test_beta_low_level_codex_update_requires_live_app_without_mutation(
     beta_home,
 ):
     from elevate_cli.auth import _update_config_for_provider
 
     _write_auth(beta_home)
     auth_before = (beta_home / "auth.json").read_bytes()
+    tree_before = _tree_snapshot(beta_home)
 
-    _update_config_for_provider(
-        BETA_ALLOWED_PROVIDER,
-        BETA_CODEX_BASE_URL,
-        default_model=BETA_ALLOWED_MODELS[3],
-    )
+    with pytest.raises(RuntimeError, match="running Elevate app"):
+        _update_config_for_provider(
+            BETA_ALLOWED_PROVIDER,
+            BETA_CODEX_BASE_URL,
+            default_model=BETA_ALLOWED_MODELS[3],
+        )
 
-    written = yaml.safe_load((beta_home / "config.yaml").read_text(encoding="utf-8"))
-    assert written["model"] == {
-        "provider": BETA_ALLOWED_PROVIDER,
-        "default": BETA_ALLOWED_MODELS[3],
-        "base_url": BETA_CODEX_BASE_URL,
-        "api_mode": "codex_responses",
-    }
+    assert _tree_snapshot(beta_home) == tree_before
     assert (beta_home / "auth.json").read_bytes() == auth_before
