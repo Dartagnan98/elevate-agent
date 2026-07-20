@@ -389,7 +389,10 @@ printf -v REMOTE_EXTRACT_SCRIPT \
   'set -Eeuo pipefail; readonly stage_dir=%q; readonly lock_dir=%q; readonly deploy_id=%q; command -v tar >/dev/null; [[ -f "$lock_dir/deploy-id" ]]; [[ "$(<"$lock_dir/deploy-id")" == "$deploy_id" ]]; [[ -d "$stage_dir" ]]; tar -xpf - -C "$stage_dir"; [[ -f "$stage_dir/package.json" && -f "$stage_dir/package-lock.json" ]]' \
   "$STAGE_DIR" "$LOCK_DIR" "$DEPLOY_ID"
 printf -v REMOTE_EXTRACT_COMMAND 'bash -c %q' "$REMOTE_EXTRACT_SCRIPT"
-git archive --format=tar "$SOURCE_REV:backend" \
+# Archive from the repository toplevel: git archive applies the CURRENT
+# DIRECTORY as an implicit pathspec, and inside the HEAD:backend tree there is
+# no backend/ path — archiving from backend/ cwd silently emits an EMPTY tar.
+git -C "$(git rev-parse --show-toplevel)" archive --format=tar "$SOURCE_REV:backend" \
   | ssh "$HOST" "$REMOTE_EXTRACT_COMMAND"
 
 echo "[deploy] building staged source with temporary root-only dotenv links"
