@@ -364,30 +364,107 @@ class TestSkillsList:
         assert decision.denied_effects == frozenset()
         assert decision.reason == "allowed"
 
-    def test_skill_view_remains_unknown_due_to_usage_writes(self):
-        unknown = frozenset({Effect(EffectKind.UNKNOWN)})
+    def test_skill_view_declares_its_read_and_its_usage_ledger_write(self):
+        """Undeclared meant the model could never open a skill at all.
+
+        ``skills_list`` returns names and descriptions only, so leaving
+        ``skill_view`` at UNKNOWN meant every skill-driven request produced an
+        empty template. The repair is a truthful declaration, not a bypass:
+        the ledger write it really does perform is named.
+        """
+        expected = frozenset({
+            Effect.parse("read:skills"),
+            Effect.parse("read:files"),
+            Effect.parse("write_local:skill_usage"),
+        })
 
         entry = registry.get_entry("skill_view")
         assert entry is not None
-        assert entry.effects is None
+        assert entry.effects == expected
         assert entry.effect_resolver is None
         assert registry.get_effect_metadata("skill_view") == {
-            "declared": False,
-            "effects": unknown,
+            "declared": True,
+            "effects": expected,
             "has_resolver": False,
         }
-        resolved = registry.resolve_effects("skill_view", {"name": "example"})
-        assert resolved == unknown
+        assert registry.resolve_effects("skill_view", {"name": "example"}) == expected
 
-        decision = authorize_effects(
+    def test_skill_view_is_admitted_by_the_workspace_ceiling_only(self):
+        resolved = registry.resolve_effects("skill_view", {"name": "example"})
+
+        allowed = authorize_effects(
             ExecutionPolicy.for_mode(
-                "turn-skill-view",
-                ExecutionPolicyMode.READ_ONLY,
+                "turn-skill-view-board",
+                ExecutionPolicyMode.WORKSPACE,
             ),
             resolved,
         )
-        assert decision.allowed is False
-        assert decision.reason == "unknown_effect"
+        assert allowed.allowed is True
+        assert allowed.reason == "allowed"
+
+        # The usage-ledger write is a real write; narrower ceilings still say no.
+        for mode in (
+            ExecutionPolicyMode.READ_ONLY,
+            ExecutionPolicyMode.PLAN,
+            ExecutionPolicyMode.DRAFT_ONLY,
+        ):
+            decision = authorize_effects(
+                ExecutionPolicy.for_mode("turn-skill-view", mode), resolved
+            )
+            assert decision.allowed is False
+            assert decision.reason == "effect_not_allowed"
+
+    def test_skill_view_never_declares_execution_and_cannot_perform_it(self):
+        """The tripwire on this surface.
+
+        ``skill_view`` renders SKILL.md through ``preprocess_skill_content``,
+        which has an inline-shell expander that would run ``bash -c`` on any
+        ``!`command`` found in skill text — arbitrary execution and secret
+        capture driven by file content. It is NOT declared, because it is
+        unreachable: the config opt-in defaults off AND the release channel is
+        checked, in ``preprocess_skill_content`` and again inside
+        ``run_inline_shell``. If any of those gates is relaxed this tool gains
+        an execution effect and must be re-declared before it ships — that is
+        what this test exists to catch.
+        """
+        import inspect
+
+        from agent import skill_preprocessing
+
+        source = inspect.getsource(skill_preprocessing.preprocess_skill_content)
+        assert 'cfg.get("inline_shell", False)' in source
+        assert "not exact_realtor_beta_active()" in source
+        assert "if exact_realtor_beta_active():" in inspect.getsource(
+            skill_preprocessing.run_inline_shell
+        )
+
+        declared_kinds = {
+            effect.kind
+            for effect in registry.resolve_effects("skill_view", {"name": "example"})
+        }
+        assert EffectKind.SPAWN not in declared_kinds
+        assert EffectKind.DESTRUCTIVE not in declared_kinds
+        assert EffectKind.MESSAGE_EXTERNAL not in declared_kinds
+        assert EffectKind.WRITE_EXTERNAL not in declared_kinds
+
+    def test_skill_view_inline_shell_is_inert_under_beta(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        from agent.skill_preprocessing import (
+            preprocess_skill_content,
+            run_inline_shell,
+        )
+
+        assert run_inline_shell("echo pwned", None, 5) == (
+            "[inline-shell disabled in Realtor Beta]"
+        )
+        assert (
+            preprocess_skill_content(
+                "before !`echo pwned` after",
+                None,
+                skills_cfg={"inline_shell": True, "template_vars": False},
+            )
+            == "before !`echo pwned` after"
+        )
 
     def test_lists_skills(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):

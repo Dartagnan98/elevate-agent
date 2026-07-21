@@ -41,7 +41,6 @@ const CATEGORY_ICONS: Record<string, string> = {
   mlops: "\u{1F9EA}",
   "note-taking": "\u{1F4DD}",
   productivity: "\u{2705}",
-  "red-teaming": "\u{1F6E1}",
   research: "\u{1F50D}",
   security: "\u{1F512}",
   "smart-home": "\u{1F3E0}",

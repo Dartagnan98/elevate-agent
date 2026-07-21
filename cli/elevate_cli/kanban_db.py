@@ -2620,7 +2620,34 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     Best-effort — any error is swallowed so cleanup never blocks task completion.
     Only ``scratch`` workspaces are removed; ``worktree`` and ``dir`` workspaces
     are intentionally preserved.
+
+    **Destructive severance (package ERB-405).**  This is the only part of
+    completing a card that is not a database write: it ``rmtree``s a
+    directory and shells out to ``tmux`` to kill a dead session.  Closing a
+    card is a board write; irreversibly deleting a directory tree is not.  So
+    when an accepted-turn policy is bound and does not authorize
+    ``destructive``, the cleanup is skipped and the card still completes —
+    the scratch directory is simply left on disk for the dispatcher's own
+    later sweep.  With no policy bound (CLI, dispatcher, dashboard) the
+    behavior is unchanged.
     """
+    try:
+        from tools.approval import current_policy_permits_effect
+
+        permitted = current_policy_permits_effect("destructive")
+    except ImportError:  # pragma: no cover — no policy system, no policy
+        # No ``tools.approval`` means no ExecutionPolicy can be bound, so this
+        # is the legacy dispatcher path; leave its cleanup byte-identical.
+        permitted = True
+    except Exception:  # pragma: no cover — the probe itself must never raise
+        permitted = False
+    if not permitted:
+        _log.debug(
+            "Scratch workspace cleanup skipped for %s: the current turn is "
+            "not authorized to delete data",
+            task_id,
+        )
+        return
     try:
         row = conn.execute(
             "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
@@ -4534,7 +4561,26 @@ def dispatch_once(
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
+
+    **Realtor Beta (package ERB-405).** ``kanban_create`` is a declared local
+    board write, but a created card is an ENQUEUE and this loop is what turns
+    an enqueued card into a detached ``elevate chat`` subprocess via
+    ``_default_spawn``.  Realtor Beta ships without autonomous execution, so
+    the tick refuses here on the same release-policy check every other
+    unattended entrypoint uses.  No dispatcher loop is started in this build,
+    but the dashboard exposes a manual dispatch endpoint, so the refusal is
+    made at the spawn primitive rather than assumed from the absence of a
+    caller.  ``dry_run`` still works — inspecting what WOULD run starts
+    nothing.
     """
+    if not dry_run:
+        from cron.execution_policy import scheduled_execution_disabled_reason
+
+        disabled_reason = scheduled_execution_disabled_reason()
+        if disabled_reason:
+            _log.info("Kanban dispatch tick skipped: %s", disabled_reason)
+            return DispatchResult()
+
     # Reap zombie children from previously spawned workers.
     # The gateway-embedded dispatcher is the parent of every worker spawned
     # via _default_spawn (start_new_session=True only detaches the

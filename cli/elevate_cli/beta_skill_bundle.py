@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
-from elevate_constants import exact_realtor_beta_active
+from elevate_constants import (
+    REALTOR_BETA_SKILL_ROOTS as _REALTOR_BETA_SKILL_ROOTS,
+    exact_realtor_beta_active,
+)
 
 
 _HASH_DOMAIN: Final[bytes] = b"elevate-realtor-beta-skill-bundle-v2\x00"
@@ -31,14 +34,12 @@ _HASH_DOMAIN: Final[bytes] = b"elevate-realtor-beta-skill-bundle-v2\x00"
 # unrelated bundled developer skill change the Realtor activation identity,
 # while omitting one of these roots would leave an entitled Realtor surface
 # outside the receipt's proof.
-REALTOR_BETA_SKILL_ROOTS: Final[tuple[str, ...]] = (
-    "real-estate",
-    "real-estate-admin",
-    "lead-scorer",
-    "outreach-lanes",
-    "social-content-engine",
-    "cma",
-)
+#
+# Defined in ``elevate_constants`` and re-exported here so the runtime listing
+# filter (``is_realtor_beta_surface_skill_path``) and this hashed identity are
+# the SAME set by construction — a root that becomes visible to the realtor
+# without entering the receipt's proof, or vice versa, is not expressible.
+REALTOR_BETA_SKILL_ROOTS: Final[tuple[str, ...]] = _REALTOR_BETA_SKILL_ROOTS
 
 REQUIRED_CRITICAL_FILES: Final[tuple[str, ...]] = (
     "real-estate-admin/ROUTING.md",

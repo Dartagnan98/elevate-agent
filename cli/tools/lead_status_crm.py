@@ -65,15 +65,59 @@ def _dry_run(config: dict[str, Any]) -> bool:
     return bool(isinstance(node, dict) and node.get("push_dry_run"))
 
 
+def _load_config_safely() -> dict[str, Any]:
+    try:
+        from elevate_cli.config import load_config
+
+        return load_config() or {}
+    except Exception:
+        return {}
+
+
+def crm_status_push_enabled(conn) -> bool:
+    """Whether an AI status change will mirror to the connected CRM.
+
+    THE single source of truth for that question.  ``lead_status``'s effect
+    resolver and :func:`push_lead_status_to_crm` both route through this
+    function so the DECLARED effect set and the DISPATCHED behavior are
+    computed from one expression and cannot drift apart — a divergence here
+    would be an undeclared external write, which is the one thing the
+    workspace ceiling exists to prevent.
+
+    Precedence is unchanged: the onboarding profile wins, ``config.yaml`` is
+    the fallback, and an unreadable onboarding profile degrades to the
+    config-only answer exactly as :func:`_onboarding_crm` always has.
+    """
+    return _push_enabled(_load_config_safely(), _onboarding_crm(conn))
+
+
 def push_lead_status_to_crm(conn, contact: dict[str, Any], status: str) -> dict[str, Any]:
     """Best-effort mirror of a lead's status to the CRM. Returns a small result
     dict ({pushed, mode, ...}); never raises."""
     try:
-        from elevate_cli.config import load_config
-        config = load_config() or {}
+        config = _load_config_safely()
         onboarding = _onboarding_crm(conn)
         if not _push_enabled(config, onboarding):
             return {"pushed": False, "reason": "disabled"}
+
+        # CRM severance (package ERB-405). Everything below this line leaves
+        # the local store: it looks the lead up in the realtor's CRM and
+        # writes a stage or a note there, which can in turn trip the CRM's
+        # own automations and reach the realtor's clients. A local board
+        # write must never be able to do that, so the push runs only when the
+        # accepted-turn policy actually authorizes ``write_external:crm``.
+        # With no policy bound (CLI / dashboard / background drains) the
+        # branch is unchanged. This is the TOCTOU close for the effect
+        # resolver: if the opt-in flips ON after the effect set was declared
+        # local-only, the push still cannot fire.
+        from tools.approval import current_policy_permits_effect
+
+        if not current_policy_permits_effect("write_external:crm"):
+            logger.info(
+                "CRM status push withheld: the current turn is not authorized "
+                "to write to an external system"
+            )
+            return {"pushed": False, "reason": "not_authorized"}
 
         email = (contact.get("primaryEmail") or "").strip()
         phone = (contact.get("primaryPhone") or "").strip()

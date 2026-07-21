@@ -1287,10 +1287,35 @@ registry.register(
     effects={"read:kanban"},
 )
 
-# Deliberately UNDECLARED (unknown effects): recompute_ready promotes
-# tasks, resets failure counters, and appends events. It stays unknown
-# until write-effect classification (write_local:kanban) lands with its
-# own authorization evidence.
+# Every lifecycle tool below mutates the agent's own task board and nothing
+# else: ``recompute_ready`` promotes tasks and resets failure counters,
+# ``complete``/``block``/``unblock`` transition status and close/open runs,
+# ``heartbeat`` extends a claim TTL, ``comment`` appends to a task thread,
+# ``create`` inserts a card, ``link`` adds a dependency edge.  Each also
+# reads the board back (``latest_run``, ``get_task``, dependency recompute),
+# so each is ``read:kanban`` + ``write_local:kanban``.
+#
+# Audited for outward reach, because a board tool that can reach a human
+# must not be declared local:
+#   * kanban_db imports no HTTP client and opens no socket except
+#     ``gethostname``; every writer here is SQL plus the event log.
+#   * ``kanban_notify_subs`` — the table a gateway "kanban-notifier" watcher
+#     would tail to push completed/blocked events out to a chat.  A human CAN
+#     create a subscription (the ``hermes kanban notify`` CLI command and the
+#     dashboard's home-channel toggle), but the DELIVERY half does not exist:
+#     ``unseen_events_for_sub`` / ``claim_unseen_events_for_sub`` /
+#     ``advance_notify_cursor`` have ZERO callers anywhere outside
+#     ``kanban_db`` itself.  Nothing reads a subscription to send anything, so
+#     completing a card cannot notify anyone.  That is the premise these
+#     local-only declarations rest on, and it is pinned by
+#     ``test_kanban_tools.py::test_the_notifier_delivery_half_has_no_caller``
+#     — wire a watcher up and that test fails before this ships.
+#   * ``complete_task`` ends with ``_cleanup_workspace``, which rmtree's a
+#     scratch directory and shells out to ``tmux``.  That is destructive and
+#     is severed there on the ``destructive`` capability, so completing a
+#     card under a local-only ceiling closes the card and deletes nothing.
+_KANBAN_WRITE_EFFECTS = {"read:kanban", "write_local:kanban"}
+
 registry.register(
     name="kanban_recompute",
     toolset="kanban",
@@ -1298,6 +1323,7 @@ registry.register(
     handler=_handle_recompute,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="♻️",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1307,6 +1333,7 @@ registry.register(
     handler=_handle_complete,
     check_fn=_check_kanban_mode,
     emoji="✔",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1316,6 +1343,7 @@ registry.register(
     handler=_handle_block,
     check_fn=_check_kanban_mode,
     emoji="⏸",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1325,6 +1353,7 @@ registry.register(
     handler=_handle_heartbeat,
     check_fn=_check_kanban_mode,
     emoji="💓",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1334,6 +1363,7 @@ registry.register(
     handler=_handle_comment,
     check_fn=_check_kanban_mode,
     emoji="💬",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1343,6 +1373,7 @@ registry.register(
     handler=_handle_create,
     check_fn=_check_kanban_mode,
     emoji="➕",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1352,6 +1383,7 @@ registry.register(
     handler=_handle_unblock,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="▶",
+    effects=_KANBAN_WRITE_EFFECTS,
 )
 
 registry.register(
@@ -1361,4 +1393,5 @@ registry.register(
     handler=_handle_link,
     check_fn=_check_kanban_mode,
     emoji="🔗",
+    effects=_KANBAN_WRITE_EFFECTS,
 )

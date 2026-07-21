@@ -74,6 +74,7 @@ from elevate_constants import (
     exact_realtor_beta_active,
     get_elevate_home,
     get_runtime_skills_dir,
+    is_realtor_beta_surface_skill_path,
     is_trusted_beta_bundled_skill_path,
 )
 import os
@@ -162,6 +163,113 @@ _REAL_ESTATE_SKILL_CATEGORIES = {
     "xposure-pcs-pipeline": "real-estate-sales",
     "social-content-engine": "real-estate-social-media",
 }
+
+# Category synonyms for ``skills_list(category=...)``.
+#
+# The stored categories are namespaced (``real-estate-marketing``) but an agent
+# routing a realtor's request guesses the workflow word — ``cma``, ``listing``,
+# ``leads``, ``paperwork``. Before this table those queries returned an empty
+# list with no hint, which reads to the model as "Elevate cannot do a CMA".
+# Keys are normalized (lowercase, ``_``/space -> ``-``); values are stored
+# category names.
+_CATEGORY_ALIASES: Dict[str, str] = {
+    # marketing / CMA
+    "cma": "real-estate-marketing",
+    "cmas": "real-estate-marketing",
+    "comparative-market-analysis": "real-estate-marketing",
+    "market-analysis": "real-estate-marketing",
+    "valuation": "real-estate-marketing",
+    "pricing": "real-estate-marketing",
+    "marketing": "real-estate-marketing",
+    "listing-marketing": "real-estate-marketing",
+    "listings": "real-estate-marketing",
+    # sales / leads / outreach
+    "sales": "real-estate-sales",
+    "leads": "real-estate-sales",
+    "lead-gen": "real-estate-sales",
+    "lead-generation": "real-estate-sales",
+    "lead-scoring": "real-estate-sales",
+    "outreach": "real-estate-sales",
+    "prospecting": "real-estate-sales",
+    "follow-up": "real-estate-sales",
+    "crm": "real-estate-sales",
+    # social
+    "social": "real-estate-social-media",
+    "social-media": "real-estate-social-media",
+    "content": "real-estate-social-media",
+    "posts": "real-estate-social-media",
+    # transaction administration
+    "admin": "real-estate-admin",
+    "transactions": "real-estate-admin",
+    "transaction-management": "real-estate-admin",
+    "deals": "real-estate-admin",
+    "paperwork": "real-estate-admin",
+    "contracts": "real-estate-admin",
+    "forms": "real-estate-admin",
+    "conveyancing": "real-estate-admin",
+    "closing": "real-estate-admin",
+    "compliance": "real-estate-admin",
+}
+
+
+def _normalize_category(value: Any) -> str:
+    """Fold a category/name token to its comparison form."""
+    text = str(value or "").strip().lower()
+    for separator in ("_", " "):
+        text = text.replace(separator, "-")
+    while "--" in text:
+        text = text.replace("--", "-")
+    return text.strip("-")
+
+
+def _filter_skills_by_category(
+    skills: List[Dict[str, Any]], category: str
+) -> Tuple[List[Dict[str, Any]], Optional[str], str]:
+    """Resolve a category query against the listed skills.
+
+    Returns ``(matches, resolved_category, match_kind)``. Layers are tried in
+    order and the first non-empty one wins. Layer 1 is byte-exact so a query
+    that worked before still means exactly what it meant before; only queries
+    that would have returned an empty list get widened.
+    """
+    query = _normalize_category(category)
+    if not query:
+        return skills, None, "exact"
+
+    literal = [s for s in skills if s.get("category") == category]
+    if literal:
+        return literal, str(category), "exact"
+
+    exact = [s for s in skills if _normalize_category(s.get("category")) == query]
+    if exact:
+        return exact, str(category), "exact"
+
+    aliased = _CATEGORY_ALIASES.get(query)
+    if aliased:
+        matches = [
+            s for s in skills if _normalize_category(s.get("category")) == _normalize_category(aliased)
+        ]
+        if matches:
+            return matches, aliased, "alias"
+
+    by_name = [s for s in skills if _normalize_category(s.get("name")) == query]
+    if by_name:
+        return by_name, str(category), "skill_name"
+
+    # Substring widening only for a query long enough to be a real word, and
+    # only in the "query names part of a stored category" direction. Without
+    # both guards a one-character query — or "_" — returns the whole catalog,
+    # and "real-estate-admin-and-anything" would union unrelated categories.
+    if len(query) >= 3:
+        partial = [
+            s
+            for s in skills
+            if (stored := _normalize_category(s.get("category"))) and query in stored
+        ]
+        if partial:
+            return partial, str(category), "partial"
+
+    return [], str(category), "none"
 
 # Platform identifiers for the 'platforms' frontmatter field.
 # Maps user-friendly names to sys.platform prefixes.
@@ -908,9 +1016,19 @@ def skills_list(category: str = None, task_id: str = None) -> str:
                 ensure_ascii=False,
             )
 
+        # Every category present before filtering — an empty or widened result
+        # has to be able to tell the caller what it COULD have asked for.
+        available_categories = sorted(
+            {s.get("category") for s in all_skills if s.get("category")}
+        )
+
         # Filter by category if specified
+        resolved_category: Optional[str] = None
+        match_kind = "exact"
         if category:
-            all_skills = [s for s in all_skills if s.get("category") == category]
+            all_skills, resolved_category, match_kind = _filter_skills_by_category(
+                all_skills, category
+            )
 
         # Sort by category then name
         all_skills = _sort_skills(all_skills)
@@ -920,16 +1038,27 @@ def skills_list(category: str = None, task_id: str = None) -> str:
             {s.get("category") for s in all_skills if s.get("category")}
         )
 
-        return json.dumps(
-            {
-                "success": True,
-                "skills": all_skills,
-                "categories": categories,
-                "count": len(all_skills),
-                "hint": "Use skill_view(name) to see full content, tags, and linked files",
-            },
-            ensure_ascii=False,
-        )
+        payload: Dict[str, Any] = {
+            "success": True,
+            "skills": all_skills,
+            "categories": categories,
+            "count": len(all_skills),
+            "hint": "Use skill_view(name) to see full content, tags, and linked files",
+        }
+        if category:
+            payload["requested_category"] = str(category)
+            payload["available_categories"] = available_categories
+            if match_kind == "none":
+                payload["message"] = (
+                    f"No skills matched category '{category}'. "
+                    "Call skills_list() with no category to see everything, or "
+                    "use one of available_categories."
+                )
+            elif match_kind != "exact":
+                payload["resolved_category"] = resolved_category
+                payload["category_match"] = match_kind
+
+        return json.dumps(payload, ensure_ascii=False)
 
     except Exception as e:
         return tool_error(str(e), success=False)
@@ -950,6 +1079,24 @@ def _serve_plugin_skill(
 ) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from elevate_cli.plugins import _get_disabled_plugins, get_plugin_manager
+
+    # ``skill_view`` dispatches qualified ``namespace:bare`` names here BEFORE
+    # its exact-Beta containment check, and ``PluginContext.register_skill``
+    # validates only that the path exists. No bundled plugin registers a skill
+    # today, so this is a latent bypass rather than a live one — one
+    # ``register_skill`` line anywhere in cli/plugins/ would serve arbitrary
+    # SKILL.md text to a realtor. Fail closed instead of relying on that.
+    if exact_realtor_beta_active() and not is_realtor_beta_surface_skill_path(skill_md):
+        return json.dumps(
+            {
+                "success": False,
+                "error": (
+                    f"Skill '{namespace}:{bare}' is not part of the Realtor "
+                    "Beta skill set and was not loaded."
+                ),
+            },
+            ensure_ascii=False,
+        )
 
     if namespace in _get_disabled_plugins():
         return json.dumps(
@@ -1319,16 +1466,21 @@ def skill_view(
                 ensure_ascii=False,
             )
 
-        if (
-            exact_realtor_beta_active()
-            and not is_trusted_beta_bundled_skill_path(skill_md)
+        # Beta containment. ``skill_view`` resolves candidates by direct path
+        # and by rglob as well as through the enumerating chokepoint, so the
+        # entitled-root allowlist has to be re-asserted right here: without it
+        # a bundled engineering skill stays reachable by exact path
+        # (``skill_view("red-teaming/godmode")``) even when it is absent from
+        # every listing.
+        if exact_realtor_beta_active() and not is_realtor_beta_surface_skill_path(
+            skill_md
         ):
             return json.dumps(
                 {
                     "success": False,
                     "error": (
-                        f"Skill '{name}' is outside the signed Realtor Beta "
-                        "skill bundle and was not loaded."
+                        f"Skill '{name}' is not part of the Realtor Beta skill "
+                        "set and was not loaded."
                     ),
                 },
                 ensure_ascii=False,
@@ -1892,6 +2044,34 @@ def _skill_view_with_bump(args, **kw):
     return result
 
 
+# ``skill_view`` is how the model actually loads a skill's instructions —
+# ``skills_list`` only returns names and descriptions.  Left undeclared it
+# resolved to UNKNOWN and was denied under every ceiling, which meant no
+# skill could ever be opened and skill-driven work silently produced empty
+# output.  Declared truthfully it is a read plus one narrow local write:
+#
+#   * READ — resolves the skill (bundled tree, local tree, or plugin
+#     registry), reads SKILL.md or one linked file, and clips it.  Files
+#     outside the skill tree are not reachable; the path is resolved inside
+#     the skill directory.  That is ``read:skills`` + ``read:files``.
+#   * WRITE — on success it bumps ``view_count``/``use_count`` in the
+#     ``~/.elevate/skills/.usage.json`` sidecar via ``skill_usage``.  The
+#     ledger is not optional decoration: ``agent/curator.py`` keys its stale
+#     timer off ``last_used_at``, so dropping the write would quietly rot
+#     curation.  It is declared instead: ``write_local:skill_usage``, a
+#     lock-serialized atomic rewrite of one JSON file under the user's own
+#     Elevate home, which ``_mutate`` no-ops entirely for bundled and
+#     hub-installed skills.
+#
+# The dangerous branch — ``preprocess_skill_content``'s inline-shell
+# expansion, which would run ``bash -c`` on ``!`command`` snippets found in
+# skill text — is NOT part of this declaration because it is structurally
+# unreachable here: ``agent/skill_preprocessing.py`` requires the
+# ``skills.inline_shell`` config opt-in (default False) AND
+# ``not exact_realtor_beta_active()``, and ``run_inline_shell`` short-circuits
+# on the same channel check a second time.  Two independent gates, one of
+# them the release channel itself.  If either is ever relaxed this tool gains
+# an arbitrary-execution effect and must be re-declared before it ships.
 registry.register(
     name="skill_view",
     toolset="skills",
@@ -1899,4 +2079,5 @@ registry.register(
     handler=_skill_view_with_bump,
     check_fn=check_skills_requirements,
     emoji="📚",
+    effects={"read:skills", "read:files", "write_local:skill_usage"},
 )

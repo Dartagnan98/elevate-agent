@@ -18,6 +18,7 @@ from elevate_constants import (
     get_elevate_home,
     get_runtime_skills_dir,
     get_skills_dir,
+    is_realtor_beta_surface_skill_path,
     is_termux,
     is_trusted_beta_bundled_skill_path,
 )
@@ -597,6 +598,18 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
     """Walk skills_dir yielding sorted paths matching *filename*.
 
     Excludes ``.git``, ``.github``, ``.hub`` directories.
+
+    Under exact Realtor Beta this is the enumeration chokepoint for the
+    model-visible skill surface — the system-prompt catalog, ``skills_list``,
+    and the slash-command menu all funnel through here — so it applies the
+    entitled-root allowlist (:func:`is_realtor_beta_surface_skill_path`), not
+    merely "is it inside the signed app bundle". The signed bundle also
+    carries the engineering catalog (mlops, devops, github, …) which must
+    never reach a realtor.
+
+    Not every lane enumerates: ``skills_tool.skill_view``,
+    ``web_routes.skills._resolve_skill_dir``, and ``_serve_plugin_skill``
+    resolve paths directly and re-assert the same allowlist themselves.
     """
     beta_only = exact_realtor_beta_active()
     if beta_only and not is_trusted_beta_bundled_skill_path(skills_dir):
@@ -610,7 +623,7 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
             and not d.endswith(_EXCLUDED_DIR_SUFFIXES)
             and (
                 not beta_only
-                or is_trusted_beta_bundled_skill_path(Path(root) / d)
+                or is_realtor_beta_surface_skill_path(Path(root) / d)
             )
         ]
         candidate = Path(root) / filename
@@ -618,7 +631,7 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
             filename in files
             and (
                 not beta_only
-                or is_trusted_beta_bundled_skill_path(candidate)
+                or is_realtor_beta_surface_skill_path(candidate)
             )
         ):
             matches.append(candidate)

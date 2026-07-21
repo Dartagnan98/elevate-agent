@@ -97,7 +97,6 @@ const sidebars: SidebarsConfig = {
           label: 'Skills',
           collapsed: true,
           items: [
-            'user-guide/skills/godmode',
             'user-guide/skills/google-workspace',
             {
               type: 'category',
@@ -332,7 +331,6 @@ const sidebars: SidebarsConfig = {
                 'user-guide/skills/bundled/mlops/mlops-huggingface-hub',
                 'user-guide/skills/bundled/mlops/mlops-inference-llama-cpp',
                 'user-guide/skills/bundled/mlops/mlops-evaluation-lm-evaluation-harness',
-                'user-guide/skills/bundled/mlops/mlops-inference-obliteratus',
                 'user-guide/skills/bundled/mlops/mlops-inference-outlines',
                 'user-guide/skills/bundled/mlops/mlops-models-segment-anything',
                 'user-guide/skills/bundled/mlops/mlops-training-trl-fine-tuning',
@@ -416,14 +414,6 @@ const sidebars: SidebarsConfig = {
                 'user-guide/skills/bundled/real-estate-admin/real-estate-admin-skyslope-sync',
                 'user-guide/skills/bundled/real-estate-admin/real-estate-admin-subject-removal',
                 'user-guide/skills/bundled/real-estate-admin/real-estate-admin-webforms',
-              ],
-            },
-            {
-              type: 'category',
-              label: 'red-teaming',
-              collapsed: true,
-              items: [
-                'user-guide/skills/bundled/red-teaming/red-teaming-godmode',
               ],
             },
             {

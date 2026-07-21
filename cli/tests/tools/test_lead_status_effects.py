@@ -6,10 +6,18 @@ an external CRM). Only ``show`` is a genuine pure read, and only after the
 repair that routes it over ``connect_ready_read_only()`` instead of the general
 bootstrapping ``connect()``.
 
-These tests pin the repaired contract: ``show`` resolves to an exact
-``read:leads`` and runs over the already-ready forced-READ-ONLY connection with
-no bootstrap; every write action and any unrecognized action stays unknown and
-denied under a read-only policy.
+These tests pin the contract in both directions:
+
+* ``show`` resolves to an exact ``read:leads`` and runs over the already-ready
+  forced-READ-ONLY connection with no bootstrap.
+* ``heat``/``follow_up``/``classify`` are purely local label writes and are
+  ALLOWED under the workspace ceiling.
+* ``set`` is allowed only while the operator's CRM mirror is off. With the
+  mirror on it declares ``write_external:crm`` and the whole call is REFUSED
+  under the workspace ceiling — a status change that leaves the machine is a
+  write to someone else's system, which can trip that system's own client
+  automations.
+* any unrecognized action stays unknown and denied under every ceiling.
 """
 
 from __future__ import annotations
@@ -28,19 +36,44 @@ from tools.approval import (
     ExecutionPolicyMode,
     authorize_effects,
 )
+from tools.lead_status_tool import (
+    _crm_mirror_reachable_for_set as _real_crm_mirror_probe,
+)
 from tools.lead_status_tool import _lead_status_effect_resolver, _lead_status_handler
 from tools.registry import registry
 
 READ_LEADS = frozenset({Effect.parse("read:leads")})
 UNKNOWN = frozenset({Effect(EffectKind.UNKNOWN)})
+LOCAL_LABEL_WRITE = frozenset({
+    Effect.parse("read:leads"), Effect.parse("write_local:leads"),
+})
+MIRRORED_WRITE = LOCAL_LABEL_WRITE | {Effect.parse("write_external:crm")}
 
 READ_ACTIONS = ["show"]
-NON_READ_ACTIONS = ["set", "heat", "follow_up", "classify", "", "frobnicate"]
+LOCAL_WRITE_ACTIONS = ["heat", "follow_up", "classify"]
+UNKNOWN_ACTIONS = ["", "frobnicate"]
+
+
+@pytest.fixture(autouse=True)
+def _crm_mirror_off(monkeypatch):
+    """Default the operator's CRM mirror OFF — the shipped default.
+
+    Tests that care about the mirror override this explicitly.
+    """
+    monkeypatch.setattr(
+        "tools.lead_status_tool._crm_mirror_reachable_for_set", lambda: False
+    )
 
 
 def _read_only():
     return ExecutionPolicy.for_mode(
         "turn-lead-status-read", ExecutionPolicyMode.READ_ONLY
+    )
+
+
+def _workspace():
+    return ExecutionPolicy.for_mode(
+        "turn-lead-status-workspace", ExecutionPolicyMode.WORKSPACE
     )
 
 
@@ -105,13 +138,137 @@ def test_show_resolves_read_leads_and_is_allowed(action):
     assert decision.reason == "allowed"
 
 
-@pytest.mark.parametrize("action", NON_READ_ACTIONS)
-def test_write_actions_stay_unknown_and_denied(action):
+@pytest.mark.parametrize("action", LOCAL_WRITE_ACTIONS)
+def test_label_writes_declare_a_scoped_local_lead_write(action):
     resolved = registry.resolve_effects("lead_status", {"action": action, "contact_id": "c"})
-    assert resolved == UNKNOWN
+    assert resolved == LOCAL_LABEL_WRITE
+    decision = authorize_effects(_workspace(), resolved)
+    assert decision.allowed is True
+    assert decision.reason == "allowed"
+
+
+@pytest.mark.parametrize("action", LOCAL_WRITE_ACTIONS)
+def test_label_writes_are_still_denied_under_read_only(action):
+    resolved = registry.resolve_effects("lead_status", {"action": action, "contact_id": "c"})
     decision = authorize_effects(_read_only(), resolved)
     assert decision.allowed is False
-    assert decision.reason == "unknown_effect"
+    assert decision.reason == "effect_not_allowed"
+
+
+def test_set_is_local_and_allowed_while_the_crm_mirror_is_off():
+    resolved = registry.resolve_effects("lead_status", {"action": "set", "contact_id": "c"})
+    assert resolved == LOCAL_LABEL_WRITE
+    assert authorize_effects(_workspace(), resolved).allowed is True
+
+
+def test_set_declares_the_external_write_and_is_refused_when_the_mirror_is_on(
+    monkeypatch,
+):
+    """The structural test: local write + outward reach must NOT slip through.
+
+    Nothing about the tool's NAME changes here — only the fact that this box
+    would physically push to Lofty/FUB/Sierra. The workspace ceiling refuses
+    the whole call because one declared effect is outside it.
+    """
+    monkeypatch.setattr(
+        "tools.lead_status_tool._crm_mirror_reachable_for_set", lambda: True
+    )
+    resolved = registry.resolve_effects("lead_status", {"action": "set", "contact_id": "c"})
+    assert resolved == MIRRORED_WRITE
+    decision = authorize_effects(_workspace(), resolved)
+    assert decision.allowed is False
+    assert decision.reason == "effect_not_allowed"
+    assert decision.denied_effects == frozenset({Effect.parse("write_external:crm")})
+
+
+@pytest.mark.parametrize("status", ["closed_seller", "closed_buyer"])
+def test_closing_a_lead_declares_the_deal_board_write_it_causes(status):
+    """``set`` to a closing status is not just a relabel.
+
+    ``set_pipeline_status`` routes both closing values through
+    ``close_to_admin`` -> ``promote_profile_to_admin_deal`` -> ``create_deal``.
+    Both effects sit inside the workspace ceiling so nothing is denied, but a
+    receipt naming only ``write_local:leads`` for a call that created a deal
+    would be a false record — and the receipt is the evidence.
+    """
+    resolved = registry.resolve_effects(
+        "lead_status", {"action": "set", "contact_id": "c", "status": status}
+    )
+    assert resolved == LOCAL_LABEL_WRITE | {Effect.parse("write_local:deals")}
+    assert authorize_effects(_workspace(), resolved).allowed is True
+
+
+@pytest.mark.parametrize("status", ["new_lead", "follow_up", "ghosting", "dead"])
+def test_non_closing_statuses_do_not_claim_the_deal_board(status):
+    resolved = registry.resolve_effects(
+        "lead_status", {"action": "set", "contact_id": "c", "status": status}
+    )
+    assert resolved == LOCAL_LABEL_WRITE
+
+
+def test_a_cold_store_does_not_read_as_mirror_on(monkeypatch):
+    """A not-ready store must not masquerade as an external-write refusal.
+
+    Declaring ``write_external:crm`` here would refuse the call with a
+    policy-shaped error and hide the handler's real, actionable
+    ``operational_store_not_ready`` message. The handler's own onboarding read
+    already degrades to config-only in exactly this case, so the resolver
+    mirrors that rather than inventing a different answer.
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _not_ready():
+        raise connection_module.OperationalStoreNotReady("cold")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        connection_module, "connect_ready_read_only", _not_ready
+    )
+    monkeypatch.setattr(
+        "tools.lead_status_crm._load_config_safely", lambda: {}
+    )
+    assert _real_crm_mirror_probe() is False
+
+    monkeypatch.setattr(
+        "tools.lead_status_crm._load_config_safely",
+        lambda: {"crm": {"push_status": True}},
+    )
+    assert _real_crm_mirror_probe() is True
+
+
+def test_resolver_fails_closed_toward_declaring_the_external_write(monkeypatch):
+    """An undeterminable mirror state declares the external write, not silence.
+
+    Bound to the REAL probe captured at import, so the autouse mirror-off
+    fixture cannot mask the fail-closed branch.
+    """
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(
+        "elevate_cli.data.connection.connect_ready_read_only", _boom
+    )
+    assert _real_crm_mirror_probe() is True
+
+
+@pytest.mark.parametrize("action", UNKNOWN_ACTIONS)
+def test_unrecognized_actions_stay_unknown_and_denied_everywhere(action):
+    resolved = registry.resolve_effects("lead_status", {"action": action, "contact_id": "c"})
+    assert resolved == UNKNOWN
+    for mode in (
+        ExecutionPolicyMode.READ_ONLY,
+        ExecutionPolicyMode.PLAN,
+        ExecutionPolicyMode.DRAFT_ONLY,
+        ExecutionPolicyMode.WORKSPACE,
+        ExecutionPolicyMode.DEFAULT,
+    ):
+        decision = authorize_effects(
+            ExecutionPolicy.for_mode("turn-unknown", mode), resolved
+        )
+        assert decision.allowed is False
+        assert decision.reason == "unknown_effect"
 
 
 def test_missing_and_none_args_are_unknown():
@@ -123,7 +280,11 @@ def test_missing_and_none_args_are_unknown():
 def test_resolver_mirrors_handler_action_normalization():
     for raw in ("show", "SHOW", "  Show "):
         assert _lead_status_effect_resolver({"action": raw}) == {"read:leads"}
-    for raw in ("Set", "  HEAT ", "classify"):
+    for raw in ("Set", "  HEAT ", "classify", "FOLLOW_UP "):
+        assert _lead_status_effect_resolver({"action": raw}) == {
+            "read:leads", "write_local:leads",
+        }
+    for raw in ("", "frobnicate", "  "):
         assert _lead_status_effect_resolver({"action": raw}) == {EffectKind.UNKNOWN}
 
 

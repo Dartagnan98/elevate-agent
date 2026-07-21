@@ -257,14 +257,26 @@ _ACTIONS = {
 
 
 def _working_state_effect_resolver(args: dict):
-    """Declare only the pure read actions; every mutation stays unknown.
+    """Classify each action against what the handler physically does.
 
     ``recall`` and ``list_active`` ride the already-ready forced-READ-ONLY
     operational boundary (no bootstrap, no migration, no seeding), so they
-    resolve to an exact ``read:working_state``. ``update``/``resolve`` write
-    the notes table and remain unclassified (fail closed) until write-effect
-    classification lands with its own evidence. Unrecognized actions are
-    unknown by construction.
+    resolve to an exact ``read:working_state``.
+
+    ``update`` and ``resolve`` write the per-entity journal row inside one
+    explicit ``transaction(conn)`` via ``update_working_state`` /
+    ``resolve_working_state``.  Those data-layer functions import nothing but
+    ``sqlite3`` and ``elevate_cli.data._util`` — no network client, no
+    subprocess, no filesystem write, no notifier, no dispatcher hook on any
+    branch.  This is the agent's own "where we left off" note about the
+    realtor's own contact or deal, on the realtor's own machine, and it is
+    what stops the next session from making the realtor re-brief from
+    scratch.  Both resolve to ``read:working_state`` +
+    ``write_local:working_state``.
+
+    Unrecognized actions are unknown by construction.  The normalization
+    mirrors the handler's dispatch key exactly so the declared surface can
+    never diverge from what runs.
     """
     from tools.approval import EffectKind
 
@@ -272,6 +284,8 @@ def _working_state_effect_resolver(args: dict):
     normalized = str(action or "").strip().lower()
     if normalized in {"recall", "list_active"}:
         return {"read:working_state"}
+    if normalized in {"update", "resolve"}:
+        return {"read:working_state", "write_local:working_state"}
     return {EffectKind.UNKNOWN}
 
 

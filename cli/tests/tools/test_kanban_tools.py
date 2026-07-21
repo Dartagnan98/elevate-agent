@@ -512,32 +512,113 @@ def test_show_and_list_are_read_only_and_every_other_registration_remains_unknow
         assert decision.allowed is True
         assert decision.reason == "allowed"
 
-    unknown = frozenset({Effect(EffectKind.UNKNOWN)})
-    for name in (
-        "kanban_recompute",
-        "kanban_complete",
-        "kanban_block",
-        "kanban_heartbeat",
-        "kanban_comment",
-        "kanban_create",
-        "kanban_unblock",
-        "kanban_link",
-    ):
-        entry = registry.get_entry(name)
-        assert entry is not None
-        assert entry.effects is None
-        assert entry.effect_resolver is None
-        assert registry.resolve_effects(name, {}) == unknown
 
-    denial = authorize_effects(
-        ExecutionPolicy.for_mode(
-            "turn-kanban-recompute",
-            ExecutionPolicyMode.READ_ONLY,
-        ),
-        registry.resolve_effects("kanban_recompute", {}),
+KANBAN_WRITE_TOOLS = (
+    "kanban_recompute",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_heartbeat",
+    "kanban_comment",
+    "kanban_create",
+    "kanban_unblock",
+    "kanban_link",
+)
+
+
+@pytest.mark.parametrize("name", KANBAN_WRITE_TOOLS)
+def test_every_lifecycle_tool_declares_a_scoped_local_board_write(name):
+    """The board exists for the agent to work out of; moving a card is a
+    local write to the realtor's own store, declared as exactly that."""
+    expected = frozenset({
+        Effect.parse("read:kanban"), Effect.parse("write_local:kanban"),
+    })
+    entry = registry.get_entry(name)
+    assert entry is not None
+    assert entry.effects == expected
+    assert entry.effect_resolver is None
+    assert registry.resolve_effects(name, {}) == expected
+
+
+@pytest.mark.parametrize("name", KANBAN_WRITE_TOOLS)
+def test_lifecycle_tools_are_allowed_under_the_workspace_ceiling(name):
+    decision = authorize_effects(
+        ExecutionPolicy.for_mode("turn-kanban-board", ExecutionPolicyMode.WORKSPACE),
+        registry.resolve_effects(name, {}),
     )
-    assert denial.allowed is False
-    assert denial.reason == "unknown_effect"
+    assert decision.allowed is True
+    assert decision.reason == "allowed"
+
+
+@pytest.mark.parametrize("name", KANBAN_WRITE_TOOLS)
+def test_lifecycle_tools_are_still_denied_under_read_only(name):
+    decision = authorize_effects(
+        ExecutionPolicy.for_mode("turn-kanban-read", ExecutionPolicyMode.READ_ONLY),
+        registry.resolve_effects(name, {}),
+    )
+    assert decision.allowed is False
+    assert decision.reason == "effect_not_allowed"
+
+
+@pytest.mark.parametrize("name", KANBAN_WRITE_TOOLS)
+def test_no_kanban_tool_declares_an_outward_effect(name):
+    """A board tool that could reach a human must not be declared local.
+
+    A human can subscribe a task to a chat channel, but nothing in this tree
+    ever reads that subscription to deliver anything — see
+    ``test_the_notifier_delivery_half_has_no_caller``.
+    """
+    forbidden = {
+        EffectKind.WRITE_EXTERNAL,
+        EffectKind.MESSAGE_EXTERNAL,
+        EffectKind.SPAWN,
+        EffectKind.DESTRUCTIVE,
+        EffectKind.FINANCIAL,
+        EffectKind.CREDENTIAL_ACCESS,
+    }
+    kinds = {effect.kind for effect in registry.resolve_effects(name, {})}
+    assert not kinds & forbidden
+
+
+def test_the_notifier_delivery_half_has_no_caller():
+    """Pins the premise the local-only kanban declarations rest on.
+
+    A human CAN subscribe a task to a chat channel (``hermes kanban notify``,
+    the dashboard home-channel toggle). What does not exist is the watcher
+    that would read those subscriptions and send: the three delivery
+    primitives below have no caller outside ``kanban_db`` itself. Until one
+    appears, a card the agent completes cannot reach anybody. When one
+    appears, this test fails and every kanban write declaration has to be
+    re-derived before it ships.
+    """
+    import subprocess
+    from pathlib import Path
+
+    cli_root = Path(kanban_tools.__file__).resolve().parents[1]
+    hits = subprocess.run(
+        [
+            "grep", "-rn", "--include=*.py",
+            "-e", "unseen_events_for_sub",
+            "-e", "claim_unseen_events_for_sub",
+            "-e", "advance_notify_cursor",
+            str(cli_root / "tools"),
+            str(cli_root / "elevate_cli"),
+            str(cli_root / "tui_gateway"),
+            str(cli_root / "plugins"),
+            str(cli_root / "gateway"),
+        ],
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    callers = []
+    for line in hits:
+        path, _, rest = line.partition(":")
+        if path.endswith("kanban_db.py"):
+            continue
+        code = rest.partition(":")[2].strip()
+        if code.startswith("#"):  # prose about the absence is not a caller
+            continue
+        callers.append(line)
+    assert callers == [], f"a kanban notifier delivery path was wired up: {callers}"
 
 
 def test_board_schema_admits_legacy_value_without_claiming_routing():

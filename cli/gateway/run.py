@@ -1456,6 +1456,17 @@ def _check_unavailable_skill(command_name: str) -> str | None:
     Returns a helpful message if the skill exists but is disabled or only
     available as an optional install. Returns None if no match found.
     """
+    # Exact Realtor Beta has a fixed, entitled skill set. This helper walks the
+    # whole bundled tree AND cli/optional-skills/ (77 skills that ship in the
+    # app), so leaving it live turns every mistyped slash command into an
+    # enumeration oracle — "/solana" would answer a realtor with a blockchain
+    # skill plus an install command that cannot work, because installs land in
+    # <ELEVATE_HOME>/skills which is not the Beta runtime root.
+    from elevate_constants import exact_realtor_beta_active
+
+    if exact_realtor_beta_active():
+        return None
+
     # Normalize: command uses hyphens, skill names may use hyphens or underscores
     normalized = command_name.lower().replace("_", "-")
     try:

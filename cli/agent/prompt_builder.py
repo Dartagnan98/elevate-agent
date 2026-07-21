@@ -12,7 +12,13 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from elevate_constants import get_elevate_home, get_runtime_skills_dir, is_wsl
+from elevate_constants import (
+    REALTOR_BETA_SKILL_ROOTS,
+    exact_realtor_beta_active,
+    get_elevate_home,
+    get_runtime_skills_dir,
+    is_wsl,
+)
 from typing import Optional
 
 from agent.skill_utils import (
@@ -862,6 +868,24 @@ def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
         return None
     if snapshot.get("manifest") != _build_skills_manifest(skills_dir):
         return None
+
+    # The manifest only pins mtime/size of the files on disk; ``skills`` itself
+    # is unsigned attacker-writable JSON under ELEVATE_HOME. A snapshot whose
+    # manifest happens to match can therefore still inject arbitrary catalog
+    # entries into a realtor's system prompt. Names and descriptions only —
+    # skill_view still refuses to load them — but exact Beta does not accept
+    # unsigned mutable JSON anywhere else either, so re-derive instead of
+    # trusting it whenever any entry claims a non-entitled root.
+    if exact_realtor_beta_active():
+        for entry in snapshot.get("skills") or []:
+            if not isinstance(entry, dict):
+                return None
+            category = str(entry.get("category") or "")
+            if category.split("/", 1)[0] not in REALTOR_BETA_SKILL_ROOTS:
+                return None
+        for category in (snapshot.get("category_descriptions") or {}):
+            if str(category).split("/", 1)[0] not in REALTOR_BETA_SKILL_ROOTS:
+                return None
     return snapshot
 
 

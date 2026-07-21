@@ -39,7 +39,6 @@ CATEGORY_LABELS = {
     "mlops": "MLOps",
     "note-taking": "Note-Taking",
     "productivity": "Productivity",
-    "red-teaming": "Red Teaming",
     "research": "Research",
     "security": "Security",
     "smart-home": "Smart Home",

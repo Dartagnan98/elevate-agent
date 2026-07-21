@@ -181,6 +181,62 @@ def is_trusted_beta_bundled_skill_path(path: Path | str | None) -> bool:
     return True
 
 
+# The Realtor Beta skill surface. These are the ONLY top-level skill roots the
+# exact-``beta`` channel may list, route, or load. The tuple is authoritative:
+# ``elevate_cli.beta_skill_bundle`` re-exports it as
+# ``REALTOR_BETA_SKILL_ROOTS`` and hashes exactly these roots into the SHA-256
+# activation identity, so the customer-visible surface and the signed bundle
+# identity can never drift apart. Everything else shipped under
+# ``cli/skills`` (mlops, devops, gaming, github, software-development, …) is
+# engineering catalog for the Stable channel and stays invisible in Beta.
+#
+# Adding a root here changes the Beta bundle SHA-256 and therefore invalidates
+# every stored ``.license-activation.json`` receipt — treat it as a release
+# event and mirror it in ``backend/src/lib/skill-seeds.ts`` defaultSeedRoots().
+REALTOR_BETA_SKILL_ROOTS: tuple[str, ...] = (
+    "real-estate",
+    "real-estate-admin",
+    "lead-scorer",
+    "outreach-lanes",
+    "social-content-engine",
+    "cma",
+)
+
+
+def is_realtor_beta_surface_skill_path(path: Path | str | None) -> bool:
+    """Whether *path* is inside one of the entitled Realtor Beta skill roots.
+
+    Strictly narrower than :func:`is_trusted_beta_bundled_skill_path`: the
+    signed app bundle carries the whole shipped skill library, but only the
+    roots in :data:`REALTOR_BETA_SKILL_ROOTS` are realtor-facing. Everything
+    else in the tree is engineering tooling that must never reach a realtor's
+    prompt catalog, slash menu, or ``skill_view``.
+
+    Scope, stated precisely: this gates **listing, routing, and loading a path
+    as a skill**. It is NOT a filesystem read barrier — ``read_file``,
+    ``search_files``, and ``terminal`` are core Beta tools and can still read
+    any file in the shipped tree. Content that must not exist on a customer's
+    disk has to be removed from the shipped tree, not merely filtered here.
+
+    Fail-closed: returns ``False`` outside exact Beta, for the bundle root
+    itself, and for anything that cannot be resolved under a Beta root. Path
+    components are matched exactly after ``resolve()``, so neither a prefix
+    (``cma-evil``), a ``..`` segment, nor a symlink out of an entitled root
+    passes.
+    """
+    if not is_trusted_beta_bundled_skill_path(path):
+        return False
+    root = get_code_bundled_skills_dir()
+    try:
+        relative = Path(path).resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    parts = relative.parts
+    if not parts:
+        return False
+    return parts[0] in REALTOR_BETA_SKILL_ROOTS
+
+
 def get_bundled_skills_dir(default: Path | None = None) -> Path:
     """Return the bundled skills directory for source and packaged installs.
 

@@ -334,7 +334,7 @@ function skillGroupKey(skill: SkillInfo): string {
   if (["email", "note-taking", "productivity", "smart-home"].includes(category)) {
     return "productivity-docs";
   }
-  if (["data", "data-science", "mlops", "red-teaming", "research"].includes(category)) {
+  if (["data", "data-science", "mlops", "research"].includes(category)) {
     return "research-data";
   }
   if (["apple", "autonomous-ai-agents", "devops", "github", "mcp", "software-development"].includes(category)) {

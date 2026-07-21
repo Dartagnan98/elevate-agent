@@ -90,23 +90,42 @@ function defaultSeedRoots(): SeedRoot[] {
   ];
 }
 
+// The default roots mirror cli/elevate_constants.py REALTOR_BETA_SKILL_ROOTS
+// (minus "real-estate", which is bundled runtime surface rather than an
+// HQ-seeded entitlement pack). That tuple is hashed into the Realtor Beta
+// SHA-256 activation identity, so these roots must always be seeded:
+// ELEVATE_HQ_SKILL_SEED_DIRS ADDS roots, it never replaces the defaults.
+//
+// It used to replace them wholesale, which meant one operator setting the var
+// to add a pack silently dropped every entitled realtor skill from HQ while
+// the signed client bundle still contained (and still hashed) all of them —
+// a drift with no error on either side. Extra roots are appended last so an
+// explicitly configured root still wins the by-name dedupe in defaultSkills().
 function configuredSeedRoots(): SeedRoot[] {
+  const roots = defaultSeedRoots();
   const raw = process.env.ELEVATE_HQ_SKILL_SEED_DIRS;
-  if (!raw) return defaultSeedRoots();
-  return raw
-    .split(/[,\n]/)
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .map((entry) => {
-      const [entitlement, dir] = entry.includes("=")
-        ? entry.split("=", 2)
-        : ["real_estate_admin", entry];
-      return {
-        entitlement: entitlement.trim() || "real_estate_admin",
-        dir: path.resolve(dir.trim()),
-        category: "real-estate-admin",
-      };
+  if (!raw) return roots;
+
+  const seen = new Set(roots.map((root) => root.dir));
+  for (const entry of raw.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)) {
+    const [rawEntitlement, rawDir] = entry.includes("=")
+      ? entry.split("=", 2)
+      : ["real_estate_admin", entry];
+    const entitlement = rawEntitlement.trim() || "real_estate_admin";
+    const dir = path.resolve(rawDir.trim());
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    roots.push({
+      dir,
+      entitlement,
+      // Derive the category from the entitlement instead of hardcoding
+      // "real-estate-admin" — a sales/marketing pack was previously filed
+      // under admin, which is exactly the category metadata that breaks
+      // skills_list(category=...) routing on the client.
+      category: entitlement.trim().replace(/_/g, "-"),
     });
+  }
+  return roots;
 }
 
 function unquote(value: string): string {

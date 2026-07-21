@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from elevate_cli.config import load_config
+from elevate_cli.source_connector_modules.apple_typedstream import (
+    decode_attributed_body,
+)
 
 
 JsonRecord = dict[str, Any]
@@ -75,6 +78,28 @@ def _apple_messages_chat_db_path() -> Path:
     if override:
         return _expand_path(override)
     return Path.home() / "Library" / "Messages" / "chat.db"
+
+
+def _message_text(row: Any) -> str:
+    """Message body from a chat.db row, preferring ``text``, else ``attributedBody``.
+
+    macOS Ventura and newer leave ``message.text`` NULL for the vast majority of
+    messages and keep the body only in the ``attributedBody`` typedstream blob.
+    Reading ``text`` alone silently drops most of a user's history, so fall back
+    to decoding the archive. Decoding is fail-safe: an unparsable blob yields
+    "" and the message is imported bodiless exactly as before.
+    """
+    try:
+        text = str(row["message_text"] or "").strip()
+    except Exception:
+        text = ""
+    if text:
+        return text
+    try:
+        blob = row["message_attributed_body"]
+    except (KeyError, IndexError):
+        return ""
+    return decode_attributed_body(blob).strip()
 
 
 def _apple_dt(raw_value: Any) -> datetime | None:
@@ -366,6 +391,7 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
                 m.guid AS message_guid,
                 m.date AS message_date,
                 m.text AS message_text,
+                m.attributedBody AS message_attributed_body,
                 m.is_from_me AS is_from_me,
                 m.service AS service,
                 h.id AS handle_id,
@@ -420,7 +446,7 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
                     continue
                 timestamp = dt.isoformat()
                 day = dt.date().isoformat()
-                text = str(row["message_text"] or "").strip()
+                text = _message_text(row)
                 is_from_me = bool(row["is_from_me"])
                 direction = "outbound" if is_from_me else "inbound"
                 if direction == "inbound":

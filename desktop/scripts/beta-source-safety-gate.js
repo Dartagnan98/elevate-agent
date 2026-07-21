@@ -60,6 +60,7 @@ const REQUIRED_SUITE_IDS = Object.freeze([
 ]);
 const REQUIRED_FILES_BY_SUITE = Object.freeze({
   "python-session-safety": Object.freeze([
+    "cli/tests/agent/test_realtor_beta_skill_surface.py",
     "cli/tests/agent/transports/test_hermes_tools_mcp_server.py",
     "cli/tests/elevate_cli/test_beta_oauth_containment.py",
     "cli/tests/elevate_cli/test_beta_pty_provider_repair_bridge.py",
@@ -92,6 +93,12 @@ const REQUIRED_FILES_BY_SUITE = Object.freeze({
     "cli/tests/tools/test_file_materialize.py",
     "cli/tests/tools/test_file_read_guards.py",
     "cli/tests/tools/test_effect_policy.py",
+    "cli/tests/tools/test_workspace_effect_policy.py",
+    "cli/tests/tools/test_workspace_severances.py",
+    "cli/tests/tools/test_workspace_starved_declarations.py",
+    "cli/tests/tools/test_workspace_board_writes_live.py",
+    "cli/tests/tools/test_kanban_tools.py",
+    "cli/tests/tools/test_skills_tool.py",
     "cli/tests/tools/test_memory_provider_registry_dispatch.py",
     "cli/tests/tools/test_context_engine_registry_dispatch.py",
     "cli/tests/tools/test_delegate_registry_dispatch.py",
@@ -256,8 +263,9 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       environment: MIXED_CHANNEL_TEST_ENV,
       requiredFiles: REQUIRED_FILES_BY_SUITE["python-session-safety"].map((relative) => path.join(REPO, relative)),
       ...pytest(
-        415,
+        429,
         "tests/agent/test_turn_fence.py",
+        "tests/agent/test_realtor_beta_skill_surface.py",
         "tests/agent/transports/test_hermes_tools_mcp_server.py",
         "tests/elevate_cli/test_beta_oauth_containment.py",
         "tests/elevate_cli/test_beta_pty_provider_repair_bridge.py",
@@ -285,7 +293,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         (relative) => path.join(REPO, relative),
       ),
       ...pytest(
-        1025,
+        1356,
         "tests/test_model_tools.py",
         "tests/tools/test_registry_shadow_execution.py",
         "tests/tools/test_terminal_approval_effect_receipts.py",
@@ -312,6 +320,12 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         "tests/tools/test_file_materialize.py",
         "tests/tools/test_file_read_guards.py",
         "tests/tools/test_effect_policy.py",
+        "tests/tools/test_workspace_effect_policy.py",
+        "tests/tools/test_workspace_severances.py",
+        "tests/tools/test_workspace_starved_declarations.py",
+        "tests/tools/test_workspace_board_writes_live.py",
+        "tests/tools/test_kanban_tools.py",
+        "tests/tools/test_skills_tool.py",
         "tests/tools/test_memory_provider_registry_dispatch.py",
         "tests/tools/test_context_engine_registry_dispatch.py",
         "tests/tools/test_delegate_registry_dispatch.py",

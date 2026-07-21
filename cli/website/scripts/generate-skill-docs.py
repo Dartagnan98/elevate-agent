@@ -33,7 +33,7 @@ SKILL_SOURCES = [
 
 # Pages the user had previously hand-written in user-guide/skills/.
 # We leave these alone (they get first-class sidebar treatment separately).
-HAND_WRITTEN = {"godmode.md", "google-workspace.md"}
+HAND_WRITTEN = {"google-workspace.md"}
 
 
 _FENCE_RE = re.compile(r"^(?P<indent>\s*)(?P<fence>```+|~~~+)", re.MULTILINE)
@@ -558,7 +558,7 @@ def build_sidebar_items(entries: list[tuple[dict[str, Any], dict[str, Any]]]) ->
 
     Structure:
     Skills
-    ├── (hand-written pages first: godmode, google-workspace)
+    ├── (hand-written pages first: google-workspace)
     ├── Bundled
     │   ├── apple
     │   │   ├── apple-apple-notes
@@ -621,7 +621,6 @@ def write_sidebar(entries):
         "          label: 'Skills',\n"
         "          collapsed: true,\n"
         "          items: [\n"
-        "            'user-guide/skills/godmode',\n"
         "            'user-guide/skills/google-workspace',\n"
         "            {\n"
         "              type: 'category',\n"

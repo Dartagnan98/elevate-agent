@@ -15,10 +15,26 @@ class SkillToggle(BaseModel):
 
 
 def _resolve_skill_dir(name: str):
-    """Locate the on-disk directory for a skill."""
+    """Locate the on-disk directory for a skill.
+
+    The direct-path branch below bypasses ``iter_skill_index_files``, so the
+    exact-Beta entitled-root allowlist has to be re-asserted here the same way
+    ``skills_tool.skill_view`` does — otherwise the dashboard's ``/tree`` and
+    ``/file`` endpoints serve any top-level bundled engineering skill verbatim
+    even though it is absent from every listing.
+    """
     from pathlib import Path
     from tools.skills_tool import SKILLS_DIR, _EXCLUDED_SKILL_DIRS
     from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+    from elevate_constants import (
+        exact_realtor_beta_active,
+        is_realtor_beta_surface_skill_path,
+    )
+
+    beta_only = exact_realtor_beta_active()
+
+    def _allowed(skill_md) -> bool:
+        return not beta_only or is_realtor_beta_surface_skill_path(skill_md)
 
     candidates = []
     if SKILLS_DIR.exists():
@@ -28,11 +44,15 @@ def _resolve_skill_dir(name: str):
     for search_dir in candidates:
         direct = search_dir / name
         if direct.is_dir() and (direct / "SKILL.md").exists():
+            if not _allowed(direct / "SKILL.md"):
+                continue
             return direct
 
     for search_dir in candidates:
         for skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            if not _allowed(skill_md):
                 continue
             if skill_md.parent.name == name:
                 return skill_md.parent

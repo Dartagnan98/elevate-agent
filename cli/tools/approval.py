@@ -1388,6 +1388,7 @@ class ExecutionPolicyMode(str, Enum):
     PLAN = "plan"
     READ_ONLY = "read_only"
     DRAFT_ONLY = "draft_only"
+    WORKSPACE = "workspace"
 
     @classmethod
     def parse(cls, value: "ExecutionPolicyMode | str") -> "ExecutionPolicyMode":
@@ -1400,6 +1401,66 @@ class ExecutionPolicyMode(str, Enum):
 _ALL_DECLARED_EFFECTS = frozenset(
     Effect(kind) for kind in EffectKind if kind is not EffectKind.UNKNOWN
 )
+
+# ---------------------------------------------------------------------------
+# The agent's own workspace (package ERB-405)
+#
+# Realtor Beta ships the agent an operational surface — a deal board, a lead
+# pipeline, a task board, a per-entity journal, a session plan, a memory
+# store, a skill library — that exists *for the agent to work out of*.  A
+# read-only/draft-only ceiling makes that surface inert: the agent can look
+# at its own board and cannot move a card on it.
+#
+# ``WORKSPACE`` is the ceiling that admits exactly those self-directed,
+# local, user-owned, reversible mutations and nothing else.  Three
+# properties are load-bearing and every future edit must preserve them:
+#
+#   1. **Every entry is SCOPED.**  A bare ``write_local`` would cover every
+#      scope that any tool ever declares, including scopes invented after
+#      this ceiling was written.  ``_effect_is_within`` treats an unscoped
+#      capability as covering all scopes of its kind, so an unscoped grant
+#      here would silently absorb tomorrow's ``write_local:outbound_queue``.
+#      Enumerate; never generalize.
+#   2. **It is a strict SUPERSET of DRAFT_ONLY.**  That keeps the mode
+#      lattice a lattice: narrowing WORKSPACE -> DRAFT_ONLY/PLAN/READ_ONLY
+#      is legal, and the reverse raises ``PolicyWideningError`` structurally
+#      (see ``ExecutionPolicy.narrow`` / ``derive_child_execution_policy``).
+#   3. **Nothing here reaches a human or an external system.**  No
+#      ``write_external``, no ``message_external``, no ``spawn``, no
+#      ``destructive``, no ``financial``.  A tool that writes locally AND
+#      reaches outward declares BOTH effects and is therefore refused under
+#      this ceiling — the refusal is set-theoretic, not name-based.
+#
+# ``credential_access:composio`` is the one non-write entry.  It is the
+# companion capability of a pure credentialed GET (``tools/composio_tool.py``
+# reaches only status/accounts/toolkits and never ``execute_tool``), and
+# unscoped ``read`` already admits the read half.  Without it the operator's
+# own entitled connector catalog is unreachable.  It is deliberately scoped
+# to ``composio``: the ha_*/feishu_*/discord credentialed-read precedents are
+# NOT admitted here.
+_WORKSPACE_EFFECTS = frozenset({
+    Effect(EffectKind.READ),
+    # --- draft-only inheritance (keep: superset property) -----------------
+    Effect(EffectKind.WRITE_LOCAL, "draft"),
+    Effect(EffectKind.WRITE_LOCAL, "session_plan"),
+    # --- the agent's own boards -------------------------------------------
+    Effect(EffectKind.WRITE_LOCAL, "kanban"),
+    Effect(EffectKind.WRITE_LOCAL, "leads"),
+    Effect(EffectKind.WRITE_LOCAL, "deals"),
+    Effect(EffectKind.WRITE_LOCAL, "working_state"),
+    # --- the agent's own continuity ---------------------------------------
+    Effect(EffectKind.WRITE_LOCAL, "memory"),
+    Effect(EffectKind.WRITE_LOCAL, "skill_usage"),
+    # --- the operator's own connector catalog (pure credentialed read) ----
+    Effect(EffectKind.CREDENTIAL_ACCESS, "composio"),
+})
+
+_DRAFT_ONLY_EFFECTS = frozenset({
+    Effect(EffectKind.READ),
+    Effect(EffectKind.WRITE_LOCAL, "draft"),
+    Effect(EffectKind.WRITE_LOCAL, "session_plan"),
+})
+
 _POLICY_MODE_CEILINGS = MappingProxyType({
     ExecutionPolicyMode.DEFAULT: _ALL_DECLARED_EFFECTS,
     ExecutionPolicyMode.PLAN: frozenset({
@@ -1407,12 +1468,40 @@ _POLICY_MODE_CEILINGS = MappingProxyType({
         Effect(EffectKind.WRITE_LOCAL, "session_plan"),
     }),
     ExecutionPolicyMode.READ_ONLY: frozenset({Effect(EffectKind.READ)}),
-    ExecutionPolicyMode.DRAFT_ONLY: frozenset({
-        Effect(EffectKind.READ),
-        Effect(EffectKind.WRITE_LOCAL, "draft"),
-        Effect(EffectKind.WRITE_LOCAL, "session_plan"),
-    }),
+    ExecutionPolicyMode.DRAFT_ONLY: _DRAFT_ONLY_EFFECTS,
+    ExecutionPolicyMode.WORKSPACE: _WORKSPACE_EFFECTS,
 })
+
+# Effect kinds that may NEVER appear in the workspace ceiling, asserted at
+# import so a future edit cannot quietly widen the cohort maximum. This is a
+# structural invariant, not a lint: it is the difference between "the agent
+# works its own board" and "the agent can reach a client".
+_WORKSPACE_FORBIDDEN_KINDS = frozenset({
+    EffectKind.WRITE_EXTERNAL,
+    EffectKind.MESSAGE_EXTERNAL,
+    EffectKind.DESTRUCTIVE,
+    EffectKind.FINANCIAL,
+    EffectKind.SPAWN,
+    EffectKind.UNKNOWN,
+})
+if any(effect.kind in _WORKSPACE_FORBIDDEN_KINDS for effect in _WORKSPACE_EFFECTS):
+    raise AssertionError(
+        "workspace ceiling may not admit an outbound, destructive, financial, "
+        "spawning, or unknown effect"
+    )
+if any(
+    effect.kind is not EffectKind.READ and effect.scope is None
+    for effect in _WORKSPACE_EFFECTS
+):
+    raise AssertionError(
+        "every non-read workspace capability must be scoped; an unscoped "
+        "capability would absorb every future scope of its kind"
+    )
+if not all(
+    any(_effect_is_within(effect, limit) for limit in _WORKSPACE_EFFECTS)
+    for effect in _DRAFT_ONLY_EFFECTS
+):
+    raise AssertionError("workspace ceiling must remain a superset of draft_only")
 
 # Existing Claude-style permission modes are an input vocabulary, not an
 # execution policy. Keep the translation total and immutable so a typo or a
@@ -1424,11 +1513,15 @@ PERMISSION_MODE_POLICY_MODES = MappingProxyType({
     "bypassPermissions": ExecutionPolicyMode.DEFAULT,
     "read_only": ExecutionPolicyMode.READ_ONLY,
 })
+# The Realtor Beta cohort maximum is WORKSPACE, and it is reached from the
+# permission mode a realtor actually runs in (``default``) — a ceiling that
+# only worked in an opt-in mode would not be a fix.  ``plan`` and an explicit
+# ``read_only`` still narrow, so the operator retains a way down.
 _BETA_PERMISSION_MODE_POLICY_MODES = MappingProxyType({
-    "default": ExecutionPolicyMode.READ_ONLY,
-    "acceptEdits": ExecutionPolicyMode.DRAFT_ONLY,
+    "default": ExecutionPolicyMode.WORKSPACE,
+    "acceptEdits": ExecutionPolicyMode.WORKSPACE,
     "plan": ExecutionPolicyMode.PLAN,
-    "bypassPermissions": ExecutionPolicyMode.DRAFT_ONLY,
+    "bypassPermissions": ExecutionPolicyMode.WORKSPACE,
     "read_only": ExecutionPolicyMode.READ_ONLY,
 })
 
@@ -1571,9 +1664,13 @@ def execution_policy_for_permission_mode(
 ) -> ExecutionPolicy:
     """Freeze one accepted-turn policy from the legacy permission mode.
 
-    Realtor Beta has a draft-only cohort maximum. Its engineering ``default``
-    remains read-only; only explicit edit/bypass-style modes reach the
-    draft-only ceiling. Unknown modes always raise.
+    Realtor Beta has a WORKSPACE cohort maximum: the agent may mutate its own
+    board, plan, journal, memory, and skill-usage ledger, and may read the
+    operator's own connector catalog.  It may not reach a human or an
+    external system from any mode.  The realtor's ``default`` mode reaches
+    that ceiling — containment that only lifted in an opt-in mode would leave
+    the shipped product inert.  ``plan`` and ``read_only`` still narrow.
+    Unknown modes always raise.
     """
     if not isinstance(permission_mode, str):
         raise TypeError("permission_mode must be a string")
@@ -1671,7 +1768,7 @@ def get_current_execution_policy_revision() -> Optional[int]:
 #      itself inherited; ambient thread state never is, in either direction.
 #
 # Under exact Realtor Beta both the capture and the bind clamp the derived
-# policy at the Beta cohort ceiling (draft-only): a wider captured binding —
+# policy at the Beta cohort ceiling (workspace): a wider captured binding —
 # for example one replayed into a Beta process from a non-Beta capture —
 # degrades to explicit no-policy, so every beyond-read dispatch fails closed
 # at the adapter's durable-identity gate rather than executing wide.
@@ -1745,11 +1842,24 @@ def derive_child_execution_policy(
     return derived
 
 
+BETA_COHORT_POLICY_MODE = ExecutionPolicyMode.WORKSPACE
+
+
+def beta_cohort_policy_active() -> bool:
+    """Public alias for the exact-Beta channel predicate.
+
+    Cross-package callers (the gateway's prompt-receipt ceiling) need this
+    decision, and an underscore-prefixed name should not be load-bearing
+    across a module boundary.
+    """
+    return _beta_approval_policy_active()
+
+
 def _beta_ceiling_rejects(policy: ExecutionPolicy) -> bool:
-    """True when *policy* exceeds the exact-Beta draft-only cohort ceiling."""
+    """True when *policy* exceeds the exact-Beta workspace cohort ceiling."""
     ceiling = ExecutionPolicy.for_mode(
         policy.accepted_turn_id,
-        ExecutionPolicyMode.DRAFT_ONLY,
+        BETA_COHORT_POLICY_MODE,
     )
     try:
         return ceiling.narrow(policy.allowed_effects, mode=policy.mode) != policy
@@ -1915,6 +2025,37 @@ def authorize_effects(
         denied_effects=frozenset(denied),
         reason=reason,
     )
+
+
+def current_policy_permits_effect(
+    effects: EffectInput | Iterable[EffectInput],
+) -> bool:
+    """Whether the bound accepted-turn policy authorizes *effects*.
+
+    This is the predicate a handler (or a data-layer seam a handler reaches)
+    uses to SEVER an outward branch that hangs off an otherwise-local
+    operation — the two live cases being the CRM mirror that hangs off a
+    lead-status write and the cron/Telegram dispatch that hangs off a deal
+    stage move.  Severing is what lets those tools declare a truthful
+    local-only effect set under the workspace ceiling: the outward half is
+    not merely unused, it is unreachable.
+
+    Returns ``True`` when NO accepted-turn policy is bound.  That is
+    deliberate and is not a hole: an unbound policy is the pre-policy legacy
+    path (CLI, dashboard, background drains, direct data-layer callers) whose
+    behavior this predicate exists to leave byte-identical.  Under exact Beta
+    a beyond-read registry dispatch already fails closed at the adapter's
+    durable-identity gate before any handler runs, so a handler that reaches
+    this predicate always has a policy bound.  Any evaluation failure denies.
+    """
+    policy = get_current_execution_policy()
+    if not isinstance(policy, ExecutionPolicy):
+        return True
+    try:
+        return authorize_effects(policy, effects).allowed
+    except Exception:
+        logger.error("side-effect policy check failed closed", exc_info=True)
+        return False
 
 
 @dataclass(frozen=True, slots=True)

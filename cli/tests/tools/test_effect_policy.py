@@ -36,6 +36,23 @@ def _handler(_args, **_kwargs) -> str:
     return "{}"
 
 
+# The exact-Beta cohort maximum. Written out longhand rather than derived from
+# the implementation so a change to the ceiling has to be made deliberately in
+# two places, and shows up as a diff a reviewer reads.
+WORKSPACE_EFFECT_NAMES = {
+    "read",
+    "write_local:draft",
+    "write_local:session_plan",
+    "write_local:kanban",
+    "write_local:leads",
+    "write_local:deals",
+    "write_local:working_state",
+    "write_local:memory",
+    "write_local:skill_usage",
+    "credential_access:composio",
+}
+
+
 def test_effect_vocabulary_parses_scoped_values_canonically() -> None:
     assert Effect.parse("write_external:CRM") == Effect(
         EffectKind.WRITE_EXTERNAL,
@@ -161,18 +178,18 @@ def test_unknown_session_and_config_modes_reach_policy_mapper_unsanitized(
     [
         (
             "default",
-            ExecutionPolicyMode.READ_ONLY,
-            {"read"},
+            ExecutionPolicyMode.WORKSPACE,
+            WORKSPACE_EFFECT_NAMES,
         ),
         (
             "acceptEdits",
-            ExecutionPolicyMode.DRAFT_ONLY,
-            {"read", "write_local:draft", "write_local:session_plan"},
+            ExecutionPolicyMode.WORKSPACE,
+            WORKSPACE_EFFECT_NAMES,
         ),
         (
             "bypassPermissions",
-            ExecutionPolicyMode.DRAFT_ONLY,
-            {"read", "write_local:draft", "write_local:session_plan"},
+            ExecutionPolicyMode.WORKSPACE,
+            WORKSPACE_EFFECT_NAMES,
         ),
         (
             "plan",
@@ -182,7 +199,7 @@ def test_unknown_session_and_config_modes_reach_policy_mapper_unsanitized(
         ("read_only", ExecutionPolicyMode.READ_ONLY, {"read"}),
     ],
 )
-def test_realtor_beta_permission_modes_are_immutably_draft_clamped(
+def test_realtor_beta_permission_modes_are_immutably_workspace_clamped(
     monkeypatch,
     permission_mode: str,
     expected_mode: ExecutionPolicyMode,

@@ -7088,8 +7088,10 @@ def _prompt_owner_alive(
 def _execution_policy_from_receipt(receipt: dict):
     """Validate one receipt and return only its durable effective policy."""
     from tools.approval import (
+        BETA_COHORT_POLICY_MODE,
         ExecutionPolicy,
-        ExecutionPolicyMode,
+        PolicyWideningError,
+        beta_cohort_policy_active,
     )
 
     client_message_id = str(receipt.get("client_message_id") or "")
@@ -7108,24 +7110,45 @@ def _execution_policy_from_receipt(receipt: dict):
         or effective.accepted_turn_id != client_message_id
     ):
         raise ValueError("prompt receipt policy identity does not match its message")
-    if accepted.narrow(
-        effective.allowed_effects,
-        mode=effective.mode,
-    ) != effective:
+    # ``narrow`` RAISES ``PolicyWideningError`` (a ValueError subclass) on a
+    # wider request rather than returning a mismatch. Both ceiling checks in
+    # this function catch it and re-raise with their own message, so a reader
+    # sees which ceiling refused instead of an opaque widening error — and so
+    # the two checks read identically.
+    try:
+        within_accepted = accepted.narrow(
+            effective.allowed_effects,
+            mode=effective.mode,
+        ) == effective
+    except PolicyWideningError:
+        within_accepted = False
+    if not within_accepted:
         raise ValueError("prompt receipt effective policy exceeds accepted policy")
 
     # A receipt accepted on another release channel cannot widen the Realtor
     # Beta process after an update/restart. This is a release ceiling check,
     # not an ambient permission lookup.
-    if os.getenv("ELEVATE_RELEASE_CHANNEL", "").strip().lower() == "beta":
+    #
+    # The ceiling MODE is imported, never written out here: this is the second
+    # of two independent Beta clamps (the other is
+    # ``approval._beta_ceiling_rejects``), and a literal in one of them silently
+    # rots the moment the cohort maximum moves. ``narrow`` also RAISES
+    # ``PolicyWideningError`` rather than returning a mismatch when the receipt
+    # is wider, so a stale literal here does not read as a policy bug — it
+    # reads as every turn being interrupted as untrusted.
+    if beta_cohort_policy_active():
         beta_ceiling = ExecutionPolicy.for_mode(
             client_message_id,
-            ExecutionPolicyMode.DRAFT_ONLY,
+            BETA_COHORT_POLICY_MODE,
         )
-        if beta_ceiling.narrow(
-            effective.allowed_effects,
-            mode=effective.mode,
-        ) != effective:
+        try:
+            within_ceiling = beta_ceiling.narrow(
+                effective.allowed_effects,
+                mode=effective.mode,
+            ) == effective
+        except PolicyWideningError:
+            within_ceiling = False
+        if not within_ceiling:
             raise ValueError("prompt receipt effective policy exceeds Beta ceiling")
     return effective
 

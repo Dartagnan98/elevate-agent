@@ -204,21 +204,54 @@ def test_resolver_declares_reads_and_keeps_mutations_unknown():
         assert decision.allowed is True
         assert decision.reason == "allowed"
 
+    # ``update``/``resolve`` write the journal row and nothing else — the data
+    # layer imports only sqlite3 and elevate_cli.data._util, so there is no
+    # network, subprocess, filesystem, notifier, or dispatcher branch to hide.
+    # They are the agent's own "where we left off" note about the realtor's own
+    # contact or deal, and the workspace ceiling admits exactly that.
+    journal_write = frozenset({
+        Effect.parse("read:working_state"),
+        Effect.parse("write_local:working_state"),
+    })
     for args in (
         {"action": "update", "entity_kind": "contact", "entity_id": "c_1"},
         {"action": "resolve", "entity_kind": "deal", "entity_id": "d_1"},
-        {"action": "surprise"},
-        {},
-        None,
+        {"action": " UPDATE "},
     ):
         resolved = registry.resolve_effects("working_state", args)
-        assert resolved == unknown
-        decision = authorize_effects(
+        assert resolved == journal_write
+        allowed = authorize_effects(
+            ExecutionPolicy.for_mode(
+                "turn-working-state-board",
+                ExecutionPolicyMode.WORKSPACE,
+            ),
+            resolved,
+        )
+        assert allowed.allowed is True
+        assert allowed.reason == "allowed"
+
+        denied = authorize_effects(
             ExecutionPolicy.for_mode(
                 "turn-working-state-write",
                 ExecutionPolicyMode.READ_ONLY,
             ),
             resolved,
         )
-        assert decision.allowed is False
-        assert decision.reason == "unknown_effect"
+        assert denied.allowed is False
+        assert denied.reason == "effect_not_allowed"
+
+    # Anything unrecognized still fails closed under every ceiling.
+    for args in ({"action": "surprise"}, {}, None):
+        resolved = registry.resolve_effects("working_state", args)
+        assert resolved == unknown
+        for mode in (
+            ExecutionPolicyMode.READ_ONLY,
+            ExecutionPolicyMode.WORKSPACE,
+            ExecutionPolicyMode.DEFAULT,
+        ):
+            decision = authorize_effects(
+                ExecutionPolicy.for_mode("turn-working-state-unknown", mode),
+                resolved,
+            )
+            assert decision.allowed is False
+            assert decision.reason == "unknown_effect"

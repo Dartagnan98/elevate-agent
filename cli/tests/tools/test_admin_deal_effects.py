@@ -6,10 +6,16 @@
 gate, all SELECTs), and only after the repair that routes it over
 ``connect_ready_read_only()`` instead of the general bootstrapping ``connect()``.
 
-These tests pin the repaired contract: ``show`` resolves to an exact
-``read:deals`` and runs over the already-ready forced-READ-ONLY connection with
-no bootstrap; every write action and any unrecognized action stays unknown and
-denied under a read-only policy.
+These tests pin the contract in both directions:
+
+* ``show`` resolves to an exact ``read:deals`` and runs over the already-ready
+  forced-READ-ONLY connection with no bootstrap.
+* the write actions resolve to ``read:deals`` + ``write_local:deals`` (plus
+  ``read:files`` where the handler validates a caller-named artifact path).
+  They are ALLOWED under the workspace ceiling — this is the realtor's own
+  deal board and the agent exists to work it — and still DENIED under
+  read-only and plan.
+* any unrecognized action stays unknown and denied under every ceiling.
 """
 
 from __future__ import annotations
@@ -33,17 +39,31 @@ from tools.registry import registry
 
 READ_DEALS = frozenset({Effect.parse("read:deals")})
 UNKNOWN = frozenset({Effect(EffectKind.UNKNOWN)})
+BOARD_WRITE = frozenset({
+    Effect.parse("read:deals"),
+    Effect.parse("write_local:deals"),
+    # Every write branch can reach move_deal_stage, which also touches the
+    # working-state journal via touch_deal_stage_move.
+    Effect.parse("write_local:working_state"),
+})
+BOARD_WRITE_WITH_FILE_READ = BOARD_WRITE | {Effect.parse("read:files")}
 
 READ_ACTIONS = ["show"]
-NON_READ_ACTIONS = [
-    "set_checklist", "set_fields", "attach", "complete_run", "advance", "move",
-    "", "frobnicate",
-]
+WRITE_ACTIONS = ["set_checklist", "set_fields", "advance", "move"]
+FILE_READING_WRITE_ACTIONS = ["attach", "complete_run"]
+ALL_WRITE_ACTIONS = WRITE_ACTIONS + FILE_READING_WRITE_ACTIONS
+UNKNOWN_ACTIONS = ["", "frobnicate"]
 
 
 def _read_only():
     return ExecutionPolicy.for_mode(
         "turn-admin-deal-read", ExecutionPolicyMode.READ_ONLY
+    )
+
+
+def _workspace():
+    return ExecutionPolicy.for_mode(
+        "turn-admin-deal-workspace", ExecutionPolicyMode.WORKSPACE
     )
 
 
@@ -107,13 +127,56 @@ def test_show_resolves_read_deals_and_is_allowed(action):
     assert decision.reason == "allowed"
 
 
-@pytest.mark.parametrize("action", NON_READ_ACTIONS)
-def test_write_actions_stay_unknown_and_denied(action):
+@pytest.mark.parametrize("action", WRITE_ACTIONS)
+def test_board_writes_declare_a_scoped_local_deal_write(action):
+    resolved = registry.resolve_effects("admin_deal", {"action": action, "deal_id": "d"})
+    assert resolved == BOARD_WRITE
+
+
+@pytest.mark.parametrize("action", FILE_READING_WRITE_ACTIONS)
+def test_artifact_actions_also_declare_the_local_file_read(action):
+    """``attach``/``complete_run`` stat and header-check a caller-named path."""
+    resolved = registry.resolve_effects("admin_deal", {"action": action, "deal_id": "d"})
+    assert resolved == BOARD_WRITE_WITH_FILE_READ
+
+
+@pytest.mark.parametrize("action", ALL_WRITE_ACTIONS)
+def test_board_writes_are_allowed_under_the_workspace_ceiling(action):
+    resolved = registry.resolve_effects("admin_deal", {"action": action, "deal_id": "d"})
+    decision = authorize_effects(_workspace(), resolved)
+    assert decision.allowed is True
+    assert decision.denied_effects == frozenset()
+    assert decision.reason == "allowed"
+
+
+@pytest.mark.parametrize("action", ALL_WRITE_ACTIONS)
+def test_board_writes_are_still_denied_under_read_only_and_plan(action):
+    resolved = registry.resolve_effects("admin_deal", {"action": action, "deal_id": "d"})
+    for mode in (ExecutionPolicyMode.READ_ONLY, ExecutionPolicyMode.PLAN):
+        decision = authorize_effects(
+            ExecutionPolicy.for_mode("turn-narrow", mode), resolved
+        )
+        assert decision.allowed is False
+        assert decision.reason == "effect_not_allowed"
+        assert Effect.parse("write_local:deals") in decision.denied_effects
+
+
+@pytest.mark.parametrize("action", UNKNOWN_ACTIONS)
+def test_unrecognized_actions_stay_unknown_and_denied_everywhere(action):
     resolved = registry.resolve_effects("admin_deal", {"action": action, "deal_id": "d"})
     assert resolved == UNKNOWN
-    decision = authorize_effects(_read_only(), resolved)
-    assert decision.allowed is False
-    assert decision.reason == "unknown_effect"
+    for mode in (
+        ExecutionPolicyMode.READ_ONLY,
+        ExecutionPolicyMode.PLAN,
+        ExecutionPolicyMode.DRAFT_ONLY,
+        ExecutionPolicyMode.WORKSPACE,
+        ExecutionPolicyMode.DEFAULT,
+    ):
+        decision = authorize_effects(
+            ExecutionPolicy.for_mode("turn-unknown", mode), resolved
+        )
+        assert decision.allowed is False
+        assert decision.reason == "unknown_effect"
 
 
 def test_missing_and_none_args_are_unknown():
@@ -125,8 +188,41 @@ def test_missing_and_none_args_are_unknown():
 def test_resolver_mirrors_handler_action_normalization():
     for raw in ("show", "SHOW", "  Show "):
         assert _admin_deal_effect_resolver({"action": raw}) == {"read:deals"}
-    for raw in ("Set_checklist", "  ADVANCE ", "move", "complete_run"):
+    for raw in ("Set_checklist", "  ADVANCE ", "move"):
+        assert _admin_deal_effect_resolver({"action": raw}) == {
+            "read:deals", "write_local:deals", "write_local:working_state",
+        }
+    for raw in ("Attach", " COMPLETE_RUN "):
+        assert _admin_deal_effect_resolver({"action": raw}) == {
+            "read:deals", "read:files", "write_local:deals",
+            "write_local:working_state",
+        }
+    for raw in ("", "frobnicate", "  "):
         assert _admin_deal_effect_resolver({"action": raw}) == {EffectKind.UNKNOWN}
+
+
+def test_admin_deal_never_declares_an_outward_effect():
+    """The structural line: no deal action may reach a human or a third party.
+
+    A card move can cascade into ``dispatch.evaluate``; the cron/Telegram
+    branch of that cascade is severed in ``deals._dispatch_safely`` on the
+    ``spawn`` capability. If that severance is ever removed, this tool must
+    start declaring ``spawn``/``message_external`` and this assertion is the
+    tripwire that says so.
+    """
+    forbidden = {
+        EffectKind.WRITE_EXTERNAL,
+        EffectKind.MESSAGE_EXTERNAL,
+        EffectKind.SPAWN,
+        EffectKind.DESTRUCTIVE,
+        EffectKind.FINANCIAL,
+        EffectKind.CREDENTIAL_ACCESS,
+    }
+    for action in READ_ACTIONS + ALL_WRITE_ACTIONS:
+        resolved = registry.resolve_effects(
+            "admin_deal", {"action": action, "deal_id": "d"}
+        )
+        assert not {effect.kind for effect in resolved} & forbidden, action
 
 
 # ── read routing (read-only connection, no write fallback) ────────────────

@@ -432,14 +432,54 @@ ADMIN_DEAL_SCHEMA = {
 }
 
 
+# Every write action can reach ``move_deal_stage``, directly (advance/move) or
+# through the gate auto-advance the others can trip, and that function also
+# writes the working-state journal via ``touch_deal_stage_move``. Declaring the
+# journal write on every branch keeps the effect receipt an accurate record of
+# what the call touched; both scopes sit inside the workspace ceiling, so
+# saying so denies nothing.
+_DEAL_WRITE_EFFECTS = frozenset({
+    "read:deals", "write_local:deals", "write_local:working_state",
+})
+
+
 def _admin_deal_effect_resolver(args: dict):
-    """Declare only the pure ``show`` read; every board write stays unknown.
+    """Classify each action against what the handler physically does.
 
     ``show`` runs over ``connect_ready_read_only()`` and only reads the deal
-    context (deal row + checklist + attachments + computed gate — all SELECTs),
-    so it is a truthful ``read:deals``. ``set_checklist``/``set_fields``/
-    ``attach``/``complete_run``/``advance``/``move`` all mutate deal state and
-    any unrecognized action stays unknown/fail-closed. The normalization
+    context (deal row + checklist + attachments + computed gate — all
+    SELECTs), so it is a truthful ``read:deals``.
+
+    ``set_checklist``/``set_fields``/``complete_run``/``advance``/``move``
+    write the deal card in the local operational store — toggles, named
+    fields, attachment rows, run results, stage transitions, and the
+    ``deal_events`` audit trail the board renders from.  Each also reads the
+    deal context back to return the updated gate, and each can reach
+    ``move_deal_stage``, which additionally touches the working-state journal.
+    They are ``read:deals`` + ``write_local:deals`` +
+    ``write_local:working_state``.
+
+    ``attach`` and ``complete_run`` additionally *read local files the model
+    named*: ``add_deal_attachment`` / ``record_run_result`` canonicalize each
+    artifact path, stat it, and inspect the file header to validate the
+    artifact kind before inserting the row.  They store the path, never a
+    copy, and never upload.  So both carry ``read:files`` as well.
+
+    **The one outward branch, and why it is not in this set.**  A stage
+    transition (``advance``/``move``, and the gate auto-advance that
+    ``set_checklist``/``set_fields``/``attach``/``complete_run`` can trip)
+    reaches ``deals._dispatch_safely`` -> ``dispatch.evaluate``.  With
+    ``create_cron_jobs=True`` that would call ``cron.jobs.create_job`` with a
+    Telegram delivery lane — background work that reaches a human, hanging
+    off a card move.  ``_dispatch_safely`` severs exactly that branch: when
+    an accepted-turn policy is bound and does not authorize ``spawn``, it
+    evaluates with ``create_cron_jobs=False``.  What survives is the queued
+    ``admin_action_runs`` row, a local write to the same operational store,
+    already covered by ``write_local:deals``.  The severance is a capability
+    check, not a release-channel check, so it holds even if Beta's cron
+    kill-switch is ever removed.
+
+    Every unrecognized action stays unknown/fail-closed.  The normalization
     mirrors the handler's ``str(args.get("action") or "").strip().lower()``
     exactly so the declared surface can never diverge from the dispatch.
     """
@@ -449,6 +489,10 @@ def _admin_deal_effect_resolver(args: dict):
     act = str(action or "").strip().lower()
     if act == "show":
         return {"read:deals"}
+    if act in {"attach", "complete_run"}:
+        return _DEAL_WRITE_EFFECTS | {"read:files"}
+    if act in {"set_checklist", "set_fields", "advance", "move"}:
+        return set(_DEAL_WRITE_EFFECTS)
     return {EffectKind.UNKNOWN}
 
 

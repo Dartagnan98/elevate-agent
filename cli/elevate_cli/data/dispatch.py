@@ -46,6 +46,75 @@ def _request_agent_worker_wake(*, reason: str, actor: str) -> None:
         return
 
 
+# ---------------------------------------------------------------------------
+# Spawn severance (package ERB-405)
+#
+# A deal-board write the agent makes is a local write.  Handing the resulting
+# action run to cron is not: ``_spawn_cron_job`` calls ``cron.jobs.create_job``
+# with the Admin agent's Telegram delivery lane, so background work starts and
+# a human gets messaged.  A board write must never be able to do that.
+#
+# Severing only the in-turn call would be a DEFERRAL, not a cut: the queued
+# ``admin_action_runs`` row survives, and any later drain running outside a
+# policy context would pick it up and dispatch it exactly as before.  So the
+# fact travels ON THE ROW.  ``_insert_run`` stamps ``spawnWithheld`` into the
+# payload when the accepted-turn policy that created the row could not spawn,
+# and ``dispatch_action_run_to_cron`` refuses to hand ANY stamped row to cron
+# no matter what policy (or none) is bound when the drain happens.  The only
+# release is an explicit human approval through ``approve_action_run``.
+#
+# This is deliberately NOT a release-channel check.  Beta's scheduler
+# kill-switch (``cron.execution_policy``) would also stop the job today, but a
+# kill-switch is a setting and this is a capability boundary: it has to keep
+# holding if that switch is ever removed.
+# ---------------------------------------------------------------------------
+
+_SPAWN_WITHHELD_KEY = "spawnWithheld"
+
+_SPAWN_WITHHELD_MESSAGE = (
+    "This step was set up to run in the background and message you when it "
+    "finished. I've saved it on the deal instead of starting it, because "
+    "starting background work that contacts someone needs your go-ahead. "
+    "Approve it here and it will run."
+)
+
+# Deliberately NO ``requiredFields`` on the spawn-withheld prompt.
+# ``deals._is_missing_info_prompt`` treats ANY prompt carrying that key as an
+# "Info needed" card and will dedup other runs behind it — so a card whose
+# whole job is scoping one consent would end up releasing a deferred skill the
+# realtor was never shown. The instruction lives in ``message`` instead, which
+# is where a human reads it anyway.
+
+
+def _spawn_permitted_for_current_turn() -> bool:
+    """Whether the turn creating this row may start background work.
+
+    ``True`` when no accepted-turn policy is bound — that is the CLI,
+    dashboard, drain, and cron path, whose behavior must stay unchanged.
+    """
+    try:
+        from tools.approval import current_policy_permits_effect
+
+        return bool(current_policy_permits_effect("spawn"))
+    except ImportError:  # pragma: no cover — no policy system, no policy
+        return True
+    except Exception:  # pragma: no cover — never assume unproven capability
+        return False
+
+
+def _mark_spawn_withheld(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    stamped = dict(payload) if payload else {}
+    stamped[_SPAWN_WITHHELD_KEY] = {
+        "reason": "accepted_turn_policy_denies_spawn",
+        "recordedAt": now_iso(),
+    }
+    return stamped
+
+
+def _spawn_is_withheld(payload: Any) -> bool:
+    return isinstance(payload, dict) and bool(payload.get(_SPAWN_WITHHELD_KEY))
+
+
 _VALID_TRIGGERS = {
     "stage_entry",
     "stage_exit",
@@ -903,6 +972,12 @@ def _insert_run(
 ) -> dict[str, Any]:
     if status not in _VALID_RUN_STATUSES:
         raise ValueError(f"invalid run status {status!r}")
+    # Stamp the row at birth when the turn creating it cannot start background
+    # work, so the restriction outlives this call stack. Every insert path
+    # (registry ``evaluate`` and ad-hoc ``queue_action_run``) funnels here.
+    spawn_withheld = not _spawn_permitted_for_current_turn()
+    if spawn_withheld:
+        payload = _mark_spawn_withheld(payload)
     if deal_event_id:
         existing = conn.execute(
             """
@@ -948,7 +1023,8 @@ def _insert_run(
                 return _row_to_run(_select_action_run_with_registry(conn, existing["id"]))
         raise
     row = _select_action_run_with_registry(conn, rid)
-    if status == "queued":
+    if status == "queued" and not spawn_withheld:
+        # Waking the drain for a row the drain is required to park is noise.
         _request_agent_worker_wake(reason=f"admin-run:{rid}", actor="admin-dispatch")
     return _row_to_run(row)
 
@@ -1503,6 +1579,28 @@ def dispatch_action_run_to_cron(
     if not isinstance(payload, dict):
         payload = {"prior": payload}
 
+    # Spawn severance, enforced on the ROW rather than on ambient state. A run
+    # created by a turn that could not spawn is never handed to cron — not by
+    # this call, and not by a later drain running with no policy bound. It
+    # parks for the realtor to approve, in words they can act on.
+    if _spawn_is_withheld(payload):
+        human_prompt = {
+            "title": "Start this in the background?",
+            "message": _SPAWN_WITHHELD_MESSAGE,
+            "kind": "spawn_withheld",
+            "runId": run_id,
+            "dealId": row["deal_id"],
+        }
+        conn.execute(
+            """
+            UPDATE admin_action_runs
+            SET status='waiting_human', human_prompt_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (_encode_json(human_prompt), now, run_id),
+        )
+        return _row_to_run(_select_action_run_with_registry(conn, run_id))
+
     setup_block = _admin_setup_dispatch_block_reason(conn)
     if setup_block:
         payload["dispatchBlocked"] = {
@@ -1899,6 +1997,19 @@ def approve_action_run(
     # treats it as a duplicate and early-returns, and the run stays stuck in
     # 'running'/'queued' forever (until the 2h reaper). That is the "card sits in
     # working forever" bug.
+    # An explicit human approval is the ONLY release for a run whose spawn was
+    # withheld: clear the stamp so the drain may hand it to cron from here on.
+    # The realtor asking for it is exactly the consent the severance was
+    # holding out for.
+    run_payload = _decode_json(_row_value(row, "payload_json"))
+    if _spawn_is_withheld(run_payload):
+        released = dict(run_payload)
+        released.pop(_SPAWN_WITHHELD_KEY, None)
+        released["spawnApproved"] = {"actor": actor, "approvedAt": now}
+        conn.execute(
+            "UPDATE admin_action_runs SET payload_json=? WHERE id=?",
+            (_encode_json(released), run_id),
+        )
     conn.execute(
         """
         UPDATE admin_action_runs

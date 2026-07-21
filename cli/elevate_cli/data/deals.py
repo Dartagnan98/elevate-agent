@@ -1566,11 +1566,51 @@ def _dispatch_safely(
     own tests cover its happy path; a real failure shows up as a missing
     ``admin_action_runs`` row, which the worker can rebuild from the
     ``deal_events`` log if needed.
+
+    **Cron severance (package ERB-405).**  ``create_cron_jobs=True`` is the
+    one branch of a deal mutation that leaves the local operational store:
+    :func:`elevate_cli.data.dispatch._spawn_cron_job` calls
+    ``cron.jobs.create_job`` with a ``deliver`` target, i.e. a board write
+    would spawn background agent work that can deliver to a human lane.  A
+    board write must never be able to do that, so when an accepted-turn
+    policy is bound and does not authorize ``spawn`` we evaluate with
+    ``create_cron_jobs=False``: matching rules still persist their queued
+    ``admin_action_runs`` rows (a local write, the source of truth), and the
+    hand-off to cron is not made.
+
+    Suppressing the call HERE would only be a deferral, not a cut: the queued
+    row survives, and ``drain_queued_action_runs`` runs with no policy bound,
+    where the capability probe permits by design.  The durable half of the
+    severance therefore lives in :func:`elevate_cli.data.dispatch._insert_run`,
+    which stamps ``spawnWithheld`` onto every row created by a turn that could
+    not spawn, and in ``dispatch_action_run_to_cron``, which refuses to hand a
+    stamped row to cron no matter what is bound when the drain happens.  An
+    explicit human approval is the only release.
+
+    This is deliberately NOT written as a release-channel check.  Beta's cron
+    kill-switch (``cron.execution_policy``) would also stop the job, but a
+    kill-switch is a setting and this is a capability boundary: the severance
+    must keep holding if that switch is ever removed.  With no policy bound —
+    every non-agent caller — the branch is unchanged.
     """
     try:
         from elevate_cli.data.dispatch import evaluate as _evaluate
     except Exception:  # pragma: no cover — import errors should be loud, but never fatal
         return
+    try:
+        from tools.approval import current_policy_permits_effect
+
+        create_cron_jobs = current_policy_permits_effect("spawn")
+    except ImportError:  # pragma: no cover — no policy system in this process
+        # If ``tools.approval`` is not importable then no ExecutionPolicy can
+        # exist to be bound, so this is the legacy path by definition. Keep it
+        # byte-identical rather than silently disabling dispatch for callers
+        # that never had a policy to begin with.
+        create_cron_jobs = True
+    except Exception:  # pragma: no cover — the probe itself must never raise
+        # Never fail the deal mutation over the capability probe, and never
+        # assume capability we could not prove: no proof means no spawn.
+        create_cron_jobs = False
     for trigger, kwargs in triggers:
         try:
             _evaluate(
@@ -1579,7 +1619,7 @@ def _dispatch_safely(
                 deal_event_id=deal_event_id,
                 trigger=trigger,
                 actor=actor,
-                create_cron_jobs=True,
+                create_cron_jobs=create_cron_jobs,
                 **kwargs,
             )
         except Exception:

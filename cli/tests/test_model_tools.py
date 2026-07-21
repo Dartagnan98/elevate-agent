@@ -655,12 +655,10 @@ class TestToolDefinitionContainment:
 
         assert {"deals_overview", "skills_list"} <= names
 
-        # lead_status is now effect-declared: its ``show`` action resolves to an
-        # exact read:leads over connect_ready_read_only, so Beta advertises it.
-        # The schema being visible does NOT grant writes — every mutating action
-        # still resolves to ``unknown`` and is denied under a read-only policy,
-        # so the declaration expands what the model can *read*, never what it can
-        # mutate under a restricted cohort.
+        # lead_status is effect-declared, so Beta advertises it. Advertising a
+        # schema is not a grant: what each action may do is decided at
+        # authorization time from the effects that action resolves to. Under a
+        # READ_ONLY policy every mutating action is still refused...
         from tools.approval import authorize_effects
 
         assert "lead_status" in names
@@ -673,6 +671,26 @@ class TestToolDefinitionContainment:
             )
             assert authorize_effects(read_only, resolved).allowed is False
 
+        # ...and under the Beta cohort's own WORKSPACE ceiling the local label
+        # writes are permitted, because the realtor's board is the agent's to
+        # work. The one action that can leave the machine is not.
+        workspace = ExecutionPolicy.for_mode(
+            "turn-beta-advertise-workspace", ExecutionPolicyMode.WORKSPACE
+        )
+        for local_action in ("heat", "follow_up", "classify"):
+            resolved = registry.resolve_effects(
+                "lead_status", {"action": local_action, "contact_id": "c"}
+            )
+            assert authorize_effects(workspace, resolved).allowed is True
+        assert not authorize_effects(
+            workspace,
+            {"read:leads", "write_local:leads", "write_external:crm"},
+        ).allowed
+
+        # skill_view is now declared too: without it the model can list skills
+        # but never open one, so skill-driven work silently produces nothing.
+        assert "skill_view" in names
+
         # Still-undeclared tools must never leak into the Beta surface.
         # (send_message is declared but its messaging check_fn fails in the
         # unconfigured test profile, so it stays out here too.)
@@ -681,7 +699,6 @@ class TestToolDefinitionContainment:
             "patch",
             "send_message",
             "skill_manage",
-            "skill_view",
         }.intersection(names)
         assert all(registry.get_effect_metadata(name)["declared"] for name in names)
 
