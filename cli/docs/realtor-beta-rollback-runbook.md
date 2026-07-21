@@ -7,9 +7,9 @@ realtor data, Admin data, sessions, `$HOME/.elevate-beta`, Stable, or
 `latest-mac.yml`. That distribution-only boundary gives the rollback RPO 0.
 
 Two Beta recovery lanes exist. The body of this document is the downgrade
-lane (restore 1.2.65). For the pinned 1.2.75 candidate there is also a
-roll-forward lane that advances Beta to the minimal 1.2.76 recovery package;
-read "Roll-forward recovery (1.2.76)" below and choose the lane first.
+lane (restore 1.2.65). For the pinned 1.2.77 candidate there is also a
+roll-forward lane that advances Beta to the minimal 1.2.78 recovery package;
+read "Roll-forward recovery (1.2.78)" below and choose the lane first.
 
 ## Required retained evidence
 
@@ -237,14 +237,14 @@ different identities and profile roots, no operational/profile data was
 written or discarded, the immutable `execute-complete` archive validates, and
 the exact rollback release-freeze marker has been retired.
 
-## Roll-forward recovery (1.2.76)
+## Roll-forward recovery (1.2.78)
 
 The second recovery lane for the same isolated `beta` channel advances the
-Beta feed and all four Beta download aliases forward to 1.2.76, a minimal
+Beta feed and all four Beta download aliases forward to 1.2.78, a minimal
 signed recovery build of `Elevate Beta.app`, instead of restoring 1.2.65.
 The pairing is version-pinned in code: the recovery package binds only to the
-exact 1.2.75 Beta candidate, its own version is exactly 1.2.76, and the next
-full Beta release must be strictly newer than 1.2.76
+exact 1.2.77 Beta candidate, its own version is exactly 1.2.78, and the next
+full Beta release must be strictly newer than 1.2.78
 (`next_full_beta_minimum_exclusive`). `verify-final` rejects a recovery
 package attached to any other candidate version. The procedure ID is
 `realtor-beta-recovery-roll-forward-v1`; downgrade-based recovery is
@@ -252,11 +252,11 @@ rejected.
 
 Choose the lane first:
 
-- Roll-forward when installed 1.2.75 Beta machines must be contained through
+- Roll-forward when installed 1.2.77 Beta machines must be contained through
   the updater lane they already poll: the feed moves forward, the standard
   Beta auto-updater installs the minimal app, the exact Beta runtime is
   stopped, and the profile is preserved until a fixed full Beta newer than
-  1.2.76 ships.
+  1.2.78 ships.
 - Rollback (above) when the candidate must be pulled from distribution and
   the public Beta feed returned to the retained 1.2.65 bytes. Auto-updaters
   do not downgrade installed machines; an already-updated machine needs the
@@ -266,7 +266,7 @@ Choose the lane first:
   `$HOME/.elevate-beta`; the roll-forward drill proves the same RPO 0
   boundary.
 
-## What the 1.2.76 recovery package is
+## What the 1.2.78 recovery package is
 
 A minimal Electron app whose packaged entrypoint is `src/recovery-main.js`
 (`elevateRecoveryMode: true`; it refuses to start from any other package). It
@@ -283,17 +283,17 @@ Beta identity (`Elevate Beta.app`, `com.elevationrealestate.elevate.beta`,
 `.elevate-beta`), so Beta/Stable coexistence is unchanged.
 
 `npm --prefix desktop run build:mac:recovery` builds it into
-`desktop/dist/recovery/`: `Elevate-Beta-Recovery-1.2.76-mac-x64.zip/.dmg`,
-`Elevate-Beta-Recovery-1.2.76-mac-arm64.zip/.dmg`, the recovery
+`desktop/dist/recovery/`: `Elevate-Beta-Recovery-1.2.78-mac-x64.zip/.dmg`,
+`Elevate-Beta-Recovery-1.2.78-mac-arm64.zip/.dmg`, the recovery
 `beta-mac.yml`, and per-architecture pre-sign evidence. The build requires
 `ELEVATE_RECOVERY_SOURCE_RECEIPT_ID` to equal the exact candidate source
 receipt ID.
 
 ## Recovery receipt binding
 
-The 1.2.75 `candidate-receipt.json` carries a `recovery` block
+The 1.2.77 `candidate-receipt.json` carries a `recovery` block
 (`kind: elevate-beta-recovery-package`) that pins the SHA-256 and SHA-512 of
-the recovery `beta-mac.yml` and all four 1.2.76 artifacts, both recovery app
+the recovery `beta-mac.yml` and all four 1.2.78 artifacts, both recovery app
 bundle manifests, Apple signing and notarization evidence for the apps and
 DMGs, the per-architecture pre-sign contracts, the minimal runtime policy,
 and the source receipt ID. `verify-final` recomputes every value from the
@@ -312,14 +312,14 @@ candidate, architecture, or receipt byte-state fails.
 
 ## Recovery upload ordering
 
-All four versioned 1.2.76 recovery artifacts must already exist on the
-update host, matching the receipt's recovery hashes, before the 1.2.75
+All four versioned 1.2.78 recovery artifacts must already exist on the
+update host, matching the receipt's recovery hashes, before the 1.2.77
 candidate Beta feed is published. This upload-first ordering is enforced by
 the locked publish transaction (`ship:mac`): for a recovery-carrying
 candidate it SHA-256-verifies the staged recovery bytes (sizes and SHA-512
 are verified against the same bytes locally before upload and publicly
 after publication), commits all four recovery artifacts plus the retained
-recovery feed (`.realtor-beta-recovery-1.2.76-beta-mac.yml`, a dot-name in
+recovery feed (`.realtor-beta-recovery-1.2.78-beta-mac.yml`, a dot-name in
 the update directory that no feed references) to their final names, and
 only then moves any candidate alias or feed pointer. Missing or foreign recovery bytes abort publication
 (`STAGED_HASH_FAILED` / `PUBLISH_RECOVERY_STATE_UNKNOWN`) with the old
@@ -343,7 +343,7 @@ SHA-256s, the Stable snapshot — is bound to `receipt.recovery` and
 `receipt.artifacts`, and the payload bytes are exactly the retention the
 locked publish transaction already committed on the update host. The
 command refuses a receipt without a bound recovery package, a recovery
-version other than exact 1.2.76, a recovery package bound to a different
+version other than exact 1.2.78, a recovery package bound to a different
 candidate or source receipt, a non-minimal runtime policy, or any
 recovery/candidate hash reuse. No operator-supplied hash or feed file is
 accepted on this lane.
@@ -374,7 +374,7 @@ All three modes acquire `/var/lock/elevate-release-publish.lock` and verify,
 before any mutation: `latest-mac.yml` against the receipt's Stable snapshot;
 `beta-mac.yml` and all four Beta aliases against the candidate's published
 hashes; the retained recovery feed
-(`.realtor-beta-recovery-1.2.76-beta-mac.yml`) and all four retained public
+(`.realtor-beta-recovery-1.2.78-beta-mac.yml`) and all four retained public
 recovery artifacts against the receipt's recovery hashes; and the four
 candidate versioned artifacts (still retained for forensics). Missing or
 foreign retained bytes fail closed with the candidate state intact — that is
@@ -403,7 +403,7 @@ recovery feed matches neither that candidate's finalize snapshot nor its
 committed state. Never delete either marker manually.
 
 On success each mode writes an immutable candidate-bound archive under
-`desktop/dist/rollback-receipts/beta/<version>-<candidate-id>/recovery-1.2.76/`
+`desktop/dist/rollback-receipts/beta/<version>-<candidate-id>/recovery-1.2.78/`
 (procedure `realtor-beta-recovery-roll-forward-v1`) containing the exact
 receipt, public Beta/Stable bytes before and after, all four public alias
 digests, all four recovery artifact digests, and the RPO-0 record. `execute`
@@ -412,7 +412,7 @@ additionally seals a durable `execute-pending` intent before mutating and an
 downloads all four aliases plus all four recovery artifacts and verifies
 them against the receipt. Do not declare activation complete without the
 `execute-complete` archive. Activation is complete only when the public
-Beta readback is exactly 1.2.76 with the receipt-bound recovery feed hash,
+Beta readback is exactly 1.2.78 with the receipt-bound recovery feed hash,
 Stable is byte-identical to its snapshot, and the activation freeze has been
 retired through the two-phase cleared marker.
 
@@ -446,7 +446,7 @@ Inside the fixture it stages the recovery feed and four alias payloads in a
 mode-0700 staging directory, hash-checks every staged copy, atomically
 replaces the four Beta aliases and then the feed (feed last), and proves:
 
-- the Beta feed advanced to exactly 1.2.76 with the receipt-bound recovery
+- the Beta feed advanced to exactly 1.2.78 with the receipt-bound recovery
   feed hash, and all four Beta aliases match the recovery DMG payloads;
 - the Stable feed, Stable alias sentinels, and an operational-data sentinel
   are byte-identical before and after (`rpo_seconds: 0`);
