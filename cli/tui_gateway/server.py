@@ -2040,19 +2040,26 @@ _TUI_TOOL_PROFILES = {
     # contract is "see everything, delegate scoped work to the specialist" —
     # without delegate_task/agent_handoff in the conversational profiles it can
     # neither query NOR hand off, and just apologizes.
+    # ``agent_bus`` is in every profile on purpose. It is the only toolset that
+    # writes surface_tasks -- the durable board the dashboard renders and the
+    # agent is meant to work out of. Every profile already carries ``todo``,
+    # which looks identical to the model but is session-scratch: the agent
+    # would call it, report honest success, and leave the board untouched.
+    # Keyword routing cannot fix that, because no phrasing selected a profile
+    # that had a board tool at all. Treat the board as ambient, like memory.
     "gateway-followup": (
-        "memory", "session_search", "todo", "messaging",
+        "memory", "session_search", "todo", "agent_bus", "messaging",
         "leads_overview", "deals_overview", "lead_status",
         "delegation", "agent_handoff",
     ),
     "skill-runner": (
-        "skills", "terminal", "file", "todo", "memory", "session_search",
+        "skills", "terminal", "file", "todo", "agent_bus", "memory", "session_search",
         "leads_overview", "deals_overview", "lead_status",
         "delegation", "agent_handoff",
     ),
-    "coding-edit": ("terminal", "file", "todo", "delegation", "code_execution", "web", "memory", "session_search"),
-    "research-browser": ("web", "browser", "file", "todo", "memory", "session_search"),
-    "creative-vision": ("vision", "image_gen", "file", "todo", "memory"),
+    "coding-edit": ("terminal", "file", "todo", "agent_bus", "delegation", "code_execution", "web", "memory", "session_search"),
+    "research-browser": ("web", "browser", "file", "todo", "agent_bus", "memory", "session_search"),
+    "creative-vision": ("vision", "image_gen", "file", "todo", "agent_bus", "memory"),
 }
 
 

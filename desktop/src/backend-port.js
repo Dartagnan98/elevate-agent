@@ -84,6 +84,17 @@ function createBackendPortController({
       return;
     }
 
+    // A free preferred port must be claimed here. Both checks above require an
+    // *existing* backend to answer, so an idle preferred port failed both and
+    // fell through to the scan below, which starts at preferredPort + 1. The
+    // desktop then waited on a port nothing would ever bind while the spawned
+    // backend took the preferred one, burning the full 180s waitForBackend
+    // timeout and showing "backend unavailable" on every clean launch.
+    if (!(await backendCanServeApp(preferredPort))) {
+      setBackendPort(preferredPort);
+      return;
+    }
+
     for (let port = preferredPort + 1; port <= preferredPort + 10; port += 1) {
       if (await backendMatchesDesktopMode(port)) {
         setBackendPort(port);

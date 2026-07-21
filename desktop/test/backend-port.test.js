@@ -89,14 +89,18 @@ test("backend port controller picks the first empty fallback port", async () => 
   assert.equal(selectedPort(), 9121);
 });
 
-test("backend port controller does not adopt a preferred backend rejected by compatibility", async () => {
+test("backend port controller claims an idle preferred port", async () => {
+  // Nothing is serving on 9119, so it is free and must be claimed. This case
+  // previously fell through to the fallback scan and selected 9120, while the
+  // spawned backend bound 9119 anyway -- the desktop then waited out the full
+  // 180s backendreadiness timeout and rendered "backend unavailable" on every
+  // clean launch. bundle/chat are deliberately absent: they are never consulted
+  // once backendCanServeApp is false.
   const { controller, selectedPort } = makeController({
     ready: { 9119: false },
-    bundle: { 9119: true },
-    chat: { 9119: true },
   });
 
   await controller.chooseBackendPort();
 
-  assert.equal(selectedPort(), 9120);
+  assert.equal(selectedPort(), 9119);
 });
