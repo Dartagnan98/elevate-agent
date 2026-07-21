@@ -807,10 +807,14 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
                 return tool_result(success=True, task=task)
 
         if action in {"list_tasks", "tasks"}:
-            from elevate_cli.data import connect
+            # Ride the ready read-only lane so this stays a true read: plain
+            # connect() can adopt a legacy DB, create the account DB, or run
+            # migrations, which would make the read: declaration below a lie.
+            # Same repair, and same reason, as the elevate_db read actions.
+            from elevate_cli.data.connection import connect_ready_read_only
             from elevate_cli.data import surface_tasks
 
-            with connect() as conn:
+            with connect_ready_read_only() as conn:
                 items = surface_tasks.list_tasks(
                     conn,
                     status=args.get("status"),
@@ -1353,6 +1357,58 @@ AGENT_BUS_SCHEMA = {
 }
 
 
+def _agent_bus_effect_resolver(args: dict):
+    """Declare the board-work loop; every other action stays UNKNOWN.
+
+    ``agent_bus`` is the only tool that reads and writes ``surface_tasks`` --
+    the rows the dashboard's board actually renders. Undeclared, the exact Beta
+    registry strips it from the tool schema entirely, so the agent is handed
+    ``todo`` (session scratch) instead, calls it, and truthfully reports
+    success while the board never moves.
+
+    Declared here, and only here, are the six actions that make up working out
+    of the board:
+
+    * ``list_tasks``/``tasks`` -> ``read:tasks``. Rides
+      ``connect_ready_read_only()`` (forced PG ``SET TRANSACTION READ ONLY``)
+      per the repair above, so an inspect can never bootstrap or migrate.
+    * ``create_task``, ``update_task``, ``complete_task``, ``block_task``,
+      ``claim_task`` -> ``write_local:tasks``. Each lands in
+      ``surface_tasks.{create,update,complete,claim}_task`` inside a write
+      transaction against the local account database. Nothing leaves the box,
+      so none of these is ``write_external`` or ``message_external``.
+
+    The other 33 actions -- approvals, heartbeat, activity, run records,
+    experiments, cycles, memory, goals, surface config, catalog, and notably
+    ``wake_agent``/``run_queued_work`` (which start other actors and are
+    ``SPAWN``-shaped, not write-shaped) -- are deliberately left UNKNOWN and
+    fail closed. They deserve their own classification pass rather than being
+    swept in behind the board work.
+
+    Normalization mirrors the handler's
+    ``.strip().lower().replace("-", "_")`` exactly, including the
+    ``task_create``/``task_claim`` aliases, so the declared surface can never
+    drift from what dispatch actually runs.
+    """
+    from tools.approval import EffectKind
+
+    action = args.get("action") if isinstance(args, dict) else None
+    act = str(action or "").strip().lower().replace("-", "_")
+    if act in {"list_tasks", "tasks"}:
+        return {"read:tasks"}
+    if act in {
+        "create_task",
+        "task_create",
+        "update_task",
+        "complete_task",
+        "block_task",
+        "claim_task",
+        "task_claim",
+    }:
+        return {"write_local:tasks"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="agent_bus",
     toolset="agent_bus",
@@ -1360,4 +1416,5 @@ registry.register(
     handler=lambda args, **kw: _agent_bus_tool(args, **kw),
     description="Native Elevate agent bus for tasks, approvals, heartbeat, activity, run records, experiments, surface config/goals, and catalog",
     emoji="",
+    effect_resolver=_agent_bus_effect_resolver,
 )
