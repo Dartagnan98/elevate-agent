@@ -3,7 +3,7 @@ import type { BetaRuntimeReceipt, OAuthProvider } from "@/lib/api-types";
 export const REALTOR_BETA_OAUTH_PROVIDER_ID = "openai-codex";
 export const REALTOR_BETA_PRIMARY_PROVIDER = "openai-codex";
 export const REALTOR_BETA_PROVIDER_POLICY_VERSION = "realtor-beta-codex-v1";
-export const REALTOR_BETA_ALLOWED_MODELS_VERSION = "2026-07-14-v1";
+export const REALTOR_BETA_ALLOWED_MODELS_VERSION = "2026-07-21-v1";
 export const REALTOR_BETA_WIZARD_STEP_IDS = [
   "models",
   "memory",

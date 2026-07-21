@@ -19,12 +19,23 @@ from typing import Any, Mapping
 
 
 BETA_PROVIDER_POLICY_VERSION = "realtor-beta-codex-v1"
-BETA_ALLOWED_MODELS_VERSION = "2026-07-14-v1"
+BETA_ALLOWED_MODELS_VERSION = "2026-07-21-v1"
 BETA_ALLOWED_PROVIDER = "openai-codex"
 BETA_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-BETA_DEFAULT_MODEL = "gpt-5.5"
+BETA_DEFAULT_MODEL = "gpt-5.6-sol"
 BETA_ALLOWED_MEMORY_PROVIDERS = ("", "holographic")
+# Mirrored byte-for-byte by desktop/src/release-profile.js BETA.allowedModels;
+# the desktop binary refuses to mark the Beta runtime ready when the two
+# disagree, so both lists and the version stamp above move together.
+#
+# ponytail: this stays an explicit enumeration only until the dynamic-list
+# work lands (lock the provider/endpoint, source the list from live Codex
+# discovery). Enumerating models rots — four entries below were retired by
+# OpenAI within a week of being pinned.
 BETA_ALLOWED_MODELS = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4-mini",
     "gpt-5.4",

@@ -2288,7 +2288,7 @@ class TestNewEndpoints:
                         # Current web transport alias; server persists canonical Codex.
                         "provider": "openai",
                         "value": {
-                            "model": "gpt-5.5",
+                            "model": "gpt-5.6-sol",
                             "runtimeProvider": "openai-codex",
                             "apiKey": "",
                         },
@@ -2309,17 +2309,17 @@ class TestNewEndpoints:
         )
         assert primary["status"] == "configured"
         assert primary["provider"] == "openai-codex"
-        assert primary["value"]["model"] == "gpt-5.5"
+        assert primary["value"]["model"] == "gpt-5.6-sol"
         config = load_config()
         assert config["model"]["provider"] == "openai-codex"
-        assert config["model"]["default"] == "gpt-5.5"
+        assert config["model"]["default"] == "gpt-5.6-sol"
         with connect() as conn:
             row = conn.execute(
                 "SELECT provider, value_json FROM agent_setup_items WHERE key=?",
                 ("model_primary",),
             ).fetchone()
         assert row["provider"] == "openai-codex"
-        assert json.loads(row["value_json"])["model"] == "gpt-5.5"
+        assert json.loads(row["value_json"])["model"] == "gpt-5.6-sol"
         assert auth_path.read_bytes() == auth_before
 
     def test_leads_setup_lifecycle_contract(self):

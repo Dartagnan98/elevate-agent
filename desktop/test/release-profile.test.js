@@ -123,7 +123,7 @@ test("desktop requires the exact Beta runtime receipt and leaves Stable legacy-c
       releaseChannel: "beta",
       elevateHome: "/Users/tester/.elevate-beta",
       providerPolicyVersion: "realtor-beta-codex-v1",
-      allowedModelsVersion: "2026-07-14-v1",
+      allowedModelsVersion: "2026-07-21-v1",
       entitlementAssertionSchema: 1,
       entitlementAssertionAcceptedKeyIds: [
         "ent-2026-07-a",
@@ -133,6 +133,9 @@ test("desktop requires the exact Beta runtime receipt and leaves Stable legacy-c
         "1d97a77a0be01aa7506fd3619ad454c709a375f8aab8febbd9818a47c5e53a0c",
       allowedProvider: "openai-codex",
       allowedModels: [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5.5",
         "gpt-5.4-mini",
         "gpt-5.4",

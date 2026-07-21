@@ -405,7 +405,7 @@ def test_beta_config_routes_return_typed_409_before_save(
         "message": "Realtor Beta does not allow configured provider 'gemini'.",
         "policyVersion": BETA_PROVIDER_POLICY_VERSION,
         "allowedProvider": BETA_ALLOWED_PROVIDER,
-        "allowedModelsVersion": "2026-07-14-v1",
+        "allowedModelsVersion": "2026-07-21-v1",
     }
     assert saved == []
     assert not beta_home.exists()

@@ -152,7 +152,7 @@ def test_beta_fresh_setup_ignores_ambient_keys_for_primary(monkeypatch):
 
     assert item["status"] == "missing"
     assert item["provider"] == "openai-codex"
-    assert item["value"]["model"] == "gpt-5.5"
+    assert item["value"]["model"] == "gpt-5.6-sol"
     assert item["value"]["secretPresent"] is False
     assert item["value"]["policyBlocked"] is False
 
@@ -172,7 +172,7 @@ def test_beta_existing_non_codex_config_is_visibly_blocked(monkeypatch):
 
     assert item["status"] == "missing"
     assert item["provider"] == "openai-codex"
-    assert item["value"]["model"] == "gpt-5.5"
+    assert item["value"]["model"] == "gpt-5.6-sol"
     assert item["value"]["policyBlocked"] is True
     assert item["value"]["blockedReason"] == "unsupported_beta_provider"
     assert item["value"]["configuredProvider"] == "gemini"

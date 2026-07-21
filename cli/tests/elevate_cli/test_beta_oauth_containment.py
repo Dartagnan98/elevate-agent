@@ -634,7 +634,7 @@ def test_beta_codex_completion_persists_runtime_provider_state_and_canonical_url
     written_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert written_config["model"] == {
         "provider": BETA_ALLOWED_PROVIDER,
-        "default": "gpt-5.5",
+        "default": "gpt-5.6-sol",
         "base_url": BETA_CODEX_BASE_URL,
         "api_mode": "codex_responses",
     }
@@ -749,7 +749,7 @@ def test_beta_live_repair_failure_never_reports_oauth_approved(
     assert repair_calls == ["attempted"]
     assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["model"] == {
         "provider": BETA_ALLOWED_PROVIDER,
-        "default": "gpt-5.5",
+        "default": "gpt-5.6-sol",
         "base_url": BETA_CODEX_BASE_URL,
         "api_mode": "codex_responses",
     }

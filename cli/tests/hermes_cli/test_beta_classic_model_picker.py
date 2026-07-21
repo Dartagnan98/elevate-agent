@@ -27,7 +27,7 @@ def test_exact_beta_picker_canonicalizes_stale_session_before_config_discovery(
         {
             "slug": "openai-codex",
             "name": "OpenAI Codex",
-            "models": ["gpt-5.5"],
+            "models": ["gpt-5.6-sol"],
             "is_current": True,
         }
     ]
@@ -46,7 +46,7 @@ def test_exact_beta_picker_canonicalizes_stale_session_before_config_discovery(
 
     assert captured == {
         "providers": codex_rows,
-        "current_model": "gpt-5.5",
+        "current_model": "gpt-5.6-sol",
         "current_provider": "OpenAI Codex",
         "kwargs": {"user_provs": None, "custom_provs": None},
     }
