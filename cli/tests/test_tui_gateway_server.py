@@ -1611,7 +1611,7 @@ def test_beta_tui_model_defaults_to_allowed_codex_model(monkeypatch):
     monkeypatch.delenv("ELEVATE_MODEL", raising=False)
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
 
-    assert server._resolve_model() == "gpt-5.5"
+    assert server._resolve_model() == "gpt-5.6-sol"
 
 
 @pytest.mark.parametrize("source", ["environment", "config"])
@@ -5033,7 +5033,7 @@ def test_exact_beta_model_options_canonicalizes_before_generic_discovery(monkeyp
         {
             "slug": "openai-codex",
             "name": "OpenAI Codex",
-            "models": ["gpt-5.5"],
+            "models": ["gpt-5.6-sol"],
             "is_current": True,
         }
     ]
@@ -5049,12 +5049,12 @@ def test_exact_beta_model_options_canonicalizes_before_generic_discovery(monkeyp
 
     assert resp["result"] == {
         "providers": codex_rows,
-        "model": "gpt-5.5",
+        "model": "gpt-5.6-sol",
         "provider": "openai-codex",
     }
     listing.assert_called_once_with(
         current_provider="openai-codex",
-        current_model="gpt-5.5",
+        current_model="gpt-5.6-sol",
         max_models=50,
     )
 

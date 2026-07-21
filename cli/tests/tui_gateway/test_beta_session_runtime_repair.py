@@ -331,7 +331,7 @@ def test_persisted_gemini_session_cold_resume_uses_repaired_codex_runtime(
     assert "ELEVATE_INFERENCE_PROVIDER" not in os.environ
     repaired = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert repaired["model"]["provider"] == BETA_ALLOWED_PROVIDER
-    assert repaired["model"]["default"] == "gpt-5.5"
+    assert repaired["model"]["default"] == "gpt-5.6-sol"
 
     persisted_id = "20260715_120000_gemini_history"
     history = [
