@@ -22,7 +22,7 @@ from tools.approval import (
     reset_current_execution_policy,
     set_current_execution_policy,
 )
-from tools.registry import ToolCallContext, registry
+from tools.registry import ToolCallContext, invalidate_check_fn_cache, registry
 
 
 _EXACT_BETA_MUTATING_REGISTRY_CALLS = (
@@ -618,6 +618,67 @@ class TestAgentLoopTools:
 
 
 class TestToolDefinitionContainment:
+    def test_exact_beta_advertises_and_authorizes_autonomous_browser(
+        self,
+        monkeypatch,
+    ):
+        import model_tools
+        from tools.approval import authorize_effects
+
+        browser_names = {
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_scroll",
+            "browser_back",
+            "browser_press",
+            "browser_get_images",
+            "browser_vision",
+            "browser_console",
+            "browser_cdp",
+            "browser_dialog",
+        }
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        # This test exercises Beta's advertiser, not host dependency probing.
+        # A packaged desktop with its local debug Chrome satisfies these checks.
+        for name in browser_names:
+            entry = registry.get_entry(name)
+            assert entry is not None
+            monkeypatch.setattr(entry, "check_fn", lambda: True)
+        invalidate_check_fn_cache()
+        with model_tools._TOOL_DEFS_CACHE_LOCK:
+            model_tools._TOOL_DEFS_CACHE.clear()
+
+        definitions = get_tool_definitions(
+            enabled_toolsets=["browser"],
+            quiet_mode=True,
+        )
+        advertised = {tool["function"]["name"] for tool in definitions}
+        assert browser_names <= advertised
+
+        workspace = ExecutionPolicy.for_mode(
+            "turn-beta-browser", ExecutionPolicyMode.WORKSPACE
+        )
+        for name in browser_names:
+            metadata = registry.get_effect_metadata(name)
+            assert metadata["declared"] is True
+            effects = registry.resolve_effects(name, {})
+            assert effects
+            assert all(effect.scope == "browser" for effect in effects)
+            assert authorize_effects(workspace, effects).allowed is True, name
+
+        # Matching effect kinds do not widen another tool's scope.
+        for effect in (
+            "message_external:sms",
+            "write_external:crm",
+            "financial:stripe",
+            "destructive:files",
+            "spawn:terminal",
+        ):
+            assert authorize_effects(workspace, {effect}).allowed is False, effect
+
     def test_disabled_toolsets_subtract_from_explicit_enabled_toolsets(
         self,
         monkeypatch,

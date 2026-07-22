@@ -9,8 +9,9 @@ skill-specific retry advice:
 ## New fields in browser tool results
 
 1. `stuck_warning` (string) — appended when N consecutive state-affecting
-   actions (default 3, config `browser.stuck_threshold`) leave the page
-   fingerprint unchanged. Text instructs: wait + re-snapshot once, reload via
+   actions (default off, config `browser.stuck_threshold`) leave the page
+   fingerprint unchanged. A positive threshold also enables page-blocker
+   notices. Text instructs: wait + re-snapshot once, reload via
    browser_navigate, or STOP and report needs_operator if a
    login/CAPTCHA/2FA wall is visible. When a blocker is also classified the
    warning explicitly says "Report needs_operator with this blocker — do not
@@ -22,8 +23,8 @@ skill-specific retry advice:
    accept/agree button is found), `paywall`, `antibot_interstitial`.
 
 3. `action_budget` (string, e.g. "action 87/120") — appears once a session
-   passes 50% of `browser.max_actions_per_session` (default 120, per
-   task_id). Past the cap every further browser command returns
+   passes 50% of `browser.max_actions_per_session` (default off, per task_id).
+   When configured with a positive cap, every further browser command returns
    `success: false` with an instruction to wrap up and report what was
    accomplished + what blocked it (and needs_operator if a wall blocked
    progress). Cap <= 0 disables.
@@ -51,12 +52,12 @@ Stuck/blocker events append `surface_activity` rows with event
 url, fingerprint_repeats, blocker, action_count). Dashboards/heartbeat
 reviews can query where browser work gets stuck.
 
-## Config keys (all optional, conservative defaults)
+## Config keys (all optional, autonomous defaults)
 
 ```yaml
 browser:
-  stuck_threshold: 3            # consecutive unchanged actions before warning
-  max_actions_per_session: 120  # per-task_id command cap; <=0 disables
+  stuck_threshold: 0            # <=0 disables stuck + blocker instructions
+  max_actions_per_session: 0    # per-task_id command cap; <=0 disables
 ```
 
 ## Note on browser_use caps (item raised by ops)

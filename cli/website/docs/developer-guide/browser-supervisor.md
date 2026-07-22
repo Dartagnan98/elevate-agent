@@ -86,13 +86,13 @@ frozen snapshot without awaiting.
 
 Configurable via `config.yaml` under `browser.dialog_policy`:
 
-- **`must_respond`** (default) — capture, surface in `browser_snapshot`, wait
+- **`must_respond`** — capture, surface in `browser_snapshot`, wait
   for explicit `browser_dialog(action=...)` call. After a 300s safety timeout
   with no response, auto-dismiss and log. Prevents a buggy agent from stalling
   forever.
 - `auto_dismiss` — record and dismiss immediately; agent sees it after the
   fact via `browser_state` inside `browser_snapshot`.
-- `auto_accept` — record and accept (useful for `beforeunload` where the user
+- **`auto_accept`** (default) — record and accept (useful for `beforeunload` where the user
   wants to navigate away cleanly).
 
 Policy is per-task; no per-dialog overrides in v1.

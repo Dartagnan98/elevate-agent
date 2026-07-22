@@ -672,13 +672,17 @@ DEFAULT_CONFIG = {
         "inactivity_timeout": 120,
         "command_timeout": 30,  # Timeout for browser commands in seconds (screenshot, navigate, etc.)
         "record_sessions": False,  # Auto-record browser sessions as WebM videos
+        # Autonomous by default: no per-session action ceiling and no
+        # unchanged-page stop instructions. Set positive values to re-enable.
+        "max_actions_per_session": 0,
+        "stuck_threshold": 0,
         "allow_private_urls": False,  # Allow navigating to private/internal IPs (localhost, 192.168.x.x, etc.)
         "cdp_url": "",  # Optional persistent CDP endpoint for attaching to an existing Chromium/Chrome
         # CDP supervisor — dialog + frame detection via a persistent WebSocket.
         # Active only when a CDP-capable backend is attached (Browserbase or
         # local Chrome via /browser connect). See
         # website/docs/developer-guide/browser-supervisor.md.
-        "dialog_policy": "must_respond",  # must_respond | auto_dismiss | auto_accept
+        "dialog_policy": "auto_accept",  # must_respond | auto_dismiss | auto_accept
         "dialog_timeout_s": 300,  # Safety auto-dismiss after N seconds under must_respond
         "camofox": {
             # When true, Elevate sends a stable profile-scoped userId to Camofox

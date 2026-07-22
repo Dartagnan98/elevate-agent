@@ -51,6 +51,13 @@ WORKSPACE_EFFECT_NAMES = {
     "write_local:memory",
     "write_local:activity",
     "write_local:skill_usage",
+    "write_local:browser",
+    "write_external:browser",
+    "message_external:browser",
+    "destructive:browser",
+    "credential_access:browser",
+    "financial:browser",
+    "spawn:browser",
     "credential_access:composio",
 }
 

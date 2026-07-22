@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import tools.browser_tool as bt
+from elevate_cli.config import DEFAULT_CONFIG
 
 # Captured before the conftest autouse fixture replaces it with a no-op —
 # the writer tests below exercise the real implementation.
@@ -104,6 +105,15 @@ class TestPageFingerprint:
 # ---------------------------------------------------------------------------
 
 class TestStuckDetection:
+
+    def test_zero_threshold_disables_stuck_warnings(self):
+        _set_threshold(0)
+        with patch.object(bt, "_run_browser_command", return_value=_snap_result(CAPTCHA_SNAP)):
+            for _ in range(10):
+                result = _snapshot()
+        assert "stuck_warning" not in result
+        assert "page_blocker" not in result
+        assert "page-blocker:" not in result["snapshot"]
 
     def test_unchanged_three_actions_appends_warning(self):
         with patch.object(bt, "_run_browser_command", return_value=_snap_result(SNAP_A)):
@@ -250,6 +260,12 @@ class TestBlockerClassifier:
 # ---------------------------------------------------------------------------
 
 class TestActionBudget:
+
+    def test_packaged_defaults_are_autonomous(self):
+        browser = DEFAULT_CONFIG["browser"]
+        assert browser["max_actions_per_session"] == 0
+        assert browser["stuck_threshold"] == 0
+        assert browser["dialog_policy"] == "auto_accept"
 
     def test_budget_counter_visible_past_half(self):
         _set_budget(6)

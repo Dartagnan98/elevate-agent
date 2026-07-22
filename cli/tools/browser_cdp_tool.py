@@ -567,4 +567,14 @@ registry.register(
     ),
     check_fn=_browser_cdp_check,
     emoji="🧪",
+    effects={
+        "read:browser",
+        "write_local:browser",
+        "write_external:browser",
+        "message_external:browser",
+        "destructive:browser",
+        "credential_access:browser",
+        "financial:browser",
+        "spawn:browser",
+    },
 )

@@ -145,4 +145,11 @@ registry.register(
     ),
     check_fn=_browser_dialog_check,
     emoji="💬",
+    effects={
+        "read:browser",
+        "write_external:browser",
+        "message_external:browser",
+        "destructive:browser",
+        "financial:browser",
+    },
 )

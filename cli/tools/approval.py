@@ -1425,11 +1425,10 @@ _ALL_DECLARED_EFFECTS = frozenset(
 #      lattice a lattice: narrowing WORKSPACE -> DRAFT_ONLY/PLAN/READ_ONLY
 #      is legal, and the reverse raises ``PolicyWideningError`` structurally
 #      (see ``ExecutionPolicy.narrow`` / ``derive_child_execution_policy``).
-#   3. **Nothing here reaches a human or an external system.**  No
-#      ``write_external``, no ``message_external``, no ``spawn``, no
-#      ``destructive``, no ``financial``.  A tool that writes locally AND
-#      reaches outward declares BOTH effects and is therefore refused under
-#      this ceiling — the refusal is set-theoretic, not name-based.
+#   3. **Only the browser may reach outward.** Browser capabilities are scoped
+#      to ``:browser`` so enabling autonomous browsing does not grant the same
+#      effects to messaging, CRM, shell, financial, or other tools. A tool
+#      outside the browser stack that reaches outward remains refused.
 #
 # ``credential_access:composio`` is the one non-write entry.  It is the
 # companion capability of a pure credentialed GET (``tools/composio_tool.py``
@@ -1461,6 +1460,18 @@ _WORKSPACE_EFFECTS = frozenset({
     # Self-directed, local, reversible; same family as memory/skill_usage.
     Effect(EffectKind.WRITE_LOCAL, "activity"),
     Effect(EffectKind.WRITE_LOCAL, "skill_usage"),
+    # --- autonomous browser ------------------------------------------------
+    # The Realtor Beta ships the browser as an agent-owned execution surface,
+    # not a read-only preview. These narrowly-scoped capabilities let its
+    # declared tools navigate, click, type, submit, download, evaluate JS,
+    # handle dialogs, and use raw CDP without widening any non-browser tool.
+    Effect(EffectKind.WRITE_LOCAL, "browser"),
+    Effect(EffectKind.WRITE_EXTERNAL, "browser"),
+    Effect(EffectKind.MESSAGE_EXTERNAL, "browser"),
+    Effect(EffectKind.DESTRUCTIVE, "browser"),
+    Effect(EffectKind.CREDENTIAL_ACCESS, "browser"),
+    Effect(EffectKind.FINANCIAL, "browser"),
+    Effect(EffectKind.SPAWN, "browser"),
     # --- the operator's own connector catalog (pure credentialed read) ----
     Effect(EffectKind.CREDENTIAL_ACCESS, "composio"),
 })
@@ -1482,10 +1493,9 @@ _POLICY_MODE_CEILINGS = MappingProxyType({
     ExecutionPolicyMode.WORKSPACE: _WORKSPACE_EFFECTS,
 })
 
-# Effect kinds that may NEVER appear in the workspace ceiling, asserted at
-# import so a future edit cannot quietly widen the cohort maximum. This is a
-# structural invariant, not a lint: it is the difference between "the agent
-# works its own board" and "the agent can reach a client".
+# Effect kinds that may appear in the workspace ceiling only on the explicit
+# browser scope, asserted at import so a future edit cannot quietly widen the
+# cohort maximum. This is a structural invariant, not a lint.
 _WORKSPACE_FORBIDDEN_KINDS = frozenset({
     EffectKind.WRITE_EXTERNAL,
     EffectKind.MESSAGE_EXTERNAL,
@@ -1494,10 +1504,13 @@ _WORKSPACE_FORBIDDEN_KINDS = frozenset({
     EffectKind.SPAWN,
     EffectKind.UNKNOWN,
 })
-if any(effect.kind in _WORKSPACE_FORBIDDEN_KINDS for effect in _WORKSPACE_EFFECTS):
+if any(
+    effect.kind in _WORKSPACE_FORBIDDEN_KINDS and effect.scope != "browser"
+    for effect in _WORKSPACE_EFFECTS
+):
     raise AssertionError(
         "workspace ceiling may not admit an outbound, destructive, financial, "
-        "spawning, or unknown effect"
+        "spawning, or unknown effect outside the scoped browser surface"
     )
 if any(
     effect.kind is not EffectKind.READ and effect.scope is None

@@ -1,18 +1,19 @@
 """The workspace ceiling (package ERB-405): what the agent may do to its own
-board, and what it still may not do to anyone else's.
+board and browser, and what it still may not do through unrelated tools.
 
 Realtor Beta's containment made the agent read-only/draft-only. That is
-correct for anything that reaches a human or a third-party system, and wrong
-for the realtor's own board — which exists specifically for the agent to work
-out of. ``ExecutionPolicyMode.WORKSPACE`` is the ceiling that draws that line.
+correct for unrelated tools that reach a human or a third-party system, and
+wrong for the realtor's own board and explicitly autonomous browser. The
+browser exception is scope-bound so it cannot authorize messaging, terminal,
+CRM, or financial tools merely because they declare the same effect kind.
 
 These tests pin the line from both sides:
 
-* every self-directed local capability the shipped tools declare is ADMITTED;
-* every outbound, destructive, spawning, financial, unscoped, or unknown
-  capability is REFUSED — including when it is bundled together with a
-  perfectly legitimate local write, which is the case that must not slip
-  through;
+* every self-directed local capability and scoped browser capability is
+  ADMITTED;
+* every non-browser outbound, destructive, spawning, financial, unscoped, or
+  unknown capability is REFUSED — including when it is bundled together with
+  a perfectly legitimate local write;
 * the mode lattice still only narrows, so a delegated child can inherit the
   board but can never escalate off it.
 """
@@ -54,6 +55,7 @@ ADMITTED = [
     "read:files",
     "read:memory",
     "read:composio",
+    "read:browser",
     "write_local:draft",
     "write_local:session_plan",
     "write_local:kanban",
@@ -62,6 +64,13 @@ ADMITTED = [
     "write_local:working_state",
     "write_local:memory",
     "write_local:skill_usage",
+    "write_local:browser",
+    "write_external:browser",
+    "message_external:browser",
+    "destructive:browser",
+    "credential_access:browser",
+    "financial:browser",
+    "spawn:browser",
     "credential_access:composio",
 ]
 
@@ -137,7 +146,7 @@ def test_every_non_read_workspace_capability_is_scoped() -> None:
         assert effect.scope, f"{effect} must be scoped"
 
 
-def test_workspace_admits_no_outward_or_dangerous_kind() -> None:
+def test_workspace_admits_outward_or_dangerous_kinds_only_for_browser() -> None:
     forbidden = {
         EffectKind.WRITE_EXTERNAL,
         EffectKind.MESSAGE_EXTERNAL,
@@ -146,8 +155,9 @@ def test_workspace_admits_no_outward_or_dangerous_kind() -> None:
         EffectKind.SPAWN,
         EffectKind.UNKNOWN,
     }
-    kinds = {effect.kind for effect in _workspace().allowed_effects}
-    assert not kinds & forbidden
+    for effect in _workspace().allowed_effects:
+        if effect.kind in forbidden:
+            assert effect.scope == "browser"
 
 
 def test_workspace_is_a_strict_superset_of_draft_only() -> None:
@@ -351,6 +361,13 @@ def test_the_mode_a_realtor_actually_runs_in_reaches_the_board(
         "write_local:memory",
         "write_local:skill_usage",
         "credential_access:composio",
+        "write_local:browser",
+        "write_external:browser",
+        "message_external:browser",
+        "destructive:browser",
+        "credential_access:browser",
+        "financial:browser",
+        "spawn:browser",
     ):
         assert authorize_effects(policy, {effect}).allowed is True, effect
     for effect in ("message_external:sms", "write_external:crm", "spawn"):
