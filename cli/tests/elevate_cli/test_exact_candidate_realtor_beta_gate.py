@@ -64,9 +64,9 @@ def _snapshot(channel: str, version: str, value: bytes) -> dict:
 
 
 def _receipt() -> tuple[dict, bytes, bytes, bytes]:
-    recovery_feed = _feed("1.2.80", "Elevate-Beta-Recovery")
+    recovery_feed = _feed("1.2.82", "Elevate-Beta-Recovery")
     stable_feed = _feed("1.2.63", "Elevate")
-    candidate_feed = _feed("1.2.79", "Elevate-Beta")
+    candidate_feed = _feed("1.2.81", "Elevate-Beta")
     stable = _snapshot("latest", "1.2.63", stable_feed)
     recovery_metadata = yaml.safe_load(recovery_feed)
     beta_profile = {
@@ -82,7 +82,7 @@ def _receipt() -> tuple[dict, bytes, bytes, bytes]:
     receipt = {
         "source_receipt_id": "a" * 64,
         "release": {
-            "version": "1.2.79",
+            "version": "1.2.81",
             "channel": "beta",
             "feed_name": "beta-mac.yml",
             "download_aliases": [
@@ -96,8 +96,8 @@ def _receipt() -> tuple[dict, bytes, bytes, bytes]:
         "recovery": {
             "schema_version": 1,
             "kind": "elevate-beta-recovery-package",
-            "candidate_version": "1.2.79",
-            "version": "1.2.80",
+            "candidate_version": "1.2.81",
+            "version": "1.2.82",
             "channel": "beta",
             "public_feed_name": "beta-mac.yml",
             "profile": beta_profile,
@@ -161,8 +161,8 @@ def test_local_recovery_drill_rolls_beta_forward_and_leaves_stable_and_data_unto
         work_root=tmp_path,
     )
 
-    assert result["candidate_version"] == "1.2.79"
-    assert result["recovery_version"] == "1.2.80"
+    assert result["candidate_version"] == "1.2.81"
+    assert result["recovery_version"] == "1.2.82"
     assert result["beta_after_sha256"] == receipt["recovery"]["local_feed"]["sha256"]
     assert result["stable_before_sha256"] == result["stable_after_sha256"]
     assert result["stable_after_sha256"] == receipt["public_feeds_at_finalize"]["latest"]["sha256"]
