@@ -49,6 +49,7 @@ WORKSPACE_EFFECT_NAMES = {
     "write_local:deals",
     "write_local:working_state",
     "write_local:memory",
+    "write_local:activity",
     "write_local:skill_usage",
     "credential_access:composio",
 }

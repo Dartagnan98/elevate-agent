@@ -329,12 +329,14 @@ def _update_heartbeat(agent_id: str, message: str, status: str = "active", metad
 
 
 def _read_heartbeats(agent_id: str | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
-    from elevate_cli.data import connect
+    # Ready read-only lane: declared read: below, so this must never
+    # bootstrap or migrate on a cold profile (same repair as list_tasks).
+    from elevate_cli.data.connection import connect_ready_read_only
     from elevate_cli.data import surface_state
 
     limit = max(1, min(limit, 100))
     target = _slug(agent_id) if agent_id else ""
-    with connect() as conn:
+    with connect_ready_read_only() as conn:
         if target:
             rec = surface_state.get_heartbeat(conn, target)
             if rec:
@@ -924,18 +926,18 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
                 return tool_result(success=True, items=items, count=len(items))
 
         if action in {"check_stale_tasks", "stale_tasks"}:
-            from elevate_cli.data import connect
+            from elevate_cli.data.connection import connect_ready_read_only
             from elevate_cli.data import surface_tasks
 
-            with connect() as conn:
+            with connect_ready_read_only() as conn:
                 report = surface_tasks.check_stale_tasks(conn)
                 return tool_result(success=True, report=report)
 
         if action in {"check_human_tasks", "human_tasks"}:
-            from elevate_cli.data import connect
+            from elevate_cli.data.connection import connect_ready_read_only
             from elevate_cli.data import surface_tasks
 
-            with connect() as conn:
+            with connect_ready_read_only() as conn:
                 items = surface_tasks.check_human_tasks(conn)
                 return tool_result(success=True, items=items, count=len(items))
 
@@ -980,10 +982,10 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
                 return tool_result(success=True, approval=approval)
 
         if action in {"list_approvals", "approvals"}:
-            from elevate_cli.data import connect
+            from elevate_cli.data.connection import connect_ready_read_only
             from elevate_cli.data import surface_tasks
 
-            with connect() as conn:
+            with connect_ready_read_only() as conn:
                 items = surface_tasks.list_approvals(
                     conn,
                     status=args.get("status"),
@@ -1127,11 +1129,11 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
             return tool_result(success=True, surface=surface, config=config)
 
         if action in {"get_goals", "surface_goals"}:
-            from elevate_cli.data import connect
+            from elevate_cli.data.connection import connect_ready_read_only
             from elevate_cli.data import surface_state
 
             surface = _surface_for_experiment(args, parent_agent)
-            with connect() as conn:
+            with connect_ready_read_only() as conn:
                 goals = surface_state.get_goals(conn, surface)
             return tool_result(success=True, surface=surface, goals=goals)
 
@@ -1406,6 +1408,32 @@ def _agent_bus_effect_resolver(args: dict):
         "task_claim",
     }:
         return {"write_local:tasks"}
+    # Second batch, 2026-07-21: every entry below was observed blocking real
+    # work in live turns on the installed 1.2.81 (the agent reached for each
+    # one unprompted and worked around the refusal). All verified against
+    # their handlers before declaring:
+    #
+    # * The four pure reads ride connect_ready_read_only() (repaired above
+    #   in their handlers, same rule as list_tasks): check_stale_tasks and
+    #   check_human_tasks are in-memory reports over list_tasks;
+    #   list_approvals is a SELECT over surface_approvals; get_goals and
+    #   read_heartbeats read surface_state rows.
+    # * write_memory seeds the agent's own local memory store AND appends a
+    #   row to its surface_activity journal -- two honest local scopes, both
+    #   additionally gated by the per-agent memory policy inside the handler.
+    # * list_memory reads the same store back (policy-gated recall).
+    if act in {"check_stale_tasks", "stale_tasks", "check_human_tasks", "human_tasks"}:
+        return {"read:tasks"}
+    if act in {"list_approvals", "approvals"}:
+        return {"read:approvals"}
+    if act in {"get_goals", "surface_goals"}:
+        return {"read:goals"}
+    if act in {"read_heartbeats", "list_heartbeats"}:
+        return {"read:heartbeats"}
+    if act in {"write_memory", "memory_write"}:
+        return {"write_local:memory", "write_local:activity"}
+    if act in {"list_memory", "memory"}:
+        return {"read:memory"}
     return {EffectKind.UNKNOWN}
 
 

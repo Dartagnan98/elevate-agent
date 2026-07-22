@@ -1456,6 +1456,10 @@ _WORKSPACE_EFFECTS = frozenset({
     Effect(EffectKind.WRITE_LOCAL, "working_state"),
     # --- the agent's own continuity ---------------------------------------
     Effect(EffectKind.WRITE_LOCAL, "memory"),
+    # The agent's own activity journal (surface_activity) -- write_memory
+    # appends a "memory_written" row so the dashboard feed reflects reality.
+    # Self-directed, local, reversible; same family as memory/skill_usage.
+    Effect(EffectKind.WRITE_LOCAL, "activity"),
     Effect(EffectKind.WRITE_LOCAL, "skill_usage"),
     # --- the operator's own connector catalog (pure credentialed read) ----
     Effect(EffectKind.CREDENTIAL_ACCESS, "composio"),

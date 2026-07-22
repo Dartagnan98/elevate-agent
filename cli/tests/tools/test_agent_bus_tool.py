@@ -556,10 +556,12 @@ def test_agent_bus_surface_config_get_and_update():
 
 
 def test_agent_bus_goals_get_and_update():
-    defaults = _call({"action": "get_goals", "surface": "admin", "agent_id": "admin"})
-    assert defaults["success"] is True
-    assert defaults["goals"]["goals"] == []
-    assert defaults["goals"]["bottleneck"] == ""
+    # get_goals is declared read:goals and rides connect_ready_read_only(),
+    # so a cold store refuses cleanly instead of bootstrapping -- same
+    # contract as the elevate_db read actions and agent_bus list_tasks.
+    cold = _call({"action": "get_goals", "surface": "admin", "agent_id": "admin"})
+    assert "error" in cold
+    assert "startup has not completed" in cold["error"]
 
     updated = _call(
         {
@@ -577,7 +579,10 @@ def test_agent_bus_goals_get_and_update():
     assert updated["goals"]["bottleneck"] == "follow-ups"
     assert updated["goals"]["updated_at"]
 
+    # The write above bootstrapped and readied the store, so the read-only
+    # lane now serves defaults-shaped reads normally.
     refetched = _call({"action": "surface_goals", "surface": "admin", "agent_id": "admin"})
+    assert refetched["success"] is True
     assert refetched["goals"]["goals"][0]["progress"] == 40
 
     missing = _call({"action": "update_goals", "surface": "admin", "agent_id": "admin"})
