@@ -1445,6 +1445,12 @@ _WORKSPACE_EFFECTS = frozenset({
     Effect(EffectKind.WRITE_LOCAL, "session_plan"),
     # --- the agent's own boards -------------------------------------------
     Effect(EffectKind.WRITE_LOCAL, "kanban"),
+    # ``tasks`` is deliberately its own scope rather than folded into
+    # ``kanban``. They are different tables: kanban_tools writes kanban_tasks,
+    # while agent_bus writes surface_tasks -- the rows the dashboard's board
+    # actually renders and the agent is meant to work out of. Granting one
+    # must not silently grant the other, per the scoping rule above.
+    Effect(EffectKind.WRITE_LOCAL, "tasks"),
     Effect(EffectKind.WRITE_LOCAL, "leads"),
     Effect(EffectKind.WRITE_LOCAL, "deals"),
     Effect(EffectKind.WRITE_LOCAL, "working_state"),

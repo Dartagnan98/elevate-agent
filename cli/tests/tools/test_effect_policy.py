@@ -44,6 +44,7 @@ WORKSPACE_EFFECT_NAMES = {
     "write_local:draft",
     "write_local:session_plan",
     "write_local:kanban",
+    "write_local:tasks",
     "write_local:leads",
     "write_local:deals",
     "write_local:working_state",
