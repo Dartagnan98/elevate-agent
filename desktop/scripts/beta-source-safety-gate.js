@@ -263,7 +263,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       environment: MIXED_CHANNEL_TEST_ENV,
       requiredFiles: REQUIRED_FILES_BY_SUITE["python-session-safety"].map((relative) => path.join(REPO, relative)),
       ...pytest(
-        429,
+        430,
         "tests/agent/test_turn_fence.py",
         "tests/agent/test_realtor_beta_skill_surface.py",
         "tests/agent/transports/test_hermes_tools_mcp_server.py",

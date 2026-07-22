@@ -986,13 +986,17 @@ def beta_activation_complete(lic: License) -> bool:
         with refresh_pending.refresh_lock(root) as lock_guard:
             lock_guard.assert_held()
             current = read_verified_beta_license_snapshot(require_current=True)
-            if not _same_beta_snapshot(current, lic):
+            # A desktop refresh can rotate the access token, refresh token,
+            # and signed assertion after the status route read ``lic`` but
+            # before this lock is acquired. Setup is bound to the stable
+            # signed account identity, not to that rotating credential pair.
+            current_identity = _beta_activation_identity(current)
+            if current_identity != _beta_activation_identity(lic):
                 return False
             receipt = _read_beta_activation_receipt_unlocked()
             return bool(
                 receipt
-                and receipt.get("identity_sha256")
-                == _beta_activation_identity(current)
+                and receipt.get("identity_sha256") == current_identity
                 and receipt.get("skill_bundle_sha256") == bundle.sha256
             )
     except (

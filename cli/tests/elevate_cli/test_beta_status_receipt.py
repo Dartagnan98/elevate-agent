@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,7 @@ from elevate_cli.beta_provider_policy import (
     clear_beta_runtime_repair_state,
     mark_beta_runtime_repair_pending,
 )
+from elevate_cli import license as license_module
 from elevate_cli.web_routes import status as status_module
 from elevate_cli.web_routes.status import (
     _beta_runtime_receipt,
@@ -214,6 +216,67 @@ def test_beta_repair_gate_bypasses_a_cached_ready_status(monkeypatch):
         assert status_module._cached_status_payload() is None
     finally:
         clear_beta_runtime_repair_state()
+
+
+def test_beta_activation_status_survives_a_concurrent_token_rotation(
+    monkeypatch,
+    tmp_path,
+):
+    """A focus refresh must not flash the full-screen setup gate."""
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    root = tmp_path / ".elevate-beta"
+    root.mkdir()
+    stale = license_module.License(
+        access_token="old-access",
+        refresh_token="old-refresh",
+        license_id="license-1",
+        tier="builder",
+        email="agent@example.test",
+        expires_at=4_102_444_800,
+        entitlements=["real_estate_admin"],
+        entitlement_assertion="old-assertion",
+        subject="user-1",
+    )
+    rotated = license_module.License(
+        access_token="new-access",
+        refresh_token="new-refresh",
+        license_id=stale.license_id,
+        tier=stale.tier,
+        email=stale.email,
+        expires_at=stale.expires_at,
+        entitlements=list(stale.entitlements),
+        entitlement_assertion="new-assertion",
+        subject=stale.subject,
+    )
+    bundle_sha256 = "b" * 64
+    monkeypatch.setattr(license_module, "_beta_profile_root", lambda: root)
+    monkeypatch.setattr(
+        license_module,
+        "preflight_beta_license_store",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        license_module,
+        "read_verified_beta_license_snapshot",
+        lambda **_kwargs: rotated,
+    )
+    monkeypatch.setattr(
+        license_module,
+        "_read_beta_activation_receipt_unlocked",
+        lambda: {
+            "identity_sha256": license_module._beta_activation_identity(rotated),
+            "skill_bundle_sha256": bundle_sha256,
+        },
+    )
+    monkeypatch.setattr(
+        "elevate_cli.beta_skill_bundle.load_exact_beta_skill_bundle",
+        lambda: SimpleNamespace(sha256=bundle_sha256),
+    )
+
+    assert license_module.beta_activation_complete(stale) is True
+
+    rotated.entitlements = ["real_estate_admin", "real_estate_sales"]
+    assert license_module.beta_activation_complete(stale) is False
 
 
 @pytest.mark.parametrize("channel", ["latest", "Beta", "BETA", " beta"])
