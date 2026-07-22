@@ -45,6 +45,11 @@ test("after-pack hook clears extended attributes before Apple signing", async (t
   fs.writeFileSync(dataFile, Buffer.from([0, 1, 2, 3, 4, 5]));
   assert.equal(isSignableCode(dataFile), false);
 
+  const binaryLink = path.join(root, "Fixture-link");
+  fs.symlinkSync(fixture, binaryLink);
+  assert.equal(isSignableCode(binaryLink), false);
+  assert.equal(fs.lstatSync(binaryLink).isSymbolicLink(), true);
+
   const rewrite = spawnSync("/usr/bin/xattr", ["-w", "com.elevate.test", "present", fixture]);
   assert.equal(rewrite.status, 0);
   cleanSigningTarget(fixture);

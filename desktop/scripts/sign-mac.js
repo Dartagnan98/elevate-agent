@@ -22,6 +22,7 @@ function isMachO(filePath) {
 }
 
 function isSignableCode(filePath) {
+  if (fs.lstatSync(filePath).isSymbolicLink()) return false;
   const stat = fs.statSync(filePath);
   return stat.isDirectory() || (stat.isFile() && stat.size >= 4 && isMachO(filePath));
 }
