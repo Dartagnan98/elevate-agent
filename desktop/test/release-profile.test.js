@@ -198,6 +198,7 @@ test("electron-builder receives the selected app, protocol, feed, and updater id
   assert.deepEqual(stable.protocols[0].schemes, ["elevate"]);
   assert.equal(stable.publish[0].channel, "latest");
   assert.equal(stable.artifactName, "Elevate-${version}-${os}-${arch}.${ext}");
+  assert.equal(stable.mac.sign, "scripts/sign-mac.js");
   assert.equal(resolveReleaseProfile("latest").downloadAliasPrefix, "Elevate-latest");
 
   assert.equal(beta.productName, "Elevate Beta");
@@ -207,6 +208,7 @@ test("electron-builder receives the selected app, protocol, feed, and updater id
   assert.deepEqual(beta.protocols[0].schemes, ["elevate-beta"]);
   assert.equal(beta.publish[0].channel, "beta");
   assert.equal(beta.artifactName, "Elevate-Beta-${version}-${os}-${arch}.${ext}");
+  assert.equal(beta.mac.sign, "scripts/sign-mac.js");
   assert.equal(resolveReleaseProfile("beta").downloadAliasPrefix, "Elevate-Beta");
   assert.equal(beta.dmg.title, "Elevate Beta");
   const updaterCache = (config) =>

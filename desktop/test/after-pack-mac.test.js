@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const { default: afterPackMac, releaseArchitecture } = require("../scripts/after-pack-mac");
+const { cleanSigningTarget, isSignableCode } = require("../scripts/sign-mac");
 
 test("after-pack maps electron-builder numeric architecture enums", () => {
   assert.equal(releaseArchitecture(1), "x64");
@@ -38,6 +39,15 @@ test("after-pack hook clears extended attributes before Apple signing", async (t
   const read = spawnSync("/usr/bin/xattr", ["-p", "com.elevate.test", fixture]);
   assert.notEqual(read.status, 0);
   assert.equal(fs.statSync(fixture).mode & 0o777, 0o755);
+  assert.equal(isSignableCode(fixture), true);
+
+  const dataFile = path.join(root, "binary-formatted-data.dat");
+  fs.writeFileSync(dataFile, Buffer.from([0, 1, 2, 3, 4, 5]));
+  assert.equal(isSignableCode(dataFile), false);
+
+  const rewrite = spawnSync("/usr/bin/xattr", ["-w", "com.elevate.test", "present", fixture]);
+  assert.equal(rewrite.status, 0);
+  cleanSigningTarget(fixture);
 
   const sign = spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", fixture], { encoding: "utf8" });
   assert.equal(sign.status, 0, sign.stderr || sign.stdout);

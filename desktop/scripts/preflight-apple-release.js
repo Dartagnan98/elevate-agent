@@ -328,6 +328,7 @@ record(
 record("hardened runtime enabled", packageJson.build?.mac?.hardenedRuntime === true);
 record("electron-builder notarization enabled", packageJson.build?.mac?.notarize === true);
 record("macOS extended-attribute cleanup hook enabled", packageJson.build?.afterPack === "scripts/after-pack-mac.js");
+record("macOS per-target signing cleanup enabled", packageJson.build?.mac?.sign === "scripts/sign-mac.js");
 record("macOS minimum version pinned", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion === "12.0", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion || "missing");
 record("Developer ID targets configured", JSON.stringify(packageJson.build?.mac?.target || []).includes("dmg"));
 record("app icon present", exists("desktop/assets/icon.icns"));
