@@ -202,6 +202,22 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+LEAD_STATUS_GUIDANCE = (
+    "The leads pipeline is live operational data the user runs their business "
+    "from — lead_status reads and writes the same records the dashboard's "
+    "Leads view renders. Statuses are only useful if they reflect reality, so "
+    "reconcile them AS you work, not just when asked: when you read a "
+    "conversation and see where a lead actually stands, record it — "
+    "lead_status(action='classify') for buyer/seller/investor/dead calls, "
+    "action='heat' when interest has clearly warmed or cooled, "
+    "action='follow_up' when a thread needs a next touch, action='set' for "
+    "pipeline stage moves. A review that only reports findings in chat and "
+    "leaves the records stale is incomplete work — the user should be able to "
+    "trust the Leads view without rereading the conversations themselves. "
+    "Never invent a status a conversation doesn't support; observed evidence "
+    "only."
+)
+
 AGENT_BUS_GUIDANCE = (
     "The dashboard's Tasks and Approvals boards are live operational data in the "
     "account database — the agent_bus tool reads and writes the same rows the "
@@ -212,7 +228,12 @@ AGENT_BUS_GUIDANCE = (
     "reality. Anything that would send or change something on the user's "
     "behalf goes through an approval (created automatically by policy, or "
     "explicitly via create_approval) and is resolved on the dashboard only — "
-    "never act as if a pending approval were granted."
+    "never act as if a pending approval were granted. If waking or "
+    "dispatching another agent is blocked or unavailable in this runtime, "
+    "that is not the end of the task: do the work yourself in this session "
+    "with the tools you do have, and keep the card's status truthful about "
+    "what actually got done. Park a task as blocked only when no tool "
+    "available to you can move it."
 )
 
 KANBAN_GUIDANCE = (

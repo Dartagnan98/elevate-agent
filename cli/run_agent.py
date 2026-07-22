@@ -9198,6 +9198,9 @@ class AIAgent:
         if "agent_bus" in self.valid_tool_names:
             from agent.prompt_builder import AGENT_BUS_GUIDANCE
             tool_guidance.append(AGENT_BUS_GUIDANCE)
+        if "lead_status" in self.valid_tool_names:
+            from agent.prompt_builder import LEAD_STATUS_GUIDANCE
+            tool_guidance.append(LEAD_STATUS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
