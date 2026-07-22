@@ -29,6 +29,23 @@ function releaseArchitecture(value) {
 
 exports.releaseArchitecture = releaseArchitecture;
 
+function copyBundleWithoutMetadata(appPath) {
+  const appOutDir = path.dirname(appPath);
+  const sourcePath = path.join(
+    appOutDir,
+    `.${path.basename(appPath)}.elevate-source-${process.pid}-${Date.now()}`,
+  );
+  fs.renameSync(appPath, sourcePath);
+  const copy = spawnSync("/bin/cp", ["-RX", sourcePath, appPath], { encoding: "utf8" });
+  if (copy.status !== 0) {
+    const detail = String(copy.stderr || copy.stdout || copy.error?.message || "cp failed").trim();
+    fs.rmSync(appPath, { recursive: true, force: true });
+    fs.renameSync(sourcePath, appPath);
+    throw new Error(`[after-pack] failed to copy app without macOS metadata${detail ? `: ${detail}` : ""}`);
+  }
+  fs.rmSync(sourcePath, { recursive: true, force: true });
+}
+
 exports.default = async function afterPackMac(context) {
   if (context.electronPlatformName !== "darwin") return;
 
@@ -39,7 +56,9 @@ exports.default = async function afterPackMac(context) {
     const detail = (result.stderr || result.stdout || "").trim();
     throw new Error(`[after-pack] failed to clear macOS extended attributes${detail ? `: ${detail}` : ""}`);
   }
-  console.log(`[after-pack] cleared macOS extended attributes from ${context.appOutDir}`);
+  const appPath = packedAppPath(context.appOutDir);
+  copyBundleWithoutMetadata(appPath);
+  console.log(`[after-pack] cleared macOS metadata from ${context.appOutDir}`);
 
   const sourceReceiptId = String(process.env.ELEVATE_SOURCE_RECEIPT_ID || "").trim();
   if (!sourceReceiptId) {
@@ -66,7 +85,6 @@ exports.default = async function afterPackMac(context) {
     sourceReceiptId,
     repoRoot,
   });
-  const appPath = packedAppPath(context.appOutDir);
   const expectedBundleName = source.release?.profile?.appBundleName;
   if (!expectedBundleName || path.basename(appPath) !== expectedBundleName) {
     throw new Error(
