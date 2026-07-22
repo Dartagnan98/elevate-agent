@@ -27,7 +27,7 @@ test("after-pack hook clears extended attributes before Apple signing", async (t
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixture = path.join(root, "Fixture.app", "Contents", "MacOS", "Fixture");
   fs.mkdirSync(path.dirname(fixture), { recursive: true });
-  fs.writeFileSync(fixture, "signed payload");
+  fs.copyFileSync("/bin/echo", fixture);
   fs.chmodSync(fixture, 0o755);
 
   const write = spawnSync("/usr/bin/xattr", ["-w", "com.elevate.test", "present", fixture]);
@@ -38,4 +38,7 @@ test("after-pack hook clears extended attributes before Apple signing", async (t
   const read = spawnSync("/usr/bin/xattr", ["-p", "com.elevate.test", fixture]);
   assert.notEqual(read.status, 0);
   assert.equal(fs.statSync(fixture).mode & 0o777, 0o755);
+
+  const sign = spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", fixture], { encoding: "utf8" });
+  assert.equal(sign.status, 0, sign.stderr || sign.stdout);
 });

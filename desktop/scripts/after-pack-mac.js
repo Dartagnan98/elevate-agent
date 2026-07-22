@@ -46,6 +46,52 @@ function copyBundleWithoutMetadata(appPath) {
   fs.rmSync(sourcePath, { recursive: true, force: true });
 }
 
+const MACH_O_MAGICS = new Set([
+  "feedface", "feedfacf", "cefaedfe", "cffaedfe",
+  "cafebabe", "bebafeca", "cafebabf", "bfbafeca",
+]);
+
+function isMachO(filePath) {
+  const descriptor = fs.openSync(filePath, "r");
+  try {
+    const magic = Buffer.allocUnsafe(4);
+    return fs.readSync(descriptor, magic, 0, magic.length, 0) === magic.length
+      && MACH_O_MAGICS.has(magic.toString("hex"));
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function copyMachOFilesWithoutMetadata(rootPath) {
+  let cleaned = 0;
+
+  function visit(currentPath) {
+    const stat = fs.lstatSync(currentPath);
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(currentPath)) visit(path.join(currentPath, entry));
+      return;
+    }
+    if (!stat.isFile() || stat.size < 4 || !isMachO(currentPath)) return;
+
+    const cleanPath = path.join(
+      path.dirname(currentPath),
+      `.${path.basename(currentPath)}.elevate-clean-${process.pid}-${cleaned}`,
+    );
+    const copy = spawnSync("/bin/cp", ["-pX", currentPath, cleanPath], { encoding: "utf8" });
+    if (copy.status !== 0) {
+      fs.rmSync(cleanPath, { force: true });
+      const detail = String(copy.stderr || copy.stdout || copy.error?.message || "cp failed").trim();
+      throw new Error(`[after-pack] failed to clean Mach-O metadata for ${currentPath}${detail ? `: ${detail}` : ""}`);
+    }
+    fs.renameSync(cleanPath, currentPath);
+    cleaned += 1;
+  }
+
+  visit(rootPath);
+  return cleaned;
+}
+
 exports.default = async function afterPackMac(context) {
   if (context.electronPlatformName !== "darwin") return;
 
@@ -58,7 +104,10 @@ exports.default = async function afterPackMac(context) {
   }
   const appPath = packedAppPath(context.appOutDir);
   copyBundleWithoutMetadata(appPath);
-  console.log(`[after-pack] cleared macOS metadata from ${context.appOutDir}`);
+  const cleanedMachOFiles = copyMachOFilesWithoutMetadata(appPath);
+  console.log(
+    `[after-pack] cleared macOS metadata from ${context.appOutDir} (${cleanedMachOFiles} Mach-O files)`,
+  );
 
   const sourceReceiptId = String(process.env.ELEVATE_SOURCE_RECEIPT_ID || "").trim();
   if (!sourceReceiptId) {
