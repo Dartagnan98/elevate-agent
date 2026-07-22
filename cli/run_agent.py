@@ -18022,6 +18022,28 @@ class AIAgent:
         # action to retry exactly. Their rejection therefore cannot be cleared
         # inside this user turn by a merely same-name or unrelated success.
         unfingerprintable_tool_failures: Dict[str, str] = {}
+        # Effect-policy refusals are typed, expected outcomes -- the framework
+        # declined the call and told the model so; no handler ran and nothing
+        # is broken. Counting them as execution failures made every turn that
+        # probed a sealed action open with "The task did not complete because
+        # tool execution failed" even when the substantive work succeeded
+        # (observed live on 1.2.81: board writes landed, leads updated, and
+        # the summary still claimed non-completion). They get their own
+        # ledger: disclosed factually in the final text, never framed as a
+        # failed task.
+        policy_refused_tool_calls: Dict[tuple[str, str], str] = {}
+
+        def _result_is_policy_refusal(result_text: Any) -> bool:
+            if not isinstance(result_text, str):
+                return False
+            try:
+                payload = json.loads(result_text.strip())
+            except Exception:
+                return False
+            return (
+                isinstance(payload, dict)
+                and payload.get("shadow_status") == "effect_policy_block"
+            )
         pending_tool_obligations: Dict[str, Dict[str, str]] = {}
         action_obligation_satisfied = False
         consumed_action_tool_fingerprints: set[tuple[str, str]] = set()
@@ -18147,7 +18169,18 @@ class AIAgent:
                         or direct_async_mutation
                     )
                 )
-                if is_failure or transition_failed:
+                if (
+                    is_failure
+                    and not transition_failed
+                    and _result_is_policy_refusal(result_text)
+                ):
+                    # Declined, not failed: no handler ran, the model was told,
+                    # and the work it did complete stands on its own evidence.
+                    action_label = (
+                        f"{fingerprint[0]}({action})" if action else fingerprint[0]
+                    )
+                    policy_refused_tool_calls[fingerprint] = action_label
+                elif is_failure or transition_failed:
                     failed_actions[fingerprint] = (
                         f"{fingerprint[0]}"
                         + (
@@ -18207,6 +18240,13 @@ class AIAgent:
             return "; ".join(
                 obligation["summary"]
                 for obligation in pending_tool_obligations.values()
+            )
+
+        def _policy_refusal_summary() -> Optional[str]:
+            if not policy_refused_tool_calls:
+                return None
+            return "; ".join(
+                sorted(set(policy_refused_tool_calls.values()))
             )
 
         steer_cut = False
@@ -22553,6 +22593,24 @@ class AIAgent:
                         final_response = action_obligation_failure
                     elif action_obligation_needs_input:
                         final_response = action_obligation_needs_input
+                    else:
+                        # No execution failures, nothing pending, obligations
+                        # met -- the turn genuinely completed. If sealed
+                        # actions were declined along the way, disclose them
+                        # factually right above the model's own summary so a
+                        # claim about a declined action is contradicted inline,
+                        # without falsely framing the whole task as failed.
+                        _refused = _policy_refusal_summary()
+                        if _refused:
+                            _note = (
+                                "Note: some actions were declined by the "
+                                f"execution policy and were not performed: {_refused}."
+                            )
+                            final_response = (
+                                f"{_note}\n\n{final_response}"
+                                if final_response
+                                else _note
+                            )
 
                     # Policy/tool summaries can replace the model text after
                     # the first canonicalization pass.  Sanitize that final
