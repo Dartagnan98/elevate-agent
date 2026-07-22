@@ -293,7 +293,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         (relative) => path.join(REPO, relative),
       ),
       ...pytest(
-        1356,
+        1365,
         "tests/test_model_tools.py",
         "tests/tools/test_registry_shadow_execution.py",
         "tests/tools/test_terminal_approval_effect_receipts.py",
