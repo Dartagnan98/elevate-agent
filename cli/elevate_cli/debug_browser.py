@@ -349,6 +349,11 @@ def launch_chrome(wait: bool = True) -> bool:
             f"--remote-debugging-port={CDP_PORT}",
             "--remote-allow-origins=*",
             f"--user-data-dir={debug_profile_dir()}",
+            # The active source profile is always cloned into ``Default``.
+            # Its copied Local State still names the original directory (for
+            # example ``Profile 4``), so Chrome otherwise opens the profile
+            # picker and exposes no normal page target over CDP.
+            "--profile-directory=Default",
             "--no-first-run",
             "--no-default-browser-check",
             "--restore-last-session",

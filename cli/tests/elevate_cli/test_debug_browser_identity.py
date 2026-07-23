@@ -53,3 +53,15 @@ def test_reachable_managed_browser_repairs_persistent_setup(monkeypatch):
 
     assert db.ensure_debug_browser() == db.CDP_URL
     assert calls == ["launch-agent", ("config", True)]
+
+
+def test_debug_browser_launches_the_cloned_default_profile(tmp_path, monkeypatch):
+    launched = []
+    checks = iter([False, True])
+    monkeypatch.setattr(db, "cdp_is_up", lambda: next(checks))
+    monkeypatch.setattr(db, "chrome_binary", lambda: Path("/tmp/Google Chrome"))
+    monkeypatch.setattr(db, "debug_profile_dir", lambda: tmp_path / "chrome-debug")
+    monkeypatch.setattr(db.subprocess, "Popen", lambda args, **kwargs: launched.append(args))
+
+    assert db.launch_chrome(wait=True) is True
+    assert "--profile-directory=Default" in launched[0]
