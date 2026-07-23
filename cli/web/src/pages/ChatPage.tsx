@@ -8675,7 +8675,24 @@ export default function ChatPage() {
   const canSend =
     (!!input.trim() || hasReadyAttachment) &&
     (state === "open" ? !!(sessionId || draftChat) : state !== "error" && state !== "closed");
-  const canPickModel = state === "open" && !!sessionId;
+  // Realtor Beta intentionally has no in-chat model picker (the gateway
+  // raises beta_app_onboarding_required before parsing) — hide the chip
+  // instead of offering a control that can only error. Model changes live
+  // in AI settings/onboarding on that build.
+  const [realtorBetaRuntime, setRealtorBetaRuntime] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void import("@/lib/beta-runtime").then(async ({ isRealtorBetaStatus }) => {
+      try {
+        const status = await api.getStatus();
+        if (!cancelled) setRealtorBetaRuntime(isRealtorBetaStatus(status));
+      } catch {
+        /* unknown runtime: keep the picker available (stable behavior) */
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const canPickModel = state === "open" && !!sessionId && !realtorBetaRuntime;
   const traceMessageIds = useMemo(() => {
     const ids = new Set<string>();
     for (const trace of activityTrace) {

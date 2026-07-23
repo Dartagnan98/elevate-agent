@@ -50,6 +50,10 @@ WORKSPACE_EFFECT_NAMES = {
     "write_local:working_state",
     "write_local:memory",
     "write_local:activity",
+    # 2026-07-23 third batch: asking permission (inert until the human
+    # resolves it on the dashboard) and the agent's own liveness row.
+    "write_local:approvals",
+    "write_local:heartbeat",
     "write_local:skill_usage",
     "write_local:browser",
     "write_external:browser",

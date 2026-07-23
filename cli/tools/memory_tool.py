@@ -786,6 +786,30 @@ def dispatch_builtin_memory_via_registry(
     )
 
 
+def _memory_effect_resolver(args: dict):
+    """Config-bounded effect declaration (ERB-404: declare only what's provable).
+
+    The write floor depends on the configured memory provider, not the action:
+    with no provider or a local one (holographic), both the store write and the
+    ``on_memory_write`` bridge stay on this machine — an honest
+    ``write_local:memory``. Any external provider (honcho/mem0/…) makes the
+    bridge surface unprovable, so it stays UNKNOWN and fails closed exactly as
+    before. Realtor Beta pins memory local, so this unblocks the agent's own
+    memory there without widening any external configuration.
+    """
+    from tools.approval import EffectKind
+
+    try:
+        from elevate_cli.config import load_config
+
+        provider = str((load_config().get("memory") or {}).get("provider") or "").strip().lower()
+    except Exception:
+        return {EffectKind.UNKNOWN}
+    if provider in ("", "local", "holographic"):
+        return {"write_local:memory"}
+    return {EffectKind.UNKNOWN}
+
+
 registry.register(
     name="memory",
     toolset="memory",
@@ -793,6 +817,7 @@ registry.register(
     handler=_registered_memory_tool_handler,
     check_fn=check_memory_requirements,
     emoji="🧠",
+    effect_resolver=_memory_effect_resolver,
 )
 
 

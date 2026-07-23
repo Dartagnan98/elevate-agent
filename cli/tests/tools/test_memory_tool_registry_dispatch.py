@@ -184,7 +184,7 @@ class TestMemoryRegistryDispatchParity:
         assert result["op"] == "add"
         assert captured["name"] == "memory"
         assert captured["started"] is True
-        assert captured["effects"] == ["unknown"]
+        assert captured["effects"] == ["write_local:memory"]  # config-bounded: local provider
         assert captured["context"].session_id == "session-memory"
         assert captured["context"].invocation_id == "call-memory-shadow"
         assert captured["context"].accepted_turn_id == "turn-memory-routing"
@@ -659,12 +659,13 @@ class TestMemoryRegistryDispatchAdversarial:
 class TestMemoryRegistryDeclaration:
     def test_handler_swapped_to_companion_backed_unknown_registration(self):
         """The registered handler is the companion-backed handler and effects
-        stay UNKNOWN (``effects=None``, no resolver) — no static widening: a
-        restricted policy fails closed rather than assuming a bounded write."""
+        are CONFIG-BOUNDED (2026-07-23): a local/empty memory provider proves
+        write_local:memory; an external provider still resolves UNKNOWN and a
+        restricted policy fails closed — no static widening."""
         entry = registry.get_entry("memory")
         assert entry is not None
         assert entry.handler is memory_module._registered_memory_tool_handler
         assert entry.effects is None
-        assert entry.effect_resolver is None
+        assert entry.effect_resolver is memory_module._memory_effect_resolver
         resolved = registry.resolve_effects("memory", _ADD_ARGS)
-        assert sorted(e.kind.value for e in resolved) == ["unknown"]
+        assert sorted(str(e) for e in resolved) == ["write_local:memory"]

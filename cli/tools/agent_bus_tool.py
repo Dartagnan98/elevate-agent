@@ -1447,6 +1447,15 @@ def _agent_bus_effect_resolver(args: dict):
         return {"write_local:activity"}
     if act in {"list_activity", "read_activity"}:
         return {"read:activity"}
+    # * create_approval writes ONE surface_approvals row that only the human
+    #   can resolve on the dashboard — it is the sanctioned "ask permission"
+    #   channel the guidance points the agent at. Blocking it as UNKNOWN made
+    #   the agent unable to request approval at all.
+    # * update_heartbeat writes the agent's own surface_state liveness row.
+    if act in {"create_approval", "approval_create"}:
+        return {"write_local:approvals"}
+    if act in {"update_heartbeat", "heartbeat"}:
+        return {"write_local:heartbeat"}
     return {EffectKind.UNKNOWN}
 
 

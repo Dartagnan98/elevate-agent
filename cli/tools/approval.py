@@ -1459,6 +1459,14 @@ _WORKSPACE_EFFECTS = frozenset({
     # appends a "memory_written" row so the dashboard feed reflects reality.
     # Self-directed, local, reversible; same family as memory/skill_usage.
     Effect(EffectKind.WRITE_LOCAL, "activity"),
+    # Requesting permission (surface_approvals) is the sanctioned escalation
+    # channel: the row is inert until the human resolves it on the dashboard,
+    # so creating one can never itself act on the user's behalf. Blocking it
+    # left the agent unable to ask. Resolution stays dashboard-only.
+    Effect(EffectKind.WRITE_LOCAL, "approvals"),
+    # The agent's own liveness row (surface_state heartbeat) -- local,
+    # self-directed, continuously overwritten; same family as activity.
+    Effect(EffectKind.WRITE_LOCAL, "heartbeat"),
     Effect(EffectKind.WRITE_LOCAL, "skill_usage"),
     # --- autonomous browser ------------------------------------------------
     # The Realtor Beta ships the browser as an agent-owned execution surface,
