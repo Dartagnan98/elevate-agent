@@ -1434,6 +1434,19 @@ def _agent_bus_effect_resolver(args: dict):
         return {"write_local:memory", "write_local:activity"}
     if act in {"list_memory", "memory"}:
         return {"read:memory"}
+    # Third batch, 2026-07-23: routine QA logging observed blocking live turns
+    # (the response layer then injects "some actions were declined…" into user
+    # answers). Verified against the handlers before declaring:
+    #
+    # * post_activity/log_event/activity -> _append_activity(): a local append
+    #   to the agent's own surface_activity journal — the exact scope the
+    #   ceiling already admits for write_memory's journal row.
+    # * list_activity/read_activity -> _read_activity(): reads the same
+    #   journal back. Same read family as the batch-2 reads above.
+    if act in {"post_activity", "log_event", "activity"}:
+        return {"write_local:activity"}
+    if act in {"list_activity", "read_activity"}:
+        return {"read:activity"}
     return {EffectKind.UNKNOWN}
 
 

@@ -215,7 +215,11 @@ LEAD_STATUS_GUIDANCE = (
     "leaves the records stale is incomplete work — the user should be able to "
     "trust the Leads view without rereading the conversations themselves. "
     "Never invent a status a conversation doesn't support; observed evidence "
-    "only."
+    "only. When the record genuinely supports no status — no conversation "
+    "history, no recorded outcome — do not loop on it: ask the user for the "
+    "missing outcome ONCE, park any related board card as blocked with that "
+    "question as the reason, and move on. Re-raise it only when new evidence "
+    "or an answer arrives, never as a repeated reminder on unrelated turns."
 )
 
 AGENT_BUS_GUIDANCE = (
