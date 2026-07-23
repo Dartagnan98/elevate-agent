@@ -284,14 +284,55 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
   }, [bridge, refresh]);
 
   return (
-    <PanelShell
-      icon={<Globe2 className="h-4.5 w-4.5" />}
-      title="Browser"
-      subtitle="Live browser shared with your Elevate agent"
-      actions={
+    <div className="@container flex h-full min-h-[320px] flex-col overflow-hidden rounded-xl border border-[var(--chat-border)] bg-[var(--chat-bg)] text-[var(--chat-text)] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.04)_inset]">
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--chat-border)] px-2 py-2">
+        <Button
+          aria-label="Back"
+          className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+          disabled={!active?.canGoBack}
+          onClick={() => active && void bridge?.back(active.id)}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          aria-label="Forward"
+          className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+          disabled={!active?.canGoForward}
+          onClick={() => active && void bridge?.forward(active.id)}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <ArrowRight className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          aria-label="Reload"
+          className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+          onClick={() => active && void bridge?.reload(active.id)}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <RefreshCw className={cn("h-3.5 w-3.5", active?.loading && "animate-spin")} />
+        </Button>
+        <input
+          aria-label="Browser address"
+          className="h-8 min-w-0 flex-1 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 text-xs text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)] focus:border-[var(--chat-accent)]"
+          data-browser-address="true"
+          onChange={(event) => setAddress(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void navigate();
+          }}
+          placeholder="Search or enter a website"
+          spellCheck={false}
+          value={address}
+        />
         <Button
           aria-label="New browser tab"
-          className="h-7 w-7 rounded-[7px] p-0"
+          className="h-7 w-7 shrink-0 rounded-[7px] p-0"
           onClick={() => void newTab()}
           size="sm"
           type="button"
@@ -299,97 +340,57 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
         >
           <Plus className="h-4 w-4" />
         </Button>
-      }
-      onClose={onClose}
-    >
-      <div className="flex h-full min-h-[320px] flex-col bg-[var(--chat-bg)]">
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--chat-border)] px-2 py-2">
-          <Button
-            aria-label="Back"
-            className="h-7 w-7 shrink-0 rounded-[7px] p-0"
-            disabled={!active?.canGoBack}
-            onClick={() => active && void bridge?.back(active.id)}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            aria-label="Forward"
-            className="h-7 w-7 shrink-0 rounded-[7px] p-0"
-            disabled={!active?.canGoForward}
-            onClick={() => active && void bridge?.forward(active.id)}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            aria-label="Reload"
-            className="h-7 w-7 shrink-0 rounded-[7px] p-0"
-            onClick={() => active && void bridge?.reload(active.id)}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            <RefreshCw className={cn("h-3.5 w-3.5", active?.loading && "animate-spin")} />
-          </Button>
-          <input
-            aria-label="Browser address"
-            className="h-8 min-w-0 flex-1 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 text-xs text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)] focus:border-[var(--chat-accent)]"
-            data-browser-address="true"
-            onChange={(event) => setAddress(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void navigate();
-            }}
-            placeholder="Search or enter a website"
-            spellCheck={false}
-            value={address}
-          />
-        </div>
-
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--chat-border)] px-2 py-1.5">
-          {tabs.map((tab) => (
-            <div
-              className={cn(
-                "group flex max-w-[180px] shrink-0 items-center rounded-[7px] border text-[11px]",
-                tab.active
-                  ? "border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-text)]"
-                  : "border-transparent text-[var(--chat-muted)] hover:bg-[var(--chat-surface)]",
-              )}
-              key={tab.id}
-            >
-              <button
-                className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pl-2"
-                onClick={() => void bridge?.selectTab(tab.id)}
-                type="button"
-              >
-                <Globe2 className="h-3 w-3 shrink-0" />
-                <span className="truncate">{tab.title || tab.url || "New tab"}</span>
-              </button>
-              <button
-                aria-label="Close tab"
-                className="mx-1 rounded-sm px-0.5 opacity-0 hover:bg-[var(--chat-border)] focus:opacity-100 group-hover:opacity-100"
-                onClick={() => void bridge?.closeTab(tab.id)}
-                type="button"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-
-        {error ? (
-          <div className="shrink-0 border-b border-[color-mix(in_srgb,var(--chat-danger)_30%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_8%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-danger)]">
-            {error}
-          </div>
-        ) : null}
-
-        <div ref={holeRef} className="min-h-0 flex-1 bg-white" />
+        <Button
+          aria-label="Close panel"
+          className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+          onClick={onClose}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <X className="h-4 w-4" />
+        </Button>
       </div>
-    </PanelShell>
+
+      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--chat-border)] px-2 py-1.5">
+        {tabs.map((tab) => (
+          <div
+            className={cn(
+              "group flex max-w-[180px] shrink-0 items-center rounded-[7px] border text-[11px]",
+              tab.active
+                ? "border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-text)]"
+                : "border-transparent text-[var(--chat-muted)] hover:bg-[var(--chat-surface)]",
+            )}
+            key={tab.id}
+          >
+            <button
+              className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pl-2"
+              onClick={() => void bridge?.selectTab(tab.id)}
+              type="button"
+            >
+              <Globe2 className="h-3 w-3 shrink-0" />
+              <span className="truncate">{tab.title || tab.url || "New tab"}</span>
+            </button>
+            <button
+              aria-label="Close tab"
+              className="mx-1 rounded-sm px-0.5 opacity-0 hover:bg-[var(--chat-border)] focus:opacity-100 group-hover:opacity-100"
+              onClick={() => void bridge?.closeTab(tab.id)}
+              type="button"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {error ? (
+        <div className="shrink-0 border-b border-[color-mix(in_srgb,var(--chat-danger)_30%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_8%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-danger)]">
+          {error}
+        </div>
+      ) : null}
+
+      <div ref={holeRef} className="min-h-0 flex-1 bg-white" />
+    </div>
   );
 }
 
