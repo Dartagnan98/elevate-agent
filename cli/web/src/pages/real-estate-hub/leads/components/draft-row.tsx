@@ -7,6 +7,15 @@ export function draftHasRegisteredTransport(draft: LeadsDraft): boolean {
   return hasRegisteredDraftTransport(draft.channel);
 }
 
+/** Tomorrow 9:00 local, as a datetime-local input value. */
+function defaultScheduleValue(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export function DraftRow({
   draft,
   selected,
@@ -35,13 +44,15 @@ export function DraftRow({
     sourceBody: draft.body,
     value: draft.body,
   }));
+  const [schedulerOpen, setSchedulerOpen] = useState(false);
+  const [scheduleValue, setScheduleValue] = useState(() => defaultScheduleValue());
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
   const editText = editState.draftId === draft.id && editState.sourceBody === draft.body
     ? editState.value
     : draft.body;
   const setEditText = (value: string) => setEditState({ draftId: draft.id, sourceBody: draft.body, value });
 
   const dirty = editText.trim() !== draft.body.trim();
-  const sendable = draftHasRegisteredTransport(draft);
   const exactIdentityReady = Boolean(draft.sourceId && draft.threadId && draft.taskId);
   const approveBlockedReason = draftApprovalBlockedReason(draft);
   // Always act on the CURRENT edited text — approving with the original body was
@@ -144,27 +155,35 @@ export function DraftRow({
           >
             {busy ? "…" : "Skip"}
           </button>
-          <span
-            className="lb-schedule-unavailable"
-            title={!exactIdentityReady
-              ? approveBlockedReason ?? undefined
-              : sendable
-                ? "Scheduled sending is not yet persisted by the delivery service. Approving would send immediately."
-                : `${draft.channel || "This"} transport is not registered, so Elevate will not claim this draft was sent.`}
-          >
-            {!exactIdentityReady
-              ? "Exact draft identity unavailable"
-              : sendable
-                ? "Schedule unavailable"
-                : `${draft.channel || "Message"} transport unavailable`}
-            <span className="sr-only">
+          {approveBlockedReason ? (
+            <span
+              className="lb-schedule-unavailable"
+              title={approveBlockedReason}
+            >
               {!exactIdentityReady
-                ? ". This draft cannot be approved until exact source, thread, and task identifiers are available."
-                : sendable
-                  ? ". Scheduled sending is not yet persisted, so approving would send immediately."
+                ? "Exact draft identity unavailable"
+                : `${draft.channel || "Message"} transport unavailable`}
+              <span className="sr-only">
+                {!exactIdentityReady
+                  ? ". This draft cannot be approved until exact source, thread, and task identifiers are available."
                   : ". This draft cannot be approved until a real delivery transport is connected."}
+              </span>
             </span>
-          </span>
+          ) : (
+            <button
+              type="button"
+              className="lb-btn ghost sm lb-draft-later"
+              aria-expanded={schedulerOpen}
+              disabled={busy || !onAction}
+              onClick={(e) => {
+                e.stopPropagation();
+                setScheduleError(null);
+                setSchedulerOpen((open) => !open);
+              }}
+            >
+              Send later ▾
+            </button>
+          )}
           <button
             type="button"
             className="lb-btn primary sm"
@@ -178,6 +197,47 @@ export function DraftRow({
             {busy ? "…" : approveBlockedReason ? "Cannot send" : "Approve"}
           </button>
       </div>
+      {schedulerOpen && !approveBlockedReason && (
+        <div className="lb-draft-scheduler" onClick={(e) => e.stopPropagation()}>
+          <label className="lb-draft-scheduler-when">
+            <span>Hold the send until</span>
+            <input
+              type="datetime-local"
+              value={scheduleValue}
+              min={new Date().toISOString().slice(0, 16)}
+              onChange={(e) => { setScheduleValue(e.target.value); setScheduleError(null); }}
+            />
+          </label>
+          <button
+            type="button"
+            className="lb-btn primary sm"
+            disabled={busy || !onAction}
+            onClick={() => {
+              const when = new Date(scheduleValue);
+              if (Number.isNaN(when.getTime()) || when.getTime() <= Date.now()) {
+                setScheduleError("Pick a date and time in the future.");
+                return;
+              }
+              setSchedulerOpen(false);
+              onAction?.("approve", editedDraft, when.toISOString());
+            }}
+          >
+            {busy ? "…" : "Schedule"}
+          </button>
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy}
+            onClick={() => setSchedulerOpen(false)}
+          >
+            Cancel
+          </button>
+          {scheduleError && <span className="lb-draft-scheduler-error" role="alert">{scheduleError}</span>}
+          <span className="lb-draft-scheduler-note mono">
+            Delivered by the next sender run after the chosen time.
+          </span>
+        </div>
+      )}
     </div>
   );
 }

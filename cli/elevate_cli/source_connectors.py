@@ -227,6 +227,8 @@ from elevate_cli.source_connector_modules.source_actions import (
     _thread_draft_template_state,
     update_profile_favorite,
     update_profile_state,
+    update_profile_tags,
+    update_profile_top25,
     update_source_task_state,
     update_source_thread_state,
 )

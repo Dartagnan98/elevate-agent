@@ -16,6 +16,7 @@ Every mutation writes a paired row into the ``events`` audit log via
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Iterable
 
@@ -109,6 +110,10 @@ _VALID_SIDES_FOR_ADMIN = {"buyer", "listing"}
 _PIPELINE_STATUS_VALUES = {
     "new_lead", "follow_up", "ghosting", "dead",
     "closed_seller", "closed_buyer",
+    # CRM redesign (migration 0035): the realtor pipeline. Legacy values
+    # above stay valid; the UI maps them onto these stages.
+    "attempted_contact", "prospect", "client", "pending_deal",
+    "closed", "referred", "realtor_contact", "trash",
 }
 _PIPELINE_STATUS_SET_BY = {"operator", "ai"}
 
@@ -768,6 +773,98 @@ def set_lead_profile_favorite(
         "favoritedBy": row["favorited_by"],
         "updatedAt": row["updated_at"],
     }
+
+
+def set_lead_profile_top25(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    *,
+    top25: bool,
+    contact_id: str | None = None,
+    actor: str = "operator:leads-ui",
+) -> dict[str, Any]:
+    """Set or clear the Top 25 flag for a source-inbox profile (migration 0035).
+
+    Same UI-scoped contract as :func:`set_lead_profile_favorite` — it does not
+    change heat, follow-up, pipeline status, or CRM/source state. The admin
+    Top 25 view filters ``WHERE top25 = 1``.
+    """
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profile_id is required")
+
+    cid = str(contact_id or "").strip() or None
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO lead_profile_flags (
+            profile_id, contact_id, favorite, top25, top25_at, updated_at
+        ) VALUES (?, ?, 0, ?, ?, ?)
+        ON CONFLICT (profile_id) DO UPDATE SET
+            contact_id = COALESCE(EXCLUDED.contact_id, lead_profile_flags.contact_id),
+            top25 = EXCLUDED.top25,
+            top25_at = CASE
+                WHEN EXCLUDED.top25 = 1
+                    THEN COALESCE(lead_profile_flags.top25_at, EXCLUDED.top25_at)
+                ELSE NULL
+            END,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (pid, cid, 1 if top25 else 0, now if top25 else None, now),
+    )
+    row = conn.execute(
+        """
+        SELECT profile_id, contact_id, top25, top25_at, updated_at
+        FROM lead_profile_flags
+        WHERE profile_id = ?
+        """,
+        (pid,),
+    ).fetchone()
+    return {
+        "profileId": row["profile_id"],
+        "contactId": row["contact_id"],
+        "top25": bool(row["top25"]),
+        "top25At": row["top25_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def set_contact_tags(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    tags: Iterable[str],
+) -> list[str]:
+    """Replace the contact's tag set (migration 0035, ``contacts.tags_json``)."""
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+    cleaned = sorted({str(t).strip() for t in tags if str(t).strip()})
+    conn.execute(
+        "UPDATE contacts SET tags_json = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(cleaned, ensure_ascii=False), now_iso(), contact_id),
+    )
+    return cleaned
+
+
+def set_contact_search_criteria(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    criteria: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Persist the contact's saved-search criteria (migration 0035)."""
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+    payload = None
+    if criteria is not None:
+        if not isinstance(criteria, dict):
+            raise ValueError("criteria must be an object")
+        payload = json.dumps(criteria, ensure_ascii=False)
+    conn.execute(
+        "UPDATE contacts SET search_criteria_json = ?, updated_at = ? WHERE id = ?",
+        (payload, now_iso(), contact_id),
+    )
+    return criteria
 
 
 def set_pipeline_status(

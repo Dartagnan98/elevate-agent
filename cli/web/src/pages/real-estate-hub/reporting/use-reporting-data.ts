@@ -15,7 +15,12 @@ const REPORTING_SOURCE_LIMIT = 500;
 export const REPORTING_REQUEST_TIMEOUT_MS = 12_000;
 export const REPORTING_AUTO_REFRESH_MS = 120_000;
 
-const EMPTY_INPUTS: ReportingSnapshotInput = { inbox: null, sends: null, deals: null };
+const EMPTY_INPUTS: ReportingSnapshotInput = {
+  inbox: null,
+  sends: null,
+  deals: null,
+  goals: null,
+};
 
 export function withReportingTimeout<T>(
   request: Promise<T>,
@@ -67,6 +72,7 @@ export function useReportingData() {
         api.getAdminDeals({ status: null, limit: REPORTING_DEAL_LIMIT }),
         "Closed deals",
       ),
+      withReportingTimeout(api.getCrmGoals(), "Goals"),
     ]);
 
     if (!mounted.current || sequence !== requestSequence.current) return;

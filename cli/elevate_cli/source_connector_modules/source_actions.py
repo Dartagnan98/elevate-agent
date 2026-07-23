@@ -164,6 +164,98 @@ def update_profile_favorite(
     return source_connectors.build_source_inbox_response(config) if return_inbox else {"ok": True}
 
 
+def update_profile_top25(
+    profile_id: str,
+    *,
+    top25: bool,
+    contact_id: str | None = None,
+    config: dict[str, Any] | None = None,
+    return_inbox: bool = True,
+) -> JsonRecord:
+    """Persist the operator-set /leads Top 25 flag for a profile (migration 0035)."""
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profileId is required")
+
+    from elevate_cli.data import connect, set_lead_profile_top25
+
+    with connect() as conn:
+        set_lead_profile_top25(
+            conn,
+            pid,
+            top25=bool(top25),
+            contact_id=contact_id,
+            actor="operator:leads-ui",
+        )
+    source_connectors = _source_connectors()
+    config = config or source_connectors.load_config()
+    return source_connectors.build_source_inbox_response(config) if return_inbox else {"ok": True}
+
+
+def _resolve_profile_contact_id(conn, profile_id: str) -> str | None:
+    """Resolve a source-inbox profile id to a contacts row id.
+
+    Same resolution the pipeline-status path uses: a contact UUID passes
+    through; ``email:<addr>`` / ``phone:<number>`` match on the verifier.
+    """
+    from elevate_cli.data import get_contact
+
+    pid = str(profile_id or "").strip()
+    if not pid:
+        return None
+    if get_contact(conn, pid) is not None:
+        return pid
+    if ":" in pid:
+        kind, _, value = pid.partition(":")
+        kind = kind.strip().lower()
+        value = value.strip()
+        if value:
+            if kind == "email":
+                row = conn.execute(
+                    "SELECT id FROM contacts WHERE LOWER(primary_email) = LOWER(?) LIMIT 1",
+                    (value,),
+                ).fetchone()
+            elif kind == "phone":
+                row = conn.execute(
+                    "SELECT id FROM contacts WHERE primary_phone = ? LIMIT 1",
+                    (value,),
+                ).fetchone()
+            else:
+                row = None
+            if row is not None:
+                return row["id"]
+    return None
+
+
+def update_profile_tags(
+    profile_id: str,
+    tags: list[str],
+    *,
+    contact_id: str | None = None,
+    config: dict[str, Any] | None = None,
+    return_inbox: bool = True,
+) -> JsonRecord:
+    """Replace the tag set on the contact behind a /leads profile (migration 0035)."""
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profileId is required")
+    if not isinstance(tags, list):
+        raise ValueError("tags must be a list")
+
+    from elevate_cli.data import connect, set_contact_tags
+
+    with connect() as conn:
+        cid = str(contact_id or "").strip() or _resolve_profile_contact_id(conn, pid)
+        if not cid:
+            raise ValueError(
+                "This profile has no contact record yet — tags need a merged contact"
+            )
+        set_contact_tags(conn, cid, tags)
+    source_connectors = _source_connectors()
+    config = config or source_connectors.load_config()
+    return source_connectors.build_source_inbox_response(config) if return_inbox else {"ok": True}
+
+
 def update_source_thread_state(
     source_id: str,
     thread_id: str,
@@ -370,12 +462,36 @@ def _fire_approve_tick(task_id: str, queue_id: str | None = None) -> None:
     threading.Thread(target=_tick, name=f"approve-tick-{str(task_id)[:24]}", daemon=True).start()
 
 
+def _validate_scheduled_at(scheduled_at: str | None) -> str | None:
+    """Normalize a /leads "Send later" timestamp to UTC ISO, or None.
+
+    Rejects unparseable values and moments not in the future — a stale picker
+    value must fail loudly, not silently send now.
+    """
+    raw = str(scheduled_at or "").strip()
+    if not raw:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"Invalid scheduledAt: {scheduled_at!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed <= datetime.now(timezone.utc):
+        raise ValueError("scheduledAt must be in the future")
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
 def update_source_task_state(
     source_id: str,
     task_id: str,
     action: str,
     *,
     draft_text: str | None = None,
+    scheduled_at: str | None = None,
     config: dict[str, Any] | None = None,
     return_inbox: bool = True,
 ) -> JsonRecord:
@@ -388,6 +504,7 @@ def update_source_task_state(
     normalized = str(action or "").strip().lower()
     if normalized not in {"approve", "edit", "skip", "restore", "open"}:
         raise ValueError("Unsupported draft action")
+    schedule_for = _validate_scheduled_at(scheduled_at) if normalized == "approve" else None
 
     source_dir = _source_dir(source_root, source_id)
     state = _read_source_ui_state(source_dir)
@@ -483,7 +600,12 @@ def update_source_task_state(
         try:
             from elevate_cli import outreach_db
 
-            flipped = outreach_db.approve_pending_send(source_id, task_id, draft_text=draft_text or None)
+            flipped = outreach_db.approve_pending_send(
+                source_id,
+                task_id,
+                draft_text=draft_text or None,
+                scheduled_at=schedule_for,
+            )
         except Exception:
             logging.getLogger(__name__).warning(
                 "approve: pending-send release failed for %s/%s", source_id, task_id,
@@ -497,9 +619,16 @@ def update_source_task_state(
             # to the gateway's periodic tick fails the permission check. Firing
             # here keeps the send in the app context. Best-effort + threaded so
             # the HTTP response isn't blocked.
-            _fire_approve_tick(task_id, str(flipped.get("id") or ""))
+            #
+            # A scheduled send must NOT tick now — the row's next_retry_at holds
+            # it and the app's cron-driven /api/sender/tick delivers it later.
+            if schedule_for is None:
+                _fire_approve_tick(task_id, str(flipped.get("id") or ""))
         else:
-            _approve_atomic(source_id, task_id, existing, source_dir, state)
+            _approve_atomic(
+                source_id, task_id, existing, source_dir, state,
+                scheduled_at=schedule_for,
+            )
     else:
         # An edit (Save) must also land on the underlying send_queue row — where
         # the real outbound payload lives — not just the source-dir UI state, or
@@ -540,6 +669,8 @@ def _approve_atomic(
     task_record: dict[str, Any],
     source_dir: Path,
     state: dict[str, Any],
+    *,
+    scheduled_at: str | None = None,
 ) -> None:
     """Atomically pair: insert send_queue row + flip task status to approved.
 
@@ -621,9 +752,12 @@ def _approve_atomic(
                 channel=channel,
                 payload=payload,
                 attempt_id=attempt_id,
+                next_retry_at=scheduled_at,
             )
             _write_source_ui_state(source_dir, state)
 
     # Dispatch only the row created/reused by this explicit approval. A global
-    # tick could claim an older unrelated lead.
-    _fire_approve_tick(task_id, str((queued_send or {}).get("id") or ""))
+    # tick could claim an older unrelated lead. A scheduled send is held by its
+    # next_retry_at and delivered by the app's cron-driven sender tick instead.
+    if scheduled_at is None:
+        _fire_approve_tick(task_id, str((queued_send or {}).get("id") or ""))

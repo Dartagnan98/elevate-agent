@@ -71,6 +71,8 @@ export interface LeadsBoardProps {
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
+  onProfileTop25Change?: (profile: LeadsProfile, top25: boolean) => void | Promise<void>;
+  onProfileTagsChange?: (profile: LeadsProfile, tags: string[]) => void | Promise<void>;
   onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
@@ -103,10 +105,17 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const draftSendNotices = props.draftSendNotices ?? [];
   const blocked = channels.filter((channel) => channel.status === "blocked");
 
-  const pipelineOptions = useMemo(() => (
-    [...new Set(profiles.map((profile) => profile.status).filter(Boolean))]
-      .sort((a, b) => a.localeCompare(b))
-  ), [profiles]);
+  const pipelineOptions = useMemo(() => {
+    const stages = [
+      "New Lead", "Attempted Contact", "Prospect", "Client", "Pending Deal",
+      "Closed", "Referred", "Realtor Contact", "Trash",
+    ];
+    const known = new Set(stages.map((stage) => stage.toLowerCase()));
+    const extras = [...new Set(profiles.map((profile) => profile.status).filter(Boolean))]
+      .filter((status) => !known.has(status.toLowerCase()))
+      .sort((a, b) => a.localeCompare(b));
+    return [...stages, ...extras];
+  }, [profiles]);
   const tagOptions = useMemo(() => (
     [...new Set(profiles.flatMap((profile) => profile.tags).map((tag) => tag.trim()).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
@@ -283,12 +292,15 @@ export function LeadsBoard(props: LeadsBoardProps) {
                 </select>
               </label>
               <label className="crm-quick-filter">
-                <span>Temperature</span>
+                <span>Temp</span>
                 <select value={temperatureFilter} onChange={(event) => setTemperatureFilter(event.target.value as CrmTemperature)}>
-                  <option value="all">All temperatures</option>
-                  <option value="hot">Hot · 80–100</option>
-                  <option value="warm">Warm · 50–79</option>
-                  <option value="cool">Cool · under 50</option>
+                  <option value="all">All segments</option>
+                  <option value="hot">Hot · 0–30d</option>
+                  <option value="warm">Warm · 30–90d</option>
+                  <option value="lukewarm">Lukewarm · 90–180d</option>
+                  <option value="cool">Cool · 180–365d</option>
+                  <option value="soi">SOI · past clients</option>
+                  <option value="nurture">Nurture · 365d+</option>
                 </select>
               </label>
               <details className="crm-tags-filter">
@@ -406,6 +418,8 @@ export function LeadsBoard(props: LeadsBoardProps) {
           onClose={() => setActiveProfile(null)}
           onStatusChange={updateStatus}
           onFavoriteChange={props.onProfileFavoriteChange ? handleFavoriteChange : undefined}
+          onTop25Change={props.onProfileTop25Change}
+          onTagsChange={props.onProfileTagsChange}
           onDraftAction={props.onDraftAction}
           onDraftActionComplete={props.onDraftActionComplete}
           draftSendNotices={draftSendNotices}

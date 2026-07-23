@@ -9,6 +9,14 @@ import { cn } from "@/lib/utils";
 const STATUS_OPTIONS: Array<{ value: SourceInboxProfileStatus | "none"; label: string }> = [
   { value: "none", label: "No status" },
   { value: "new_lead", label: "New Lead" },
+  { value: "attempted_contact", label: "Attempted Contact" },
+  { value: "prospect", label: "Prospect" },
+  { value: "client", label: "Client" },
+  { value: "pending_deal", label: "Pending Deal" },
+  { value: "closed", label: "Closed" },
+  { value: "referred", label: "Referred" },
+  { value: "realtor_contact", label: "Realtor Contact" },
+  { value: "trash", label: "Trash" },
   { value: "follow_up", label: "Follow Up" },
   { value: "ghosting", label: "Ghosting" },
   { value: "dead", label: "Dead" },
@@ -26,6 +34,14 @@ const STATUS_BADGE: Record<
   dead: { label: "dead", variant: "destructive" },
   closed_seller: { label: "closed seller", variant: "success" },
   closed_buyer: { label: "closed buyer", variant: "success" },
+  attempted_contact: { label: "attempted contact", variant: "warning" },
+  prospect: { label: "prospect", variant: "default" },
+  client: { label: "client", variant: "success" },
+  pending_deal: { label: "pending deal", variant: "warning" },
+  closed: { label: "closed", variant: "success" },
+  referred: { label: "referred", variant: "secondary" },
+  realtor_contact: { label: "realtor contact", variant: "outline" },
+  trash: { label: "trash", variant: "destructive" },
 };
 
 export function LeadStatusBadge({ status }: { status: SourceInboxProfileStatus | null }) {

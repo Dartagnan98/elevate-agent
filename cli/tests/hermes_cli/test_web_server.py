@@ -1956,8 +1956,10 @@ class TestNewEndpoints:
 
         calls = []
 
-        def fake_update_source_task_state(source_id, task_id, action, *, draft_text="", return_inbox=True):
-            calls.append((source_id, task_id, action, draft_text, return_inbox))
+        def fake_update_source_task_state(
+            source_id, task_id, action, *, draft_text="", scheduled_at=None, return_inbox=True,
+        ):
+            calls.append((source_id, task_id, action, draft_text, scheduled_at, return_inbox))
             return {"ok": True}
 
         monkeypatch.setattr(source_connectors, "update_source_task_state", fake_update_source_task_state)
@@ -1975,7 +1977,25 @@ class TestNewEndpoints:
 
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
-        assert calls == [("email", "task-1", "approve", "send this", False)]
+        assert calls == [("email", "task-1", "approve", "send this", None, False)]
+
+        # The /leads "Send later" path forwards scheduledAt verbatim.
+        calls.clear()
+        resp = self.client.post(
+            "/api/source-inbox/draft",
+            json={
+                "sourceId": "email",
+                "taskId": "task-1",
+                "action": "approve",
+                "draftText": "send this",
+                "scheduledAt": "2099-01-01T09:00:00Z",
+                "returnInbox": False,
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert calls == [("email", "task-1", "approve", "send this", "2099-01-01T09:00:00Z", False)]
 
     def test_apple_messages_directions_update_contract(self, monkeypatch):
         import elevate_cli.source_connectors as source_connectors

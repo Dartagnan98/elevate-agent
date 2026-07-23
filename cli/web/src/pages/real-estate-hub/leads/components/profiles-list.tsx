@@ -23,6 +23,8 @@ function ProfileRow({
   onStatusChange,
   onFavoriteChange,
   favoriteBusy,
+  selected,
+  onToggleSelect,
 }: {
   profile: LeadsProfile;
   draft?: LeadsDraft;
@@ -32,6 +34,8 @@ function ProfileRow({
   onStatusChange?: (profile: LeadsProfile, value: string) => void;
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   favoriteBusy?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (profile: LeadsProfile) => void;
 }) {
   const heatTone = crmTemperatureForProfile(profile);
   const initials = profile.name
@@ -45,9 +49,18 @@ function ProfileRow({
 
   return (
     <div
-      className={"lb-profile-row" + (isFavorite ? " favorite" : "")}
+      className={"lb-profile-row" + (isFavorite ? " favorite" : "") + (selected ? " selected" : "")}
       onClick={() => onOpen?.(profile)}
     >
+      <div className="lb-profile-select-cell" onClick={(event) => event.stopPropagation()}>
+        <input
+          type="checkbox"
+          className="lb-profile-select"
+          checked={Boolean(selected)}
+          aria-label={selected ? `Deselect ${profile.name}` : `Select ${profile.name}`}
+          onChange={() => onToggleSelect?.(profile)}
+        />
+      </div>
       <div className="lb-profile-favorite-cell" onClick={(event) => event.stopPropagation()}>
         <button
           type="button"
@@ -154,6 +167,10 @@ export function ProfilesList({
   const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
   const [draftBusy, setDraftBusy] = useState<Record<string, boolean>>({});
   const [draftError, setDraftError] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkStage, setBulkStage] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
 
   const profiles = profilesProp;
 
@@ -227,6 +244,41 @@ export function ProfilesList({
     setShowAll(false);
   };
 
+  const toggleSelect = (profile: LeadsProfile) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(profile.id)) next.delete(profile.id); else next.add(profile.id);
+      return next;
+    });
+  };
+  const selectVisible = () => setSelectedIds(new Set(visibleProfiles.map((profile) => profile.id)));
+  const clearSelection = () => { setSelectedIds(new Set()); setBulkStage(""); setBulkNotice(null); };
+  const selectedProfiles = filtered.filter((profile) => selectedIds.has(profile.id));
+
+  const applyBulkStage = async () => {
+    if (!bulkStage || selectedProfiles.length === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkNotice(null);
+    let applied = 0;
+    let failed = 0;
+    for (const profile of selectedProfiles) {
+      try {
+        // Same per-row path as the pill dropdown; sequential so one failure
+        // doesn't hide behind a wall of parallel errors.
+        await Promise.resolve(onStatusChange(profile, bulkStage));
+        applied += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setBulkBusy(false);
+    setBulkNotice(
+      failed === 0
+        ? `Pipeline set to “${bulkStage}” on ${applied} lead${applied === 1 ? "" : "s"}.`
+        : `Set ${applied}, failed ${failed} — check the board error above.`,
+    );
+  };
+
   return (
     <section className="ab-card lb-profiles" aria-labelledby="leads-list-title">
       <header className="lb-profiles-head">
@@ -259,7 +311,40 @@ export function ProfilesList({
         <div className="lb-replies-empty lb-crm-error" role="alert">{favoriteError || draftError}</div>
       )}
 
+      <div className="lb-bulkbar-anchor" aria-live="polite">
+        {selectedIds.size > 0 && (
+          <div className="lb-bulkbar" role="toolbar" aria-label="Bulk actions">
+            <span className="lb-bulkbar-count"><strong className="mono">{selectedIds.size}</strong> selected</span>
+            <label className="lb-bulkbar-stage">
+              <span className="sr-only">Change pipeline stage for selected leads</span>
+              <select value={bulkStage} onChange={(event) => setBulkStage(event.target.value)} disabled={bulkBusy}>
+                <option value="">Change pipeline…</option>
+                {[
+                  "New Lead", "Attempted Contact", "Prospect", "Client", "Pending Deal",
+                  "Closed", "Referred", "Realtor Contact", "Trash",
+                ].map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="lb-bulkbar-apply"
+              onClick={() => void applyBulkStage()}
+              disabled={!bulkStage || bulkBusy}
+            >
+              {bulkBusy ? "Applying…" : "Apply"}
+            </button>
+            <span className="lb-bulkbar-soon mono" title="Mass Email, Mass Text, Assign to agent, and Send to Dialer are on the build list — they are not wired to the send engine yet.">
+              Mass Email / Text · soon
+            </span>
+            <button type="button" className="lb-bulkbar-select-page" onClick={selectVisible}>Select page</button>
+            <button type="button" className="lb-bulkbar-clear" onClick={clearSelection}>Clear</button>
+          </div>
+        )}
+        {bulkNotice && <div className="lb-bulkbar-notice" role="status">{bulkNotice}</div>}
+      </div>
+
       <div className="lb-profiles-colhead" aria-hidden="true">
+        <span></span>
         <span>Fav</span>
         <span></span>
         <span>Lead</span>
@@ -287,6 +372,8 @@ export function ProfilesList({
                 onStatusChange={onStatusChange}
                 onFavoriteChange={handleFavoriteChange}
                 favoriteBusy={Boolean(favoriteBusy[profile.id])}
+                selected={selectedIds.has(profile.id)}
+                onToggleSelect={toggleSelect}
               />
               {draft && draftExpanded && (
                 <div className="lb-profile-inline-draft">

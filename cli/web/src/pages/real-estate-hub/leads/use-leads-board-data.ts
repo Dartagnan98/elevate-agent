@@ -52,6 +52,14 @@ export function sourceInboxProfileStatusForLabel(label: string): SourceInboxProf
   if (key === "dead") return "dead";
   if (key === "closed seller") return "closed_seller";
   if (key === "closed buyer") return "closed_buyer";
+  if (key === "attempted contact") return "attempted_contact";
+  if (key === "prospect") return "prospect";
+  if (key === "client") return "client";
+  if (key === "pending deal") return "pending_deal";
+  if (key === "closed") return "closed";
+  if (key === "referred") return "referred";
+  if (key === "realtor contact") return "realtor_contact";
+  if (key === "trash") return "trash";
   return undefined;
 }
 
@@ -255,13 +263,26 @@ export function useLeadsBoardData() {
       if (approvalBlockedReason) {
         throw new Error(approvalBlockedReason);
       }
-      if (action === "approve") updateDraftSendLifecycle(draft, initialDraftSendLifecycleState());
+      if (action === "approve" && !scheduledAt) updateDraftSendLifecycle(draft, initialDraftSendLifecycleState());
       try {
         const res = await api.updateSourceInboxDraft(
           sourceId, taskId, action, draft.body ?? "",
           scheduledAt ? { scheduledAt } : undefined,
         );
         setSourceInbox(res);
+        if (action === "approve" && scheduledAt) {
+          // A scheduled send is held by next_retry_at — polling for a sent
+          // status now would only ever time out. Report the hold honestly.
+          const whenLabel = new Date(scheduledAt).toLocaleString(undefined, {
+            month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+          });
+          updateDraftSendLifecycle(draft, {
+            phase: "pending",
+            status: "queued",
+            message: `Scheduled — held until ${whenLabel}, delivered by the next sender run after that.`,
+          });
+          return;
+        }
         if (action === "approve" && threadId) {
           const terminal = await pollExactDraftSendStatus(
             (remainingMs) => api.getSourceInboxDraftSendStatus(sourceId, threadId, taskId, { timeoutMs: remainingMs }),
@@ -307,6 +328,36 @@ export function useLeadsBoardData() {
     [setSourceInbox],
   );
 
+  const handleProfileTop25Change = useCallback(
+    async (profile: LeadsProfile, top25: boolean) => {
+      try {
+        const res = await api.updateSourceInboxProfileTop25(profile.id, top25, {
+          contactId: profile.contactIds?.[0] ?? null,
+        });
+        setSourceInbox(res);
+      } catch (err) {
+        console.error("top25 toggle failed", err);
+        throw err;
+      }
+    },
+    [setSourceInbox],
+  );
+
+  const handleProfileTagsChange = useCallback(
+    async (profile: LeadsProfile, tags: string[]) => {
+      try {
+        const res = await api.updateSourceInboxProfileTags(profile.id, tags, {
+          contactId: profile.contactIds?.[0] ?? null,
+        });
+        setSourceInbox(res);
+      } catch (err) {
+        console.error("tags update failed", err);
+        throw err;
+      }
+    },
+    [setSourceInbox],
+  );
+
   const handleProfileStatusChange = useCallback(
     async (profile: LeadsProfile, label: string) => {
       const status = sourceInboxProfileStatusForLabel(label);
@@ -342,6 +393,8 @@ export function useLeadsBoardData() {
     handleDraftAction,
     handleDraftActionComplete,
     handleProfileFavoriteChange,
+    handleProfileTop25Change,
+    handleProfileTagsChange,
     handleProfileStatusChange,
     handleToggleDirection,
     refreshSent,

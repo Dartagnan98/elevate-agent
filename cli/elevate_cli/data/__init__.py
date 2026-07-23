@@ -32,7 +32,10 @@ from elevate_cli.data.contacts import (
     get_contact,
     leads_worked_recently,
     park_contact,
+    set_contact_search_criteria,
+    set_contact_tags,
     set_lead_profile_favorite,
+    set_lead_profile_top25,
     set_pipeline_status,
     unpark_contact,
     update_contact_stage,
@@ -289,8 +292,9 @@ __all__ = [
     # contacts
     "add_contact_note", "classify_contact", "close_to_admin", "find_contacts",
     "leads_worked_recently",
-    "get_contact", "park_contact", "set_lead_profile_favorite",
-    "set_pipeline_status", "unpark_contact",
+    "get_contact", "park_contact", "set_contact_search_criteria",
+    "set_contact_tags", "set_lead_profile_favorite",
+    "set_lead_profile_top25", "set_pipeline_status", "unpark_contact",
     "update_contact_stage", "update_flags", "upsert_contact",
     # identities
     "add_identity", "list_open_conflicts", "merge_contacts",

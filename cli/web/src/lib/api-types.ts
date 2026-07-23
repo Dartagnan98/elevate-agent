@@ -219,7 +219,16 @@ export type SourceInboxProfileStatus =
   | "ghosting"
   | "dead"
   | "closed_seller"
-  | "closed_buyer";
+  | "closed_buyer"
+  // CRM redesign (migration 0035): the realtor pipeline stages.
+  | "attempted_contact"
+  | "prospect"
+  | "client"
+  | "pending_deal"
+  | "closed"
+  | "referred"
+  | "realtor_contact"
+  | "trash";
 
 export interface SourceInboxProfile {
   id: string;
@@ -253,7 +262,31 @@ export interface SourceInboxProfile {
   favorite?: boolean;
   favoritedAt?: string | null;
   favoritedBy?: string | null;
+  top25?: boolean;
+  top25At?: string | null;
+  /** JSON string of saved-search criteria (migration 0035). */
+  searchCriteria?: string | null;
   leadSectionIds?: string[];
+}
+
+export interface ContactNote {
+  id: string;
+  contactId: string;
+  body: string;
+  authorKind: "ai" | "operator" | "system" | string;
+  authorName: string;
+  pinned: boolean;
+  deleted: boolean;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+export interface AccountGoals {
+  leadsGoal: number | null;
+  apptsGoal: number | null;
+  closingsGoal: number | null;
+  gciGoal: number | null;
+  updatedAt: string | null;
 }
 
 export interface SourceInboxDraft {

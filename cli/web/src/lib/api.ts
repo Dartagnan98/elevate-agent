@@ -59,6 +59,8 @@ import type {
   SourceInboxSentResponse,
   TodayDashboardResponse,
   SourceInboxProfileStatus,
+  ContactNote,
+  AccountGoals,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
   IntegrationTestResponse,
@@ -2255,6 +2257,74 @@ export const api = {
         returnInbox: options?.returnInbox ?? true,
       }),
     }, 20_000, "Favorite update timed out. Refresh the contact before trying again."),
+  updateSourceInboxProfileTop25: (
+    profileId: string,
+    top25: boolean,
+    options?: { contactId?: string | null; returnInbox?: boolean },
+  ) =>
+    fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/profile/top25", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profileId,
+        top25,
+        contactId: options?.contactId ?? null,
+        returnInbox: options?.returnInbox ?? true,
+      }),
+    }, 20_000, "Top 25 update timed out. Refresh the contact before trying again."),
+  updateSourceInboxProfileTags: (
+    profileId: string,
+    tags: string[],
+    options?: { contactId?: string | null; returnInbox?: boolean },
+  ) =>
+    fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/profile/tags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profileId,
+        tags,
+        contactId: options?.contactId ?? null,
+        returnInbox: options?.returnInbox ?? true,
+      }),
+    }, 20_000, "Tags update timed out. Refresh the contact before trying again."),
+  getSourceInboxNotes: (contactId: string, limit = 100) =>
+    fetchJSONWithTimeout<{ notes: ContactNote[] }>(
+      `/api/source-inbox/notes/${encodeURIComponent(contactId)}?limit=${limit}`,
+    ),
+  createSourceInboxNote: (contactId: string, body: string) =>
+    fetchJSONWithTimeout<{ ok: boolean; note: ContactNote | null }>(
+      "/api/source-inbox/note",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactId, body }),
+      }, 20_000, "Note save timed out. Refresh the contact before trying again.",
+    ),
+  pinSourceInboxNote: (noteId: string, pinned: boolean) =>
+    fetchJSONWithTimeout<{ ok: boolean }>("/api/source-inbox/note/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId, pinned }),
+    }, 20_000, "Note pin timed out. Refresh the contact before trying again."),
+  updateSearchCriteria: (contactId: string, criteria: Record<string, unknown> | null) =>
+    fetchJSONWithTimeout<{ ok: boolean }>("/api/source-inbox/search-criteria", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contactId, criteria }),
+    }, 20_000, "Search criteria save timed out. Refresh the contact before trying again."),
+  getCrmGoals: () =>
+    fetchJSONWithTimeout<AccountGoals>("/api/crm/goals"),
+  putCrmGoals: (goals: {
+    leadsGoal?: number | null;
+    apptsGoal?: number | null;
+    closingsGoal?: number | null;
+    gciGoal?: number | null;
+  }) =>
+    fetchJSONWithTimeout<{ ok: boolean }>("/api/crm/goals", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(goals),
+    }, 20_000, "Goals save timed out. Reopen the goals dialog before trying again."),
   // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
   // (status=sent by default). Set includePending=true to also see queued /
   // sending / retrying / failed for debugging mid-flight rows.

@@ -3014,21 +3014,12 @@
 
   .lb-profiles-list { display: flex; flex-direction: column; }
 
+  /* NOTE: the pre-redesign colhead/row grid used to live here. The live
+     /leads layout is the `.crm-board`-scoped grid further down; the legacy
+     copy fought it via equal-or-higher cascade rules and is deleted. */
   .lb-profiles-colhead,
   .lb-profile-row {
     display: grid;
-    grid-template-columns:
-      28px
-      32px
-      minmax(130px, 1fr)
-      minmax(160px, 1.2fr)
-      110px
-      64px
-      130px
-      minmax(110px, 0.9fr)
-      minmax(140px, 1.4fr)
-      80px
-      18px;
     align-items: center;
     column-gap: 14px;
     padding: 7px 18px;
@@ -3278,68 +3269,6 @@
     color: var(--fg-dim);
     font-size: 14px;
     transition: color 120ms var(--ease-out), transform 120ms var(--ease-out);
-  }
-
-  /* Narrower viewports — drop columns gracefully */
-  @media (max-width: 1400px) {
-    .lb-profiles-colhead,
-    .lb-profile-row {
-      grid-template-columns:
-        32px
-        minmax(130px, 1fr)
-        minmax(160px, 1.2fr)
-        110px
-        64px
-        130px
-        minmax(140px, 1.4fr)
-        80px
-        18px;
-      column-gap: 12px;
-    }
-    .lb-profile-source-cell,
-    .lb-profiles-colhead span:nth-child(7) { display: none; }
-  }
-  @media (max-width: 1200px) {
-    .lb-profiles-colhead,
-    .lb-profile-row {
-      grid-template-columns:
-        32px
-        minmax(130px, 1fr)
-        minmax(160px, 1.2fr)
-        110px
-        64px
-        130px
-        80px
-        18px;
-    }
-    .lb-profile-preview,
-    .lb-profiles-colhead span:nth-child(8) { display: none; }
-  }
-  @media (max-width: 980px) {
-    .lb-profiles-colhead,
-    .lb-profile-row {
-      grid-template-columns:
-        32px
-        minmax(0, 1fr)
-        110px
-        64px
-        130px
-        18px;
-    }
-    .lb-profile-email,
-    .lb-profile-touch-cell,
-    .lb-profiles-colhead span:nth-child(3),
-    .lb-profiles-colhead .lb-profile-touch-col { display: none; }
-  }
-  @media (max-width: 760px) {
-    .lb-profiles-colhead,
-    .lb-profile-row {
-      grid-template-columns: 32px minmax(0, 1fr) 64px 18px;
-    }
-    .lb-profile-phone,
-    .lb-profile-status-cell,
-    .lb-profiles-colhead span:nth-child(4),
-    .lb-profiles-colhead span:nth-child(5) { display: none; }
   }
 
   /* Generic placeholder for stub tab pages */
@@ -4400,6 +4329,7 @@ html[data-app-theme="dark"] .crm-board {
 .crm-board .lb-profiles-colhead,
 .crm-board .lb-profile-row {
   grid-template-columns:
+    20px
     30px
     36px
     minmax(150px, 1.05fr)
@@ -4665,8 +4595,11 @@ html[data-app-theme="dark"] .crm-board {
   .crm-board .lb-profile-row {
     grid-template-columns: 30px 36px minmax(145px, 1fr) minmax(160px, 1.1fr) 122px 82px minmax(145px, 1fr) 76px 22px;
   }
+  /* Bulk-select is a wide-view feature; the checkbox column is the new span 1. */
+  .crm-board .lb-profile-select-cell,
+  .crm-board .lb-profiles-colhead > span:nth-child(1),
   .crm-board .lb-profile-source-cell,
-  .crm-board .lb-profiles-colhead > span:nth-child(7) { display: none; }
+  .crm-board .lb-profiles-colhead > span:nth-child(8) { display: none; }
 }
 @media (max-width: 1100px) {
   .crm-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -4676,7 +4609,7 @@ html[data-app-theme="dark"] .crm-board {
   .crm-board .lb-profiles-colhead,
   .crm-board .lb-profile-row { grid-template-columns: 30px 36px minmax(155px, 1fr) 122px 82px minmax(150px, 1fr) 76px 22px; }
   .crm-board .lb-profile-contact-cell,
-  .crm-board .lb-profiles-colhead > span:nth-child(4) { display: none; }
+  .crm-board .lb-profiles-colhead > span:nth-child(5) { display: none; }
   .lb-profile-contact-preview { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .crm-contact-body { grid-template-columns: minmax(0, 1fr) 270px; }
 }
@@ -4748,4 +4681,225 @@ html[data-app-theme="dark"] .crm-board {
 @media (prefers-reduced-motion: reduce) {
   .crm-board *,
   .crm-contact-backdrop * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+/* ─── CRM redesign additions: segments, bulk actions, scheduler, contact tabs ─── */
+
+/* Follow-up segment tones (Hot/Warm/Lukewarm/Cool/SOI/Nurture) */
+.lb-profile-avatar[data-tone="lukewarm"] { border-color: color-mix(in srgb, var(--status-warn) 22%, transparent); background: color-mix(in srgb, var(--status-warn) 3%, var(--bg-3)); }
+.lb-profile-avatar[data-tone="soi"]      { border-color: color-mix(in srgb, var(--status-done) 36%, transparent); background: color-mix(in srgb, var(--status-done) 6%, var(--bg-3)); }
+.lb-profile-avatar[data-tone="nurture"]  { border-color: var(--border-soft); }
+.lb-profile-heat-cell.lukewarm { color: var(--status-warn); background: color-mix(in srgb, var(--status-warn) 7%, transparent); }
+.lb-profile-heat-cell.soi      { color: var(--status-done); background: color-mix(in srgb, var(--status-done) 12%, transparent); }
+.lb-profile-heat-cell.nurture  { color: var(--fg-muted);    background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.crm-temp.lukewarm { color: var(--status-warn); background: color-mix(in srgb, var(--status-warn) 7%, transparent); }
+.crm-temp.soi      { color: var(--status-done); background: color-mix(in srgb, var(--status-done) 10%, transparent); }
+.crm-temp.nurture  { color: var(--fg-muted);    background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.crm-contact-avatar[data-tone="lukewarm"] { border-color: color-mix(in srgb, var(--status-warn) 26%, var(--border)); background: color-mix(in srgb, var(--status-warn) 5%, var(--bg-3)); }
+.crm-contact-avatar[data-tone="soi"]      { border-color: color-mix(in srgb, var(--status-done) 42%, var(--border)); background: color-mix(in srgb, var(--status-done) 9%, var(--bg-3)); }
+.crm-contact-avatar[data-tone="nurture"]  { border-color: var(--border-soft); }
+
+/* Row selection */
+.lb-profile-select-cell { display: flex; align-items: center; justify-content: center; }
+.lb-profile-select { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.lb-profile-row.selected { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+
+/* Bulk actions bar */
+.lb-bulkbar-anchor { margin: 0 18px; }
+.lb-bulkbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 8px 12px; margin-bottom: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-1));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 6px;
+}
+.lb-bulkbar-count { font-size: 12.5px; color: var(--fg); }
+.lb-bulkbar-stage select {
+  font: inherit; font-size: 12.5px; color: var(--fg);
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 5px;
+  padding: 5px 8px;
+}
+.lb-bulkbar-apply,
+.lb-bulkbar-select-page,
+.lb-bulkbar-clear {
+  appearance: none; cursor: pointer; font: 600 12px/1 inherit;
+  border-radius: 5px; padding: 6px 12px;
+  border: 1px solid var(--border); background: var(--bg-1); color: var(--fg);
+}
+.lb-bulkbar-apply { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast, var(--bg)); }
+.lb-bulkbar-apply:disabled { opacity: 0.5; cursor: default; }
+.lb-bulkbar-clear { border-color: transparent; background: transparent; color: var(--fg-muted); margin-left: auto; }
+.lb-bulkbar-soon { font-size: 10.5px; color: var(--fg-faint); cursor: help; }
+.lb-bulkbar-notice { font-size: 12px; color: var(--fg-dim); padding: 4px 2px 8px; }
+
+/* Send later scheduler */
+.lb-draft-scheduler {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 0 12px 12px; padding: 10px 12px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--border-soft); border-radius: 6px;
+}
+.lb-draft-scheduler-when { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--fg-dim); }
+.lb-draft-scheduler-when input {
+  font: inherit; font-size: 12.5px; color: var(--fg);
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px;
+}
+.lb-draft-scheduler-error { font-size: 12px; color: var(--status-error); }
+.lb-draft-scheduler-note { font-size: 10.5px; color: var(--fg-faint); }
+
+/* Contact card tabs */
+.crm-contact-tabs {
+  display: flex; gap: 2px; overflow-x: auto;
+  padding: 0 20px; border-bottom: 1px solid var(--border-soft);
+}
+.crm-contact-tabs button {
+  appearance: none; background: transparent; border: 0; cursor: pointer;
+  font: 600 12.5px/1 inherit; color: var(--fg-muted);
+  padding: 10px 12px; border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.crm-contact-tabs button:hover { color: var(--fg); }
+.crm-contact-tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+
+/* Under-construction tab panel */
+.crm-contact-uc {
+  margin: 18px 20px; padding: 30px 22px; text-align: center;
+  border: 1px dashed var(--border); border-radius: 6px; color: var(--fg-dim);
+}
+.crm-contact-uc span { font-size: 26px; display: block; }
+.crm-contact-uc strong { display: block; margin: 8px 0 4px; color: var(--fg); }
+.crm-contact-uc p { margin: 0 auto; max-width: 46ch; font-size: 13px; }
+
+/* Searches tab */
+.crm-contact-searches { padding: 4px 20px 20px; overflow-y: auto; }
+.crm-criteria-save {
+  appearance: none; cursor: pointer; font: 600 12px/1 inherit;
+  border-radius: 5px; padding: 6px 12px;
+  background: var(--accent); border: 1px solid var(--accent); color: var(--accent-contrast, var(--bg));
+}
+.crm-criteria-save:disabled { opacity: 0.5; cursor: default; }
+.crm-criteria-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.crm-criteria-field { display: flex; flex-direction: column; gap: 4px; }
+.crm-criteria-field span { font: 600 10.5px/1 "Geist Mono", monospace; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-faint); }
+.crm-criteria-field input,
+.crm-criteria-field textarea {
+  font: inherit; font-size: 13px; color: var(--fg);
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 5px;
+  padding: 7px 9px; resize: vertical;
+}
+.crm-criteria-notes { grid-column: 1 / -1; }
+.crm-criteria-notice { grid-column: 1 / -1; font-size: 12px; color: var(--fg-dim); }
+@media (max-width: 760px) { .crm-criteria-grid { grid-template-columns: 1fr; } }
+
+/* Compose + notes */
+.crm-compose-modes { display: inline-flex; gap: 4px; }
+.crm-compose-modes button {
+  appearance: none; cursor: pointer; font: 600 11.5px/1 inherit;
+  border: 1px solid var(--border); background: var(--bg-1); color: var(--fg-muted);
+  border-radius: 999px; padding: 5px 11px;
+}
+.crm-compose-modes button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast, var(--bg)); }
+.crm-compose-modes button:disabled { opacity: 0.55; cursor: help; }
+.crm-compose-box { display: flex; gap: 8px; align-items: flex-end; }
+.crm-compose-box textarea {
+  flex: 1; font: inherit; font-size: 13px; color: var(--fg);
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; resize: vertical; min-height: 40px;
+}
+.crm-compose-send {
+  appearance: none; cursor: pointer; font: 600 12px/1 inherit;
+  background: var(--accent); border: 1px solid var(--accent); color: var(--accent-contrast, var(--bg));
+  border-radius: 5px; padding: 8px 14px;
+}
+.crm-compose-send:disabled { opacity: 0.5; cursor: default; }
+.crm-note-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.crm-note-list li { border: 1px solid var(--border-soft); border-radius: 6px; padding: 8px 10px; background: var(--bg-1); }
+.crm-note-list li.pinned { border-color: color-mix(in srgb, var(--accent) 45%, transparent); border-left: 3px solid var(--accent); }
+.crm-note-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.crm-note-pin-badge { font: 700 10px/1 "Geist Mono", monospace; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); }
+.crm-note-when { font-size: 11px; color: var(--fg-faint); }
+.crm-note-pin {
+  appearance: none; margin-left: auto; border: 0; background: transparent; cursor: pointer;
+  font-size: 13px; line-height: 1; opacity: 0.35; filter: grayscale(1); padding: 2px;
+}
+.crm-note-pin.on { opacity: 1; filter: none; }
+.crm-note-pin:hover { opacity: 0.85; }
+.crm-note-list p { margin: 0; font-size: 13px; color: var(--fg); }
+
+/* Top 25 */
+.crm-top25-badge {
+  font: 700 10px/1 "Geist Mono", monospace; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--accent-contrast, var(--bg)); background: var(--accent);
+  border-radius: 999px; padding: 3px 8px;
+}
+.crm-top25-button {
+  appearance: none; cursor: pointer; font: 600 12px/1 inherit;
+  border: 1.5px solid var(--accent); background: transparent; color: var(--accent);
+  border-radius: 6px; padding: 7px 12px;
+}
+.crm-top25-button.on { background: var(--accent); color: var(--accent-contrast, var(--bg)); }
+.crm-top25-button:disabled { opacity: 0.6; cursor: wait; }
+
+/* Editable tags */
+.crm-tag-editable { display: inline-flex; align-items: center; gap: 3px; }
+.crm-tag-editable button {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--fg-faint); font-size: 13px; line-height: 1; padding: 0 2px;
+}
+.crm-tag-editable button:hover { color: var(--status-error); }
+.crm-tag-add {
+  appearance: none; cursor: pointer; margin-top: 8px;
+  font: 600 11.5px/1 inherit; color: var(--fg-dim);
+  border: 1.5px dashed var(--border); background: transparent;
+  border-radius: 999px; padding: 5px 12px;
+}
+.crm-tag-add:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Tag picker */
+.crm-tagpicker-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  display: grid; place-items: center; padding: 20px;
+}
+.crm-tagpicker {
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px;
+  max-width: 440px; width: 100%; max-height: 82vh; overflow-y: auto;
+  padding: 18px 20px; box-shadow: 0 18px 50px color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.crm-tagpicker-head { display: flex; align-items: center; justify-content: space-between; }
+.crm-tagpicker-head h3 { margin: 0; font-size: 15px; color: var(--fg); }
+.crm-tagpicker-head button {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--fg-muted); font-size: 18px; line-height: 1; padding: 2px 6px;
+}
+.crm-tagpicker-sub { margin: 4px 0 12px; font-size: 12px; color: var(--fg-dim); }
+.crm-tagpicker-group { margin-bottom: 12px; }
+.crm-tagpicker-label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-faint); margin-bottom: 6px; }
+.crm-tagpicker-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.crm-tagpicker-opts button {
+  appearance: none; cursor: pointer; font: 600 12px/1 inherit;
+  border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  border-radius: 999px; padding: 5px 11px;
+}
+.crm-tagpicker-opts button:hover { border-color: var(--accent); color: var(--accent); }
+.crm-tagpicker-opts button.added { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast, var(--bg)); }
+.crm-tagpicker-custom { display: flex; gap: 8px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+.crm-tagpicker-custom input {
+  flex: 1; font: inherit; font-size: 13px; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 9px;
+}
+.crm-tagpicker-custom button,
+.crm-tagpicker-foot button {
+  appearance: none; cursor: pointer; font: 600 12px/1 inherit;
+  background: var(--accent); border: 1px solid var(--accent); color: var(--accent-contrast, var(--bg));
+  border-radius: 5px; padding: 7px 14px;
+}
+.crm-tagpicker-custom button:disabled { opacity: 0.5; cursor: default; }
+.crm-tagpicker-foot { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+/* Must trail the base .lb-profile-select-cell rule above so the cascade wins:
+   bulk-select is desktop-wide only (matches the .crm-board 1300px tier). */
+@media (max-width: 1300px) {
+  .lb-profile-select-cell { display: none; }
+  .lb-bulkbar-anchor { display: none; }
 }

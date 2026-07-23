@@ -218,10 +218,26 @@ describe("CRM actionable draft identity", () => {
 });
 
 describe("CRM lead filters", () => {
-  it("uses the visible heat thresholds for temperature", () => {
+  it("uses the visible heat thresholds when there is no activity timestamp", () => {
     expect(crmTemperatureForProfile(profile({ heat: 80 }))).toBe("hot");
     expect(crmTemperatureForProfile(profile({ heat: 50 }))).toBe("warm");
     expect(crmTemperatureForProfile(profile({ heat: 49 }))).toBe("cool");
+  });
+
+  it("derives the follow-up segment from days since last activity", () => {
+    const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+    expect(crmTemperatureForProfile(profile({ heat: 0, latestAt: daysAgo(10) }))).toBe("hot");
+    expect(crmTemperatureForProfile(profile({ heat: 0, latestAt: daysAgo(60) }))).toBe("warm");
+    expect(crmTemperatureForProfile(profile({ heat: 0, latestAt: daysAgo(120) }))).toBe("lukewarm");
+    expect(crmTemperatureForProfile(profile({ heat: 0, latestAt: daysAgo(250) }))).toBe("cool");
+    expect(crmTemperatureForProfile(profile({ heat: 0, latestAt: daysAgo(400) }))).toBe("nurture");
+  });
+
+  it("routes closed and past-client relationships to SOI regardless of recency", () => {
+    const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+    expect(crmTemperatureForProfile(profile({ heat: 0, status: "Closed", latestAt: daysAgo(2) }))).toBe("soi");
+    expect(crmTemperatureForProfile(profile({ heat: 0, status: "Closed Buyer", latestAt: daysAgo(500) }))).toBe("soi");
+    expect(crmTemperatureForProfile(profile({ heat: 0, tags: ["Past Client"], latestAt: daysAgo(40) }))).toBe("soi");
   });
 
   it("keeps source, pipeline, temperature, tags, and search in one predicate", () => {
@@ -290,11 +306,16 @@ describe("CRM truth guards", () => {
     expect(board).toContain("not yet an all-contacts CRM directory");
   });
 
-  it("keeps scheduling disabled until the backend persists scheduledAt", () => {
+  it("offers Send later now that the backend persists scheduledAt (next_retry_at)", () => {
+    // Migration 0035 era: approve accepts scheduledAt, the send_queue row is
+    // held by next_retry_at, and the app's cron sender tick delivers it. The
+    // scheduler must exist, validate the future, and never show on a blocked draft.
     const row = readFileSync(new URL("../components/draft-row.tsx", import.meta.url), "utf8");
-    expect(row).toContain("Schedule unavailable");
-    expect(row).toContain("Scheduled sending is not yet persisted");
-    expect(row).not.toContain('type="datetime-local"');
+    expect(row).toContain('type="datetime-local"');
+    expect(row).toContain("Send later");
+    expect(row).toContain("Pick a date and time in the future.");
+    expect(row).toContain("schedulerOpen && !approveBlockedReason");
+    expect(row).toContain('onAction?.("approve", editedDraft, when.toISOString())');
     expect(row).toContain("aria-checked={selected}");
   });
 

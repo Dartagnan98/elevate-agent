@@ -21,6 +21,7 @@ class SourceInboxDraftAction(BaseModel):
     sourceId: str
     taskId: str
     draftText: str = ""
+    scheduledAt: str | None = None
 
 
 class SourceInboxProfileAction(BaseModel):
@@ -34,6 +35,42 @@ class SourceInboxFavoriteAction(BaseModel):
     favorite: bool
     contactId: str | None = None
     returnInbox: bool = True
+
+
+class SourceInboxTop25Action(BaseModel):
+    profileId: str
+    top25: bool
+    contactId: str | None = None
+    returnInbox: bool = True
+
+
+class SourceInboxTagsAction(BaseModel):
+    profileId: str
+    tags: list[str]
+    contactId: str | None = None
+    returnInbox: bool = True
+
+
+class SourceInboxNoteCreate(BaseModel):
+    contactId: str
+    body: str
+
+
+class SourceInboxNotePin(BaseModel):
+    noteId: str
+    pinned: bool
+
+
+class SearchCriteriaUpdate(BaseModel):
+    contactId: str
+    criteria: dict | None = None
+
+
+class AccountGoalsUpdate(BaseModel):
+    leadsGoal: int | None = None
+    apptsGoal: int | None = None
+    closingsGoal: int | None = None
+    gciGoal: int | None = None
 
 
 _SOURCE_INBOX_ACTION_LIMIT = 500
@@ -171,6 +208,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
                 body.taskId,
                 body.action,
                 draft_text=body.draftText,
+                scheduled_at=body.scheduledAt,
                 return_inbox=False,
             )
             if not body.returnInbox:
@@ -181,3 +219,195 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
         except Exception as exc:
             log.exception("POST /api/source-inbox/draft failed")
             raise HTTPException(status_code=500, detail=f"Source draft update failed: {exc}")
+
+    @router.post("/api/source-inbox/profile/top25")
+    async def update_source_inbox_profile_top25(body: SourceInboxTop25Action):
+        try:
+            from elevate_cli.source_connectors import update_profile_top25
+
+            update_profile_top25(
+                body.profileId,
+                top25=body.top25,
+                contact_id=body.contactId,
+                return_inbox=False,
+            )
+            if not body.returnInbox:
+                return {"ok": True}
+            return _source_inbox_response()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/profile/top25 failed")
+            raise HTTPException(status_code=500, detail=f"Top 25 update failed: {exc}")
+
+    @router.post("/api/source-inbox/profile/tags")
+    async def update_source_inbox_profile_tags(body: SourceInboxTagsAction):
+        try:
+            from elevate_cli.source_connectors import update_profile_tags
+
+            update_profile_tags(
+                body.profileId,
+                body.tags,
+                contact_id=body.contactId,
+                return_inbox=False,
+            )
+            if not body.returnInbox:
+                return {"ok": True}
+            return _source_inbox_response()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/profile/tags failed")
+            raise HTTPException(status_code=500, detail=f"Tags update failed: {exc}")
+
+    @router.get("/api/source-inbox/notes/{contact_id}")
+    async def get_source_inbox_notes(contact_id: str, limit: int = 100):
+        try:
+            from elevate_cli.data import connect, list_notes_for_contact
+
+            with connect() as conn:
+                notes = list_notes_for_contact(conn, contact_id, limit=limit)
+            return {"notes": notes}
+        except Exception as exc:
+            log.exception("GET /api/source-inbox/notes/%s failed", contact_id)
+            raise HTTPException(status_code=500, detail=f"Notes read failed: {exc}")
+
+    @router.post("/api/source-inbox/note")
+    async def create_source_inbox_note(body: SourceInboxNoteCreate):
+        try:
+            text = str(body.body or "").strip()
+            if not text:
+                raise ValueError("note body is required")
+            from elevate_cli.data import connect, write_note
+
+            with connect() as conn:
+                note = write_note(
+                    conn,
+                    contact_id=body.contactId,
+                    body=text,
+                    author_kind="operator",
+                    author_name="operator:leads-ui",
+                    daily_cap=False,
+                )
+            return {"ok": True, "note": note}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/note failed")
+            raise HTTPException(status_code=500, detail=f"Note create failed: {exc}")
+
+    @router.post("/api/source-inbox/note/pin")
+    async def pin_source_inbox_note(body: SourceInboxNotePin):
+        try:
+            from elevate_cli.data import connect
+            from elevate_cli.data._util import now_iso
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT id, contact_id FROM notes WHERE id = ? AND deleted = 0",
+                    (body.noteId,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"note {body.noteId!r} not found")
+                if body.pinned:
+                    # Single pin per contact: pinning one unpins the rest.
+                    conn.execute(
+                        "UPDATE notes SET pinned = 0, updated_at = ? "
+                        "WHERE contact_id = ? AND pinned = 1",
+                        (now_iso(), row["contact_id"]),
+                    )
+                conn.execute(
+                    "UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?",
+                    (1 if body.pinned else 0, now_iso(), body.noteId),
+                )
+            return {"ok": True}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/note/pin failed")
+            raise HTTPException(status_code=500, detail=f"Note pin failed: {exc}")
+
+    @router.post("/api/source-inbox/search-criteria")
+    async def update_search_criteria(body: SearchCriteriaUpdate):
+        try:
+            from elevate_cli.data import connect, set_contact_search_criteria
+
+            with connect() as conn:
+                set_contact_search_criteria(conn, body.contactId, body.criteria)
+            return {"ok": True}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/search-criteria failed")
+            raise HTTPException(status_code=500, detail=f"Search criteria update failed: {exc}")
+
+    @router.get("/api/crm/goals")
+    async def get_account_goals():
+        try:
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT leads_goal, appts_goal, closings_goal, gci_goal, updated_at "
+                    "FROM account_goals WHERE id = 'default'",
+                ).fetchone()
+            if row is None:
+                return {
+                    "leadsGoal": None,
+                    "apptsGoal": None,
+                    "closingsGoal": None,
+                    "gciGoal": None,
+                    "updatedAt": None,
+                }
+            return {
+                "leadsGoal": row["leads_goal"],
+                "apptsGoal": row["appts_goal"],
+                "closingsGoal": row["closings_goal"],
+                "gciGoal": row["gci_goal"],
+                "updatedAt": row["updated_at"],
+            }
+        except Exception as exc:
+            log.exception("GET /api/crm/goals failed")
+            raise HTTPException(status_code=500, detail=f"Goals read failed: {exc}")
+
+    @router.put("/api/crm/goals")
+    async def put_account_goals(body: AccountGoalsUpdate):
+        try:
+            for label, value in (
+                ("leadsGoal", body.leadsGoal),
+                ("apptsGoal", body.apptsGoal),
+                ("closingsGoal", body.closingsGoal),
+                ("gciGoal", body.gciGoal),
+            ):
+                if value is not None and value < 0:
+                    raise ValueError(f"{label} must be >= 0")
+            from elevate_cli.data import connect
+            from elevate_cli.data._util import now_iso
+
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO account_goals
+                        (id, leads_goal, appts_goal, closings_goal, gci_goal, updated_at)
+                    VALUES ('default', ?, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        leads_goal = EXCLUDED.leads_goal,
+                        appts_goal = EXCLUDED.appts_goal,
+                        closings_goal = EXCLUDED.closings_goal,
+                        gci_goal = EXCLUDED.gci_goal,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        body.leadsGoal,
+                        body.apptsGoal,
+                        body.closingsGoal,
+                        body.gciGoal,
+                        now_iso(),
+                    ),
+                )
+            return {"ok": True}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("PUT /api/crm/goals failed")
+            raise HTTPException(status_code=500, detail=f"Goals update failed: {exc}")

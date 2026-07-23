@@ -730,12 +730,17 @@ def enqueue_send(
     payload: dict[str, Any],
     attempt_id: str | None = None,
     revision: int = 0,
+    next_retry_at: str | None = None,
 ) -> dict[str, Any]:
     """Insert a send_queue row inside the caller's transaction.
 
     Idempotent: if a row with the same idempotency_key already exists, returns
     the existing row instead of raising. Caller MUST already hold a write
     transaction (use `transaction(conn)` in the approve flow).
+
+    ``next_retry_at`` schedules the send: ``claim_due_sends`` only claims rows
+    whose ``next_retry_at`` is NULL or due, so a future timestamp holds the row
+    until the sender tick after that moment (the /leads "Send later" path).
     """
     key = make_idempotency_key(source_id, thread_id, task_id, revision)
     existing = conn.execute(
@@ -749,12 +754,14 @@ def enqueue_send(
         """
         INSERT INTO send_queue
             (id, idempotency_key, source_id, thread_id, task_id, channel,
-             payload_json, status, attempts, attempt_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+             payload_json, status, attempts, attempt_id, next_retry_at,
+             created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
         """,
         (
             queue_id, key, source_id, thread_id, task_id, channel,
-            json.dumps(payload), SEND_STATUS_QUEUED, attempt_id, now, now,
+            json.dumps(payload), SEND_STATUS_QUEUED, attempt_id, next_retry_at,
+            now, now,
         ),
     )
     row = conn.execute("SELECT * FROM send_queue WHERE id=?", (queue_id,)).fetchone()
@@ -1017,7 +1024,11 @@ def recover_stale_sends(*, stale_after_seconds: int = 300) -> dict[str, int]:
 
 
 def approve_pending_send(
-    source_id: str, task_id: str, draft_text: str | None = None
+    source_id: str,
+    task_id: str,
+    draft_text: str | None = None,
+    *,
+    scheduled_at: str | None = None,
 ) -> dict[str, Any] | None:
     """Flip a ``pending_approval`` send_queue row to ``queued`` so the sender picks
     it up. The /leads Approve button surfaces send_queue rows as drafts (id
@@ -1055,15 +1066,17 @@ def approve_pending_send(
                 if isinstance(payload, dict):
                     payload["draft_text"] = str(draft_text)
                     new_payload_json = json.dumps(payload, ensure_ascii=False)
+            # A future scheduled_at holds the released row until the sender
+            # tick after that moment (claim_due_sends gates on next_retry_at).
             if new_payload_json is not None:
                 conn.execute(
-                    "UPDATE send_queue SET status=?, payload_json=?, updated_at=? WHERE id=?",
-                    (SEND_STATUS_QUEUED, new_payload_json, now, row["id"]),
+                    "UPDATE send_queue SET status=?, payload_json=?, next_retry_at=?, updated_at=? WHERE id=?",
+                    (SEND_STATUS_QUEUED, new_payload_json, scheduled_at, now, row["id"]),
                 )
             else:
                 conn.execute(
-                    "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
-                    (SEND_STATUS_QUEUED, now, row["id"]),
+                    "UPDATE send_queue SET status=?, next_retry_at=?, updated_at=? WHERE id=?",
+                    (SEND_STATUS_QUEUED, scheduled_at, now, row["id"]),
                 )
         out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
     return _row_to_send(out)

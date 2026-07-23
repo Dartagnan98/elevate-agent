@@ -105,11 +105,16 @@ export interface LeadsProfile {
   sub: string;
   lastMsg: string;
   lastTouch: string;
+  /** ISO timestamp of latest activity — drives the follow-up segment. */
+  latestAt?: string | null;
   sourceId?: string;
   threadId?: string;
   contactIds?: string[];
   favorite?: boolean;
   favoritedAt?: string | null;
+  top25?: boolean;
+  /** JSON string of saved-search criteria (contact card Searches tab). */
+  searchCriteria?: string | null;
 }
 
 export interface LeadsTemplateItem {

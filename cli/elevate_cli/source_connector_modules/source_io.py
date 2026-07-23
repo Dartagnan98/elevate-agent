@@ -308,6 +308,15 @@ PROFILE_STATUS_VALUES: tuple[str, ...] = (
     "dead",
     "closed_seller",
     "closed_buyer",
+    # CRM redesign (migration 0035): the realtor pipeline stages.
+    "attempted_contact",
+    "prospect",
+    "client",
+    "pending_deal",
+    "closed",
+    "referred",
+    "realtor_contact",
+    "trash",
 )
 
 

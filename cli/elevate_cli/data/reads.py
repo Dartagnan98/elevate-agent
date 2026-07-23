@@ -894,21 +894,38 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             placeholders = ",".join("?" for _ in profile_contact_ids)
             for row in conn.execute(
                 f"""
-                SELECT id, pipeline_status, pipeline_status_set_at
+                SELECT id, pipeline_status, pipeline_status_set_at,
+                       tags_json, search_criteria_json
                 FROM contacts
                 WHERE id IN ({placeholders})
                 """,
                 profile_contact_ids,
             ).fetchall():
+                tags: list[str] = []
+                raw_tags = row["tags_json"] if "tags_json" in row.keys() else None
+                if raw_tags:
+                    try:
+                        parsed = json.loads(raw_tags)
+                        if isinstance(parsed, list):
+                            tags = [str(t) for t in parsed if str(t).strip()]
+                    except (ValueError, TypeError):
+                        tags = []
                 profile_status_by_contact[str(row["id"])] = {
                     "status": row["pipeline_status"],
                     "updated_at": row["pipeline_status_set_at"],
+                    "tags": tags,
+                    "search_criteria": (
+                        row["search_criteria_json"]
+                        if "search_criteria_json" in row.keys()
+                        else None
+                    ),
                 }
         if profile_ids:
             placeholders = ",".join("?" for _ in profile_ids)
             for row in conn.execute(
                 f"""
-                SELECT profile_id, contact_id, favorite, favorited_at, favorited_by
+                SELECT profile_id, contact_id, favorite, favorited_at, favorited_by,
+                       top25, top25_at
                 FROM lead_profile_flags
                 WHERE profile_id IN ({placeholders})
                 """,
@@ -922,18 +939,30 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         )
     for profile in profiles:
         db_status = None
+        db_tags: list[str] = []
+        db_search_criteria = None
         for contact_id in profile.get("contactIds", []):
             candidate = profile_status_by_contact.get(str(contact_id))
-            if candidate and candidate.get("status"):
+            if candidate:
+                if candidate.get("tags") and not db_tags:
+                    db_tags = candidate["tags"]
+                if candidate.get("search_criteria") and db_search_criteria is None:
+                    db_search_criteria = candidate["search_criteria"]
+            if candidate and candidate.get("status") and db_status is None:
                 db_status = candidate
-                break
         profile["status"] = db_status.get("status") if db_status else None
         profile["statusUpdatedAt"] = db_status.get("updated_at") if db_status else None
+        if db_tags:
+            profile["tags"] = sorted({*[str(t) for t in profile.get("tags", []) if t], *db_tags})
+        if db_search_criteria is not None:
+            profile["searchCriteria"] = db_search_criteria
         flag = profile_flags_by_id.get(str(profile.get("id") or ""))
         is_favorite = bool(flag and flag["favorite"])
         profile["favorite"] = is_favorite
         profile["favoritedAt"] = flag["favorited_at"] if flag else None
         profile["favoritedBy"] = flag["favorited_by"] if flag else None
+        profile["top25"] = bool(flag and ("top25" in flag.keys()) and flag["top25"])
+        profile["top25At"] = flag["top25_at"] if flag and "top25" in flag.keys() else None
         if is_favorite:
             profile["leadSectionIds"] = sorted({
                 *[str(x) for x in profile.get("leadSectionIds", []) if x],

@@ -101,13 +101,25 @@ export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
   }));
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  new_lead: "New Lead",
+  follow_up: "Follow Up",
+  ghosting: "Ghosting",
+  dead: "Dead",
+  closed_seller: "Closed Seller",
+  closed_buyer: "Closed Buyer",
+  attempted_contact: "Attempted Contact",
+  prospect: "Prospect",
+  client: "Client",
+  pending_deal: "Pending Deal",
+  closed: "Closed",
+  referred: "Referred",
+  realtor_contact: "Realtor Contact",
+  trash: "Trash",
+};
+
 function statusLabel(profile: SourceInboxProfile): string {
-  if (profile.status === "new_lead") return "New Lead";
-  if (profile.status === "follow_up") return "Follow Up";
-  if (profile.status === "ghosting") return "Ghosting";
-  if (profile.status === "dead") return "Dead";
-  if (profile.status === "closed_seller") return "Closed Seller";
-  if (profile.status === "closed_buyer") return "Closed Buyer";
+  if (profile.status && STATUS_LABELS[profile.status]) return STATUS_LABELS[profile.status];
   if (profile.crmStage) return profile.crmStage;
   return profile.heatLabel === "hot" ? "Hot" : "Open";
 }
@@ -162,11 +174,14 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       sub: p.crmStage || (p.leadSource ? `Source: ${p.leadSource}` : ""),
       lastMsg: p.latestText || "",
       lastTouch: ageLabel(p.statusUpdatedAt || p.latestAt),
+      latestAt: p.latestAt || null,
       sourceId: latestThread.sourceId,
       threadId: latestThread.threadId,
       contactIds: p.contactIds || [],
       favorite: Boolean(p.favorite),
       favoritedAt: p.favoritedAt ?? null,
+      top25: Boolean(p.top25),
+      searchCriteria: p.searchCriteria ?? null,
     };
   });
 }
