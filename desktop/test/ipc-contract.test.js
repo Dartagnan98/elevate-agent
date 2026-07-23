@@ -7,6 +7,7 @@ const repoRoot = path.resolve(__dirname, "../..");
 const preloadPath = path.join(repoRoot, "desktop/src/preload.js");
 const mainPath = path.join(repoRoot, "desktop/src/main.js");
 const authIpcPath = path.join(repoRoot, "desktop/src/auth-ipc.js");
+const browserPanePath = path.join(repoRoot, "desktop/src/browser-pane.js");
 const updaterPath = path.join(repoRoot, "desktop/src/updater.js");
 
 function read(filePath) {
@@ -49,6 +50,16 @@ const allowedInvokeChannels = [
   "updater:status",
   "updater:check",
   "updater:install",
+  "browser:set-bounds",
+  "browser:set-visible",
+  "browser:list",
+  "browser:new-tab",
+  "browser:close-tab",
+  "browser:select-tab",
+  "browser:navigate",
+  "browser:back",
+  "browser:forward",
+  "browser:reload",
 ];
 
 function preloadInvokeChannels() {
@@ -57,7 +68,12 @@ function preloadInvokeChannels() {
 }
 
 test("preload ipc invokes have main-process handlers", () => {
-  const handlerSource = [read(mainPath), read(authIpcPath), read(updaterPath)].join("\n");
+  const handlerSource = [
+    read(mainPath),
+    read(authIpcPath),
+    read(browserPanePath),
+    read(updaterPath),
+  ].join("\n");
   const channels = preloadInvokeChannels();
 
   assert.deepEqual([...new Set(channels)], channels);

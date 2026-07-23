@@ -124,6 +124,15 @@ try:
 except ImportError:
     _is_camofox_mode = lambda: False  # noqa: E731
 
+try:
+    from tools.browser_pane import (
+        is_available as _embedded_browser_available,
+        run_command as _run_embedded_browser_command,
+    )
+except ImportError:
+    _embedded_browser_available = lambda: False  # noqa: E731
+    _run_embedded_browser_command = lambda *_args, **_kwargs: None  # noqa: E731
+
 logger = logging.getLogger(__name__)
 
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
@@ -1749,6 +1758,17 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     }
 
 
+def _create_embedded_pane_session(task_id: str) -> Dict[str, str]:
+    logger.info("Using embedded Elevate browser pane for task %s", task_id)
+    return {
+        "session_name": f"pane_{task_id[:24]}",
+        "bb_session_id": None,
+        "cdp_url": None,
+        "features": {"embedded_pane": True, "local": True},
+        "embedded_pane": True,
+    }
+
+
 def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
     """
     Get or create session info for the given session key.
@@ -1790,6 +1810,10 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
     # Create session outside the lock (network call in cloud mode)
     cdp_override = _get_cdp_override()
 
+    # The desktop pane is the preferred local browser. It is the only backend
+    # where the realtor and agent share the exact same visible tabs.
+    embedded_pane = not force_local and _embedded_browser_available()
+
     # Download-and-go path: in pure local mode, transparently bring up (or
     # relaunch) the user's real, logged-in Chrome and drive it over CDP instead
     # of a blank headless Chromium. This is the only place that may launch a
@@ -1797,12 +1821,14 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
     # backends, on Termux, on headless Linux, or when the user disabled it, and
     # self-heals a managed window that died since last session.
     managed_cdp = ""
-    if not force_local:
+    if not force_local and not embedded_pane:
         managed_cdp = _ensure_managed_debug_browser()
         if managed_cdp:
             managed_cdp = _resolve_cdp_override(managed_cdp)
 
-    if managed_cdp and not force_local:
+    if embedded_pane:
+        session_info = _create_embedded_pane_session(task_id)
+    elif managed_cdp and not force_local:
         session_info = _create_cdp_session(task_id, managed_cdp)
     elif cdp_override and not force_local:
         session_info = _create_cdp_session(task_id, cdp_override)
@@ -2014,6 +2040,18 @@ def _run_browser_command(
     if timeout is None:
         timeout = _get_command_timeout()
     args = args or []
+
+    # When the Elevate desktop app is running, its embedded pane is the
+    # primary browser backend. This check intentionally happens before CLI /
+    # Chromium discovery so a clean desktop install needs no second browser
+    # process and the agent always operates the page visible in the app.
+    pane_result = _run_embedded_browser_command(
+        command,
+        args,
+        timeout=timeout,
+    )
+    if pane_result is not None:
+        return pane_result
 
     # Build the command
     try:

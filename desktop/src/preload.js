@@ -28,4 +28,22 @@ contextBridge.exposeInMainWorld("elevateDesktop", {
       return () => ipcRenderer.removeListener("updater:event", handler);
     },
   },
+
+  browserPane: {
+    setBounds: (rect) => ipcRenderer.invoke("browser:set-bounds", rect),
+    setVisible: (visible) => ipcRenderer.invoke("browser:set-visible", visible),
+    list: () => ipcRenderer.invoke("browser:list"),
+    newTab: (url) => ipcRenderer.invoke("browser:new-tab", url),
+    closeTab: (id) => ipcRenderer.invoke("browser:close-tab", id),
+    selectTab: (id) => ipcRenderer.invoke("browser:select-tab", id),
+    navigate: (id, url) => ipcRenderer.invoke("browser:navigate", id, url),
+    back: (id) => ipcRenderer.invoke("browser:back", id),
+    forward: (id) => ipcRenderer.invoke("browser:forward", id),
+    reload: (id) => ipcRenderer.invoke("browser:reload", id),
+    onEvent: (callback) => {
+      const handler = (_event, payload) => callback(payload);
+      ipcRenderer.on("browser:event", handler);
+      return () => ipcRenderer.removeListener("browser:event", handler);
+    },
+  },
 });

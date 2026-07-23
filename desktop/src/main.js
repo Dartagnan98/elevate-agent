@@ -21,6 +21,8 @@ const { registerAuthIpc } = require("./auth-ipc");
 const backendHttp = require("./backend-http");
 const { createBackendPortController } = require("./backend-port");
 const { createBackendRunner } = require("./backend-runner");
+const { startControlServer } = require("./browser-control");
+const { BrowserPane, registerPaneIpc } = require("./browser-pane");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDashboardNavigation } = require("./dashboard-navigation");
@@ -135,6 +137,8 @@ const smsOutbox = createSmsOutbox({
 
 let mainWindow = null;
 let backendProcess = null;
+let browserPane = null;
+let browserControl = null;
 
 // The computer-use tool touches this file on every action. The desktop app
 // polls its mtime and shows the screen-edge glow while it is fresh, so the
@@ -656,6 +660,38 @@ function createMenu() {
 
 function createWindow() {
   mainWindowController.createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  browserControl?.stop();
+  browserPane?.destroy();
+
+  const paneForWindow = new BrowserPane({
+    window: mainWindow,
+    partition: RELEASE_PROFILE.isBeta
+      ? "persist:elevate-browser-beta"
+      : "persist:elevate-browser",
+    onEvent: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("browser:event", payload);
+      }
+    },
+  });
+  browserPane = paneForWindow;
+  browserPane.newTab();
+  browserControl = startControlServer({
+    pane: browserPane,
+    elevateHome: RUNTIME_PATHS.elevateHome,
+    log,
+  });
+
+  const paneWindow = mainWindow;
+  paneWindow.once("closed", () => {
+    if (browserPane !== paneForWindow) return;
+    browserControl?.stop();
+    browserControl = null;
+    paneForWindow.destroy();
+    browserPane = null;
+  });
 }
 
 function createOverlay() {
@@ -797,6 +833,8 @@ ipcMain.handle("desktop:retry", async () => {
 });
 
 ipcMain.handle("desktop:install", async () => runInstaller());
+
+registerPaneIpc(ipcMain, () => browserPane);
 
 registerAuthIpc({
   hqBaseUrl: HQ_BASE_URL,

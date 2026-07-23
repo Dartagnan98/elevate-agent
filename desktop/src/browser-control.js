@@ -1,0 +1,112 @@
+"use strict";
+
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const http = require("node:http");
+const path = require("node:path");
+
+const MAX_BODY = 1 << 20;
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function tokenMatches(header, token) {
+  const supplied = Buffer.from(String(header || ""), "utf8");
+  const expected = Buffer.from(`Bearer ${token}`, "utf8");
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
+const COMMANDS = {
+  list: (pane) => pane.list(),
+  new_tab: (pane, params) => ({ tabId: pane.newTab(params.url) }),
+  close_tab: (pane, params) => ({ ok: pane.closeTab(params.tabId) }),
+  select_tab: (pane, params) => ({ ok: pane.selectTab(params.tabId) }),
+  navigate: (pane, params) => pane.navigate(params.tabId, params.url),
+  read_page: (pane, params) => pane.readPage(params.tabId),
+  click: (pane, params) => pane.click(params.tabId, params.ref),
+  fill: (pane, params) => pane.fill(params.tabId, params.ref, params.value),
+  type: (pane, params) => pane.type(params.tabId, params.text),
+  key: (pane, params) => pane.key(params.tabId, params.key),
+  scroll: (pane, params) => pane.scroll(params.tabId, params.dy),
+  back: (pane, params) => pane.back(params.tabId),
+  forward: (pane, params) => pane.forward(params.tabId),
+  reload: (pane, params) => pane.reload(params.tabId),
+  eval: (pane, params) => pane.evaluate(params.tabId, params.expression),
+  screenshot: (pane, params) => pane.screenshot(params.tabId),
+};
+
+function startControlServer({ pane, elevateHome, log = console }) {
+  const token = crypto.randomBytes(32).toString("hex");
+  const endpointFile = path.join(elevateHome, "browser-pane.json");
+  let stopped = false;
+
+  const server = http.createServer(async (req, res) => {
+    const send = (status, body) => {
+      const json = JSON.stringify(body);
+      res.writeHead(status, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(json),
+      });
+      res.end(json);
+    };
+
+    try {
+      if (req.method !== "POST" || req.url !== "/rpc") {
+        send(404, { error: "not found" });
+        return;
+      }
+      if (!tokenMatches(req.headers.authorization, token)) {
+        send(401, { error: "unauthorized" });
+        return;
+      }
+      const payload = JSON.parse(await readBody(req));
+      const handler = COMMANDS[payload.method];
+      if (!handler) {
+        send(400, { error: `unknown method: ${payload.method}` });
+        return;
+      }
+      send(200, { result: await handler(pane, payload.params || {}) });
+    } catch (error) {
+      log.warn?.(`[browser-control] ${error && error.message ? error.message : error}`);
+      send(500, { error: String(error && error.message ? error.message : error) });
+    }
+  });
+
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    if (!address || typeof address === "string" || stopped) return;
+    fs.mkdirSync(elevateHome, { recursive: true });
+    fs.writeFileSync(
+      endpointFile,
+      JSON.stringify({ port: address.port, token }),
+      { mode: 0o600 },
+    );
+    log.info?.(`[browser-control] listening on 127.0.0.1:${address.port}`);
+  });
+
+  return {
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      server.close();
+      fs.rmSync(endpointFile, { force: true });
+    },
+  };
+}
+
+module.exports = { startControlServer };

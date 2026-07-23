@@ -8,6 +8,7 @@ import type { ToolEntry } from "@/components/ToolCall";
 import {
   ArtifactsPanel,
   BackgroundTasksPanel,
+  BrowserPanel,
   type BackgroundTaskItem,
   EmptyPreviewPanel,
   FilesPanel,
@@ -297,7 +298,7 @@ function SidePanelMotionSlot({
       className={cn(
         "chat-side-panel-motion",
         mobile && "chat-side-panel-motion--mobile",
-        mode === "preview" && "chat-side-panel-motion--preview",
+        (mode === "preview" || mode === "browser") && "chat-side-panel-motion--preview",
       )}
       data-panel-mode={mode}
     >
@@ -9131,14 +9132,13 @@ export default function ChatPage() {
     };
   }, [chatTitle, folderLabel, handleOpenChatMenu, sessionId, setBeforeTitle, setEnd, setTitle]);
   const previewPanelWidthPx = `${previewPanelWidth}px`;
-  // The right panel is open for ANY side-panel mode. Preview included — it
-  // shows a "No preview" state when there's no artifact rather than being a
-  // dead menu row.
+  // The right panel is open for ANY side-panel mode. Browser and Preview are
+  // included. Preview remains an internal artifact destination even though
+  // Browser replaced it in the selector.
   const wideOpen = sidePanel !== "none";
-  // Preview shows file content, so it earns the big resizable 50/50. Plan /
-  // Files / Background tasks are just breakdowns (lists) — they get a compact
-  // fixed width and no resize handle.
-  const isPreviewPanel = sidePanel === "preview";
+  // Browser and artifact Preview show full content, so they earn the big
+  // resizable 50/50. Plan / Files / Background tasks are compact lists.
+  const isPreviewPanel = sidePanel === "preview" || sidePanel === "browser";
   const activeSidePanelMode = sidePanel === "none" ? null : sidePanel;
   const sidePanelMotionKey =
     sidePanel === "preview"
@@ -9181,6 +9181,8 @@ export default function ChatPage() {
           (planReadyForApproval || permissionModeId === "plan")));
 
     switch (sidePanel) {
+      case "browser":
+        return <BrowserPanel onClose={closeSidePanel} />;
       case "preview":
         return previewArtifact ? (
           <ArtifactPreviewPane artifact={previewArtifact} onClose={dismissPreviewArtifact} />

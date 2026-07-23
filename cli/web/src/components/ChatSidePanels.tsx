@@ -1,5 +1,7 @@
 import {
   AlertCircle,
+  ArrowLeft,
+  ArrowRight,
   Boxes,
   Check,
   CheckCircle2,
@@ -12,11 +14,14 @@ import {
   FileStack,
   FileText,
   Folder,
+  Globe2,
   Image as ImageIcon,
   ListChecks,
   Loader2,
   MessageSquare,
   PanelRight,
+  Plus,
+  RefreshCw,
   Square,
   X,
   XCircle,
@@ -32,7 +37,14 @@ import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
 import { Markdown } from "@/components/Markdown";
 import { cn } from "@/lib/utils";
 
-export type SidePanelMode = "none" | "preview" | "artifacts" | "plan" | "tasks" | "files";
+export type SidePanelMode =
+  | "none"
+  | "browser"
+  | "preview"
+  | "artifacts"
+  | "plan"
+  | "tasks"
+  | "files";
 
 // ---------------------------------------------------------------------------
 // Shared shell — mirrors ArtifactPreviewPane so every side panel reads the
@@ -133,7 +145,256 @@ function PanelSectionLabel({ children }: { children: ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
-// Header selector — the "little icon" dropdown (Preview / Files / Background
+// Browser — one native Electron WebContentsView shared by the realtor and the
+// agent. The React pane owns only the controls and the layout hole; the main
+// process composites the live page into that hole.
+// ---------------------------------------------------------------------------
+
+type BrowserTab = {
+  id: string;
+  url: string;
+  title: string;
+  active: boolean;
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  lastError?: string | null;
+};
+
+type BrowserPaneEvent =
+  | { type: "tabs"; tabs: BrowserTab[] }
+  | { type: "blocked" | "load-failed"; reason?: string; description?: string; url?: string };
+
+type BrowserPaneBridge = {
+  setBounds: (rect: { x: number; y: number; width: number; height: number }) => Promise<void>;
+  setVisible: (visible: boolean) => Promise<void>;
+  list: () => Promise<BrowserTab[]>;
+  newTab: (url?: string) => Promise<string>;
+  closeTab: (id: string) => Promise<boolean>;
+  selectTab: (id: string) => Promise<boolean>;
+  navigate: (id: string, url: string) => Promise<{ ok: boolean; url?: string }>;
+  back: (id: string) => Promise<unknown>;
+  forward: (id: string) => Promise<unknown>;
+  reload: (id: string) => Promise<unknown>;
+  onEvent: (callback: (event: BrowserPaneEvent) => void) => () => void;
+};
+
+function desktopBrowserPane(): BrowserPaneBridge | null {
+  return (
+    window as unknown as {
+      elevateDesktop?: { browserPane?: BrowserPaneBridge };
+    }
+  ).elevateDesktop?.browserPane ?? null;
+}
+
+function browserTarget(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "about:blank";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.includes(" ") || !trimmed.includes(".")) {
+    return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+  }
+  return `https://${trimmed}`;
+}
+
+export function BrowserPanel({ onClose }: { onClose: () => void }) {
+  const bridge = useMemo(desktopBrowserPane, []);
+  const holeRef = useRef<HTMLDivElement>(null);
+  const [tabs, setTabs] = useState<BrowserTab[]>([]);
+  const [address, setAddress] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const active = tabs.find((tab) => tab.active) ?? tabs[0] ?? null;
+
+  const refresh = useCallback(async () => {
+    if (!bridge) return;
+    try {
+      let next = await bridge.list();
+      if (!next.length) {
+        await bridge.newTab();
+        next = await bridge.list();
+      }
+      setTabs(next);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [bridge]);
+
+  useEffect(() => {
+    if (!bridge) {
+      setError("The embedded browser is available in the Elevate desktop app.");
+      return;
+    }
+    void refresh();
+    return bridge.onEvent((event) => {
+      if (event.type === "tabs") {
+        setTabs(event.tabs);
+        setError(null);
+      } else {
+        setError(event.reason || event.description || "The page could not be loaded.");
+      }
+    });
+  }, [bridge, refresh]);
+
+  useEffect(() => {
+    if (active && document.activeElement?.getAttribute("data-browser-address") !== "true") {
+      setAddress(active.url === "about:blank" ? "" : active.url);
+    }
+  }, [active]);
+
+  useEffect(() => {
+    if (!bridge || !holeRef.current) return;
+    const hole = holeRef.current;
+    const pushBounds = () => {
+      const rect = hole.getBoundingClientRect();
+      void bridge.setBounds({
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      });
+    };
+    const observer = new ResizeObserver(pushBounds);
+    observer.observe(hole);
+    window.addEventListener("resize", pushBounds);
+    void bridge.setVisible(true);
+    pushBounds();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", pushBounds);
+      void bridge.setVisible(false);
+    };
+  }, [bridge]);
+
+  const navigate = useCallback(async () => {
+    if (!bridge || !active) return;
+    try {
+      setError(null);
+      await bridge.navigate(active.id, browserTarget(address));
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [active, address, bridge, refresh]);
+
+  const newTab = useCallback(async () => {
+    if (!bridge) return;
+    await bridge.newTab();
+    await refresh();
+  }, [bridge, refresh]);
+
+  return (
+    <PanelShell
+      icon={<Globe2 className="h-4.5 w-4.5" />}
+      title="Browser"
+      subtitle="Live browser shared with your Elevate agent"
+      actions={
+        <Button
+          aria-label="New browser tab"
+          className="h-7 w-7 rounded-[7px] p-0"
+          onClick={() => void newTab()}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      }
+      onClose={onClose}
+    >
+      <div className="flex h-full min-h-[320px] flex-col bg-[var(--chat-bg)]">
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--chat-border)] px-2 py-2">
+          <Button
+            aria-label="Back"
+            className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+            disabled={!active?.canGoBack}
+            onClick={() => active && void bridge?.back(active.id)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            aria-label="Forward"
+            className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+            disabled={!active?.canGoForward}
+            onClick={() => active && void bridge?.forward(active.id)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            aria-label="Reload"
+            className="h-7 w-7 shrink-0 rounded-[7px] p-0"
+            onClick={() => active && void bridge?.reload(active.id)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", active?.loading && "animate-spin")} />
+          </Button>
+          <input
+            aria-label="Browser address"
+            className="h-8 min-w-0 flex-1 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 text-xs text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)] focus:border-[var(--chat-accent)]"
+            data-browser-address="true"
+            onChange={(event) => setAddress(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void navigate();
+            }}
+            placeholder="Search or enter a website"
+            spellCheck={false}
+            value={address}
+          />
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--chat-border)] px-2 py-1.5">
+          {tabs.map((tab) => (
+            <div
+              className={cn(
+                "group flex max-w-[180px] shrink-0 items-center rounded-[7px] border text-[11px]",
+                tab.active
+                  ? "border-[var(--chat-border-strong)] bg-[var(--chat-surface)] text-[var(--chat-text)]"
+                  : "border-transparent text-[var(--chat-muted)] hover:bg-[var(--chat-surface)]",
+              )}
+              key={tab.id}
+            >
+              <button
+                className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pl-2"
+                onClick={() => void bridge?.selectTab(tab.id)}
+                type="button"
+              >
+                <Globe2 className="h-3 w-3 shrink-0" />
+                <span className="truncate">{tab.title || tab.url || "New tab"}</span>
+              </button>
+              <button
+                aria-label="Close tab"
+                className="mx-1 rounded-sm px-0.5 opacity-0 hover:bg-[var(--chat-border)] focus:opacity-100 group-hover:opacity-100"
+                onClick={() => void bridge?.closeTab(tab.id)}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {error ? (
+          <div className="shrink-0 border-b border-[color-mix(in_srgb,var(--chat-danger)_30%,transparent)] bg-[color-mix(in_srgb,var(--chat-danger)_8%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-danger)]">
+            {error}
+          </div>
+        ) : null}
+
+        <div ref={holeRef} className="min-h-0 flex-1 bg-white" />
+      </div>
+    </PanelShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Header selector — the "little icon" dropdown (Browser / Files / Background
 // tasks / Plan). No Diff, no Terminal.
 // ---------------------------------------------------------------------------
 
@@ -143,7 +404,7 @@ const SELECTOR_ROWS: {
   icon: ReactNode;
   hint?: string;
 }[] = [
-  { mode: "preview", label: "Preview", icon: <FileText className="h-4 w-4" />, hint: "⇧⌘P" },
+  { mode: "browser", label: "Browser", icon: <Globe2 className="h-4 w-4" /> },
   { mode: "artifacts", label: "Artifacts", icon: <FileStack className="h-4 w-4" /> },
   { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" /> },
   { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" />, hint: "⇧⌘B" },
