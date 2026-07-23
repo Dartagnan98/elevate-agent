@@ -1686,12 +1686,10 @@ def execution_policy_for_permission_mode(
 ) -> ExecutionPolicy:
     """Freeze one accepted-turn policy from the legacy permission mode.
 
-    Realtor Beta has a WORKSPACE cohort maximum: the agent may mutate its own
-    board, plan, journal, memory, and skill-usage ledger, and may read the
-    operator's own connector catalog.  It may not reach a human or an
-    external system from any mode.  The realtor's ``default`` mode reaches
-    that ceiling — containment that only lifted in an opt-in mode would leave
-    the shipped product inert.  ``plan`` and ``read_only`` still narrow.
+    Realtor Beta's normal modes have a WORKSPACE cohort maximum: the agent may
+    mutate its own board, plan, journal, memory, skill-usage ledger, and the
+    scoped browser surface. Explicit ``bypassPermissions`` receives the
+    standard DEFAULT policy, while ``plan`` and ``read_only`` still narrow.
     Unknown modes always raise.
     """
     if not isinstance(permission_mode, str):
@@ -1712,6 +1710,9 @@ _current_execution_policy: contextvars.ContextVar[Optional[ExecutionPolicy]] = (
 )
 _current_execution_policy_revision: contextvars.ContextVar[Optional[int]] = (
     contextvars.ContextVar("current_execution_policy_revision", default=None)
+)
+_current_inherited_beta_bypass: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar("current_inherited_beta_bypass", default=False)
 )
 
 
@@ -1790,10 +1791,9 @@ def get_current_execution_policy_revision() -> Optional[int]:
 #      itself inherited; ambient thread state never is, in either direction.
 #
 # Under exact Realtor Beta both the capture and the bind clamp the derived
-# policy at the Beta cohort ceiling (workspace): a wider captured binding —
-# for example one replayed into a Beta process from a non-Beta capture —
-# degrades to explicit no-policy, so every beyond-read dispatch fails closed
-# at the adapter's durable-identity gate rather than executing wide.
+# policy at the normal cohort ceiling (workspace). Only a binding stamped from
+# an explicitly selected ``bypassPermissions`` turn may carry the DEFAULT
+# policy. A wide binding replayed from elsewhere degrades to explicit no-policy.
 # ---------------------------------------------------------------------------
 
 
@@ -1813,6 +1813,7 @@ class InheritedPolicyBinding:
     policy: Optional[ExecutionPolicy]
     policy_revision: Optional[int]
     parent_session_id: Optional[str] = None
+    beta_bypass_permissions: bool = False
 
 
 def derive_child_execution_policy(
@@ -1864,7 +1865,8 @@ def derive_child_execution_policy(
     return derived
 
 
-BETA_COHORT_POLICY_MODE = ExecutionPolicyMode.DEFAULT
+BETA_COHORT_POLICY_MODE = ExecutionPolicyMode.WORKSPACE
+BETA_BYPASS_POLICY_MODE = ExecutionPolicyMode.DEFAULT
 
 
 def beta_cohort_policy_active() -> bool:
@@ -1877,11 +1879,15 @@ def beta_cohort_policy_active() -> bool:
     return _beta_approval_policy_active()
 
 
-def _beta_ceiling_rejects(policy: ExecutionPolicy) -> bool:
+def _beta_ceiling_rejects(
+    policy: ExecutionPolicy,
+    *,
+    explicit_bypass: bool = False,
+) -> bool:
     """True when *policy* exceeds Beta's explicit-mode cohort ceiling."""
     ceiling = ExecutionPolicy.for_mode(
         policy.accepted_turn_id,
-        BETA_COHORT_POLICY_MODE,
+        BETA_BYPASS_POLICY_MODE if explicit_bypass else BETA_COHORT_POLICY_MODE,
     )
     try:
         return ceiling.narrow(policy.allowed_effects, mode=policy.mode) != policy
@@ -1925,13 +1931,30 @@ def capture_inherited_execution_policy(
         # inherit nothing rather than something unproven.
         logger.error("inherited policy derivation failed closed", exc_info=True)
         return InheritedPolicyBinding(None, None, session)
-    if _beta_approval_policy_active() and _beta_ceiling_rejects(derived):
+    beta_active = _beta_approval_policy_active()
+    explicit_bypass = bool(
+        beta_active
+        and derived.mode is ExecutionPolicyMode.DEFAULT
+        and (
+            get_permission_mode() == "bypassPermissions"
+            or _current_inherited_beta_bypass.get()
+        )
+    )
+    if beta_active and _beta_ceiling_rejects(
+        derived,
+        explicit_bypass=explicit_bypass,
+    ):
         logger.error(
             "inherited policy exceeds the exact-Beta ceiling; child agents "
             "inherit no policy and fail closed"
         )
         return InheritedPolicyBinding(None, None, session)
-    return InheritedPolicyBinding(derived, revision, session)
+    return InheritedPolicyBinding(
+        derived,
+        revision,
+        session,
+        explicit_bypass,
+    )
 
 
 @contextlib.contextmanager
@@ -1947,14 +1970,19 @@ def inherited_execution_policy_scope(binding):
     """
     policy: Optional[ExecutionPolicy] = None
     revision: Optional[int] = None
+    explicit_bypass = False
     if isinstance(binding, InheritedPolicyBinding):
         if isinstance(binding.policy, ExecutionPolicy):
             policy = binding.policy
             revision = _validated_inherited_revision(binding.policy_revision)
+            explicit_bypass = bool(binding.beta_bypass_permissions)
     if (
         policy is not None
         and _beta_approval_policy_active()
-        and _beta_ceiling_rejects(policy)
+        and _beta_ceiling_rejects(
+            policy,
+            explicit_bypass=explicit_bypass,
+        )
     ):
         # Bind-time re-clamp: a binding captured outside Beta (or replayed
         # across a channel change) can never widen a Beta child.
@@ -1964,12 +1992,20 @@ def inherited_execution_policy_scope(binding):
         )
         policy = None
         revision = None
+        explicit_bypass = False
     policy_token = _current_execution_policy.set(policy)
     try:
         revision_token = _current_execution_policy_revision.set(revision)
     except BaseException:
         _current_execution_policy.reset(policy_token)
         raise
+    bypass_token = _current_inherited_beta_bypass.set(
+        bool(
+            policy is not None
+            and _beta_approval_policy_active()
+            and explicit_bypass
+        )
+    )
     try:
         yield InheritedPolicyBinding(
             policy,
@@ -1977,8 +2013,10 @@ def inherited_execution_policy_scope(binding):
             binding.parent_session_id
             if isinstance(binding, InheritedPolicyBinding)
             else None,
+            explicit_bypass,
         )
     finally:
+        _current_inherited_beta_bypass.reset(bypass_token)
         _current_execution_policy_revision.reset(revision_token)
         _current_execution_policy.reset(policy_token)
 

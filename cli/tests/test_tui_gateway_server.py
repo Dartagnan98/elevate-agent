@@ -2077,6 +2077,7 @@ def test_prompt_submit_binds_only_effective_policy_read_back_from_receipt(
             "user-policy-bind",
             "bypassPermissions",
         ).to_dict()
+        assert stored["payload"]["permission_mode"] == "bypassPermissions"
         expected_effective = ExecutionPolicy.for_mode(
             "user-policy-bind",
             ExecutionPolicyMode.READ_ONLY,

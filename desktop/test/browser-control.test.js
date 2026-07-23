@@ -62,6 +62,11 @@ test("browser control endpoint authenticates and targets the shared pane", async
   const elevateHome = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-browser-control-"));
   const calls = [];
   const pane = {
+    status: (sessionKey) => ({
+      open: true,
+      workspaceId: sessionKey,
+      activeTabId: "tab_1",
+    }),
     list: (sessionKey) => [{ id: "tab_1", active: true, sessionKey }],
     navigate: async (tabId, url, sessionKey) => {
       calls.push({ tabId, url, sessionKey });
@@ -83,6 +88,7 @@ test("browser control endpoint authenticates and targets the shared pane", async
 
   const endpointPath = path.join(elevateHome, "browser-pane.json");
   const endpoint = await waitForEndpoint(endpointPath);
+  const status = await rpc(endpoint, "status", { sessionKey: "chat-a" });
   const listed = await rpc(endpoint, "list", { sessionKey: "chat-a" });
   const navigated = await rpc(endpoint, "navigate", {
     sessionKey: "chat-a",
@@ -90,6 +96,12 @@ test("browser control endpoint authenticates and targets the shared pane", async
     url: "https://example.com/",
   });
 
+  assert.equal(status.status, 200);
+  assert.deepEqual(status.body.result, {
+    open: true,
+    workspaceId: "chat-a",
+    activeTabId: "tab_1",
+  });
   assert.equal(listed.status, 200);
   assert.deepEqual(listed.body.result, [{
     id: "tab_1",

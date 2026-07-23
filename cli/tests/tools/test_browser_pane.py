@@ -124,6 +124,7 @@ def test_embedded_pane_satisfies_browser_requirements_without_cli(monkeypatch):
 
 
 def test_visible_browser_status_is_scoped_to_the_agent_session(monkeypatch):
+    from tools import browser_tool
     from tools import visible_browser_tool
 
     monkeypatch.setattr(
@@ -143,6 +144,23 @@ def test_visible_browser_status_is_scoped_to_the_agent_session(monkeypatch):
     assert result["success"] is True
     assert result["workspaceId"] == "chat-9"
     assert result["activeTabId"] == "tab_9"
+    assert set(visible_browser_tool._SCHEMAS) == {
+        "browser_status",
+        "browser_open",
+        "browser_read",
+        "browser_fill",
+        "browser_drag",
+        "browser_login",
+        "browser_shot",
+        "browser_recordings",
+        "browser_play",
+    }
+    assert visible_browser_tool._SCHEMAS["browser_open"]["parameters"]["required"] == [
+        "url"
+    ]
+    assert browser_tool._BROWSER_SCHEMA_MAP["browser_click"]["parameters"]["required"] == [
+        "ref"
+    ]
 
 
 def test_saved_browser_login_never_returns_the_password(monkeypatch):

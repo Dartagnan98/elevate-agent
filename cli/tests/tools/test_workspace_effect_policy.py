@@ -399,7 +399,12 @@ def test_beta_operator_can_still_narrow_below_the_board(beta_channel) -> None:
 
 def test_an_explicit_bypass_binding_is_carried_intact_under_beta(
     beta_channel,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        "tools.approval.get_permission_mode",
+        lambda: "bypassPermissions",
+    )
     wide = ExecutionPolicy.for_mode("turn-wide", ExecutionPolicyMode.DEFAULT)
     token = set_current_execution_policy(wide, policy_revision=7)
     try:
@@ -408,6 +413,7 @@ def test_an_explicit_bypass_binding_is_carried_intact_under_beta(
         reset_current_execution_policy(token)
     assert binding.policy == wide
     assert binding.policy_revision == 7
+    assert binding.beta_bypass_permissions is True
 
 
 def test_a_workspace_binding_is_carried_intact_under_beta(beta_channel) -> None:
@@ -520,13 +526,20 @@ def test_severance_predicate_permits_outward_effects_under_default(
 # ---------------------------------------------------------------------------
 
 
-def _receipt_for(policy: ExecutionPolicy) -> dict:
-    return {
+def _receipt_for(
+    policy: ExecutionPolicy,
+    *,
+    permission_mode: str | None = None,
+) -> dict:
+    receipt = {
         "client_message_id": policy.accepted_turn_id,
         "policy_revision": 1,
         "accepted_policy": policy.to_dict(),
         "effective_policy": policy.to_dict(),
     }
+    if permission_mode is not None:
+        receipt["payload"] = {"permission_mode": permission_mode}
+    return receipt
 
 
 def test_the_gateway_accepts_the_policy_a_realtor_turn_produces(
@@ -548,8 +561,13 @@ def test_the_gateway_accepts_an_explicit_bypass_receipt(
     from tui_gateway.server import _execution_policy_from_receipt
 
     wide = ExecutionPolicy.for_mode("msg-wide", ExecutionPolicyMode.DEFAULT)
-    assert _execution_policy_from_receipt(_receipt_for(wide)).mode is (
-        ExecutionPolicyMode.DEFAULT
+    with pytest.raises(ValueError, match="exceeds Beta ceiling"):
+        _execution_policy_from_receipt(_receipt_for(wide))
+    assert (
+        _execution_policy_from_receipt(
+            _receipt_for(wide, permission_mode="bypassPermissions")
+        ).mode
+        is ExecutionPolicyMode.DEFAULT
     )
 
 
@@ -569,7 +587,17 @@ def test_the_gateway_accepts_every_mode_at_or_below_the_cohort(
     from tui_gateway.server import _execution_policy_from_receipt
 
     policy = ExecutionPolicy.for_mode(f"msg-{mode.value}", mode)
-    assert _execution_policy_from_receipt(_receipt_for(policy)).mode is mode
+    permission_mode = (
+        "bypassPermissions"
+        if mode is ExecutionPolicyMode.DEFAULT
+        else None
+    )
+    assert (
+        _execution_policy_from_receipt(
+            _receipt_for(policy, permission_mode=permission_mode)
+        ).mode
+        is mode
+    )
 
 
 def test_the_two_beta_clamps_agree() -> None:
@@ -579,7 +607,8 @@ def test_the_two_beta_clamps_agree() -> None:
     from tools import approval
     from tui_gateway import server
 
-    assert approval.BETA_COHORT_POLICY_MODE is ExecutionPolicyMode.DEFAULT
+    assert approval.BETA_COHORT_POLICY_MODE is ExecutionPolicyMode.WORKSPACE
+    assert approval.BETA_BYPASS_POLICY_MODE is ExecutionPolicyMode.DEFAULT
     source = inspect.getsource(server._execution_policy_from_receipt)
     assert "BETA_COHORT_POLICY_MODE" in source
     # A hardcoded mode here is what rotted last time.

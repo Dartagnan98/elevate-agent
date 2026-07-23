@@ -7095,6 +7095,7 @@ def _prompt_owner_alive(
 def _execution_policy_from_receipt(receipt: dict):
     """Validate one receipt and return only its durable effective policy."""
     from tools.approval import (
+        BETA_BYPASS_POLICY_MODE,
         BETA_COHORT_POLICY_MODE,
         ExecutionPolicy,
         PolicyWideningError,
@@ -7144,9 +7145,18 @@ def _execution_policy_from_receipt(receipt: dict):
     # is wider, so a stale literal here does not read as a policy bug — it
     # reads as every turn being interrupted as untrusted.
     if beta_cohort_policy_active():
+        payload = receipt.get("payload")
+        explicit_bypass = bool(
+            isinstance(payload, dict)
+            and payload.get("permission_mode") == "bypassPermissions"
+        )
         beta_ceiling = ExecutionPolicy.for_mode(
             client_message_id,
-            BETA_COHORT_POLICY_MODE,
+            (
+                BETA_BYPASS_POLICY_MODE
+                if explicit_bypass
+                else BETA_COHORT_POLICY_MODE
+            ),
         )
         try:
             within_ceiling = beta_ceiling.narrow(
@@ -8150,9 +8160,15 @@ def _(rid, params: dict) -> dict:
                         raise TypeError("invalid internal recovery execution policy")
                     accepted_policy = recovered_policy
                 else:
+                    accepted_permission_mode = (
+                        get_session_permission_mode_for_policy(session_key)
+                    )
                     accepted_policy = execution_policy_for_permission_mode(
                         turn_ids["user"],
-                        get_session_permission_mode_for_policy(session_key),
+                        accepted_permission_mode,
+                    )
+                    submitted_payload["permission_mode"] = (
+                        accepted_permission_mode
                     )
             except (TypeError, ValueError) as exc:
                 return _err(rid, 4002, f"prompt policy rejected: {exc}")

@@ -7,8 +7,8 @@ a child agent acquires an execution policy:
   every widening attempt raises ``PolicyWideningError``.
 * ``capture_inherited_execution_policy`` — dispatch-time snapshot of the
   parent's bound policy + durable revision; no bound policy captures as
-  EXPLICIT no-policy; exact-Beta clamps anything above the draft-only
-  cohort ceiling to no-policy.
+  EXPLICIT no-policy; exact-Beta permits a DEFAULT policy only when the
+  accepted turn explicitly selected bypass.
 * ``inherited_execution_policy_scope`` — binds exactly the captured values
   around a child run and restores the worker thread's prior state on every
   exit path; ambient thread state can never leak in either direction.
@@ -267,7 +267,7 @@ class TestCaptureInheritedExecutionPolicy:
             is None
         )
 
-    def test_beta_clamps_default_mode_policy_to_no_policy(self, monkeypatch):
+    def test_beta_only_inherits_default_for_explicit_bypass(self, monkeypatch):
         monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
         wide = _policy("default")
         token = set_current_execution_policy(wide, policy_revision=1)
@@ -275,6 +275,14 @@ class TestCaptureInheritedExecutionPolicy:
             binding = capture_inherited_execution_policy(parent_session_id="p")
             assert binding.policy is None
             assert binding.policy_revision is None
+            monkeypatch.setattr(
+                "tools.approval.get_permission_mode",
+                lambda: "bypassPermissions",
+            )
+            binding = capture_inherited_execution_policy(parent_session_id="p")
+            assert binding.policy == wide
+            assert binding.policy_revision == 1
+            assert binding.beta_bypass_permissions is True
         finally:
             reset_current_execution_policy(token)
 
@@ -398,7 +406,7 @@ class TestInheritedExecutionPolicyScope:
                 assert get_current_execution_policy() == grandchild_policy
             assert get_current_execution_policy() == child_policy
 
-    def test_beta_bind_time_reclamp_rejects_wide_replayed_binding(
+    def test_beta_bind_time_requires_explicit_bypass_stamp_for_default(
         self, monkeypatch
     ):
         """Cross-generation replay: a binding captured outside Beta must not
@@ -408,6 +416,18 @@ class TestInheritedExecutionPolicyScope:
         with inherited_execution_policy_scope(wide_binding):
             assert get_current_execution_policy() is None
             assert get_current_execution_policy_revision() is None
+        explicit_binding = InheritedPolicyBinding(
+            _policy("default"),
+            5,
+            "p",
+            True,
+        )
+        with inherited_execution_policy_scope(explicit_binding):
+            assert get_current_execution_policy() == explicit_binding.policy
+            assert get_current_execution_policy_revision() == 5
+            descendant = capture_inherited_execution_policy()
+            assert descendant.policy == explicit_binding.policy
+            assert descendant.beta_bypass_permissions is True
 
     def test_beta_bind_time_keeps_draft_only_binding(self, monkeypatch):
         monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
