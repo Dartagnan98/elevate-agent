@@ -1,11 +1,14 @@
 "use strict";
 
 const { WebContentsView, session } = require("electron");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const MAX_TEXT = 40_000;
 const CORNER_RADIUS = 8;
 const DEFAULT_WORKSPACE = "default";
 const MAX_CONSOLE_ENTRIES = 200;
+const MAX_IMPORT_COOKIES = 10_000;
 
 const READ_PAGE_JS = `(() => {
   const selector = 'a[href],button,input,select,textarea,summary,[role],[onclick],[contenteditable="true"],[draggable="true"],[ondragstart],[ondrop],.ui-draggable,.ui-droppable';
@@ -205,10 +208,65 @@ function clampPaneBounds(rect, contentBounds, zoom = 1) {
   };
 }
 
+function cookieUrl(cookie) {
+  const domain = String(cookie?.domain || "").replace(/^\./, "").trim();
+  if (!domain || /[\s/]/.test(domain)) return null;
+  const secure = Boolean(cookie?.secure) ||
+    /^__(?:Secure|Host)-/.test(String(cookie?.name || ""));
+  const cookiePath = String(cookie?.path || "/");
+  const normalizedPath = cookiePath.startsWith("/") ? cookiePath : `/${cookiePath}`;
+  return `${secure ? "https" : "http"}://${domain}${normalizedPath}`;
+}
+
+function toElectronCookieDetails(cookie, nowSeconds = Date.now() / 1000) {
+  // Electron 39 cannot preserve CHIPS partition keys. Importing one without
+  // that key would widen its scope, so reject it even if a caller bypasses the
+  // Chrome exporter.
+  if (cookie?.partitionKey) return null;
+  const url = cookieUrl(cookie);
+  const name = String(cookie?.name || "");
+  const value = typeof cookie?.value === "string" ? cookie.value : "";
+  if (!url || !name) return null;
+
+  const expires = Number(cookie?.expires);
+  if (Number.isFinite(expires) && expires > 0 && expires <= nowSeconds) return null;
+
+  const details = {
+    url,
+    name,
+    value,
+    path: String(cookie?.path || "/"),
+    secure: Boolean(cookie?.secure) || /^__(?:Secure|Host)-/.test(name),
+    httpOnly: Boolean(cookie?.httpOnly),
+  };
+  const domain = String(cookie?.domain || "");
+  if (domain.startsWith(".") && !name.startsWith("__Host-")) details.domain = domain;
+  if (Number.isFinite(expires) && expires > 0 && !cookie?.session) {
+    details.expirationDate = expires;
+  }
+
+  const sameSite = String(cookie?.sameSite || "").toLowerCase();
+  if (sameSite === "strict") details.sameSite = "strict";
+  else if (sameSite === "lax") details.sameSite = "lax";
+  else if (sameSite === "none" || sameSite === "no_restriction") {
+    details.sameSite = "no_restriction";
+    details.secure = true;
+  }
+  return details;
+}
+
 class BrowserPane {
-  constructor({ window, partition = "persist:elevate-browser", onEvent = () => {} }) {
+  constructor({
+    window,
+    partition = "persist:elevate-browser",
+    elevateHome = null,
+    onEvent = () => {},
+  }) {
     this.window = window;
     this.partition = partition;
+    this.profileReceiptPath = elevateHome
+      ? path.join(elevateHome, "browser-profile-import.json")
+      : null;
     this.onEvent = onEvent;
     this.workspaces = new Map();
     this.currentWorkspaceId = DEFAULT_WORKSPACE;
@@ -218,6 +276,90 @@ class BrowserPane {
     this.browserSession = session.fromPartition(this.partition);
     this.userAgent = standardBrowserUserAgent();
     this.browserSession.setUserAgent(this.userAgent, "en-US,en;q=0.9");
+  }
+
+  _lastProfileImport() {
+    if (!this.profileReceiptPath) return null;
+    try {
+      return JSON.parse(fs.readFileSync(this.profileReceiptPath, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  async profileStatus() {
+    const cookies = await this.browserSession.cookies.get({});
+    return {
+      persistent: this.partition.startsWith("persist:"),
+      partition: this.partition,
+      cookieCount: cookies.length,
+      domainCount: new Set(
+        cookies.map((cookie) => String(cookie.domain || "").replace(/^\./, "")),
+      ).size,
+      lastImport: this._lastProfileImport(),
+    };
+  }
+
+  async importCookies(cookies, metadata = {}) {
+    if (!Array.isArray(cookies)) throw new Error("cookies must be an array");
+    if (cookies.length > MAX_IMPORT_COOKIES) {
+      throw new Error(`cookie import exceeds ${MAX_IMPORT_COOKIES} entries`);
+    }
+
+    let imported = 0;
+    let persistentImported = 0;
+    let sessionImported = 0;
+    let skipped = 0;
+    let failed = 0;
+    const queue = [];
+    for (const cookie of cookies) {
+      const details = toElectronCookieDetails(cookie);
+      if (!details) {
+        skipped += 1;
+        continue;
+      }
+      queue.push(details);
+    }
+
+    for (let index = 0; index < queue.length; index += 50) {
+      const batch = queue.slice(index, index + 50);
+      const results = await Promise.allSettled(
+        batch.map((details) =>
+          this.browserSession.cookies.set(details)),
+      );
+      for (const [offset, result] of results.entries()) {
+        if (result.status === "fulfilled") {
+          imported += 1;
+          if (batch[offset].expirationDate) persistentImported += 1;
+          else sessionImported += 1;
+        } else {
+          failed += 1;
+        }
+      }
+    }
+
+    const receipt = {
+      schemaVersion: 1,
+      source: "chrome",
+      sourceProfile: String(metadata.sourceProfile || "Chrome"),
+      importedAt: new Date().toISOString(),
+      persistent: this.partition.startsWith("persist:"),
+      partition: this.partition,
+      total: cookies.length,
+      imported,
+      persistentImported,
+      sessionImported,
+      skipped,
+      failed,
+    };
+    if (this.profileReceiptPath) {
+      fs.mkdirSync(path.dirname(this.profileReceiptPath), { recursive: true });
+      fs.writeFileSync(this.profileReceiptPath, JSON.stringify(receipt), {
+        mode: 0o600,
+      });
+      fs.chmodSync(this.profileReceiptPath, 0o600);
+    }
+    return receipt;
   }
 
   workspace(workspaceId, create = true) {
@@ -677,7 +819,9 @@ function registerPaneIpc(ipcMain, getPane) {
 module.exports = {
   BrowserPane,
   clampPaneBounds,
+  cookieUrl,
   normalizeWorkspaceId,
   registerPaneIpc,
   standardBrowserUserAgent,
+  toElectronCookieDetails,
 };

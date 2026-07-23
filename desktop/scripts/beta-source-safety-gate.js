@@ -120,6 +120,7 @@ const REQUIRED_FILES_BY_SUITE = Object.freeze({
     "cli/tests/elevate_cli/test_beta_sender_containment.py",
     "cli/tests/run_agent/test_exact_beta_lane_dispatch_outcome.py",
     "cli/tests/tools/test_browser_pane.py",
+    "cli/tests/elevate_cli/test_chrome_session_import.py",
   ]),
   "python-tool-policy-runtime": Object.freeze([
     "cli/tests/run_agent/test_run_agent.py",
@@ -297,7 +298,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         (relative) => path.join(REPO, relative),
       ),
       ...pytest(
-        1381,
+        1388,
         "tests/test_model_tools.py",
         "tests/tools/test_registry_shadow_execution.py",
         "tests/tools/test_terminal_approval_effect_receipts.py",
@@ -351,6 +352,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         "tests/elevate_cli/test_beta_sender_containment.py",
         "tests/run_agent/test_exact_beta_lane_dispatch_outcome.py",
         "tests/tools/test_browser_pane.py",
+        "tests/elevate_cli/test_chrome_session_import.py",
       ),
     },
     {
@@ -483,7 +485,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       command: process.execPath,
       displayCommand: "<active-node>",
       args: ["--test", "--test-reporter=tap", ...desktopTests],
-      resultContract: { kind: "node-test", minimum_tests: 512, expected_tests: 512 },
+      resultContract: { kind: "node-test", minimum_tests: 514, expected_tests: 514 },
     },
   ];
 }

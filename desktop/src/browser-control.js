@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 
-const MAX_BODY = 1 << 20;
+const MAX_BODY = 16 << 20;
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -33,6 +33,11 @@ function tokenMatches(header, token) {
 
 const COMMANDS = {
   status: (pane, params) => pane.status(params.sessionKey),
+  profile_status: (pane) => pane.profileStatus(),
+  import_cookies: (pane, params) =>
+    pane.importCookies(params.cookies, {
+      sourceProfile: params.sourceProfile,
+    }),
   list: (pane, params) => pane.list(params.sessionKey),
   new_tab: (pane, params) => ({
     tabId: pane.newTab(params.url, params.sessionKey),
