@@ -1433,8 +1433,8 @@ test("dependency-injected orchestration seals execute-complete before unfreeze a
 
 function recoveryCandidateFixture(t) {
   const root = tempDirectory(t, "elevate-recovery-candidate-");
-  const candidateFeed = feedFixture("1.2.84", "Elevate-Beta");
-  const recoveryFeed = feedFixture("1.2.85", "Elevate-Beta-Recovery");
+  const candidateFeed = feedFixture("1.2.86", "Elevate-Beta");
+  const recoveryFeed = feedFixture("1.2.87", "Elevate-Beta-Recovery");
   const rollbackFeed = feedFixture("1.2.65", "Elevate");
   const stableFeed = feedFixture("1.2.63", "Elevate");
   const rollbackSnapshot = snapshot("beta", "1.2.65", rollbackFeed);
@@ -1453,7 +1453,7 @@ function recoveryCandidateFixture(t) {
   const recovery = {
     schema_version: 1,
     kind: "elevate-beta-recovery-package",
-    candidate_version: "1.2.84",
+    candidate_version: "1.2.86",
     version: EXPECTED_RECOVERY_VERSION,
     reserved_version: EXPECTED_RECOVERY_VERSION,
     next_full_beta_minimum_exclusive: EXPECTED_RECOVERY_VERSION,
@@ -1488,7 +1488,7 @@ function recoveryCandidateFixture(t) {
     source_receipt_id: "a".repeat(64),
     release: {
       channel: "beta",
-      version: "1.2.84",
+      version: "1.2.86",
       feed_name: BETA_FEED,
       profile: { channel: "beta" },
       artifact_names: candidateFeed.artifacts.map((item) => item.url),
@@ -1532,8 +1532,8 @@ function recoveryRemoteFixture(t) {
   const root = `${tempDirectory(t, "elevate-recovery-remote-")}/remote/`;
   fs.mkdirSync(root);
   const stableBytes = Buffer.from("stable-feed-exact\n");
-  const candidateFeedBytes = Buffer.from("candidate-beta-feed-1.2.84-exact\n");
-  const recoveryFeedBytes = Buffer.from("retained-recovery-feed-1.2.85-exact\n");
+  const candidateFeedBytes = Buffer.from("candidate-beta-feed-1.2.86-exact\n");
+  const recoveryFeedBytes = Buffer.from("retained-recovery-feed-1.2.87-exact\n");
   const candidateDmgBytes = {
     x64: Buffer.from("candidate-x64-dmg\n"),
     arm64: Buffer.from("candidate-arm64-dmg\n"),
@@ -1557,12 +1557,12 @@ function recoveryRemoteFixture(t) {
     "Alias-B-mac-arm64.dmg",
   ];
   const candidateArtifacts = ["x64", "arm64"].flatMap((arch) => [
-    { name: `Elevate-Beta-1.2.84-mac-${arch}.zip`, ...record(candidateZipBytes[arch]) },
-    { name: `Elevate-Beta-1.2.84-mac-${arch}.dmg`, ...record(candidateDmgBytes[arch]) },
+    { name: `Elevate-Beta-1.2.86-mac-${arch}.zip`, ...record(candidateZipBytes[arch]) },
+    { name: `Elevate-Beta-1.2.86-mac-${arch}.dmg`, ...record(candidateDmgBytes[arch]) },
   ]);
   const recoveryArtifacts = ["x64", "arm64"].flatMap((arch) => [
-    { name: `Elevate-Beta-Recovery-1.2.85-mac-${arch}.zip`, ...record(recoveryZipBytes[arch]) },
-    { name: `Elevate-Beta-Recovery-1.2.85-mac-${arch}.dmg`, ...record(recoveryDmgBytesByArch[arch]) },
+    { name: `Elevate-Beta-Recovery-1.2.87-mac-${arch}.zip`, ...record(recoveryZipBytes[arch]) },
+    { name: `Elevate-Beta-Recovery-1.2.87-mac-${arch}.dmg`, ...record(recoveryDmgBytesByArch[arch]) },
   ]);
   const candidateDmgs = Object.fromEntries(["x64", "arm64"].map((arch) => [
     arch,
@@ -1587,7 +1587,7 @@ function recoveryRemoteFixture(t) {
   const contract = {
     candidateId: "e".repeat(64),
     sourceReceiptId: "a".repeat(64),
-    candidateVersion: "1.2.84",
+    candidateVersion: "1.2.86",
     recoveryVersion: EXPECTED_RECOVERY_VERSION,
     stableFeedSha256: sha256(stableBytes),
     candidateFeedSha256: sha256(candidateFeedBytes),
@@ -1676,7 +1676,7 @@ test("recovery activation contract binds the exact receipt, recovery package, St
   const contract = loadRecoveryActivationContract(fixture.options);
   assert.equal(contract.candidateId, fixture.receipt.candidate_id);
   assert.equal(contract.candidateReceiptSha256, fixture.options.expectedCandidateReceiptSha256);
-  assert.equal(contract.candidateVersion, "1.2.84");
+  assert.equal(contract.candidateVersion, "1.2.86");
   assert.equal(contract.recoveryVersion, EXPECTED_RECOVERY_VERSION);
   assert.equal(contract.candidateFeedSha256, sha256(fixture.candidateFeed.bytes));
   assert.equal(contract.recoveryFeedSha256, sha256(fixture.recoveryFeed.bytes));
@@ -1710,19 +1710,19 @@ test("recovery activation contract fails closed for every receipt or package dri
     ["missing recovery package", (receipt) => { delete receipt.recovery; }, /no bound roll-forward recovery package/],
     ["recovery bound to another candidate", (receipt) => { receipt.recovery.candidate_version = "1.2.72"; }, /not bound to this exact candidate/],
     ["recovery not the pinned target", (receipt) => {
-      receipt.recovery.version = "1.2.86";
-      receipt.recovery.reserved_version = "1.2.86";
-    }, /exact Beta 1\.2\.85/],
+      receipt.recovery.version = "1.2.88";
+      receipt.recovery.reserved_version = "1.2.88";
+    }, /exact Beta 1\.2\.87/],
     ["recovery not a roll-forward", (receipt) => {
-      receipt.release.version = "1.2.85";
-      receipt.recovery.candidate_version = "1.2.85";
-      receipt.release.artifact_names = receipt.release.artifact_names.map((name) => name.replace("1.2.84", "1.2.85"));
+      receipt.release.version = "1.2.87";
+      receipt.recovery.candidate_version = "1.2.87";
+      receipt.release.artifact_names = receipt.release.artifact_names.map((name) => name.replace("1.2.86", "1.2.87"));
       receipt.artifacts = Object.fromEntries(Object.entries(receipt.artifacts).map(([name, value]) => [
-        name.replace("1.2.84", "1.2.85"), value,
+        name.replace("1.2.86", "1.2.87"), value,
       ]));
     }, /strictly newer than the candidate/],
     ["runtime policy not minimal", (receipt) => { receipt.recovery.static_provenance.runtime_policy.gateway = true; }, /minimal profile-preserving/],
-    ["recovery artifact set drift", (receipt) => { receipt.recovery.artifact_names[0] = "Elevate-Beta-Recovery-1.2.85-mac-x64.pkg"; }, /exact retained recovery set/],
+    ["recovery artifact set drift", (receipt) => { receipt.recovery.artifact_names[0] = "Elevate-Beta-Recovery-1.2.87-mac-x64.pkg"; }, /exact retained recovery set/],
     ["recovery bytes reuse candidate bytes", (receipt) => {
       const name = receipt.recovery.artifact_names.find((item) => item.endsWith("-mac-x64.dmg"));
       const candidateName = receipt.release.artifact_names.find((item) => item.endsWith("-mac-x64.dmg"));
@@ -1861,7 +1861,7 @@ test("real recovery preflight and dry-run stage retained bytes but leave every p
   assert.equal(fs.existsSync(activationFreezePath(fixture)), false);
 });
 
-test("real recovery execute activates 1.2.85 from retained bytes only and commits the feed last", (t) => {
+test("real recovery execute activates 1.2.87 from retained bytes only and commits the feed last", (t) => {
   const fixture = recoveryRemoteFixture(t);
   const script = buildRemoteRecoveryInnerScript({
     contract: fixture.contract,

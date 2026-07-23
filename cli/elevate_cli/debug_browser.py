@@ -42,11 +42,37 @@ import time
 import urllib.request
 from pathlib import Path
 
-from elevate_cli.config import get_elevate_home, load_config, save_config
+from elevate_constants import get_elevate_home
 
-CDP_PORT = 9222
+DEFAULT_CDP_PORT = 9222
+BETA_CDP_PORT = 9232
+DEFAULT_LAUNCH_AGENT_LABEL = "ai.elevate.debugchrome"
+BETA_LAUNCH_AGENT_LABEL = "ai.elevate.debugchrome-beta"
+
+
+def _managed_browser_identity(
+    *, home: Path | None = None, release_channel: str | None = None
+) -> tuple[int, str]:
+    """Return a profile-isolated CDP port and LaunchAgent label.
+
+    Stable and Beta run side by side with separate state. Their visible
+    browsers must be isolated too: sharing port 9222 lets any unrelated debug
+    Chrome make Beta falsely conclude that its own profile is ready.
+    """
+    resolved_home = home or get_elevate_home()
+    channel = (
+        os.environ.get("ELEVATE_RELEASE_CHANNEL", "")
+        if release_channel is None
+        else release_channel
+    )
+    is_beta = channel == "beta" or resolved_home.name == ".elevate-beta"
+    if is_beta:
+        return BETA_CDP_PORT, BETA_LAUNCH_AGENT_LABEL
+    return DEFAULT_CDP_PORT, DEFAULT_LAUNCH_AGENT_LABEL
+
+
+CDP_PORT, LAUNCH_AGENT_LABEL = _managed_browser_identity()
 CDP_URL = f"http://localhost:{CDP_PORT}"
-LAUNCH_AGENT_LABEL = "ai.elevate.debugchrome"
 
 # Caches regenerate themselves — never worth cloning.
 _PROFILE_EXCLUDES = [
@@ -357,18 +383,26 @@ def launch_agent_path() -> Path:
 
 
 def _python_path() -> str:
-    """Absolute interpreter path for the LaunchAgent (mirrors gateway.py)."""
-    try:
-        from elevate_cli.gateway import get_python_path
-
-        return get_python_path()
-    except Exception:
-        return sys.executable
+    """The current CLI runtime is already the correct persisted interpreter."""
+    return str(Path(sys.executable).resolve())
 
 
 def generate_plist() -> bytes:
-    log_dir = get_elevate_home() / "logs"
+    elevate_home = get_elevate_home()
+    cli_root = Path(__file__).resolve().parent.parent
+    log_dir = elevate_home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    pycache_dir = elevate_home / "cache" / "python-pycache"
+    pycache_dir.mkdir(parents=True, exist_ok=True)
+    environment = {
+        "ELEVATE_HOME": str(elevate_home),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": str(cli_root),
+        # Never write .pyc files into a signed packaged app bundle.
+        "PYTHONPYCACHEPREFIX": str(pycache_dir),
+    }
+    if LAUNCH_AGENT_LABEL == BETA_LAUNCH_AGENT_LABEL:
+        environment["ELEVATE_RELEASE_CHANNEL"] = "beta"
     payload = {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": [
@@ -378,6 +412,8 @@ def generate_plist() -> bytes:
             "browser",
             "launch",
         ],
+        "WorkingDirectory": str(cli_root),
+        "EnvironmentVariables": environment,
         # RunAtLoad only — no KeepAlive, so quitting the window stays quit
         # until next login. The agent must not fight the user.
         "RunAtLoad": True,
@@ -431,6 +467,8 @@ def uninstall_launch_agent() -> None:
 
 def set_cdp_config(enabled: bool) -> None:
     """Point the browser tool at the debug Chrome (or unset it)."""
+    from elevate_cli.config import load_config, save_config
+
     config = load_config()
     browser_cfg = config.setdefault("browser", {})
     if not isinstance(browser_cfg, dict):
@@ -446,6 +484,8 @@ def set_auto_provision(enabled: bool) -> None:
     ``elevate browser disable`` sets this False so the browser tool stops
     re-cloning Chrome on the next action. ``setup`` / ``sync`` clear it.
     """
+    from elevate_cli.config import load_config, save_config
+
     config = load_config()
     browser_cfg = config.setdefault("browser", {})
     if not isinstance(browser_cfg, dict):
@@ -458,6 +498,8 @@ def set_auto_provision(enabled: bool) -> None:
 def auto_provision_disabled() -> bool:
     """True only when the user explicitly ran ``elevate browser disable``."""
     try:
+        from elevate_cli.config import load_config
+
         config = load_config()
         browser_cfg = config.get("browser") or {}
         if isinstance(browser_cfg, dict):
@@ -493,8 +535,15 @@ def ensure_debug_browser() -> str | None:
         if auto_provision_disabled():
             return None
         if cdp_is_up():
+            # Repair partial/older setup state too. A reachable managed Chrome
+            # is useful for this call, but without the persisted config and
+            # launch service it disappears again after restart.
+            install_launch_agent()
+            set_cdp_config(True)
             return CDP_URL
         if (debug_profile_dir() / "Default").is_dir():
+            install_launch_agent()
+            set_cdp_config(True)
             return CDP_URL if launch_chrome(wait=True) else None
         # First run: no debug profile yet. Clone, wire up, launch.
         clone_profile()
@@ -540,6 +589,8 @@ def setup() -> tuple[bool, str]:
 
 def status() -> dict:
     """Snapshot of the debug-browser setup, for `elevate browser status`."""
+    from elevate_cli.config import load_config
+
     config = load_config()
     cdp_cfg = (config.get("browser") or {}).get("cdp_url") or ""
     return {
