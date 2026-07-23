@@ -80,6 +80,41 @@ class TestHandleFunctionCall:
             "session_id": "durable-chat-session",
         }
 
+    def test_exact_beta_browser_dispatch_accepts_durable_session_context(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        policy = ExecutionPolicy.for_mode(
+            "accepted-browser-turn",
+            ExecutionPolicyMode.DEFAULT,
+        )
+        token = set_current_execution_policy(policy, policy_revision=4)
+        try:
+            with patch(
+                "model_tools._dispatch_model_registry_call",
+                return_value=('{"ok":true}', False, None),
+            ) as dispatch:
+                result = handle_function_call(
+                    "browser_status",
+                    {},
+                    task_id="random-turn-task",
+                    session_id="durable-chat-session",
+                    tool_call_id="browser-call-1",
+                    skip_pre_tool_call_hook=True,
+                )
+        finally:
+            reset_current_execution_policy(token)
+
+        assert result == '{"ok":true}'
+        assert dispatch.call_args.kwargs["prepared_call"].authorization.allowed
+        assert dispatch.call_args.kwargs["prepared_call"].preparation_error is None
+        assert dispatch.call_args.kwargs["handler_kwargs"] == {
+            "task_id": "random-turn-task",
+            "user_task": None,
+            "session_id": "durable-chat-session",
+        }
+
     def test_exception_returns_json_error(self):
         # Even if something goes wrong, should return valid JSON
         result = handle_function_call("web_search", None)  # None args may cause issues

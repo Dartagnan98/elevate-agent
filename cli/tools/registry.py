@@ -305,7 +305,12 @@ def _canonicalize_tool_args(args: Any) -> tuple[str, str]:
     return canonical, digest
 
 
-_SHADOW_HANDLER_KWARGS = frozenset({"task_id", "user_task", "enabled_tools"})
+_SHADOW_HANDLER_KWARGS = frozenset({
+    "task_id",
+    "user_task",
+    "enabled_tools",
+    "session_id",
+})
 
 
 def _canonicalize_handler_kwargs(kwargs: Any) -> tuple[str, str]:
