@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elevation CRM — Feature Map</title>
+<style>
+  :root {
+    --navy: #182848;
+    --navy-2: #1f3358;
+    --terracotta: #C46340;
+    --terracotta-soft: #d98a6d;
+    --blue: #5E8AD0;
+    --ink: #1a2236;
+    --paper: #f6f4ef;
+    --card: #ffffff;
+    --line: #e2ddd2;
+    --muted: #6b7185;
+    --muted-2: #8a90a3;
+    /* status */
+    --built: #4f7fc4;
+    --built-bg: rgba(94,138,208,0.13);
+    --partial: #c98a2e;
+    --partial-bg: rgba(201,138,46,0.14);
+    --new: #7d8598;
+    --new-bg: rgba(125,133,152,0.12);
+    --star: var(--terracotta);
+    --shadow: 0 1px 2px rgba(24,40,72,0.06), 0 8px 24px rgba(24,40,72,0.06);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --navy: #dfe6f5; --navy-2: #c8d2e8;
+      --terracotta: #e08a63; --terracotta-soft: #c46340;
+      --blue: #7ba4e2;
+      --ink: #e8ebf2; --paper: #10141f; --card: #171d2b; --line: #29303f;
+      --muted: #9aa1b4; --muted-2: #757c90;
+      --built: #7ba4e2; --built-bg: rgba(123,164,226,0.16);
+      --partial: #e0a94e; --partial-bg: rgba(224,169,78,0.15);
+      --new: #9aa1b4; --new-bg: rgba(154,161,180,0.12);
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 10px 30px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --navy: #182848; --navy-2: #1f3358; --terracotta: #C46340; --blue: #5E8AD0;
+    --ink: #1a2236; --paper: #f6f4ef; --card: #ffffff; --line: #e2ddd2;
+    --muted: #6b7185; --muted-2: #8a90a3;
+    --built: #4f7fc4; --built-bg: rgba(94,138,208,0.13);
+    --partial: #c98a2e; --partial-bg: rgba(201,138,46,0.14);
+    --new: #7d8598; --new-bg: rgba(125,133,152,0.12);
+    --shadow: 0 1px 2px rgba(24,40,72,0.06), 0 8px 24px rgba(24,40,72,0.06);
+  }
+  :root[data-theme="dark"] {
+    --navy: #dfe6f5; --navy-2: #c8d2e8; --terracotta: #e08a63; --blue: #7ba4e2;
+    --ink: #e8ebf2; --paper: #10141f; --card: #171d2b; --line: #29303f;
+    --muted: #9aa1b4; --muted-2: #757c90;
+    --built: #7ba4e2; --built-bg: rgba(123,164,226,0.16);
+    --partial: #e0a94e; --partial-bg: rgba(224,169,78,0.15);
+    --new: #9aa1b4; --new-bg: rgba(154,161,180,0.12);
+    --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 10px 30px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--font);
+    line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 24px 72px; }
+
+  header.top { margin-bottom: 12px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--terracotta); font-weight: 600; }
+  h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.05; margin: 10px 0 8px;
+    letter-spacing: -0.02em; text-wrap: balance; color: var(--navy); font-weight: 700; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 68ch; margin: 0; }
+
+  /* summary strip */
+  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+    margin: 28px 0 10px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; box-shadow: var(--shadow); }
+  .stat .n { font-size: 30px; font-weight: 750; letter-spacing: -0.02em; color: var(--navy);
+    font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .stat .l b { color: var(--ink); font-weight: 600; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+    margin: 22px 0 30px; padding: 14px 16px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); font-size: 13px; }
+  .legend .grp { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+  .chip.built { color: var(--built); background: var(--built-bg); }
+  .chip.partial { color: var(--partial); background: var(--partial-bg); }
+  .chip.new { color: var(--new); background: var(--new-bg); }
+  .star { color: var(--star); font-size: 13px; }
+  .legend .sep { width: 1px; height: 18px; background: var(--line); }
+
+  /* sections */
+  section { margin-top: 30px; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px;
+    padding-bottom: 10px; border-bottom: 2px solid var(--line); }
+  .sec-num { font-family: var(--mono); font-size: 13px; color: var(--terracotta); font-weight: 700;
+    font-variant-numeric: tabular-nums; }
+  .sec-head h2 { font-size: 21px; margin: 0; letter-spacing: -0.01em; color: var(--navy); font-weight: 700; }
+  .sec-head .tag { margin-left: auto; font-size: 12.5px; color: var(--muted-2); font-style: italic; }
+
+  .rows { display: grid; gap: 10px; }
+  .row { display: grid; grid-template-columns: 22px 1fr auto; gap: 14px; align-items: start;
+    background: var(--card); border: 1px solid var(--line); border-radius: 11px;
+    padding: 13px 16px; box-shadow: var(--shadow); }
+  .row .pri { text-align: center; padding-top: 1px; }
+  .row .pri .star { font-size: 14px; }
+  .row .body h3 { margin: 0 0 2px; font-size: 15.5px; font-weight: 650; color: var(--ink);
+    letter-spacing: -0.005em; }
+  .row .body p { margin: 0; font-size: 13.5px; color: var(--muted); max-width: 74ch; }
+  .row .body .have { display: block; margin-top: 5px; font-size: 12px; color: var(--built);
+    font-family: var(--mono); }
+  .row .status { padding-top: 2px; }
+
+  .note { margin-top: 40px; padding: 20px 22px; border-radius: 14px;
+    background: linear-gradient(180deg, var(--card), var(--card));
+    border: 1px solid var(--line); border-left: 3px solid var(--terracotta); box-shadow: var(--shadow); }
+  .note h3 { margin: 0 0 8px; font-size: 16px; color: var(--navy); }
+  .note p { margin: 0 0 10px; font-size: 14px; color: var(--muted); }
+  .note ol { margin: 0; padding-left: 20px; color: var(--ink); font-size: 14px; }
+  .note ol li { margin: 5px 0; }
+  .note ol li b { color: var(--navy); }
+
+  footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid var(--line);
+    font-size: 12.5px; color: var(--muted-2); display: flex; justify-content: space-between;
+    flex-wrap: wrap; gap: 8px; }
+
+  @media (max-width: 720px) {
+    .summary { grid-template-columns: repeat(2, 1fr); }
+    .row { grid-template-columns: 20px 1fr; }
+    .row .status { grid-column: 2 / -1; }
+    .sec-head .tag { display: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Elevation Hub · CRM Build</div>
+    <h1>The CRM feature map</h1>
+    <p class="lede">The tools the top real-estate and general CRMs actually run on, sorted by how much of it your dashboard already holds. Pick the ones you want and we design those cards next. Starred rows are the ones nearly every agent uses daily.</p>
+  </header>
+
+  <div class="summary">
+    <div class="stat"><div class="n">9,303</div><div class="l"><b>contacts</b> already in the dashboard database</div></div>
+    <div class="stat"><div class="n">128k+</div><div class="l"><b>texts</b> on file to build timelines from</div></div>
+    <div class="stat"><div class="n">7</div><div class="l">areas <b>already partly built</b> in the backend</div></div>
+    <div class="stat"><div class="n">9</div><div class="l">feature areas to choose from below</div></div>
+  </div>
+
+  <div class="legend">
+    <span class="grp"><span class="chip built">Built</span> backend already there, needs the screen</span>
+    <span class="sep"></span>
+    <span class="grp"><span class="chip partial">Partial</span> some of it exists, needs finishing</span>
+    <span class="sep"></span>
+    <span class="grp"><span class="chip new">New</span> net-new build</span>
+    <span class="sep"></span>
+    <span class="grp"><span class="star">★</span> used daily by most agents</span>
+  </div>
+
+  <!-- 1 CONTACT CARDS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Contact cards &amp; people</h2><span class="tag">the heart of what you asked for</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Rich contact profile</h3>
+        <p>One card per person: photo, phone/email, tags, lead source, stage, heat, and the custom fields that matter (buyer vs seller, price range, areas, timeline, pre-approval).</p>
+        <span class="have">You have: contacts table with stage, heat, source, buyer/seller fields</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Notes</h3>
+        <p>Timestamped notes that stack into a history, pin the important one to the top, quick-add from anywhere on the card. Not one text box that gets overwritten.</p>
+        <span class="have">You have: a single owner-notes field today (needs to become a thread)</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Activity timeline</h3>
+        <p>Every text, email, call, showing, note, and deal change for that person in one scrollable feed, newest first, so you're caught up in seconds.</p>
+        <span class="have">You have: their full text history + deals; needs to be stitched into one view</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Relationships &amp; referrals</h3>
+        <p>Link people: partner, referred-by, past client who sent them. See who's connected to who.</p>
+      </div><div class="status"><span class="chip new">New</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Files on the card</h3>
+        <p>Attach a pre-approval, a signed doc, a photo right on the person, not buried in Drive.</p>
+        <span class="have">You have: deal-level Drive mirror already; extend to the contact</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Duplicate merge</h3>
+        <p>Catch and merge the same person on two cards (the split-contact problem that drops phone numbers).</p>
+        <span class="have">You have: a nightly dedupe job; add a one-click merge in the UI</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+    </div>
+  </section>
+
+  <!-- 2 COMMUNICATION -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Communication hub</h2><span class="tag">text ↔ email in one place</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Unified conversation</h3>
+        <p>One thread per person that shows texts and emails together in order. Reply from the same box and pick the channel, no jumping between apps.</p>
+        <span class="have">You have: the send engine already does both SMS and email</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Switch text / email inline</h3>
+        <p>A toggle on the compose box: same draft, send it as a text or an email depending on who and what.</p>
+        <span class="have">You have: both channels live in the queue; needs the toggle on screen</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Templates with merge fields</h3>
+        <p>Saved text and email templates that auto-fill first name, address, price, so you send fast and stay in your voice.</p>
+        <span class="have">You have: outreach templates + your voice profile already</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Sequences / drip</h3>
+        <p>Multi-step follow-up across text and email on a schedule (new lead, past client, sphere), that stops the moment they reply.</p>
+        <span class="have">You have: cadence tasks + drafters; needs a builder + on/off per person</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Email open &amp; click tracking</h3>
+        <p>See who opened, who clicked, so you know who's warm before you call.</p>
+      </div><div class="status"><span class="chip new">New</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Call logging &amp; notes</h3>
+        <p>Log a call and its outcome onto the timeline, tap-to-call from the card.</p>
+      </div><div class="status"><span class="chip new">New</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Scheduled &amp; bulk send</h3>
+        <p>Hold a message for a chosen time; send one message to a filtered group at once.</p>
+        <span class="have">You have: approve-and-schedule + the daily send cap already exist</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+    </div>
+  </section>
+
+  <!-- 3 PIPELINE -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>Pipeline &amp; deals</h2><span class="tag">mostly done already</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Visual pipeline</h3>
+        <p>Buyer and seller deals as cards moving through stages, drag to advance, value and next date on each.</p>
+        <span class="have">You have: the deal score cards + stage pipeline live now</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Tasks &amp; reminders</h3>
+        <p>Follow-ups tied to a person or deal, with due dates that surface in a daily "who to touch today".</p>
+        <span class="have">You have: deal checklists; add a person-level reminder + today view</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Transaction management</h3>
+        <p>Docs, key dates, subject deadlines, closing steps on the deal itself.</p>
+        <span class="have">You have: full deal pipeline with stages + docs already</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+    </div>
+  </section>
+
+  <!-- 4 LEADS -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>Lead management</h2><span class="tag">know who to work first</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Lead capture &amp; source</h3>
+        <p>New leads land automatically, tagged by where they came from (paid ad, website, referral, open house).</p>
+        <span class="have">You have: paid-ad intake + lead-source tracking live</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Lead scoring / heat</h3>
+        <p>A hot / warm / cold read on each person so the right ones rise to the top.</p>
+        <span class="have">You have: heat score + label on every contact already</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Smart lists / saved filters</h3>
+        <p>Saved views that answer "buyers under $600k in Kamloops I haven't touched in 30 days" in one click.</p>
+      </div><div class="status"><span class="chip new">New</span></div></div>
+    </div>
+  </section>
+
+  <!-- 5 AUTOMATION -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>Automation</h2><span class="tag">the follow-up that runs itself</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Action plans / triggers</h3>
+        <p>"New lead → first touch in 5 min", "offer accepted → congrats + next steps", birthday and list-anniversary touches, all automatic.</p>
+        <span class="have">You have: the cron + drafting engine that already fires these</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>AI reply drafts &amp; next-best-action</h3>
+        <p>The system drafts the reply in your voice and suggests who to follow up with next, you just approve.</p>
+        <span class="have">You have: the approval-gated drafters running now</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+    </div>
+  </section>
+
+  <!-- 6 CALENDAR -->
+  <section>
+    <div class="sec-head"><span class="sec-num">06</span><h2>Calendar &amp; scheduling</h2></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Appointments &amp; showings</h3>
+        <p>Book showings and appointments against a contact, see them on a day view, reminders go out automatically.</p>
+        <span class="have">You have: macOS Calendar wiring + showing confirmation skill</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+    </div>
+  </section>
+
+  <!-- 7 REAL ESTATE -->
+  <section>
+    <div class="sec-head"><span class="sec-num">07</span><h2>Real-estate specific</h2><span class="tag">what general CRMs can't do</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Property alerts to buyers</h3>
+        <p>Auto new-listing, price-change, just-sold matches sent to buyers on their saved criteria.</p>
+      </div><div class="status"><span class="chip new">New</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Listings linked to people</h3>
+        <p>Connect a property to its seller, its interested buyers, and the deal, all cross-referenced.</p>
+        <span class="have">You have: listings data + deals; add the buyer-interest link</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>CMA &amp; market reports</h3>
+        <p>Send a branded CMA or market update to a contact and log that you did.</p>
+        <span class="have">You have: the full CMA engine already</span>
+      </div><div class="status"><span class="chip built">Built</span></div></div>
+    </div>
+  </section>
+
+  <!-- 8 REPORTING -->
+  <section>
+    <div class="sec-head"><span class="sec-num">08</span><h2>Reporting</h2></div>
+    <div class="rows">
+      <div class="row"><div class="pri"></div><div class="body">
+        <h3>Pipeline &amp; activity dashboard</h3>
+        <p>Pipeline value, conversion by source, what got sent this week, so you see ROI without a spreadsheet.</p>
+        <span class="have">You have: the underlying data; needs the summary view</span>
+      </div><div class="status"><span class="chip partial">Partial</span></div></div>
+    </div>
+  </section>
+
+  <!-- 9 MOBILE -->
+  <section>
+    <div class="sec-head"><span class="sec-num">09</span><h2>On the go</h2><span class="tag">you run from your phone</span></div>
+    <div class="rows">
+      <div class="row"><div class="pri"><span class="star">★</span></div><div class="body">
+        <h3>Phone-first layout</h3>
+        <p>Contact card, timeline, and send box all usable one-handed from the phone, since that's where most of this happens.</p>
+      </div><div class="status"><span class="chip new">New</span></div></div>
+    </div>
+  </section>
+
+  <div class="note">
+    <h3>What I'd build first</h3>
+    <p>The daily-use core is Section 01 and 02 — and most of it is already sitting in your database waiting for a proper screen. My recommendation for the first mockup:</p>
+    <ol>
+      <li><b>The contact card</b> — profile up top, threaded notes, and the unified text-and-email timeline in one view.</li>
+      <li><b>The compose box</b> — with the text ↔ email toggle and template picker built in.</li>
+      <li><b>The "today" list</b> — who's hot and who's owed a follow-up, one click into their card.</li>
+    </ol>
+    <p style="margin-top:10px;">Tell me which sections you want in and which to drop, and we start drawing the contact card.</p>
+  </div>
+
+  <footer>
+    <span>Elevation Hub · CRM feature map</span>
+    <span>Sources: Follow Up Boss · BoldTrail/kvCore · Lofty · HubSpot · Salesforce · Capterra</span>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    function apply(t){ root.setAttribute('data-theme', t); }
+    try {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      if (!root.getAttribute('data-theme')) apply(mq.matches ? 'dark' : 'light');
+      mq.addEventListener && mq.addEventListener('change', function(e){
+        if (!root.dataset.userSet) apply(e.matches ? 'dark' : 'light');
+      });
+    } catch (e) {}
+  })();
+</script>
+
+</html>
