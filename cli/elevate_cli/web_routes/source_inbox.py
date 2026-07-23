@@ -107,6 +107,39 @@ class CrmColumnsUpdate(BaseModel):
     columns: list[dict]
 
 
+class ComposeCreate(BaseModel):
+    contactIds: list[str]
+    channel: str
+    body: str
+    subject: str | None = None
+
+
+class ContactAssign(BaseModel):
+    contactId: str
+    assignee: str | None = None
+
+
+class ContactDocumentAdd(BaseModel):
+    contactId: str
+    name: str
+    url: str | None = None
+    note: str | None = None
+
+
+class ContactDocumentRemove(BaseModel):
+    contactId: str
+    documentId: str
+
+
+class AutomationPause(BaseModel):
+    contactId: str
+    paused: bool
+
+
+class CrmStagesUpdate(BaseModel):
+    stages: list[dict]
+
+
 _SOURCE_INBOX_ACTION_LIMIT = 500
 
 
@@ -555,6 +588,350 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
         except Exception as exc:
             log.exception("POST /api/source-inbox/task/status failed")
             raise HTTPException(status_code=500, detail=f"Task status update failed: {exc}")
+
+    @router.post("/api/source-inbox/compose")
+    async def compose_source_inbox_drafts(body: ComposeCreate):
+        """Operator compose (single or mass): creates pending-approval drafts.
+
+        Nothing sends here — every draft lands in the approval queue and rides
+        the existing approve → send_queue → sender path, respecting per-channel
+        consent (cannot_text / cannot_email) contact by contact.
+        """
+        try:
+            channel = str(body.channel or "").strip().lower()
+            if channel not in {"sms", "email"}:
+                raise ValueError("channel must be 'sms' or 'email'")
+            text = str(body.body or "").strip()
+            if not text:
+                raise ValueError("message body is required")
+            if not body.contactIds:
+                raise ValueError("at least one contact is required")
+            import uuid as _uuid
+
+            from elevate_cli import outreach_db
+            from elevate_cli.data import connect, get_contact
+
+            created: list[str] = []
+            skipped: list[dict] = []
+            with connect() as conn:
+                contacts = {
+                    cid: get_contact(conn, str(cid)) for cid in body.contactIds
+                }
+            for cid, contact in contacts.items():
+                if contact is None:
+                    skipped.append({"contactId": cid, "reason": "No contact record"})
+                    continue
+                if channel == "sms":
+                    recipient_value = str(contact.get("primaryPhone") or "").strip()
+                    blocked = bool(contact.get("cannotText"))
+                    missing_reason = "No phone number on file"
+                else:
+                    recipient_value = str(contact.get("primaryEmail") or "").strip()
+                    blocked = bool(contact.get("cannotEmail"))
+                    missing_reason = "No email address on file"
+                if blocked:
+                    skipped.append({"contactId": cid, "reason": "Consent is off for this channel"})
+                    continue
+                if not recipient_value:
+                    skipped.append({"contactId": cid, "reason": missing_reason})
+                    continue
+                task_id = f"compose:{_uuid.uuid4().hex}"
+                payload = {
+                    "draft_text": text,
+                    "recipient": {
+                        "person_name": contact.get("displayName"),
+                        "contact_id": str(cid),
+                        "phone": recipient_value if channel == "sms" else None,
+                        "email": recipient_value if channel == "email" else None,
+                    },
+                    "source_id": "apple-messages" if channel == "sms" else "email",
+                    "thread_id": f"compose:{cid}",
+                    "task_id": task_id,
+                    "composed_by": "operator:leads-ui",
+                }
+                if channel == "email" and body.subject:
+                    payload["subject"] = str(body.subject).strip()
+                outreach_db.create_pending_send(
+                    source_id="apple-messages" if channel == "sms" else "email",
+                    thread_id=f"compose:{cid}",
+                    task_id=task_id,
+                    channel=channel,
+                    payload=payload,
+                )
+                created.append(str(cid))
+            return {"ok": True, "created": len(created), "skipped": skipped}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/compose failed")
+            raise HTTPException(status_code=500, detail=f"Compose failed: {exc}")
+
+    @router.post("/api/source-inbox/assign")
+    async def assign_source_inbox_contact(body: ContactAssign):
+        try:
+            from elevate_cli.data import connect, get_contact
+            from elevate_cli.data._util import now_iso
+
+            with connect() as conn:
+                if get_contact(conn, body.contactId) is None:
+                    raise ValueError(f"contact {body.contactId!r} not found")
+                conn.execute(
+                    "UPDATE contacts SET crm_user_id = ?, updated_at = ? WHERE id = ?",
+                    (str(body.assignee or "").strip() or None, now_iso(), body.contactId),
+                )
+            return {"ok": True}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/assign failed")
+            raise HTTPException(status_code=500, detail=f"Assign failed: {exc}")
+
+    def _read_documents(conn, contact_id: str) -> list[dict]:
+        import json as _json
+
+        row = conn.execute(
+            "SELECT documents_json FROM contacts WHERE id = ?", (contact_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"contact {contact_id!r} not found")
+        try:
+            parsed = _json.loads(row["documents_json"] or "[]")
+        except (ValueError, TypeError):
+            parsed = []
+        return [d for d in parsed if isinstance(d, dict)] if isinstance(parsed, list) else []
+
+    @router.get("/api/source-inbox/documents/{contact_id}")
+    async def get_source_inbox_documents(contact_id: str):
+        try:
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                documents = _read_documents(conn, contact_id)
+            return {"documents": documents}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("GET /api/source-inbox/documents/%s failed", contact_id)
+            raise HTTPException(status_code=500, detail=f"Documents read failed: {exc}")
+
+    @router.post("/api/source-inbox/document")
+    async def add_source_inbox_document(body: ContactDocumentAdd):
+        try:
+            name = str(body.name or "").strip()
+            if not name:
+                raise ValueError("document name is required")
+            import json as _json
+            import uuid as _uuid
+
+            from elevate_cli.data import connect
+            from elevate_cli.data._util import now_iso
+
+            with connect() as conn:
+                documents = _read_documents(conn, body.contactId)
+                documents.insert(0, {
+                    "id": _uuid.uuid4().hex,
+                    "name": name,
+                    "url": str(body.url or "").strip() or None,
+                    "note": str(body.note or "").strip() or None,
+                    "addedAt": now_iso(),
+                })
+                conn.execute(
+                    "UPDATE contacts SET documents_json = ?, updated_at = ? WHERE id = ?",
+                    (_json.dumps(documents, ensure_ascii=False), now_iso(), body.contactId),
+                )
+            return {"ok": True, "documents": documents}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/document failed")
+            raise HTTPException(status_code=500, detail=f"Document add failed: {exc}")
+
+    @router.post("/api/source-inbox/document/remove")
+    async def remove_source_inbox_document(body: ContactDocumentRemove):
+        try:
+            import json as _json
+
+            from elevate_cli.data import connect
+            from elevate_cli.data._util import now_iso
+
+            with connect() as conn:
+                documents = [
+                    d for d in _read_documents(conn, body.contactId)
+                    if str(d.get("id")) != body.documentId
+                ]
+                conn.execute(
+                    "UPDATE contacts SET documents_json = ?, updated_at = ? WHERE id = ?",
+                    (_json.dumps(documents, ensure_ascii=False), now_iso(), body.contactId),
+                )
+            return {"ok": True, "documents": documents}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/document/remove failed")
+            raise HTTPException(status_code=500, detail=f"Document remove failed: {exc}")
+
+    @router.get("/api/source-inbox/automation/{contact_id}")
+    async def get_source_inbox_automation(contact_id: str):
+        """The contact's real outreach-automation state: paused flag plus the
+        actual draft/send history the automation engine has produced for them."""
+        try:
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT outreach_paused FROM contacts WHERE id = ?",
+                    (contact_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"contact {contact_id!r} not found")
+                sends = conn.execute(
+                    """
+                    SELECT status, COUNT(*) AS c FROM send_queue
+                    WHERE payload_json LIKE ?
+                    GROUP BY status
+                    """,
+                    (f'%"contact_id": "{contact_id}"%',),
+                ).fetchall()
+            counts = {str(r["status"]): int(r["c"]) for r in sends}
+            return {
+                "paused": bool(row["outreach_paused"]),
+                "pendingDrafts": counts.get("pending_approval", 0),
+                "queued": counts.get("queued", 0) + counts.get("retrying", 0),
+                "sent": counts.get("sent", 0),
+                "failed": counts.get("failed", 0),
+                "skipped": counts.get("skipped", 0),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("GET /api/source-inbox/automation/%s failed", contact_id)
+            raise HTTPException(status_code=500, detail=f"Automation read failed: {exc}")
+
+    @router.post("/api/source-inbox/automation")
+    async def set_source_inbox_automation(body: AutomationPause):
+        try:
+            from elevate_cli.data import connect, get_contact
+            from elevate_cli.data._util import now_iso
+
+            with connect() as conn:
+                if get_contact(conn, body.contactId) is None:
+                    raise ValueError(f"contact {body.contactId!r} not found")
+                conn.execute(
+                    "UPDATE contacts SET outreach_paused = ?, updated_at = ? WHERE id = ?",
+                    (1 if body.paused else 0, now_iso(), body.contactId),
+                )
+            return {"ok": True, "paused": body.paused}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/automation failed")
+            raise HTTPException(status_code=500, detail=f"Automation update failed: {exc}")
+
+    @router.get("/api/source-inbox/property-activity/{contact_id}")
+    async def get_source_inbox_property_activity(contact_id: str, limit: int = 200):
+        """Real property engagement for the Properties tab: pcs/property events
+        recorded for this contact (viewed / shown / sent / favorited)."""
+        try:
+            import json as _json
+
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, kind, payload_json, ts
+                    FROM events
+                    WHERE contact_id = ? AND kind = 'pcs_activity'
+                    ORDER BY ts DESC LIMIT ?
+                    """,
+                    (contact_id, max(1, min(int(limit or 200), 500))),
+                ).fetchall()
+            items = []
+            for row in rows:
+                try:
+                    payload = _json.loads(row["payload_json"] or "{}")
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if (payload.get("legacy_type") or payload.get("legacyType")) == "crm_task":
+                    continue
+                items.append({
+                    "id": row["id"],
+                    "type": payload.get("type") or payload.get("activity") or "activity",
+                    "title": payload.get("title") or payload.get("address") or "Property activity",
+                    "address": payload.get("address"),
+                    "summary": payload.get("summary") or payload.get("note") or "",
+                    "timestamp": row["ts"],
+                })
+            return {"activity": items}
+        except Exception as exc:
+            log.exception("GET /api/source-inbox/property-activity/%s failed", contact_id)
+            raise HTTPException(status_code=500, detail=f"Property activity read failed: {exc}")
+
+    @router.get("/api/crm/stages")
+    async def get_crm_stages():
+        try:
+            import json as _json
+
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT custom_stages_json FROM crm_settings WHERE id = 'default'",
+                ).fetchone()
+            stages: list[dict] = []
+            if row is not None and row["custom_stages_json"]:
+                try:
+                    parsed = _json.loads(row["custom_stages_json"])
+                    if isinstance(parsed, list):
+                        stages = [s for s in parsed if isinstance(s, dict) and s.get("key")]
+                except (ValueError, TypeError):
+                    stages = []
+            return {"stages": stages}
+        except Exception as exc:
+            log.exception("GET /api/crm/stages failed")
+            raise HTTPException(status_code=500, detail=f"Stages read failed: {exc}")
+
+    @router.put("/api/crm/stages")
+    async def put_crm_stages(body: CrmStagesUpdate):
+        try:
+            import json as _json
+            import re as _re
+
+            from elevate_cli.data import connect
+            from elevate_cli.data._util import now_iso
+
+            cleaned: list[dict] = []
+            seen: set[str] = set()
+            for stage in body.stages:
+                label = str(stage.get("label") or "").strip()
+                if not label:
+                    continue
+                key = str(stage.get("key") or "").strip() or _re.sub(
+                    r"[^a-z0-9]+", "_", label.lower()
+                ).strip("_")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append({"key": key, "label": label})
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO crm_settings (id, custom_stages_json, updated_at)
+                    VALUES ('default', ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        custom_stages_json = EXCLUDED.custom_stages_json,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (_json.dumps(cleaned, ensure_ascii=False), now_iso()),
+                )
+            return {"ok": True, "stages": cleaned}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("PUT /api/crm/stages failed")
+            raise HTTPException(status_code=500, detail=f"Stages update failed: {exc}")
 
     @router.get("/api/crm/columns")
     async def get_crm_columns():

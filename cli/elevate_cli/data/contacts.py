@@ -115,6 +115,18 @@ _PIPELINE_STATUS_VALUES = {
     "attempted_contact", "prospect", "client", "pending_deal",
     "closed", "referred", "realtor_contact", "trash",
 }
+
+# Migration 0037: stages are operator-defined — nothing pinned. Any value
+# matching this slug shape is a valid stage; the set above only names the
+# built-ins the UI offers by default.
+_PIPELINE_STATUS_SLUG_RE = __import__("re").compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def is_valid_pipeline_status(value: str) -> bool:
+    norm = str(value or "").strip().lower()
+    return bool(norm) and (
+        norm in _PIPELINE_STATUS_VALUES or bool(_PIPELINE_STATUS_SLUG_RE.match(norm))
+    )
 _PIPELINE_STATUS_SET_BY = {"operator", "ai"}
 
 
@@ -970,7 +982,7 @@ def set_pipeline_status(
         raise ValueError(f"invalid set_by {set_by!r}")
 
     norm = (status or "").strip().lower() or None
-    if norm is not None and norm not in _PIPELINE_STATUS_VALUES:
+    if norm is not None and not is_valid_pipeline_status(norm):
         raise ValueError(f"invalid pipeline_status {status!r}")
 
     # AI must not overwrite explicit operator marks. The check is here, not

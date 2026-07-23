@@ -19,6 +19,7 @@ import {
   Palette,
   Users,
   Brain,
+  Gauge,
   Package,
   Lock,
   Globe,
@@ -1936,6 +1937,123 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
   );
 }
 
+interface LimitsPanelProps {
+  config: Record<string, unknown> | null;
+  setConfig: (next: Record<string, unknown>) => void;
+}
+
+function LimitsPanel({ config, setConfig }: LimitsPanelProps) {
+  const { showToast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    if (config) setDraft(structuredClone(config));
+  }, [config]);
+
+  if (!draft) {
+    return <PageSkeleton rows={4} variant="form" />;
+  }
+
+  const get = (path: string): unknown => getNestedValue(draft, path);
+  const set = (path: string, value: unknown) => setDraft(setNestedValue(draft, path, value) as Record<string, unknown>);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(config);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.saveConfig(draft);
+      setConfig(draft);
+      showToast("Limits saved", "success");
+    } catch (err) {
+      showToast(`Failed: ${String(err)}`, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const usageEnabled = Boolean(get("guardrails.usage.enabled"));
+  const tokenCap = Number(get("guardrails.usage.daily_token_cap") ?? 0);
+  const usageWindowHours = Math.max(1, Math.round(Number(get("guardrails.usage.window_seconds") ?? 86400) / 3600));
+  const rateEnabled = Boolean(get("guardrails.rate_limit.enabled"));
+  const maxMessages = Number(get("guardrails.rate_limit.max_messages") ?? 20);
+  const rateWindow = Number(get("guardrails.rate_limit.window_seconds") ?? 60);
+
+  return (
+    <section className="space-y-6">
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <Gauge className="h-4 w-4 text-primary" aria-hidden="true" />
+            Limits &amp; spend
+          </h2>
+          <p className="mt-1 max-w-prose text-sm leading-6 text-muted-foreground">
+            Guardrails on AI spend and chat pacing. These used to live only in config.yaml — this is the same
+            <code className="mx-1">guardrails</code> block, surfaced.
+          </p>
+        </div>
+        <Button size="sm" onClick={() => void save()} disabled={saving || !dirty}>
+          <Save className="h-3.5 w-3.5" />
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </header>
+
+      <div className="rounded-lg border border-border/60 p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-foreground">Token budget</h3>
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Enforce a per-chat token budget</span>
+          <Switch checked={usageEnabled} onCheckedChange={(v) => set("guardrails.usage.enabled", v)} aria-label="Enforce token budget" />
+        </label>
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">
+            Tokens per chat per {usageWindowHours}h
+            <span className="block text-xs text-muted-foreground">0 = unlimited (the check is skipped entirely)</span>
+          </span>
+          <Input
+            type="number"
+            min={0}
+            className="w-40"
+            value={tokenCap}
+            aria-label="Daily token cap"
+            onChange={(event) => set("guardrails.usage.daily_token_cap", Math.max(0, Number(event.target.value) || 0))}
+          />
+        </label>
+      </div>
+
+      <div className="rounded-lg border border-border/60 p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-foreground">Message pacing</h3>
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Rate-limit rapid messages</span>
+          <Switch checked={rateEnabled} onCheckedChange={(v) => set("guardrails.rate_limit.enabled", v)} aria-label="Rate limit messages" />
+        </label>
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Max messages per window</span>
+          <Input
+            type="number"
+            min={1}
+            className="w-40"
+            value={maxMessages}
+            aria-label="Max messages per window"
+            onChange={(event) => set("guardrails.rate_limit.max_messages", Math.max(1, Number(event.target.value) || 1))}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-foreground/90">Window (seconds)</span>
+          <Input
+            type="number"
+            min={1}
+            className="w-40"
+            value={rateWindow}
+            aria-label="Rate limit window in seconds"
+            onChange={(event) => set("guardrails.rate_limit.window_seconds", Math.max(1, Number(event.target.value) || 1))}
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
 interface MemoryPanelProps {
   config: Record<string, unknown> | null;
   setConfig: (next: Record<string, unknown>) => void;
@@ -2343,7 +2461,7 @@ export default function ConfigPage() {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("");
-  const [activePane, setActivePane] = useState<"config" | "channels" | "memory" | "composio" | "connectors" | "crm" | "setup">("channels");
+  const [activePane, setActivePane] = useState<"config" | "channels" | "memory" | "composio" | "connectors" | "crm" | "limits" | "setup">("channels");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -2633,6 +2751,7 @@ export default function ConfigPage() {
     { id: "memory", pane: "memory" as const, label: "Memory", icon: <Brain className="h-4 w-4" /> },
     { id: "connectors", pane: "connectors" as const, label: "Sources", icon: <Network className="h-4 w-4" /> },
     { id: "crm", pane: "crm" as const, label: "CRM", icon: <Users className="h-4 w-4" /> },
+    { id: "limits", pane: "limits" as const, label: "Limits & spend", icon: <Gauge className="h-4 w-4" /> },
     { id: "composio", pane: "composio" as const, label: "Composio", icon: <Plug className="h-4 w-4" /> },
     { id: "setup", pane: "setup" as const, label: "Setup commands", icon: <Wrench className="h-4 w-4" /> },
   ];
@@ -2866,6 +2985,9 @@ export default function ConfigPage() {
               realtorBeta={memoryPolicyState === "beta"}
             />
           )}
+
+          {/* ---- Limits & spend pane ---- */}
+          {activePane === "limits" && config && <LimitsPanel config={config} setConfig={setConfig} />}
 
           {/* ---- Composio pane ---- */}
           {activePane === "composio" && <ComposioPanel />}

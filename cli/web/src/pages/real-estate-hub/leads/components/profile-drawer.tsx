@@ -1,7 +1,15 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
-import type { ContactNote, ContactTask, CrmColumn, ThreadContextResponse } from "@/lib/api-types";
+import type {
+  ContactAutomationStatus,
+  ContactDocument,
+  ContactNote,
+  ContactPropertyActivity,
+  ContactTask,
+  CrmColumn,
+  ThreadContextResponse,
+} from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
 import type { DraftSendLifecycleNotice } from "../draft-send-lifecycle";
 import { CRM_TEMPERATURE_LABELS, crmTemperatureForProfile } from "./crm-profile-helpers";
@@ -17,21 +25,6 @@ const CONTACT_TABS: Array<{ id: ContactTab; label: string }> = [
   { id: "documents", label: "Documents" },
   { id: "automations", label: "Automations" },
 ];
-
-const UNDER_CONSTRUCTION: Partial<Record<ContactTab, { title: string; body: string }>> = {
-  properties: {
-    title: "Properties",
-    body: "Homes this contact has actually engaged with — viewed, favorited, shown, or sent, each with a status. On the build list.",
-  },
-  documents: {
-    title: "Documents",
-    body: "Pre-approvals and signed files attached to the person instead of buried in a drive. On the build list.",
-  },
-  automations: {
-    title: "Automations",
-    body: "Where drip campaigns will live — multi-step text + email follow-up that stops the moment they reply. Coming after the core card.",
-  },
-};
 
 const TAG_GROUPS: Array<{ label: string; tags: string[] }> = [
   { label: "Property needs", tags: ["First-time buyer", "Upsizing", "Downsizing", "Investor", "Suite / income", "Move-in ready"] },
@@ -217,7 +210,144 @@ export function ProfileDrawer({
   const [taskBusy, setTaskBusy] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
   const [contactTasks, setContactTasks] = useState<ContactTask[] | null>(null);
+  const [propertyActivity, setPropertyActivity] = useState<ContactPropertyActivity[] | null>(null);
+  const [propertyError, setPropertyError] = useState<string | null>(null);
+  const propertyFetchedFor = useRef<string | null>(null);
+  const [documents, setDocuments] = useState<ContactDocument[] | null>(null);
+  const [documentsError, setDocumentsError] = useState<string | null>(null);
+  const documentsFetchedFor = useRef<string | null>(null);
+  const [docName, setDocName] = useState("");
+  const [docUrl, setDocUrl] = useState("");
+  const [docNote, setDocNote] = useState("");
+  const [docBusy, setDocBusy] = useState(false);
+  const [automation, setAutomation] = useState<ContactAutomationStatus | null>(null);
+  const [automationError, setAutomationError] = useState<string | null>(null);
+  const automationFetchedFor = useRef<string | null>(null);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [composeSubject, setComposeSubject] = useState("");
+  const [composeBusy, setComposeBusy] = useState(false);
+  const [composeError, setComposeError] = useState<string | null>(null);
+  const [composeStatus, setComposeStatus] = useState<string | null>(null);
   const contactId = profile.contactIds?.[0] ?? null;
+
+  useEffect(() => {
+    if (tab !== "properties" || !contactId || propertyFetchedFor.current === contactId) return;
+    propertyFetchedFor.current = contactId;
+    let cancelled = false;
+    setPropertyError(null);
+    api.getContactPropertyActivity(contactId)
+      .then((result) => { if (!cancelled) setPropertyActivity(result.activity || []); })
+      .catch((error: { message?: string }) => {
+        if (!cancelled) setPropertyError(error?.message || "Could not load property activity.");
+      });
+    return () => { cancelled = true; };
+  }, [tab, contactId]);
+
+  useEffect(() => {
+    if (tab !== "documents" || !contactId || documentsFetchedFor.current === contactId) return;
+    documentsFetchedFor.current = contactId;
+    let cancelled = false;
+    setDocumentsError(null);
+    api.getContactDocuments(contactId)
+      .then((result) => { if (!cancelled) setDocuments(result.documents || []); })
+      .catch((error: { message?: string }) => {
+        if (!cancelled) setDocumentsError(error?.message || "Could not load documents.");
+      });
+    return () => { cancelled = true; };
+  }, [tab, contactId]);
+
+  useEffect(() => {
+    if (tab !== "automations" || !contactId || automationFetchedFor.current === contactId) return;
+    automationFetchedFor.current = contactId;
+    let cancelled = false;
+    setAutomationError(null);
+    api.getContactAutomation(contactId)
+      .then((result) => { if (!cancelled) setAutomation(result); })
+      .catch((error: { message?: string }) => {
+        if (!cancelled) setAutomationError(error?.message || "Could not load automation status.");
+      });
+    return () => { cancelled = true; };
+  }, [tab, contactId]);
+
+  const handleAddDocument = async () => {
+    const name = docName.trim();
+    if (!name || !contactId || docBusy) return;
+    setDocBusy(true);
+    setDocumentsError(null);
+    try {
+      const result = await api.addContactDocument(
+        contactId,
+        name,
+        docUrl.trim() || undefined,
+        docNote.trim() || undefined,
+      );
+      setDocuments(result.documents || []);
+      setDocName("");
+      setDocUrl("");
+      setDocNote("");
+    } catch (error) {
+      setDocumentsError(error instanceof Error ? error.message : "Could not save the document.");
+    } finally {
+      setDocBusy(false);
+    }
+  };
+
+  const handleRemoveDocument = async (documentId: string) => {
+    if (!contactId || docBusy) return;
+    setDocBusy(true);
+    setDocumentsError(null);
+    try {
+      const result = await api.removeContactDocument(contactId, documentId);
+      setDocuments(result.documents || []);
+    } catch (error) {
+      setDocumentsError(error instanceof Error ? error.message : "Could not remove the document.");
+    } finally {
+      setDocBusy(false);
+    }
+  };
+
+  const handleToggleAutomation = async () => {
+    if (!contactId || !automation || automationBusy) return;
+    setAutomationBusy(true);
+    setAutomationError(null);
+    try {
+      const result = await api.setContactAutomation(contactId, !automation.paused);
+      setAutomation((current) => (current ? { ...current, paused: result.paused } : current));
+    } catch (error) {
+      setAutomationError(error instanceof Error ? error.message : "Could not update automation.");
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleComposeDraft = async () => {
+    const body = noteText.trim();
+    if (!body || !contactId || composeBusy || composeMode === "note") return;
+    setComposeBusy(true);
+    setComposeError(null);
+    setComposeStatus(null);
+    try {
+      const result = await api.composeSourceInboxDrafts({
+        contactIds: [contactId],
+        channel: composeMode === "text" ? "sms" : "email",
+        body,
+        subject: composeMode === "email" ? composeSubject.trim() || undefined : undefined,
+      });
+      if (result.created > 0) {
+        setNoteText("");
+        setComposeSubject("");
+        setComposeStatus("Draft created — it's in the approval queue; nothing sends until you approve it.");
+      } else if (result.skipped?.length) {
+        setComposeError(`Draft not created: ${result.skipped.map((skip) => skip.reason).join("; ")}`);
+      } else {
+        setComposeError("Draft not created — the compose endpoint returned no draft and no reason.");
+      }
+    } catch (error) {
+      setComposeError(error instanceof Error ? error.message : "Could not create the draft.");
+    } finally {
+      setComposeBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (!contactId) return;
@@ -512,6 +642,7 @@ export function ProfileDrawer({
   const owner = lead?.assignedUser || context?.source.ownerAgent || "Unassigned";
   const temperature = crmTemperatureForProfile(profile);
   const initials = profile.name.split(/\s+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
+  const firstName = profile.name.split(/\s+/)[0] || profile.name;
   const hasConversationIdentity = Boolean(profile.sourceId && profile.threadId);
 
   return (
@@ -696,16 +827,226 @@ export function ProfileDrawer({
           </section>
         )}
 
-        {tab !== "overview" && tab !== "searches" && (
+        {tab === "properties" && (
           <div
-            className="crm-contact-uc"
+            className="crm-contact-searches"
             role="tabpanel"
-            id={`${titleId}-panel-${tab}`}
-            aria-labelledby={`${titleId}-tab-${tab}`}
+            id={`${titleId}-panel-properties`}
+            aria-labelledby={`${titleId}-tab-properties`}
           >
-            <span aria-hidden="true">🚧</span>
-            <strong>{UNDER_CONSTRUCTION[tab]?.title}</strong>
-            <p>{UNDER_CONSTRUCTION[tab]?.body}</p>
+            <section className="crm-contact-section">
+              <div className="crm-section-heading">
+                <div><span className="crm-section-kicker">Property activity</span><h3>Homes they've engaged with</h3></div>
+                {contactId && propertyActivity !== null && (
+                  <span className="mono">{propertyActivity.length} {propertyActivity.length === 1 ? "event" : "events"}</span>
+                )}
+              </div>
+              {!contactId ? (
+                <div className="crm-contact-empty">
+                  <strong>No merged contact record yet.</strong>
+                  <span>Property activity attaches to a contact — it'll be available once this profile is merged.</span>
+                </div>
+              ) : propertyActivity === null ? (
+                propertyError ? (
+                  <div className="crm-contact-empty" role="alert">
+                    <strong>Property activity unavailable</strong>
+                    <span>{propertyError}</span>
+                  </div>
+                ) : (
+                  <div className="crm-contact-loading" role="status">Loading property activity…</div>
+                )
+              ) : propertyActivity.length === 0 ? (
+                <div className="crm-contact-empty">
+                  <strong>No property activity recorded yet</strong>
+                  <span>Viewed, shown, and sent listings will appear here as they're tracked.</span>
+                </div>
+              ) : (
+                <ol className="crm-timeline">
+                  {propertyActivity.map((item) => (
+                    <li key={item.id} data-kind="activity">
+                      <span className="crm-timeline-marker" aria-hidden="true" />
+                      <article>
+                        <div className="crm-timeline-meta">
+                          <span className="crm-timeline-label">{(item.type || "activity").replace(/_/g, " ")}</span>
+                          <time dateTime={item.timestamp || undefined}>{formatTime(item.timestamp)}</time>
+                        </div>
+                        <strong>{item.title}{item.address ? ` · ${item.address}` : ""}</strong>
+                        {item.summary && <p>{item.summary}</p>}
+                      </article>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
+          </div>
+        )}
+
+        {tab === "documents" && (
+          <div
+            className="crm-contact-searches"
+            role="tabpanel"
+            id={`${titleId}-panel-documents`}
+            aria-labelledby={`${titleId}-tab-documents`}
+          >
+            <section className="crm-contact-section">
+              <div className="crm-section-heading">
+                <div><span className="crm-section-kicker">Documents</span><h3>Files on this contact</h3></div>
+                {contactId && documents !== null && (
+                  <span className="mono">{documents.length}</span>
+                )}
+              </div>
+              <div className="crm-contact-scope" role="note">
+                Link-based tracking: files stay where they live (Drive, DigiSign, email) — this list keeps the links attached to the person.
+              </div>
+              {!contactId ? (
+                <div className="crm-contact-empty">
+                  <strong>No merged contact record yet.</strong>
+                  <span>Documents attach to a contact — they'll be available once this profile is merged.</span>
+                </div>
+              ) : (
+                <>
+                  {documentsError && <div className="crm-contact-error" role="alert">{documentsError}</div>}
+                  {documents === null ? (
+                    !documentsError && <div className="crm-contact-loading" role="status">Loading documents…</div>
+                  ) : documents.length === 0 ? (
+                    <p className="crm-rail-empty">No documents linked yet — add the first one below.</p>
+                  ) : (
+                    <ul className="crm-note-list">
+                      {documents.map((doc) => (
+                        <li key={doc.id}>
+                          <div className="crm-note-top">
+                            <span className="crm-note-when mono">Added {formatTime(doc.addedAt)}</span>
+                            <button
+                              type="button"
+                              className="crm-note-pin"
+                              aria-label={`Remove document ${doc.name}`}
+                              disabled={docBusy}
+                              onClick={() => void handleRemoveDocument(doc.id)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                          <p>
+                            {doc.url
+                              ? <a href={doc.url} target="_blank" rel="noopener noreferrer">{doc.name}</a>
+                              : doc.name}
+                            {doc.note ? ` — ${doc.note}` : ""}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+            </section>
+            {contactId && (
+              <section className="crm-contact-section">
+                <div className="crm-section-heading">
+                  <div><span className="crm-section-kicker">Add a document</span><h3>Link a file</h3></div>
+                  <button
+                    type="button"
+                    className="crm-criteria-save"
+                    onClick={() => void handleAddDocument()}
+                    disabled={docBusy || !docName.trim()}
+                  >
+                    {docBusy ? "Saving…" : "Add document"}
+                  </button>
+                </div>
+                <div className="crm-criteria-grid">
+                  <label className="crm-criteria-field">
+                    <span>Document name</span>
+                    <input
+                      type="text"
+                      value={docName}
+                      placeholder="e.g. Pre-approval letter"
+                      onChange={(event) => setDocName(event.target.value)}
+                    />
+                  </label>
+                  <label className="crm-criteria-field">
+                    <span>Link URL (optional)</span>
+                    <input
+                      type="url"
+                      value={docUrl}
+                      placeholder="https://…"
+                      onChange={(event) => setDocUrl(event.target.value)}
+                    />
+                  </label>
+                  <label className="crm-criteria-field crm-criteria-notes">
+                    <span>Note (optional)</span>
+                    <input
+                      type="text"
+                      value={docNote}
+                      placeholder="e.g. Signed copy, expires Sept 30"
+                      onChange={(event) => setDocNote(event.target.value)}
+                    />
+                  </label>
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+
+        {tab === "automations" && (
+          <div
+            className="crm-contact-searches"
+            role="tabpanel"
+            id={`${titleId}-panel-automations`}
+            aria-labelledby={`${titleId}-tab-automations`}
+          >
+            <section className="crm-contact-section">
+              <div className="crm-section-heading">
+                <div><span className="crm-section-kicker">Automations</span><h3>Outreach for this contact</h3></div>
+                {contactId && automation !== null && (
+                  <button
+                    type="button"
+                    className={"crm-top25-button" + (automation.paused ? "" : " on")}
+                    aria-pressed={!automation.paused}
+                    disabled={automationBusy}
+                    onClick={() => void handleToggleAutomation()}
+                    title={automation.paused
+                      ? "Resume automated outreach for this contact"
+                      : "Pause automated outreach for this contact"}
+                  >
+                    {automationBusy ? "Saving…" : automation.paused ? "⏸ Paused — resume" : "● Active — pause"}
+                  </button>
+                )}
+              </div>
+              {!contactId ? (
+                <div className="crm-contact-empty">
+                  <strong>No merged contact record yet.</strong>
+                  <span>Automation status attaches to a contact — it'll be available once this profile is merged.</span>
+                </div>
+              ) : automation === null ? (
+                automationError ? (
+                  <div className="crm-contact-empty" role="alert">
+                    <strong>Automation status unavailable</strong>
+                    <span>{automationError}</span>
+                  </div>
+                ) : (
+                  <div className="crm-contact-loading" role="status">Loading automation status…</div>
+                )
+              ) : (
+                <>
+                  {automationError && <div className="crm-contact-error" role="alert">{automationError}</div>}
+                  <div className="crm-contact-scope" role="note">
+                    {automation.paused
+                      ? "Paused: the backend refuses draft approvals for this contact until you resume."
+                      : "Active: approved drafts for this contact can send. While paused, the backend refuses draft approvals for this contact."}
+                  </div>
+                  <dl className="crm-detail-list" aria-label={`Outreach history for ${profile.name}`}>
+                    <div><dt>Awaiting OK</dt><dd>{automation.pendingDrafts.toLocaleString("en-CA")} {automation.pendingDrafts === 1 ? "draft" : "drafts"} awaiting approval</dd></div>
+                    <div><dt>Queued</dt><dd>{automation.queued.toLocaleString("en-CA")}</dd></div>
+                    <div><dt>Sent</dt><dd>{automation.sent.toLocaleString("en-CA")}</dd></div>
+                    <div><dt>Failed</dt><dd>{automation.failed.toLocaleString("en-CA")}</dd></div>
+                    <div><dt>Skipped</dt><dd>{automation.skipped.toLocaleString("en-CA")}</dd></div>
+                  </dl>
+                  <p className="crm-rail-empty">
+                    These counts are this contact's outreach history. Multi-step drip sequences ride the existing
+                    daily outreach engine; the per-contact pause is enforced at approval time.
+                  </p>
+                </>
+              )}
+            </section>
           </div>
         )}
 
@@ -782,49 +1123,98 @@ export function ProfileDrawer({
           <div className="crm-contact-main">
             <section className="crm-contact-section crm-contact-compose" aria-labelledby={`${titleId}-compose`}>
               <div className="crm-section-heading">
-                <div><span className="crm-section-kicker">Log it</span><h3 id={`${titleId}-compose`}>Notes</h3></div>
+                <div>
+                  <span className="crm-section-kicker">Log it</span>
+                  <h3 id={`${titleId}-compose`}>
+                    {composeMode === "note" ? "Notes" : composeMode === "text" ? "Text draft" : "Email draft"}
+                  </h3>
+                </div>
                 <div className="crm-compose-modes" role="group" aria-label="Compose mode">
-                  {(["note", "text", "email"] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      className={composeMode === mode ? "on" : ""}
-                      data-mode={mode}
-                      aria-pressed={composeMode === mode}
-                      disabled={mode !== "note"}
-                      title={mode === "note"
-                        ? undefined
-                        : "Texts and emails go through the AI draft approval flow — compose here is notes-only for now."}
-                      onClick={() => setComposeMode(mode)}
-                    >
-                      {mode === "note" ? "Note" : mode === "text" ? "Text" : "Email"}
-                    </button>
-                  ))}
+                  {(["note", "text", "email"] as const).map((mode) => {
+                    const consentOff = mode === "text"
+                      ? profile.consent?.text === false
+                      : mode === "email"
+                        ? profile.consent?.email === false
+                        : false;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={composeMode === mode ? "on" : ""}
+                        data-mode={mode}
+                        aria-pressed={composeMode === mode}
+                        disabled={consentOff}
+                        title={consentOff
+                          ? mode === "text"
+                            ? "Texting consent is off for this contact — turn it on in Edit details first."
+                            : "Email consent is off for this contact — turn it on in Edit details first."
+                          : undefined}
+                        onClick={() => {
+                          setComposeMode(mode);
+                          setComposeError(null);
+                          setComposeStatus(null);
+                        }}
+                      >
+                        {mode === "note" ? "Note" : mode === "text" ? "Text" : "Email"}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
               {!contactId ? (
-                <p className="crm-rail-empty">Notes attach to a merged contact record — none exists for this profile yet.</p>
+                <p className="crm-rail-empty">
+                  {composeMode === "note"
+                    ? "Notes attach to a merged contact record — none exists for this profile yet."
+                    : "Drafts need a merged contact record — none exists for this profile yet."}
+                </p>
               ) : (
                 <>
+                  {composeMode === "email" && (
+                    <label className="crm-criteria-field">
+                      <span>Subject (optional)</span>
+                      <input
+                        type="text"
+                        value={composeSubject}
+                        placeholder="Subject…"
+                        onChange={(event) => setComposeSubject(event.target.value)}
+                      />
+                    </label>
+                  )}
                   <div className="crm-compose-box">
                     <textarea
                       value={noteText}
-                      placeholder="Add a note / log…"
+                      placeholder={composeMode === "note"
+                        ? "Add a note / log…"
+                        : composeMode === "text"
+                          ? `Write a text to ${firstName}…`
+                          : "Write an email…"}
                       rows={2}
-                      aria-label={`Add a note for ${profile.name}`}
+                      aria-label={composeMode === "note"
+                        ? `Add a note for ${profile.name}`
+                        : composeMode === "text"
+                          ? `Write a text to ${profile.name}`
+                          : `Write an email to ${profile.name}`}
                       onChange={(event) => setNoteText(event.target.value)}
                     />
                     <button
                       type="button"
                       className="crm-compose-send"
-                      onClick={() => void handleAddNote()}
-                      disabled={noteBusy || !noteText.trim()}
+                      onClick={() => void (composeMode === "note" ? handleAddNote() : handleComposeDraft())}
+                      disabled={(composeMode === "note" ? noteBusy : composeBusy) || !noteText.trim()}
                     >
-                      {noteBusy ? "Saving…" : "Log note"}
+                      {composeMode === "note"
+                        ? noteBusy ? "Saving…" : "Log note"
+                        : composeBusy ? "Creating…" : "Create draft"}
                     </button>
                   </div>
-                  {notesError && <div className="crm-contact-error" role="alert">{notesError}</div>}
-                  {notes === null ? (
+                  {composeMode !== "note" && composeError && (
+                    <div className="crm-contact-error" role="alert">{composeError}</div>
+                  )}
+                  {composeMode !== "note" && composeStatus && (
+                    <div className="crm-contact-scope" role="status">{composeStatus}</div>
+                  )}
+                  {composeMode === "note" && notesError && <div className="crm-contact-error" role="alert">{notesError}</div>}
+                  {composeMode !== "note" ? null : notes === null ? (
                     <div className="crm-contact-loading" role="status">Loading notes…</div>
                   ) : notes.length === 0 ? (
                     <p className="crm-rail-empty">No notes yet — the first one you log lands here.</p>

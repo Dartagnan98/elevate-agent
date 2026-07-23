@@ -264,6 +264,20 @@ html[data-app-theme="dark"] .reporting-header-context {
   opacity: 0.85;
 }
 
+/* Live range picker: the same .report-range chrome on a native <select>. */
+select.report-range {
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+select.report-range:focus-visible {
+  outline: 2px solid var(--report-focus-ring);
+  outline-offset: 2px;
+}
+
 /* -------------------------------------------------------- goal progress */
 
 .report-goalcard {

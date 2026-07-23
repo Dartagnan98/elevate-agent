@@ -5,6 +5,7 @@ import {
   buildReportingSnapshot,
   reportingInputsFromFetchResults,
   REPORTING_DEAL_LIMIT,
+  REPORTING_PERIOD_DAYS,
   REPORTING_SEND_LIMIT,
 } from "./reporting-data";
 import type { ReportingSnapshotInput } from "./reporting-data";
@@ -44,7 +45,13 @@ export function withReportingTimeout<T>(
   });
 }
 
-export function useReportingData() {
+/**
+ * Fetches the reporting sources once per refresh and recomputes the snapshot
+ * for the requested window. The fetches are window-independent (newest-first
+ * reads bounded by REPORTING_SEND_LIMIT / REPORTING_DEAL_LIMIT), so changing
+ * `periodDays` is a pure client-side recompute — no refetch required.
+ */
+export function useReportingData(periodDays: number = REPORTING_PERIOD_DAYS) {
   const [inputs, setInputs] = useState<ReportingSnapshotInput>(EMPTY_INPUTS);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -127,8 +134,8 @@ export function useReportingData() {
   }, [refresh]);
 
   const snapshot = useMemo(
-    () => buildReportingSnapshot(inputs, updatedAt ?? initialAsOf),
-    [initialAsOf, inputs, updatedAt],
+    () => buildReportingSnapshot(inputs, updatedAt ?? initialAsOf, periodDays),
+    [initialAsOf, inputs, periodDays, updatedAt],
   );
 
   return { snapshot, loading, refreshing, error, updatedAt, refresh };

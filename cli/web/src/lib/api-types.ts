@@ -308,6 +308,37 @@ export interface ContactTask {
   timestamp: string | null;
 }
 
+export interface ContactDocument {
+  id: string;
+  name: string;
+  url: string | null;
+  note: string | null;
+  addedAt: string;
+}
+
+export interface ContactAutomationStatus {
+  paused: boolean;
+  pendingDrafts: number;
+  queued: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface ContactPropertyActivity {
+  id: string;
+  type: string;
+  title: string;
+  address: string | null;
+  summary: string;
+  timestamp: string | null;
+}
+
+export interface CrmStage {
+  key: string;
+  label: string;
+}
+
 export interface SourceInboxDraft {
   id: string;
   sourceId: string;

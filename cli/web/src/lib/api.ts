@@ -61,8 +61,12 @@ import type {
   SourceInboxProfileStatus,
   ContactNote,
   ContactTask,
+  ContactDocument,
+  ContactAutomationStatus,
+  ContactPropertyActivity,
   AccountGoals,
   CrmColumn,
+  CrmStage,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
   IntegrationTestResponse,
@@ -2360,6 +2364,70 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ taskId, status }),
     }, 20_000, "Task update timed out. Refresh the contact before trying again."),
+  composeSourceInboxDrafts: (compose: {
+    contactIds: string[];
+    channel: "sms" | "email";
+    body: string;
+    subject?: string;
+  }) =>
+    fetchJSONWithTimeout<{ ok: boolean; created: number; skipped: Array<{ contactId: string; reason: string }> }>(
+      "/api/source-inbox/compose",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(compose),
+      }, 25_000, "Compose timed out. Check the approval queue before retrying.",
+    ),
+  assignSourceInboxContact: (contactId: string, assignee: string | null) =>
+    fetchJSONWithTimeout<{ ok: boolean }>("/api/source-inbox/assign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contactId, assignee }),
+    }, 20_000, "Assign timed out. Refresh the list before trying again."),
+  getContactDocuments: (contactId: string) =>
+    fetchJSONWithTimeout<{ documents: ContactDocument[] }>(
+      `/api/source-inbox/documents/${encodeURIComponent(contactId)}`,
+    ),
+  addContactDocument: (contactId: string, name: string, url?: string, note?: string) =>
+    fetchJSONWithTimeout<{ ok: boolean; documents: ContactDocument[] }>(
+      "/api/source-inbox/document",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactId, name, url: url || null, note: note || null }),
+      }, 20_000, "Document save timed out. Refresh the contact before trying again.",
+    ),
+  removeContactDocument: (contactId: string, documentId: string) =>
+    fetchJSONWithTimeout<{ ok: boolean; documents: ContactDocument[] }>(
+      "/api/source-inbox/document/remove",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactId, documentId }),
+      }, 20_000, "Document remove timed out. Refresh the contact before trying again.",
+    ),
+  getContactAutomation: (contactId: string) =>
+    fetchJSONWithTimeout<ContactAutomationStatus>(
+      `/api/source-inbox/automation/${encodeURIComponent(contactId)}`,
+    ),
+  setContactAutomation: (contactId: string, paused: boolean) =>
+    fetchJSONWithTimeout<{ ok: boolean; paused: boolean }>("/api/source-inbox/automation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contactId, paused }),
+    }, 20_000, "Automation update timed out. Refresh the contact before trying again."),
+  getContactPropertyActivity: (contactId: string, limit = 200) =>
+    fetchJSONWithTimeout<{ activity: ContactPropertyActivity[] }>(
+      `/api/source-inbox/property-activity/${encodeURIComponent(contactId)}?limit=${limit}`,
+    ),
+  getCrmStages: () =>
+    fetchJSONWithTimeout<{ stages: CrmStage[] }>("/api/crm/stages"),
+  putCrmStages: (stages: CrmStage[]) =>
+    fetchJSONWithTimeout<{ ok: boolean; stages: CrmStage[] }>("/api/crm/stages", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stages }),
+    }, 20_000, "Stage update timed out. Reload the list before trying again."),
   getCrmColumns: () =>
     fetchJSONWithTimeout<{ columns: CrmColumn[] }>("/api/crm/columns"),
   putCrmColumns: (columns: CrmColumn[]) =>

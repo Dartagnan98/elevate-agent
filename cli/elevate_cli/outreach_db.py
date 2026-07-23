@@ -796,6 +796,43 @@ def _row_to_send(row: sqlite3.Row | None) -> dict[str, Any] | None:
     }
 
 
+def create_pending_send(
+    *,
+    source_id: str,
+    thread_id: str,
+    task_id: str,
+    channel: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Insert a ``pending_approval`` send_queue row (operator compose / mass
+    compose). Surfaces in the /leads approval queue exactly like cron-written
+    drafts — nothing sends until the operator approves it."""
+    now = _now()
+    queue_id = uuid.uuid4().hex
+    key = make_idempotency_key(source_id, thread_id, task_id, 0)
+    with connect() as conn:
+        with transaction(conn):
+            existing = conn.execute(
+                "SELECT * FROM send_queue WHERE idempotency_key=?", (key,)
+            ).fetchone()
+            if existing:
+                return _row_to_send(existing)
+            conn.execute(
+                """
+                INSERT INTO send_queue
+                    (id, idempotency_key, source_id, thread_id, task_id, channel,
+                     payload_json, status, attempts, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_approval', 0, ?, ?)
+                """,
+                (
+                    queue_id, key, source_id, thread_id, task_id, channel,
+                    json.dumps(payload, ensure_ascii=False), now, now,
+                ),
+            )
+        row = conn.execute("SELECT * FROM send_queue WHERE id=?", (queue_id,)).fetchone()
+    return _row_to_send(row)
+
+
 def get_send_by_task(source_id: str, thread_id: str, task_id: str) -> dict[str, Any] | None:
     """Return the most recent send_queue row for this draft task, or None."""
     with connect() as conn:
@@ -1057,6 +1094,29 @@ def approve_pending_send(
             ).fetchone()
             if row is None:
                 return None
+            # Migration 0037: a paused contact's drafts are held — approval is
+            # refused until the operator resumes automations on the card.
+            try:
+                payload_probe = json.loads(row["payload_json"] or "{}")
+            except (ValueError, TypeError):
+                payload_probe = {}
+            probe_contact = (
+                (payload_probe.get("recipient") or {}).get("contact_id")
+                if isinstance(payload_probe, dict)
+                else None
+            )
+            if probe_contact:
+                try:
+                    paused_row = conn.execute(
+                        "SELECT outreach_paused FROM contacts WHERE id = ?",
+                        (str(probe_contact),),
+                    ).fetchone()
+                except Exception:  # noqa: BLE001 — pre-0037 store: no column, no pause
+                    paused_row = None
+                if paused_row is not None and int(paused_row["outreach_paused"] or 0):
+                    raise ValueError(
+                        "Automations are paused for this contact — resume them on the card before approving."
+                    )
             new_payload_json = None
             if draft_text and str(draft_text).strip():
                 try:

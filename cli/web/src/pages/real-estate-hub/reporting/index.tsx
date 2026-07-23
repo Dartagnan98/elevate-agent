@@ -18,12 +18,14 @@ import {
   useHubHeader,
   useRealEstateHubData,
 } from "@/pages/real-estate-hub/_shared";
+import { REPORTING_RANGE_OPTIONS, REPORTING_SEND_LIMIT } from "./reporting-data";
 import type {
   ActivityMath,
   GoalProgressRow,
   ReportingBreakdownRow,
   ReportingFunnelStage,
   ReportingMetric,
+  ReportingRangeDays,
   ReportingRateId,
   ReportingTrendPoint,
   SourceConversionRow,
@@ -498,7 +500,8 @@ function LoadingReport() {
 
 export function RealEstateReportingPage() {
   const hubData = useRealEstateHubData();
-  const reporting = useReportingData();
+  const [rangeDays, setRangeDays] = useState<ReportingRangeDays>(30);
+  const reporting = useReportingData(rangeDays);
   const { snapshot } = reporting;
   const [goalsOpen, setGoalsOpen] = useState(false);
   const refreshReporting = reporting.refresh;
@@ -566,14 +569,19 @@ export function RealEstateReportingPage() {
                 <Target aria-hidden="true" />
                 Set goals
               </button>
-              <button
-                type="button"
+              <select
                 className="report-range"
-                disabled
-                aria-label="Date range is fixed to the last 30 days for now; a range picker is coming"
+                aria-label="Reporting date range"
+                value={String(rangeDays)}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setRangeDays(REPORTING_RANGE_OPTIONS.includes(next as ReportingRangeDays) ? (next as ReportingRangeDays) : 30);
+                }}
               >
-                Last 30 days
-              </button>
+                {REPORTING_RANGE_OPTIONS.map((days) => (
+                  <option key={days} value={String(days)}>Last {days} days</option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -586,6 +594,14 @@ export function RealEstateReportingPage() {
           <section className="report-kpis" aria-label={`Activity in the last ${snapshot.periodDays} days`}>
             {snapshot.kpis.map((metric) => <MetricCard key={metric.id} metric={metric} />)}
           </section>
+
+          {snapshot.sendWindowTruncated && (
+            <p className="report-data-note" role="note">
+              The send log reached its {REPORTING_SEND_LIMIT.toLocaleString("en-CA")}-row read limit
+              inside this range, so the {snapshot.periodDays}-day window may be truncated — send
+              totals are lower bounds.
+            </p>
+          )}
 
           <ActivityMathCard math={snapshot.activityMath} onSetGoal={openGoals} />
 

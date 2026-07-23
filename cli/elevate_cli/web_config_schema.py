@@ -78,6 +78,39 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Default Agent Hub persona for new local chat sessions",
         "category": "agent_hub",
     },
+    # Empty-dict maps render no auto fields; expose them as JSON editors so
+    # nothing in config.yaml is reachable only through the raw-YAML editor.
+    # (hooks stays raw-YAML-only on purpose: it executes arbitrary shell.)
+    "quick_commands": {
+        "type": "json",
+        "description": "Custom slash-command shortcuts: {\"name\": \"prompt text\"}",
+        "category": "general",
+    },
+    "personalities": {
+        "type": "json",
+        "description": "Named personality presets selectable via display.personality",
+        "category": "general",
+    },
+    "telegram.channel_prompts": {
+        "type": "json",
+        "description": "Per-channel system-prompt overrides: {\"channel id\": \"prompt\"}",
+        "category": "telegram",
+    },
+    "slack.channel_prompts": {
+        "type": "json",
+        "description": "Per-channel system-prompt overrides: {\"channel id\": \"prompt\"}",
+        "category": "slack",
+    },
+    "mattermost.channel_prompts": {
+        "type": "json",
+        "description": "Per-channel system-prompt overrides: {\"channel id\": \"prompt\"}",
+        "category": "mattermost",
+    },
+    "discord.channel_prompts": {
+        "type": "json",
+        "description": "Per-channel system-prompt overrides: {\"channel id\": \"prompt\"}",
+        "category": "discord",
+    },
     "agent_hub.agents": {
         # NOTE: agent definitions are authoritative in the per-account DB
         # (hub_agents, migration 0026). config.yaml's copy is a frozen
@@ -339,8 +372,10 @@ def _build_schema_from_config(
         else:
             category = "general"
 
-        if isinstance(value, dict):
-            # Recurse into nested dicts
+        if isinstance(value, dict) and full_key not in _SCHEMA_OVERRIDES:
+            # Recurse into nested dicts. Empty maps yield no fields — only the
+            # ones named in _SCHEMA_OVERRIDES surface (as JSON editors below);
+            # the rest (hooks, providers, …) stay raw-YAML-only on purpose.
             schema.update(_build_schema_from_config(value, full_key))
         else:
             entry: Dict[str, Any] = {

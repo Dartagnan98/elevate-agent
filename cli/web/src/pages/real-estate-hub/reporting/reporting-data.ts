@@ -9,6 +9,9 @@ import type {
 } from "@/lib/api-types";
 
 export const REPORTING_PERIOD_DAYS = 30;
+/** Selectable report windows (days). Every snapshot number derives from the chosen one. */
+export const REPORTING_RANGE_OPTIONS = [30, 90] as const;
+export type ReportingRangeDays = (typeof REPORTING_RANGE_OPTIONS)[number];
 export const REPORTING_SEND_LIMIT = 500;
 export const REPORTING_DEAL_LIMIT = 1000;
 
@@ -345,10 +348,11 @@ function goalRow(
 export function buildGoalProgress(
   goals: AccountGoals | null,
   currents: GoalCurrents,
+  periodDays: number = REPORTING_PERIOD_DAYS,
 ): GoalProgressRow[] {
   const plain = (value: number) => value.toLocaleString("en-CA");
   return [
-    goalRow("leads", "New leads (30d)", currents.newLeads, goals?.leadsGoal ?? null, plain),
+    goalRow("leads", `New leads (${periodDays}d)`, currents.newLeads, goals?.leadsGoal ?? null, plain),
     goalRow(
       "appointments",
       "Appointments",
@@ -384,6 +388,11 @@ export interface ReportingSnapshot {
   gciThisYear: { total: number; dealsWithGci: number; dealsMissingGci: number } | null;
   closedDealsPartial: boolean;
   undatedClosedDeals: number;
+  /**
+   * True when the newest-first send read hit its row limit without leaving the
+   * selected window — send-derived totals are lower bounds for this range.
+   */
+  sendWindowTruncated: boolean;
 }
 
 export interface ReportingSnapshotInput {
@@ -502,6 +511,7 @@ function sendMetric(
   sends: SourceInboxSentResponse | null,
   periodStart: number,
   now: number,
+  periodDays: number,
 ): ReportingMetric {
   if (!sends) {
     return unavailableMetric(
@@ -519,8 +529,8 @@ function sendMetric(
     displayValue: partial ? `${value.toLocaleString("en-CA")}+` : value.toLocaleString("en-CA"),
     status: partial ? "partial" : "available",
     note: partial
-      ? `At least ${value.toLocaleString("en-CA")} non-synthetic rows were marked sent; the send log reached its ${REPORTING_SEND_LIMIT.toLocaleString("en-CA")}-row read limit within this period. Send status is not recipient-delivery proof.`
-      : `Non-synthetic rows marked sent in the last ${REPORTING_PERIOD_DAYS} days. Send status is not recipient-delivery proof.`,
+      ? `At least ${value.toLocaleString("en-CA")} non-synthetic rows were marked sent; the send log reached its ${REPORTING_SEND_LIMIT.toLocaleString("en-CA")}-row read limit within this ${periodDays}-day period. Send status is not recipient-delivery proof.`
+      : `Non-synthetic rows marked sent in the last ${periodDays} days. Send status is not recipient-delivery proof.`,
   };
 }
 
@@ -555,6 +565,7 @@ function newLeadsMetric(
   inbox: SourceInboxResponse | null,
   periodStart: number,
   now: number,
+  periodDays: number,
 ): ReportingMetric {
   if (!inbox) {
     return unavailableMetric(
@@ -570,7 +581,7 @@ function newLeadsMetric(
     value,
     displayValue: value.toLocaleString("en-CA"),
     status: "available",
-    note: `Profiles marked New lead in the last ${REPORTING_PERIOD_DAYS} days (status-change date; contact creation dates are not recorded yet).`,
+    note: `Profiles marked New lead in the last ${periodDays} days (status-change date; contact creation dates are not recorded yet).`,
   };
 }
 
@@ -713,8 +724,9 @@ export function salesByYear(deals: AdminDeal[], nowMs: number): ReportingBreakdo
 export function buildReportingSnapshot(
   input: ReportingSnapshotInput,
   now = Date.now(),
+  periodDays: number = REPORTING_PERIOD_DAYS,
 ): ReportingSnapshot {
-  const periodStart = now - REPORTING_PERIOD_DAYS * DAY_MS;
+  const periodStart = now - periodDays * DAY_MS;
   const nowDate = new Date(now);
   const yearStart = Date.UTC(nowDate.getUTCFullYear(), 0, 1);
   const deals = input.deals;
@@ -726,17 +738,17 @@ export function buildReportingSnapshot(
 
   return {
     asOf: now,
-    periodDays: REPORTING_PERIOD_DAYS,
+    periodDays,
     periodStart,
     kpis: [
-      newLeadsMetric(input.inbox, periodStart, now),
+      newLeadsMetric(input.inbox, periodStart, now, periodDays),
       unavailableMetric(
         "calls",
         "Calls made",
         "No call tracking yet — calls are not stored as reportable activity events.",
       ),
-      sendMetric("texts", "Texts sent", "text", input.sends, periodStart, now),
-      sendMetric("emails", "Emails sent", "email", input.sends, periodStart, now),
+      sendMetric("texts", "Texts sent", "text", input.sends, periodStart, now, periodDays),
+      sendMetric("emails", "Emails sent", "email", input.sends, periodStart, now, periodDays),
       unavailableMetric(
         "appointments",
         "Appointments booked",
@@ -758,7 +770,7 @@ export function buildReportingSnapshot(
       appointments: null,
       closingsThisMonth: deals ? closedDealsInMonth(deals, now) : null,
       gciThisYear: gciThisYear ? gciThisYear.total : null,
-    }),
+    }, periodDays),
     funnel,
     conversionBySource: profiles ? conversionByLeadSource(profiles) : null,
     rates,
@@ -771,5 +783,6 @@ export function buildReportingSnapshot(
     undatedClosedDeals: deals
       ? deals.filter((deal) => isClosedDeal(deal) && dealCloseTimestamp(deal) === null).length
       : 0,
+    sendWindowTruncated: Boolean(input.sends && sentWindowMayBeTruncated(input.sends, periodStart)),
   };
 }

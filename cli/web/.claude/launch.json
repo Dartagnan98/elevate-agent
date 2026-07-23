@@ -12,6 +12,12 @@
       "runtimeExecutable": "env",
       "runtimeArgs": ["ELEVATE_DASHBOARD_URL=http://127.0.0.1:9120", "npm", "run", "dev"],
       "port": 5173
+    },
+    {
+      "name": "elevate-web-9155",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["ELEVATE_DASHBOARD_URL=http://127.0.0.1:9155", "npm", "run", "dev"],
+      "port": 5173
     }
   ]
 }

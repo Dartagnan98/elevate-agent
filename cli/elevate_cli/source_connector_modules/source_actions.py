@@ -72,7 +72,11 @@ def update_profile_state(
     if normalized == "none":
         normalized = ""
     if normalized and normalized not in PROFILE_STATUS_VALUES:
-        raise ValueError(f"Unsupported profile status: {status}")
+        # Migration 0037: stages are operator-defined — accept any valid slug.
+        from elevate_cli.data.contacts import is_valid_pipeline_status
+
+        if not is_valid_pipeline_status(normalized):
+            raise ValueError(f"Unsupported profile status: {status}")
 
     source_connectors = _source_connectors()
     config = config or source_connectors.load_config()

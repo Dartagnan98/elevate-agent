@@ -8,6 +8,7 @@ import type {
   SourceInboxSentItem,
 } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "./leads-data";
+import { stageKeyForLabel } from "./components/profile-status";
 import {
   draftApprovalBlockedReason,
   initialDraftSendLifecycleState,
@@ -360,8 +361,16 @@ export function useLeadsBoardData() {
 
   const handleProfileStatusChange = useCallback(
     async (profile: LeadsProfile, label: string) => {
-      const status = sourceInboxProfileStatusForLabel(label);
-      if (status === undefined) throw new Error(`Unsupported lead status: ${label}`);
+      let status = sourceInboxProfileStatusForLabel(label);
+      if (status === undefined) {
+        // Operator-defined stage (migration 0037): the backend stores the
+        // slugged label — lowercase, non-alphanumeric runs collapsed to "_",
+        // matching PUT /api/crm/stages. The union type only names the
+        // built-ins, so the cast carries the custom slug through.
+        const slug = stageKeyForLabel(label);
+        if (!slug) throw new Error(`Unsupported lead status: ${label}`);
+        status = slug as SourceInboxProfileStatus;
+      }
       const res = await api.updateSourceInboxProfile(profile.id, status);
       setSourceInbox(res);
     },

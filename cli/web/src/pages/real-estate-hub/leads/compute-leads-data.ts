@@ -118,8 +118,20 @@ const STATUS_LABELS: Record<string, string> = {
   trash: "Trash",
 };
 
+function humanizeStatusSlug(slug: string): string {
+  return slug
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 function statusLabel(profile: SourceInboxProfile): string {
   if (profile.status && STATUS_LABELS[profile.status]) return STATUS_LABELS[profile.status];
+  // Migration 0037: pipeline stages are operator-defined, so an unknown slug
+  // is a custom stage, not garbage. Humanize it for display; StatusPill swaps
+  // in the exact configured label once /api/crm/stages loads.
+  if (profile.status) return humanizeStatusSlug(String(profile.status));
   if (profile.crmStage) return profile.crmStage;
   return profile.heatLabel === "hot" ? "Hot" : "Open";
 }

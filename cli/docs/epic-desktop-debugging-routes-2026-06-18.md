@@ -173,10 +173,10 @@ Production readiness artifacts:
 
 Current verified snapshot, 2026-06-18:
 
-- Local inventory: 374 decorated local routes/WebSockets, now split across
+- Local inventory: 384 decorated local routes/WebSockets, now split across
   focused `web_routes/*` modules plus 36 in the Kanban plugin API and 1 in the
   example plugin API.
-- Local route identity fingerprint: `1f1ec9b574060c28`.
+- Local route identity fingerprint: `dc5a9abe6c8086a2`.
 - Hosted inventory: 39 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -223,10 +223,10 @@ Current verified snapshot, 2026-06-18:
   - `backend/src/app/api/stripe/checkout/route.ts`
   - `backend/src/app/api/stripe/portal/route.ts`
   - `backend/src/app/api/stripe/webhook/route.ts`
-- Caller inventory: the latest sweep found 539 frontend/desktop caller
+- Caller inventory: the latest sweep found 561 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `178e027783ef8d86`.
+- Caller inventory fingerprint: `1a903a67d621e943`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test, served-SPA
   `HttpOnly` session-cookie authorization test,

@@ -432,6 +432,55 @@ describe("truthful reporting snapshot", () => {
 
     expect(metrics.get("texts")).toMatchObject({ value: 250, displayValue: "250+", status: "partial" });
     expect(metrics.get("emails")).toMatchObject({ value: 250, displayValue: "250+", status: "partial" });
+    expect(snapshot.sendWindowTruncated).toBe(true);
+  });
+
+  it("keeps the truncation flag off when the send read did not hit its limit", () => {
+    const snapshot = buildReportingSnapshot(
+      { inbox: null, sends: sentResponse([sent("only", "sms")]), deals: null, goals: null },
+      NOW,
+    );
+    expect(snapshot.sendWindowTruncated).toBe(false);
+    expect(
+      buildReportingSnapshot({ inbox: null, sends: null, deals: null, goals: null }, NOW)
+        .sendWindowTruncated,
+    ).toBe(false);
+  });
+
+  it("recomputes every windowed number from the selected period instead of a hardcoded 30 days", () => {
+    const inWiderWindow = "2026-05-20T12:00:00Z"; // ~54 days before NOW
+    const sends = sentResponse([
+      sent("recent", "sms"),
+      sent("older", "sms", inWiderWindow),
+      sent("older-email", "email", inWiderWindow),
+    ]);
+    const profiles = [
+      ...funnelProfiles(), // includes a new_lead marked 2026-05-01 (outside 30d, inside 90d)
+    ];
+
+    const thirty = buildReportingSnapshot({ inbox: inbox(profiles), sends, deals: [], goals: null }, NOW, 30);
+    const ninety = buildReportingSnapshot({ inbox: inbox(profiles), sends, deals: [], goals: null }, NOW, 90);
+
+    expect(thirty.periodDays).toBe(30);
+    expect(ninety.periodDays).toBe(90);
+    expect(ninety.periodStart).toBe(NOW - 90 * 24 * 60 * 60 * 1000);
+
+    const thirtyMetrics = new Map(thirty.kpis.map((metric) => [metric.id, metric]));
+    const ninetyMetrics = new Map(ninety.kpis.map((metric) => [metric.id, metric]));
+
+    expect(thirtyMetrics.get("texts")).toMatchObject({ value: 1 });
+    expect(ninetyMetrics.get("texts")).toMatchObject({ value: 2 });
+    expect(ninetyMetrics.get("emails")).toMatchObject({ value: 1 });
+    expect(thirtyMetrics.get("new-leads")).toMatchObject({ value: 2 });
+    expect(ninetyMetrics.get("new-leads")).toMatchObject({ value: 3 });
+
+    // Captions and goal labels name the selected window.
+    expect(ninetyMetrics.get("texts")?.note).toContain("last 90 days");
+    expect(ninetyMetrics.get("new-leads")?.note).toContain("last 90 days");
+    expect(ninety.goalProgress.find((row) => row.id === "leads")?.label).toBe("New leads (90d)");
+    expect(thirty.goalProgress.find((row) => row.id === "leads")?.label).toBe("New leads (30d)");
+    // The wider window counts more marked leads toward the same goal input.
+    expect(ninety.goalProgress.find((row) => row.id === "leads")?.current).toBe(3);
   });
 
   it("uses dated closed deals for source attribution and excludes undated claims", () => {

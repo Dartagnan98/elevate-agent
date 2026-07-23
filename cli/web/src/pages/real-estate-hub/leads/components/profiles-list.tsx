@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
+import { api } from "@/lib/api";
 import type { CrmColumn } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
+import { BulkComposeModal } from "./bulk-compose-modal";
 import {
   crmTemperatureForProfile,
   draftMatchesProfile,
@@ -14,6 +16,11 @@ import { StatusPill } from "./profile-status";
 export { StatusPill } from "./profile-status";
 
 const PROFILE_PAGE = 50;
+
+const BUILT_IN_STAGES = [
+  "New Lead", "Attempted Contact", "Prospect", "Client", "Pending Deal",
+  "Closed", "Referred", "Realtor Contact", "Trash",
+];
 
 function ProfileRow({
   profile,
@@ -148,6 +155,7 @@ export function ProfilesList({
   tagFilters = [],
   searchQuery = "",
   customColumns = [],
+  pipelineOptions,
   loading = false,
   onOpen,
   onStatusChange,
@@ -155,6 +163,7 @@ export function ProfilesList({
   onDraftAction,
   onDraftActionComplete,
   onEditTemplate,
+  onBulkActionComplete,
 }: {
   profiles: LeadsProfile[];
   drafts?: LeadsDraft[];
@@ -164,6 +173,8 @@ export function ProfilesList({
   tagFilters?: string[];
   searchQuery?: string;
   customColumns?: CrmColumn[];
+  /** Stage choices for the bulk Change Pipeline select (built-ins + custom). */
+  pipelineOptions?: string[];
   loading?: boolean;
   onOpen: (p: LeadsProfile) => void;
   onStatusChange: (profile: LeadsProfile, value: string) => void;
@@ -171,6 +182,8 @@ export function ProfilesList({
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onEditTemplate?: () => void;
+  /** Called after a bulk compose/assign lands so the parent can refresh. */
+  onBulkActionComplete?: () => void;
 }) {
   const [audienceFilter, setAudienceFilter] = useState<"all" | "verified" | "potential" | "favorites">("all");
   const [page, setPage] = useState(0);
@@ -184,6 +197,20 @@ export function ProfilesList({
   const [bulkStage, setBulkStage] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [composeChannel, setComposeChannel] = useState<"sms" | "email" | null>(null);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [assignName, setAssignName] = useState("");
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!assignOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !assignBusy) setAssignOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [assignOpen, assignBusy]);
 
   const profiles = profilesProp;
 
@@ -292,6 +319,58 @@ export function ProfilesList({
     );
   };
 
+  const finishBulkAction = (notice: string) => {
+    setSelectedIds(new Set());
+    setBulkStage("");
+    setBulkNotice(notice);
+    onBulkActionComplete?.();
+  };
+
+  const handleComposeDone = (summary: string) => {
+    setComposeChannel(null);
+    finishBulkAction(summary);
+  };
+
+  const runAssign = async () => {
+    if (assignBusy) return;
+    const assignee = assignName.trim();
+    const withContact = selectedProfiles.filter((profile) => (profile.contactIds?.[0] || "").trim());
+    const skippedNoContact = selectedProfiles.length - withContact.length;
+    if (withContact.length === 0) {
+      setAssignError("None of the selected leads have a linked contact record.");
+      return;
+    }
+    setAssignBusy(true);
+    setAssignError(null);
+    let done = 0;
+    const failures: string[] = [];
+    for (const profile of withContact) {
+      try {
+        // Sequential on purpose — one failure surfaces by name instead of
+        // hiding behind a burst of parallel errors.
+        await api.assignSourceInboxContact(profile.contactIds![0], assignee || null);
+        done += 1;
+      } catch (error) {
+        failures.push(`${profile.name}: ${error instanceof Error ? error.message : "assign failed"}`);
+      }
+    }
+    setAssignBusy(false);
+    if (failures.length > 0) {
+      setAssignError(`Assigned ${done} of ${withContact.length}. Failed — ${failures.join("; ")}`);
+      return;
+    }
+    setAssignOpen(false);
+    setAssignName("");
+    const skippedNote = skippedNoContact > 0
+      ? ` ${skippedNoContact} skipped (no linked contact).`
+      : "";
+    finishBulkAction(
+      assignee
+        ? `Assigned ${done} lead${done === 1 ? "" : "s"} to ${assignee}.${skippedNote}`
+        : `Cleared the assigned agent on ${done} lead${done === 1 ? "" : "s"}.${skippedNote}`,
+    );
+  };
+
   return (
     <section className="ab-card lb-profiles" aria-labelledby="leads-list-title">
       <header className="lb-profiles-head">
@@ -332,10 +411,9 @@ export function ProfilesList({
               <span className="sr-only">Change pipeline stage for selected leads</span>
               <select value={bulkStage} onChange={(event) => setBulkStage(event.target.value)} disabled={bulkBusy}>
                 <option value="">Change pipeline…</option>
-                {[
-                  "New Lead", "Attempted Contact", "Prospect", "Client", "Pending Deal",
-                  "Closed", "Referred", "Realtor Contact", "Trash",
-                ].map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+                {(pipelineOptions ?? BUILT_IN_STAGES).map((stage) => (
+                  <option key={stage} value={stage}>{stage}</option>
+                ))}
               </select>
             </label>
             <button
@@ -346,9 +424,33 @@ export function ProfilesList({
             >
               {bulkBusy ? "Applying…" : "Apply"}
             </button>
-            <span className="lb-bulkbar-soon mono" title="Mass Email, Mass Text, Assign to agent, and Send to Dialer are on the build list — they are not wired to the send engine yet.">
-              Mass Email / Text · soon
-            </span>
+            <button
+              type="button"
+              className="lb-bulkbar-select-page"
+              title="Draft the same text to every selected lead — each lands in the approval queue."
+              onClick={() => setComposeChannel("sms")}
+              disabled={bulkBusy}
+            >
+              Mass Text
+            </button>
+            <button
+              type="button"
+              className="lb-bulkbar-select-page"
+              title="Draft the same email to every selected lead — each lands in the approval queue."
+              onClick={() => setComposeChannel("email")}
+              disabled={bulkBusy}
+            >
+              Mass Email
+            </button>
+            <button
+              type="button"
+              className="lb-bulkbar-select-page"
+              title="Set the assigned agent on each selected lead's contact record."
+              onClick={() => { setAssignError(null); setAssignOpen(true); }}
+              disabled={bulkBusy}
+            >
+              Assign to agent
+            </button>
             <button type="button" className="lb-bulkbar-select-page" onClick={selectVisible}>Select page</button>
             <button type="button" className="lb-bulkbar-clear" onClick={clearSelection}>Clear</button>
           </div>
@@ -443,6 +545,57 @@ export function ProfilesList({
             </button>
           </div>
         </footer>
+      )}
+
+      {assignOpen && (
+        <div
+          className="crm-tagpicker-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !assignBusy) setAssignOpen(false);
+          }}
+        >
+          <div
+            className="crm-tagpicker crm-add-lead-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Assign selected leads to an agent"
+          >
+            <div className="crm-tagpicker-head">
+              <h3>Assign to agent</h3>
+              <button type="button" aria-label="Close assign form" disabled={assignBusy} onClick={() => setAssignOpen(false)}>×</button>
+            </div>
+            <p className="crm-tagpicker-sub">
+              Sets the assigned agent on <strong className="mono">{selectedProfiles.length}</strong> selected
+              lead{selectedProfiles.length === 1 ? "" : "s"}. Leave the name empty to clear the assignment.
+            </p>
+            {assignError && <div className="crm-contact-error" role="alert">{assignError}</div>}
+            <label className="crm-criteria-field">
+              <span>Agent name</span>
+              <input
+                type="text"
+                value={assignName}
+                placeholder="e.g. Skyleigh"
+                autoFocus
+                onChange={(event) => setAssignName(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void runAssign(); }}
+              />
+            </label>
+            <div className="crm-tagpicker-foot">
+              <button type="button" disabled={assignBusy} onClick={() => void runAssign()}>
+                {assignBusy ? "Assigning…" : assignName.trim() ? "Assign leads" : "Clear assignment"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {composeChannel && (
+        <BulkComposeModal
+          channel={composeChannel}
+          profiles={selectedProfiles}
+          onClose={() => setComposeChannel(null)}
+          onDone={handleComposeDone}
+        />
       )}
     </section>
   );

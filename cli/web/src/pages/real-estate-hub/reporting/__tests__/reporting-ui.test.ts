@@ -19,10 +19,19 @@ describe("reporting interaction truth", () => {
     expect(modal).toContain("min={0}");
   });
 
-  it("renders the fixed range as a genuinely disabled control, not a dead picker", () => {
-    // A real <button disabled> with an aria-label explaining the fixed window.
-    expect(page).toMatch(/className="report-range"\s+disabled\s+aria-label=/);
-    expect(page).toContain("Last 30 days");
+  it("ships the date range as a live labelled select wired into the snapshot window", () => {
+    // A named <select> whose value drives the reporting hook's window.
+    expect(page).toContain('aria-label="Reporting date range"');
+    expect(page).toContain("REPORTING_RANGE_OPTIONS.map((days)");
+    expect(page).toContain("Last {days} days");
+    expect(page).toContain("useReportingData(rangeDays)");
+    expect(page).toContain("setRangeDays(");
+    // The select is enabled and window text is derived, never hardcoded.
+    expect(page).not.toMatch(/className="report-range"\s+disabled/);
+    expect(page).not.toContain("Last 30 days");
+    // Hitting the send read limit inside the window is called out honestly.
+    expect(page).toContain("snapshot.sendWindowTruncated");
+    expect(page).toContain("window may be truncated");
     // No fake dropdown affordance and no dead handlers.
     expect(page).not.toContain("window.open");
     expect(page).not.toMatch(/onClick=\{\(\)\s*=>\s*\{\s*\}\}/);

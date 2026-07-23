@@ -30,6 +30,7 @@ import { NotSentView } from "./not-sent-view";
 import { ProfileDrawer } from "./profile-drawer";
 import { draftMatchesProfile, type CrmTemperature } from "./crm-profile-helpers";
 import type { DraftSendLifecycleNotice } from "../draft-send-lifecycle";
+import { setCustomStagesCache, useCustomStages } from "./profile-status";
 import { ProfilesList } from "./profiles-list";
 import { SentView } from "./sent-view";
 import { TemplatesView, type TemplateMutations } from "./templates-view";
@@ -104,6 +105,13 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const [columnBusy, setColumnBusy] = useState(false);
   const [columnError, setColumnError] = useState<string | null>(null);
   const [customColumns, setCustomColumns] = useState<CrmColumn[]>([]);
+  const [addStageOpen, setAddStageOpen] = useState(false);
+  const [addStageLabel, setAddStageLabel] = useState("");
+  const [stageBusy, setStageBusy] = useState(false);
+  const [stageError, setStageError] = useState<string | null>(null);
+  // Custom pipeline stages: fetched once per page load (shared module cache,
+  // same store the status pills read), primed here after every PUT.
+  const customStages = useCustomStages();
 
   useEffect(() => {
     let cancelled = false;
@@ -168,6 +176,39 @@ export function LeadsBoard(props: LeadsBoardProps) {
     }
   };
 
+  const handleAddStage = async () => {
+    const label = addStageLabel.trim();
+    if (!label) return;
+    setStageBusy(true);
+    setStageError(null);
+    try {
+      // The backend slugs the label into the stage key.
+      const result = await api.putCrmStages([...customStages, { key: "", label }]);
+      setCustomStagesCache(result.stages);
+      setAddStageOpen(false);
+      setAddStageLabel("");
+    } catch (error) {
+      setStageError(error instanceof Error ? error.message : "Could not add the stage.");
+    } finally {
+      setStageBusy(false);
+    }
+  };
+
+  const handleRemoveStage = async (key: string) => {
+    setStageBusy(true);
+    setStageError(null);
+    try {
+      // Removal only edits the stage config — contacts already in the stage
+      // keep their pipeline_status value.
+      const result = await api.putCrmStages(customStages.filter((stage) => stage.key !== key));
+      setCustomStagesCache(result.stages);
+    } catch (error) {
+      setStageError(error instanceof Error ? error.message : "Could not remove the stage.");
+    } finally {
+      setStageBusy(false);
+    }
+  };
+
   // Rendering an empty inbox must stay empty. Demo constants still support
   // isolated design fixtures, but are never a fallback for the live CRM.
   const sources = props.sources ?? EMPTY_SOURCES;
@@ -186,11 +227,20 @@ export function LeadsBoard(props: LeadsBoardProps) {
       "Closed", "Referred", "Realtor Contact", "Trash",
     ];
     const known = new Set(stages.map((stage) => stage.toLowerCase()));
+    // Operator-defined stages sit after the built-ins, before observed extras.
+    const custom = customStages
+      .map((stage) => (stage.label || "").trim())
+      .filter((label) => {
+        const key = label.toLowerCase();
+        if (!key || known.has(key)) return false;
+        known.add(key);
+        return true;
+      });
     const extras = [...new Set(profiles.map((profile) => profile.status).filter(Boolean))]
       .filter((status) => !known.has(status.toLowerCase()))
       .sort((a, b) => a.localeCompare(b));
-    return [...stages, ...extras];
-  }, [profiles]);
+    return [...stages, ...custom, ...extras];
+  }, [profiles, customStages]);
   const tagOptions = useMemo(() => (
     [...new Set(profiles.flatMap((profile) => profile.tags).map((tag) => tag.trim()).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
@@ -319,7 +369,10 @@ export function LeadsBoard(props: LeadsBoardProps) {
                 <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); setAddColumnOpen(true); }}>
                   New column
                 </button>
-                {customColumns.length > 0 && <div className="crm-addmenu-sep" aria-hidden="true" />}
+                <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); setAddStageOpen(true); }}>
+                  New pipeline stage
+                </button>
+                {(customColumns.length > 0 || customStages.length > 0) && <div className="crm-addmenu-sep" aria-hidden="true" />}
                 {customColumns.map((column) => (
                   <button
                     key={column.key}
@@ -332,6 +385,19 @@ export function LeadsBoard(props: LeadsBoardProps) {
                     Remove column “{column.label}”
                   </button>
                 ))}
+                {customStages.map((stage) => (
+                  <button
+                    key={stage.key}
+                    type="button"
+                    role="menuitem"
+                    className="crm-addmenu-remove"
+                    title="Removes the stage from the stage pickers only — contacts already in this stage keep it."
+                    disabled={stageBusy}
+                    onClick={() => void handleRemoveStage(stage.key)}
+                  >
+                    Remove stage “{stage.label}”
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -342,6 +408,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
         <div
           className="crm-tagpicker-backdrop"
           onMouseDown={(event) => { if (event.target === event.currentTarget) setAddLeadOpen(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") setAddLeadOpen(false); }}
         >
           <div className="crm-tagpicker crm-add-lead-modal" role="dialog" aria-modal="true" aria-label="Add a new lead">
             <div className="crm-tagpicker-head">
@@ -383,6 +450,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
         <div
           className="crm-tagpicker-backdrop"
           onMouseDown={(event) => { if (event.target === event.currentTarget) setAddColumnOpen(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") setAddColumnOpen(false); }}
         >
           <div className="crm-tagpicker crm-add-lead-modal" role="dialog" aria-modal="true" aria-label="Add a custom column">
             <div className="crm-tagpicker-head">
@@ -412,6 +480,42 @@ export function LeadsBoard(props: LeadsBoardProps) {
         </div>
       )}
 
+      {addStageOpen && (
+        <div
+          className="crm-tagpicker-backdrop"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setAddStageOpen(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") setAddStageOpen(false); }}
+        >
+          <div className="crm-tagpicker crm-add-lead-modal" role="dialog" aria-modal="true" aria-label="Add a custom pipeline stage">
+            <div className="crm-tagpicker-head">
+              <h3>New pipeline stage</h3>
+              <button type="button" aria-label="Close new stage form" onClick={() => setAddStageOpen(false)}>×</button>
+            </div>
+            <p className="crm-tagpicker-sub">
+              Adds a stage to every pipeline picker — the filters, bulk actions, and each lead's status menu.
+              Removing it later only edits this list; contacts keep whatever stage they are in.
+            </p>
+            {stageError && <div className="crm-contact-error" role="alert">{stageError}</div>}
+            <label className="crm-criteria-field">
+              <span>Stage name</span>
+              <input
+                type="text"
+                value={addStageLabel}
+                placeholder="e.g. Sphere of Influence, Under Contract"
+                autoFocus
+                onChange={(event) => setAddStageLabel(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void handleAddStage(); }}
+              />
+            </label>
+            <div className="crm-tagpicker-foot">
+              <button type="button" disabled={stageBusy || !addStageLabel.trim()} onClick={() => void handleAddStage()}>
+                {stageBusy ? "Adding…" : "Add stage"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="ab-scroll crm-scroll">
         <div className="crm-viewbar">
           <LeadsTabs tab={tab} onChange={setTab} />
@@ -425,6 +529,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
         )}
 
         {profileStatusError && <div className="lb-replies-empty lb-crm-error" role="alert">{profileStatusError}</div>}
+        {stageError && !addStageOpen && <div className="lb-replies-empty lb-crm-error" role="alert">{stageError}</div>}
 
         {draftSendNotices.length > 0 && (
           <section aria-label="Approved draft send status" aria-live="polite">
@@ -540,6 +645,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
               tagFilters={tagFilters}
               searchQuery={searchQuery}
               customColumns={customColumns}
+              pipelineOptions={pipelineOptions}
               loading={Boolean(props.loading)}
               onOpen={setActiveProfile}
               onStatusChange={handleListStatusChange}
@@ -547,6 +653,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
               onDraftAction={props.onDraftAction}
               onDraftActionComplete={props.onDraftActionComplete}
               onEditTemplate={() => setTab("templates")}
+              onBulkActionComplete={props.onRefresh}
             />
 
             {queueCount > 0 && (
