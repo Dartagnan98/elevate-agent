@@ -99,6 +99,15 @@ const REQUIRED_REALTOR_BETA_GATE_CHECK_IDS = [
   "recovery_minimal_runtime",
   "stable_feed_untouched",
 ];
+const REALTOR_BETA_RECOVERY_CHECK_IDS = [
+  "recovery_target_metadata",
+  "recovery_local_roll_forward",
+  "recovery_minimal_runtime",
+];
+const REALTOR_BETA_RECOVERY_NOT_APPLICABLE_CHECK_ID = "recovery_contract_not_applicable";
+const REQUIRED_REALTOR_BETA_BASE_CHECK_IDS = REQUIRED_REALTOR_BETA_GATE_CHECK_IDS.filter(
+  (check) => !REALTOR_BETA_RECOVERY_CHECK_IDS.includes(check),
+);
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -2731,7 +2740,8 @@ function validateRealtorBetaGateEvidence(
   const release = receipt.release || {};
   const profile = release.profile || {};
   const recovery = evidence.recovery || {};
-  const expectedRecovery = receipt.recovery || {};
+  const expectedRecovery = receipt.recovery;
+  const recoveryApplicable = expectedRecovery != null;
   const stable = receipt.public_feeds_at_finalize?.latest || {};
   const candidateFeed = receipt.artifacts?.[release.feed_name] || {};
   if (release.channel !== "beta"
@@ -2756,9 +2766,16 @@ function validateRealtorBetaGateEvidence(
       || evidence.installed_app_name !== profile.appBundleName) {
     throw new Error(`[candidate] invalid required Realtor Beta gate evidence: ${label}`);
   }
+  const requiredCheckIds = recoveryApplicable
+    ? REQUIRED_REALTOR_BETA_GATE_CHECK_IDS
+    : [...REQUIRED_REALTOR_BETA_BASE_CHECK_IDS, REALTOR_BETA_RECOVERY_NOT_APPLICABLE_CHECK_ID];
+  const forbiddenCheckIds = recoveryApplicable
+    ? [REALTOR_BETA_RECOVERY_NOT_APPLICABLE_CHECK_ID]
+    : REALTOR_BETA_RECOVERY_CHECK_IDS;
   if (!Array.isArray(evidence.check_ids)
       || evidence.check_ids.length !== new Set(evidence.check_ids).size
-      || REQUIRED_REALTOR_BETA_GATE_CHECK_IDS.some((check) => !evidence.check_ids.includes(check))) {
+      || requiredCheckIds.some((check) => !evidence.check_ids.includes(check))
+      || forbiddenCheckIds.some((check) => evidence.check_ids.includes(check))) {
     throw new Error(`[candidate] Realtor Beta gate evidence is missing required checks: ${label}`);
   }
   if (evidence.test_profile?.name !== "exact-installed-realtor-beta-prepublish-v1"
@@ -2788,34 +2805,46 @@ function validateRealtorBetaGateEvidence(
       || evidence.session_resume?.resume_pending_cleared !== true) {
     throw new Error(`[candidate] Realtor Beta installed fault evidence is invalid: ${label}`);
   }
-  if (recovery.mode !== "local-fixture-roll-forward"
-      || recovery.candidate_version !== release.version
-      || recovery.recovery_version !== expectedRecovery.version
-      || recovery.source_receipt_id !== receipt.source_receipt_id
-      || recovery.recovery_feed_sha256 !== expectedRecovery.local_feed?.sha256
-      || recovery.beta_after_sha256 !== expectedRecovery.local_feed?.sha256
-      || recovery.candidate_feed_sha256 !== candidateFeed.sha256
-      || recovery.stable_before_sha256 !== stable.sha256
-      || recovery.stable_after_sha256 !== stable.sha256
-      || recovery.stable_expected_sha256 !== stable.sha256
-      || recovery.stable_alias_count !== 2
-      || recovery.recovery_alias_count !== 4
-      || recovery.recovery_artifact_count !== 4
-      || recovery.recovery_architecture_count !== 2
-      || recovery.signed_app_count !== 2
-      || recovery.notarized_app_count !== 2
-      || recovery.stapled_app_count !== 2
-      || recovery.runtime_actor_count !== 0
-      || recovery.backend_actor_count !== 0
-      || recovery.gateway_actor_count !== 0
-      || recovery.tool_actor_count !== 0
-      || recovery.artifact_bytes_mode !== "synthetic-local-fixture"
-      || recovery.remote_mutation !== false
-      || recovery.production_mutated !== false
-      || recovery.profile_data_mutations !== 0
-      || recovery.rpo_seconds !== 0
-      || recovery.procedure_id !== REALTOR_BETA_RECOVERY_PROCEDURE_ID) {
-    throw new Error(`[candidate] Realtor Beta recovery roll-forward drill evidence is invalid: ${label}`);
+  if (recoveryApplicable) {
+    if (recovery.mode !== "local-fixture-roll-forward"
+        || recovery.candidate_version !== release.version
+        || recovery.recovery_version !== expectedRecovery.version
+        || recovery.source_receipt_id !== receipt.source_receipt_id
+        || recovery.recovery_feed_sha256 !== expectedRecovery.local_feed?.sha256
+        || recovery.beta_after_sha256 !== expectedRecovery.local_feed?.sha256
+        || recovery.candidate_feed_sha256 !== candidateFeed.sha256
+        || recovery.stable_before_sha256 !== stable.sha256
+        || recovery.stable_after_sha256 !== stable.sha256
+        || recovery.stable_expected_sha256 !== stable.sha256
+        || recovery.stable_alias_count !== 2
+        || recovery.recovery_alias_count !== 4
+        || recovery.recovery_artifact_count !== 4
+        || recovery.recovery_architecture_count !== 2
+        || recovery.signed_app_count !== 2
+        || recovery.notarized_app_count !== 2
+        || recovery.stapled_app_count !== 2
+        || recovery.runtime_actor_count !== 0
+        || recovery.backend_actor_count !== 0
+        || recovery.gateway_actor_count !== 0
+        || recovery.tool_actor_count !== 0
+        || recovery.artifact_bytes_mode !== "synthetic-local-fixture"
+        || recovery.remote_mutation !== false
+        || recovery.production_mutated !== false
+        || recovery.profile_data_mutations !== 0
+        || recovery.rpo_seconds !== 0
+        || recovery.procedure_id !== REALTOR_BETA_RECOVERY_PROCEDURE_ID) {
+      throw new Error(`[candidate] Realtor Beta recovery roll-forward drill evidence is invalid: ${label}`);
+    }
+  } else if (canonicalJson(recovery) !== canonicalJson({
+    mode: "not-applicable",
+    candidate_version: release.version,
+    source_receipt_id: receipt.source_receipt_id,
+    reason: "candidate-has-no-recovery-contract",
+    remote_mutation: false,
+    production_mutated: false,
+    profile_data_mutations: 0,
+  })) {
+    throw new Error(`[candidate] Realtor Beta recovery applicability evidence is invalid: ${label}`);
   }
   const started = Date.parse(evidence.started_at || "");
   const completed = Date.parse(evidence.completed_at || "");
@@ -3250,8 +3279,10 @@ module.exports = {
   PRE_SIGN_EVIDENCE_SCHEMA_VERSION,
   REALTOR_BETA_GATE_EVIDENCE_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
+  REQUIRED_REALTOR_BETA_BASE_CHECK_IDS,
   REQUIRED_REALTOR_BETA_GATE_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
+  REALTOR_BETA_RECOVERY_NOT_APPLICABLE_CHECK_ID,
   REALTOR_BETA_RECOVERY_PROCEDURE_ID,
   REALTOR_BETA_ROLLBACK_PROCEDURE_ID,
   ROLLBACK_FREEZE_FILE,

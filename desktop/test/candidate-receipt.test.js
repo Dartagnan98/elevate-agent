@@ -13,8 +13,10 @@ const yaml = require("js-yaml");
 const {
   CANDIDATE_RECEIPT_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
+  REQUIRED_REALTOR_BETA_BASE_CHECK_IDS,
   REQUIRED_REALTOR_BETA_GATE_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
+  REALTOR_BETA_RECOVERY_NOT_APPLICABLE_CHECK_ID,
   SOURCE_RECEIPT_SCHEMA_VERSION,
   archiveSuccessfulRelease,
   assertCompleteAsar,
@@ -56,6 +58,7 @@ const {
   verifyPreSignEvidence,
   verifyReleaseArchive,
   verifySourceReceipt,
+  validateRealtorBetaGateEvidence,
   validateFeed,
   validateZipEntryListing,
   validateZipEntries,
@@ -1621,6 +1624,114 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     requireSource: false,
     requireEvidence: "static",
   }), /missing required checks/);
+});
+
+test("later Betas require explicit evidence that the pinned recovery contract is not applicable", (t) => {
+  const root = temporaryDirectory(t);
+  const receiptPath = path.join(root, "candidate-receipt.json");
+  const receipt = {
+    candidate_id: "candidate-1.2.90",
+    source_receipt_id: "source-1.2.90",
+    production_feed_untouched: true,
+    release: {
+      version: "1.2.90",
+      channel: "beta",
+      feed_name: "beta-mac.yml",
+      profile: {
+        appBundleName: "Elevate Beta.app",
+        preferredPort: 9139,
+      },
+    },
+    apps: {
+      arm64: { bundle_manifest: { sha256: "app-arm64" } },
+    },
+    public_feeds_at_finalize: {
+      latest: { sha256: "a".repeat(64) },
+    },
+    artifacts: {
+      "beta-mac.yml": { sha256: "b".repeat(64) },
+    },
+  };
+  fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+  const evidence = {
+    evidence_schema_version: 1,
+    kind: "elevate-realtor-beta-prepublish-gate",
+    ok: true,
+    failures: [],
+    check_ids: [
+      ...REQUIRED_REALTOR_BETA_BASE_CHECK_IDS,
+      REALTOR_BETA_RECOVERY_NOT_APPLICABLE_CHECK_ID,
+    ],
+    candidate_id: receipt.candidate_id,
+    source_receipt_id: receipt.source_receipt_id,
+    candidate_architecture: "arm64",
+    candidate_receipt_sha256: sha256File(receiptPath),
+    candidate_app_version: receipt.release.version,
+    candidate_app_bundle_manifest_sha256: receipt.apps.arm64.bundle_manifest.sha256,
+    release_channel: "beta",
+    release_app_bundle_name: "Elevate Beta.app",
+    installed_app_name: "Elevate Beta.app",
+    started_at: "2026-07-10T10:00:00.000Z",
+    completed_at: "2026-07-10T10:00:01.000Z",
+    duration_ms: 1000,
+    test_profile: {
+      name: "exact-installed-realtor-beta-prepublish-v1",
+      isolated_home: true,
+      installed_profile_mutation: false,
+      remote_mutation: false,
+      public_feed_mutation: false,
+    },
+    profile: {
+      identities_distinct: true,
+      preferred_port: 9139,
+      production_feed_untouched: true,
+    },
+    installed_runtime: { module_count: 7, python_major: 3 },
+    tool_parity: { request_count: 2, receipt_count: 2 },
+    pack: { form_count: 34, pack_sha256: "c".repeat(64) },
+    action_faults: {
+      forms_missing_available: false,
+      forms_fake_available: false,
+      artifact_rejections: 2,
+      worker_retry_count: 1,
+      worker_terminal_status: "failed",
+    },
+    session_resume: {
+      session_id_preserved: true,
+      message_count: 1,
+      resume_pending_cleared: true,
+    },
+    recovery: {
+      mode: "not-applicable",
+      candidate_version: "1.2.90",
+      source_receipt_id: "source-1.2.90",
+      reason: "candidate-has-no-recovery-contract",
+      remote_mutation: false,
+      production_mutated: false,
+      profile_data_mutations: 0,
+    },
+  };
+  evidence.evidence_integrity_sha256 = evidenceIntegrity(evidence);
+  assert.equal(
+    validateRealtorBetaGateEvidence(evidence, receipt, "arm64", receiptPath),
+    true,
+  );
+
+  const falseRecoveryClaim = structuredClone(evidence);
+  falseRecoveryClaim.check_ids.push("recovery_target_metadata");
+  falseRecoveryClaim.evidence_integrity_sha256 = evidenceIntegrity(falseRecoveryClaim);
+  assert.throws(
+    () => validateRealtorBetaGateEvidence(falseRecoveryClaim, receipt, "arm64", receiptPath),
+    /missing required checks/,
+  );
+
+  const wrongReason = structuredClone(evidence);
+  wrongReason.recovery.reason = "skipped";
+  wrongReason.evidence_integrity_sha256 = evidenceIntegrity(wrongReason);
+  assert.throws(
+    () => validateRealtorBetaGateEvidence(wrongReason, receipt, "arm64", receiptPath),
+    /recovery applicability evidence is invalid/,
+  );
 });
 
 test("recoveryStaticProvenance emits a pinned static-provenance key and shape contract", () => {

@@ -394,7 +394,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         (relative) => path.join(REPO, relative),
       ),
       ...pytest(
-        8,
+        9,
         "tests/elevate_cli/test_exact_candidate_realtor_beta_gate.py",
       ),
     },
@@ -483,7 +483,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       command: process.execPath,
       displayCommand: "<active-node>",
       args: ["--test", "--test-reporter=tap", ...desktopTests],
-      resultContract: { kind: "node-test", minimum_tests: 510, expected_tests: 510 },
+      resultContract: { kind: "node-test", minimum_tests: 511, expected_tests: 511 },
     },
   ];
 }

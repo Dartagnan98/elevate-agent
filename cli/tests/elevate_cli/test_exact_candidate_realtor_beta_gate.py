@@ -195,6 +195,28 @@ def test_local_recovery_drill_rolls_beta_forward_and_leaves_stable_and_data_unto
     assert downgraded["stapled_app_count"] == 1
 
 
+def test_later_beta_marks_version_pinned_recovery_contract_not_applicable():
+    gate = _load_gate()
+    receipt, _candidate_feed, _recovery_feed, _stable_feed = _receipt()
+    receipt["release"]["version"] = "1.2.90"
+    del receipt["recovery"]
+
+    result = gate._recovery_not_applicable_result(receipt)
+    check_ids = gate._required_check_ids(recovery_applicable=False)
+
+    assert result == {
+        "mode": "not-applicable",
+        "candidate_version": "1.2.90",
+        "source_receipt_id": "a" * 64,
+        "reason": "candidate-has-no-recovery-contract",
+        "remote_mutation": False,
+        "production_mutated": False,
+        "profile_data_mutations": 0,
+    }
+    assert gate.RECOVERY_NOT_APPLICABLE_CHECK_ID in check_ids
+    assert not set(gate.RECOVERY_CHECK_IDS).intersection(check_ids)
+
+
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [

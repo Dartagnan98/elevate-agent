@@ -61,6 +61,15 @@ REQUIRED_CHECK_IDS = (
     "recovery_minimal_runtime",
     "stable_feed_untouched",
 )
+RECOVERY_CHECK_IDS = (
+    "recovery_target_metadata",
+    "recovery_local_roll_forward",
+    "recovery_minimal_runtime",
+)
+RECOVERY_NOT_APPLICABLE_CHECK_ID = "recovery_contract_not_applicable"
+BASE_REQUIRED_CHECK_IDS = tuple(
+    check_id for check_id in REQUIRED_CHECK_IDS if check_id not in RECOVERY_CHECK_IDS
+)
 _SHA256_RE = __import__("re").compile(r"[0-9a-f]{64}\Z")
 _FORBIDDEN_EVIDENCE_KEYS = {
     "content",
@@ -663,6 +672,31 @@ def _recovery_roll_forward_dry_run(
     }
 
 
+def _recovery_not_applicable_result(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    release = receipt.get("release")
+    if (
+        not isinstance(release, Mapping)
+        or release.get("channel") != "beta"
+        or receipt.get("recovery") is not None
+    ):
+        raise GateFailure("recovery_not_applicable_invalid")
+    return {
+        "mode": "not-applicable",
+        "candidate_version": str(release.get("version") or ""),
+        "source_receipt_id": str(receipt.get("source_receipt_id") or ""),
+        "reason": "candidate-has-no-recovery-contract",
+        "remote_mutation": False,
+        "production_mutated": False,
+        "profile_data_mutations": 0,
+    }
+
+
+def _required_check_ids(*, recovery_applicable: bool) -> list[str]:
+    if recovery_applicable:
+        return list(REQUIRED_CHECK_IDS)
+    return [*BASE_REQUIRED_CHECK_IDS, RECOVERY_NOT_APPLICABLE_CHECK_ID]
+
+
 _PACK_SCHEMA = """
 CREATE TABLE province_reference_pages (
  id TEXT PRIMARY KEY, province TEXT NOT NULL, slug TEXT NOT NULL, page_type TEXT NOT NULL,
@@ -1210,42 +1244,50 @@ def _main_gate(args: argparse.Namespace) -> int:
         )
         release = receipt.get("release") or {}
         public = receipt.get("public_feeds_at_finalize") or {}
-        recovery = receipt.get("recovery") or {}
-        local_recovery_feed = recovery.get("local_feed") or {}
-        recovery_feed_path = args.recovery_feed
-        if recovery_feed_path is None:
-            relative_recovery_feed = str(local_recovery_feed.get("path") or "")
-            if not relative_recovery_feed:
-                raise GateFailure("recovery_feed_path_missing")
-            recovery_feed_path = _repo_receipt_file(
-                repo_root,
-                relative_recovery_feed,
-                "recovery_feed_path_invalid",
+        recovery = receipt.get("recovery")
+        recovery_applicable = recovery is not None
+        if recovery_applicable:
+            if not isinstance(recovery, Mapping):
+                raise GateFailure("recovery_contract_invalid")
+            local_recovery_feed = recovery.get("local_feed") or {}
+            recovery_feed_path = args.recovery_feed
+            if recovery_feed_path is None:
+                relative_recovery_feed = str(local_recovery_feed.get("path") or "")
+                if not relative_recovery_feed:
+                    raise GateFailure("recovery_feed_path_missing")
+                recovery_feed_path = _repo_receipt_file(
+                    repo_root,
+                    relative_recovery_feed,
+                    "recovery_feed_path_invalid",
+                )
+            recovery_feed = _feed_bytes(
+                recovery_feed_path,
+                "",
+                "recovery_feed_unreachable",
             )
-        recovery_feed = _feed_bytes(
-            recovery_feed_path,
-            "",
-            "recovery_feed_unreachable",
-        )
-        stable_feed = _feed_bytes(
-            args.stable_feed,
-            str((public.get("latest") or {}).get("url") or ""),
-            "stable_snapshot_unreachable",
-        )
-        candidate_feed_path = args.candidate_feed or (
-            receipt_path.parent / str(release.get("feed_name") or "beta-mac.yml")
-        )
-        try:
-            candidate_feed = candidate_feed_path.read_bytes()
-        except OSError as exc:
-            raise GateFailure("candidate_beta_feed_unreadable") from exc
-        recovery_result = _recovery_roll_forward_dry_run(
-            receipt=receipt,
-            candidate_feed=candidate_feed,
-            recovery_feed=recovery_feed,
-            stable_feed=stable_feed,
-            work_root=work_root,
-        )
+            stable_feed = _feed_bytes(
+                args.stable_feed,
+                str((public.get("latest") or {}).get("url") or ""),
+                "stable_snapshot_unreachable",
+            )
+            candidate_feed_path = args.candidate_feed or (
+                receipt_path.parent / str(release.get("feed_name") or "beta-mac.yml")
+            )
+            try:
+                candidate_feed = candidate_feed_path.read_bytes()
+            except OSError as exc:
+                raise GateFailure("candidate_beta_feed_unreadable") from exc
+            recovery_result = _recovery_roll_forward_dry_run(
+                receipt=receipt,
+                candidate_feed=candidate_feed,
+                recovery_feed=recovery_feed,
+                stable_feed=stable_feed,
+                work_root=work_root,
+            )
+        else:
+            if args.recovery_feed is not None:
+                raise GateFailure("unexpected_recovery_feed")
+            recovery_result = _recovery_not_applicable_result(receipt)
 
     completed_at = _utc_now()
     evidence: dict[str, Any] = {
@@ -1253,7 +1295,7 @@ def _main_gate(args: argparse.Namespace) -> int:
         "kind": EVIDENCE_KIND,
         "ok": True,
         "failures": [],
-        "check_ids": list(REQUIRED_CHECK_IDS),
+        "check_ids": _required_check_ids(recovery_applicable=recovery_applicable),
         **binding,
         "release_channel": "beta",
         "release_app_bundle_name": "Elevate Beta.app",
@@ -1277,9 +1319,10 @@ def _main_gate(args: argparse.Namespace) -> int:
         "recovery": recovery_result,
     }
     _write_evidence(args.json_out, evidence)
+    recovery_label = recovery_result.get("recovery_version", "not-applicable")
     print(
         f"Realtor Beta pre-publish gate passed for {binding['candidate_id'][:12]} "
-        f"({len(REQUIRED_CHECK_IDS)} checks; recovery {recovery_result['recovery_version']}; Stable untouched)."
+        f"({len(evidence['check_ids'])} checks; recovery {recovery_label}; Stable untouched)."
     )
     return 0
 
