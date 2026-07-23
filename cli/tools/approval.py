@@ -2368,6 +2368,7 @@ PLAN_MODE_READ_ONLY_TOOLS = frozenset({
     "todo", "clarify", "present_plan",      # planning + asking the user
     "browser_snapshot", "browser_status", "browser_read",
     "browser_shot", "browser_recordings", "browser_console",
+    "browser_profile_status",
 })
 _PLAN_MEMORY_READ_ACTIONS = frozenset(
     {"get", "search", "recall", "list", "view", "read", "show"}

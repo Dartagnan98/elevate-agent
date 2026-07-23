@@ -331,6 +331,7 @@ _LEGACY_TOOLSET_MAP = {
         "browser_type", "browser_scroll", "browser_back",
         "browser_forward", "browser_reload", "browser_new_tab",
         "browser_select_tab", "browser_close_tab",
+        "browser_profile_status", "browser_import_chrome",
         "browser_press", "browser_get_images",
         "browser_vision", "browser_console"
     ],

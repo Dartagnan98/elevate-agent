@@ -696,6 +696,8 @@ class TestToolDefinitionContainment:
             "browser_console",
             "browser_cdp",
             "browser_dialog",
+            "browser_profile_status",
+            "browser_import_chrome",
         }
         monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
 
