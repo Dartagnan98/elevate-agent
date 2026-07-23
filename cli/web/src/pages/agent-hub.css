@@ -1,52 +1,93 @@
 /* Agent Hub page styles — prototype design system, scoped to .hub-root.
  *
- * Verbatim from the design prototype (agent-hub-design.css) with two
+ * Verbatim from the design prototype (agent-hub-design.css) with three
  * adjustments per the brief:
  *   1. The @font-face blocks (broken local url() refs) are removed. The app
  *      already loads Geist / Geist Mono; we keep the font-family *stacks* in
  *      every rule so the look is identical.
- *   2. Every global / reset / :root / [data-*] selector is scoped under
- *      `.hub-root` so the design's resets and custom properties CANNOT bleed
- *      into the rest of the dashboard. The unique `.hub-*` selectors are
- *      already namespaced and stay as-is.
+ *   2. Every global / reset / [data-*] selector is scoped under `.hub-root`
+ *      (and `.hub-modal-back`, because the page's modals portal to
+ *      document.body and sit OUTSIDE .hub-root) so the design's resets
+ *      CANNOT bleed into the rest of the dashboard. The unique `.hub-*`
+ *      selectors are already namespaced and stay as-is.
+ *   3. The prototype's hardcoded dark palette is gone. The hub inherits the
+ *      app-wide theme tokens (--bg*, --fg*, --border*, --accent*,
+ *      --status-*) from :root/html[data-app-theme="light"|"medium"|"dark"]
+ *      in index.css, so all three themes render correctly. Never shadow
+ *      those token names here with fixed hexes — that is exactly what used
+ *      to pin the whole page to the dark prototype palette in light/medium
+ *      (invisible light-on-light headings, dark cards on the light canvas).
  */
 
 /* ── reset (scoped) ── */
-.hub-root, .hub-root *, .hub-root *::before, .hub-root *::after { box-sizing: border-box; }
-.hub-root .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-.hub-root ::selection { background: #5d5d5d; color: #ffffff; }
+.hub-root, .hub-root *, .hub-root *::before, .hub-root *::after,
+.hub-modal-back, .hub-modal-back *, .hub-modal-back *::before, .hub-modal-back *::after { box-sizing: border-box; }
+.hub-root .mono, .hub-modal-back .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.hub-root ::selection, .hub-modal-back ::selection { background: var(--hub-selection-bg); color: var(--hub-selection-fg); }
 
-/* ── design tokens (scoped to the page root so they never override the app) ── */
-.hub-root {
-  --bg:            #0F0F0F;
-  --bg-1:          #161616;
-  --bg-2:          #1A1A1A;
-  --bg-3:          #202020;
-  --border:        #2A2A2A;
-  --border-soft:   #1F1F1F;
-  --border-strong: #353535;
+/* ── hub-derived tokens ──
+   The prototype and the app disagree on surface semantics (prototype:
+   --bg-1/2/3 are raised card surfaces on a #0F0F0F canvas; app: --bg/--bg-1
+   is the page canvas, --bg-2/--bg-3 are the card/inset surfaces). The
+   --hub-* tokens bridge that: by default they map onto the app's card/inset
+   tokens (correct for light and medium), and the dark-theme block below pins
+   them back to the original prototype hexes so dark keeps its exact
+   pre-theming look. */
+.hub-root, .hub-modal-back {
+  --hub-card:   var(--bg-2);      /* raised card: runway tiles, inputs, rows, modal */
+  --hub-card-2: var(--bg-3);      /* inset: stat tiles, avatars, chips, pills */
+  --hub-card-3: var(--bg-soft);   /* deepest inset: config icons */
+  --hub-track-off: color-mix(in srgb, var(--fg) 32%, var(--bg-2)); /* switch/toggle off track */
+  --hub-primary-bg: var(--fg);
+  --hub-primary-fg: var(--bg-2);
+  --hub-primary-bg-hover: color-mix(in srgb, var(--fg) 86%, #FFFFFF);
+  --hub-error-fg: color-mix(in srgb, var(--status-error) 55%, var(--fg)); /* AA "bad" text on light surfaces */
+  --hub-done-fg:  color-mix(in srgb, var(--status-done) 50%, var(--fg));
+  --hub-selection-bg: color-mix(in srgb, var(--fg) 26%, var(--bg-2));
+  --hub-selection-fg: var(--fg);
+}
+
+/* Dark — keep the page's original prototype palette exactly (near-black
+   neutrals + green/amber/red status colors) instead of the app's blue-tinted
+   charcoal, so the dark hub looks the same as it did before this file was
+   made theme-aware. These are also the first hex definitions of
+   --fg-muted/--fg-faint/--fg-dim in this file: icon-control-a11y.test.ts
+   contrast-checks them against #202020, so they must stay light hexes. */
+:root[data-app-theme="dark"] .hub-root,
+html[data-app-theme="dark"] .hub-root,
+:root[data-app-theme="dark"] .hub-modal-back,
+html[data-app-theme="dark"] .hub-modal-back {
   --fg:            #ECECEC;
   --fg-muted:      #B5B5B5;
   --fg-faint:      #8A8A8A;
   --fg-dim:        #8A8A8A;
-
-  --accent:        #8A8A8A;
-  --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
-  --accent-fg:     #0F0F0F;
-
+  --border:        #2A2A2A;
+  --border-soft:   #1F1F1F;
+  --border-strong: #353535;
   --status-done:   #4FC38A;
   --status-warn:   #E0B257;
   --status-error:  #E07570;
-  --status-idle:   #6E6E6E;
-  --status-info:   #7AA9E5;
+  --hub-card:      #161616;
+  --hub-card-2:    #1A1A1A;
+  --hub-card-3:    #202020;
+  --hub-track-off: #202020;
+  --hub-primary-bg: #EDEDED;
+  --hub-primary-fg: #161616;
+  --hub-primary-bg-hover: #FFFFFF;
+  --hub-error-fg:  #F0C9C6;
+  --hub-done-fg:   #BCEBD3;
+  --hub-selection-bg: #5D5D5D;
+  --hub-selection-fg: #FFFFFF;
+}
 
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-
+.hub-root, .hub-modal-back {
   /* density defaults (the design exposed [data-density] presets via a tweaks
      tool we stripped; bake in the "comfortable" preset as the page default) */
   --hub-gap: 30px;
   --hub-card-pad: 18px;
+}
 
+.hub-root {
   color: var(--fg);
   font: 13.5px/1.55 "Anthropic Sans Display", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -62,12 +103,11 @@
 .hub-root[data-density="comfortable"] { --hub-gap: 30px; --hub-card-pad: 18px; }
 .hub-root[data-density="spacious"]    { --hub-gap: 40px; --hub-card-pad: 22px; }
 
-.hub-root {
-  height: calc(100dvh - 3rem);
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
+/* No inner scroll region: /hub renders in the standard app shell where
+   PageHeaderProvider's <main> already scrolls. The old
+   `height: calc(100dvh - 3rem); overflow-y: auto` here underestimated the
+   4rem header + shell padding, so the page grew a second, nested scrollbar
+   and `overscroll-behavior: contain` trapped wheel events at its edges. */
 .hub { min-height: 100%; }
 /* Full-width like Admin/Leads: horizontal margin comes from the app shell
    (px-3 sm:px-6), NOT from here. No max-width cap and no inner left/right
@@ -81,7 +121,7 @@
 @media (max-width: 720px) { .hub-inner { padding: 20px 0 70px; } }
 
 @keyframes hub-spin { to { transform: rotate(360deg); } }
-.hub-root .spin { animation: hub-spin 0.7s linear infinite; }
+.hub-root .spin, .hub-modal-back .spin { animation: hub-spin 0.7s linear infinite; }
 .hub-root .hub-skel {
   background: color-mix(in srgb, var(--fg) 9%, transparent);
   border-radius: 7px;
@@ -124,12 +164,12 @@
 .hub-btn svg { flex-shrink: 0; }
 .hub-btn.ghost:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); border-color: var(--border); }
 .hub-btn.primary {
-  background: #EDEDED; color: #161616; border-color: transparent;
+  background: var(--hub-primary-bg); color: var(--hub-primary-fg); border-color: transparent;
   font-weight: 600;
 }
-.hub-btn.primary:hover { background: #FFFFFF; }
-.hub-btn.primary.stop { background: color-mix(in srgb, var(--status-error) 22%, var(--bg-2)); color: #F0C9C6; }
-.hub-btn.primary.ok { background: color-mix(in srgb, var(--status-done) 24%, var(--bg-2)); color: #BCEBD3; }
+.hub-btn.primary:hover { background: var(--hub-primary-bg-hover); }
+.hub-btn.primary.stop { background: color-mix(in srgb, var(--status-error) 22%, var(--hub-card-2)); color: var(--hub-error-fg); }
+.hub-btn.primary.ok { background: color-mix(in srgb, var(--status-done) 24%, var(--hub-card-2)); color: var(--hub-done-fg); }
 .hub-btn:disabled { opacity: 0.4; cursor: default; }
 .hub-link {
   appearance: none; background: transparent; border: 0; cursor: pointer;
@@ -169,7 +209,7 @@
 .hub-kpi-label { font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-faint); }
 .hub-kpi-value { margin-top: 9px; font: 500 15px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
 .hub-kpi-value.big { font-size: 22px; letter-spacing: -0.02em; }
-.hub-mini3 .hub-kpi { padding: 11px 13px; background: var(--bg-1); border: 1px solid var(--border-soft); border-radius: 9px; }
+.hub-mini3 .hub-kpi { padding: 11px 13px; background: var(--hub-card); border: 1px solid var(--border-soft); border-radius: 9px; }
 .hub-mini3 .hub-kpi-value { margin-top: 6px; font-size: 17px; }
 
 /* ── blocks ── */
@@ -183,7 +223,7 @@
 .hub-runway { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 @media (max-width: 920px) { .hub-runway { grid-template-columns: repeat(2, 1fr); } }
 .hub-runway-tile {
-  background: var(--bg-1); border: 1px solid var(--border-soft);
+  background: var(--hub-card); border: 1px solid var(--border-soft);
   border-radius: 10px; padding: 14px 16px;
   transition: border-color 140ms var(--ease-out);
   text-align: left; width: 100%; display: block;
@@ -218,7 +258,7 @@
 .hub-input-label { display: block; font-size: 11.5px; color: var(--fg-faint); margin-bottom: 7px; }
 .hub-input {
   width: 100%; appearance: none;
-  background: var(--bg-1); border: 1px solid var(--border-soft);
+  background: var(--hub-card); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 10px 13px;
   color: var(--fg); font: 400 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   transition: border-color 120ms var(--ease-out), background 120ms var(--ease-out);
@@ -227,7 +267,7 @@
 .hub-input[type="number"] { appearance: textfield; }
 .hub-input[type="number"]::-webkit-outer-spin-button,
 .hub-input[type="number"]::-webkit-inner-spin-button { appearance: none; margin: 0; }
-.hub-input:focus { outline: none; border-color: var(--border-strong); background: var(--bg-2); }
+.hub-input:focus { outline: none; border-color: var(--border-strong); background: var(--hub-card-2); }
 .hub-input::placeholder { color: var(--fg-dim); }
 
 .hub-exectel-sep { color: var(--fg-dim); }
@@ -283,7 +323,7 @@
   display: grid;
   place-items: center;
   border-radius: 9px;
-  background: var(--bg-2);
+  background: var(--hub-card-2);
   color: var(--fg);
   font: 650 16px/1 "Anthropic Sans Display", "Geist", sans-serif;
 }
@@ -358,7 +398,7 @@
 }
 .hub-agent-glance > .ok { color: var(--status-done); }
 .hub-agent-glance > .warn { color: var(--status-warn); }
-.hub-agent-glance > .bad { color: #F0C9C6; }
+.hub-agent-glance > .bad { color: var(--hub-error-fg); }
 .hub-agent-console {
   margin-top: 13px;
   display: grid;
@@ -410,7 +450,7 @@
 }
 .hub-agent-console-tile.ok > strong { color: var(--status-done); }
 .hub-agent-console-tile.warn > strong { color: var(--status-warn); }
-.hub-agent-console-tile.bad > strong { color: #F0C9C6; }
+.hub-agent-console-tile.bad > strong { color: var(--hub-error-fg); }
 .hub-agent-native-nav {
   margin-top: 10px;
   display: flex;
@@ -431,7 +471,7 @@
   background: color-mix(in srgb, var(--fg) 6%, transparent);
 }
 .hub-agent-actions { margin-top: 13px; display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
-.hub-btn.danger { color: #F0C9C6; border-color: color-mix(in srgb, var(--status-error) 30%, var(--border)); }
+.hub-btn.danger { color: var(--hub-error-fg); border-color: color-mix(in srgb, var(--status-error) 30%, var(--border)); }
 .hub-btn.danger:hover { background: color-mix(in srgb, var(--status-error) 16%, transparent); }
 .hub-agent-section-grid { margin-top: 12px; display: grid; gap: 10px 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 620px) { .hub-agent-section-grid { grid-template-columns: 1fr; } }
@@ -490,7 +530,7 @@
   color: var(--fg-muted);
 }
 .hub-agent-tab.active {
-  background: var(--bg-2);
+  background: var(--hub-card-2);
   border-color: var(--border-soft);
   color: var(--fg);
 }
@@ -542,7 +582,7 @@
 .hub-save-note {
   border: 1px solid color-mix(in srgb, var(--status-done) 34%, var(--border));
   background: color-mix(in srgb, var(--status-done) 10%, transparent);
-  color: #BCEBD3;
+  color: var(--hub-done-fg);
   border-radius: 8px;
   padding: 9px 10px;
   font-size: 12px;
@@ -578,7 +618,7 @@
   min-width: 0;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  background: var(--bg-1);
+  background: var(--hub-card);
   padding: 10px 13px;
   display: grid;
   gap: 6px;
@@ -606,7 +646,7 @@
   gap: 10px;
   align-items: center;
   border: 1px solid var(--border-soft);
-  background: var(--bg-1);
+  background: var(--hub-card);
   border-radius: 8px;
   padding: 9px 10px;
 }
@@ -640,7 +680,7 @@
   justify-content: space-between;
   gap: 14px;
   border: 1px solid var(--border-soft);
-  background: var(--bg-1);
+  background: var(--hub-card);
   border-radius: 8px;
   padding: 10px 12px;
 }
@@ -773,7 +813,7 @@
   padding: 3px 7px;
   font: 500 10.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
-  background: var(--bg-2);
+  background: var(--hub-card-2);
 }
 .hub-detail-pill.warn {
   color: var(--status-warn);
@@ -784,7 +824,7 @@
   border-color: color-mix(in srgb, var(--status-done) 30%, var(--border));
 }
 .hub-detail-pill.bad {
-  color: #F0C9C6;
+  color: var(--hub-error-fg);
   border-color: color-mix(in srgb, var(--status-error) 34%, var(--border));
 }
 .hub-detail-empty {
@@ -857,7 +897,7 @@
   appearance: none;
   cursor: pointer;
   border: 1px solid var(--border-soft);
-  background: var(--bg-2);
+  background: var(--hub-card-2);
   color: var(--fg-faint);
   border-radius: 8px;
   width: 32px;
@@ -910,7 +950,7 @@
 .hub-acc-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .hub-textarea {
   width: 100%; resize: vertical;
-  background: var(--bg-1); border: 1px solid var(--border-soft);
+  background: var(--hub-card); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 10px 12px;
   color: var(--fg); font: 400 12.5px/1.5 "Anthropic Sans Display", "Geist", sans-serif;
 }
@@ -935,7 +975,7 @@
   padding: 4px 5px 4px 10px;
   border: 1px solid var(--border-soft);
   border-radius: 999px;
-  background: var(--bg-2);
+  background: var(--hub-card-2);
   color: var(--fg-faint);
   font: 650 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out), opacity 120ms var(--ease-out);
@@ -967,22 +1007,22 @@
 }
 
 /* switch */
-.hub-switch { appearance: none; cursor: pointer; display: inline-block; flex-shrink: 0; width: 36px; height: 21px; border-radius: 999px; border: 0; background: var(--bg-3); position: relative; transition: background 160ms var(--ease-out); }
+.hub-switch { appearance: none; cursor: pointer; display: inline-block; flex-shrink: 0; width: 36px; height: 21px; border-radius: 999px; border: 0; background: var(--hub-track-off); position: relative; transition: background 160ms var(--ease-out); }
 .hub-switch.on { background: var(--status-done); }
-.hub-switch-knob { position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%; background: #fff; transition: transform 160ms var(--ease-out); }
+.hub-switch-knob { position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); transition: transform 160ms var(--ease-out); }
 .hub-switch.on .hub-switch-knob { transform: translateX(15px); }
 
 /* multiselect grid */
 .hub-ms { display: flex; flex-direction: column; gap: 8px; }
 .hub-ms-empty { font-size: 12px; color: var(--fg-dim); padding: 6px 0; }
-.hub-ms-search { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--bg-1); color: var(--fg-faint); }
+.hub-ms-search { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--hub-card); color: var(--fg-faint); }
 .hub-ms-search input { flex: 1; border: 0; background: transparent; color: var(--fg); font: 400 12px/1 "Anthropic Sans Display", "Geist", sans-serif; outline: none; }
 .hub-ms-grid { display: flex; flex-wrap: wrap; gap: 6px; }
 .hub-ms-chip {
   appearance: none; cursor: pointer;
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 10px; border-radius: 7px;
-  border: 1px solid var(--border-soft); background: var(--bg-1);
+  border: 1px solid var(--border-soft); background: var(--hub-card);
   color: var(--fg-faint); font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: all 120ms var(--ease-out);
 }
@@ -1019,7 +1059,7 @@
   display: flex; flex-direction: column; gap: 11px;
   padding: 14px;
   border: 1px solid var(--border-soft); border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-1) 86%, transparent);
+  background: color-mix(in srgb, var(--hub-card) 86%, transparent);
 }
 .hub-pack-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .hub-pack-name { color: var(--fg); font: 650 14px/1.15 "Anthropic Sans Display", "Geist", sans-serif; }
@@ -1039,7 +1079,7 @@
 .hub-pack-chips span {
   display: inline-flex; align-items: center; min-height: 20px;
   padding: 0 7px; border-radius: 6px;
-  background: var(--bg-2); border: 1px solid var(--border-soft);
+  background: var(--hub-card-2); border: 1px solid var(--border-soft);
   color: var(--fg-faint); font-size: 10.5px;
 }
 .hub-pack-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--fg-faint); font-size: 11.5px; }
@@ -1131,7 +1171,7 @@
 .hub-modal {
   position: relative; width: 100%; max-width: 600px;
   max-height: calc(100vh - 64px); display: flex; flex-direction: column;
-  background: var(--bg-1); border: 1px solid var(--border);
+  background: var(--hub-card); border: 1px solid var(--border);
   border-radius: 14px; overflow: hidden;
   box-shadow: 0 40px 90px -22px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.04) inset;
   animation: hub-rise 220ms var(--ease-out) both;
@@ -1216,13 +1256,13 @@
 }
 
 .hub-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.hub-stat { background: var(--bg-2); border-radius: 9px; padding: 13px 14px; }
+.hub-stat { background: var(--hub-card-2); border-radius: 9px; padding: 13px 14px; }
 .hub-stat-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-faint); }
 .hub-stat-val { margin-top: 8px; font: 600 20px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.01em; }
 .hub-stat-val.ok { color: var(--status-done); font-size: 16px; }
 .hub-stat-val.warn { color: var(--status-warn); font-size: 16px; }
 
-.hub-field-group { margin-top: 16px; background: var(--bg-2); border-radius: 10px; padding: 4px 16px; }
+.hub-field-group { margin-top: 16px; background: var(--hub-card-2); border-radius: 10px; padding: 4px 16px; }
 .hub-field-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--border-soft); }
 .hub-field-row:last-child { border-bottom: 0; }
 .hub-field-k { font-size: 12px; color: var(--fg-faint); }
@@ -1237,7 +1277,7 @@
 .hub-import-error {
   border: 1px solid color-mix(in srgb, var(--status-error) 34%, var(--border));
   background: color-mix(in srgb, var(--status-error) 12%, transparent);
-  color: #F0C9C6;
+  color: var(--hub-error-fg);
   border-radius: 8px;
   padding: 9px 10px;
   font-size: 12px;
@@ -1246,7 +1286,7 @@
   display: grid;
   gap: 6px;
   border: 1px solid var(--border-soft);
-  background: var(--bg-2);
+  background: var(--hub-card-2);
   border-radius: 9px;
   padding: 12px;
   color: var(--fg-faint);
@@ -1306,7 +1346,7 @@
   gap: 3px;
   padding: 8px;
   border-radius: 8px;
-  background: var(--bg-2);
+  background: var(--hub-card-2);
   color: var(--fg-muted);
   font-size: 11px;
   overflow: hidden;
@@ -1338,23 +1378,23 @@
   .hub-template-grid { grid-template-columns: 1fr; }
 }
 .hub-config-list { display: flex; flex-direction: column; gap: 6px; }
-.hub-config-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg-2); border-radius: 9px; }
-.hub-config-ico { width: 28px; height: 28px; border-radius: 7px; background: var(--bg-3); display: grid; place-items: center; color: var(--fg-muted); flex-shrink: 0; }
+.hub-config-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--hub-card-2); border-radius: 9px; }
+.hub-config-ico { width: 28px; height: 28px; border-radius: 7px; background: var(--hub-card-3); display: grid; place-items: center; color: var(--fg-muted); flex-shrink: 0; }
 .hub-config-meta { flex: 1; min-width: 0; }
 .hub-config-name { font: 500 13.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .hub-config-desc { margin-top: 3px; font-size: 12px; color: var(--fg-faint); }
-.hub-empty { padding: 18px; text-align: center; color: var(--fg-faint); font-size: 13px; background: var(--bg-2); border-radius: 9px; }
+.hub-empty { padding: 18px; text-align: center; color: var(--fg-faint); font-size: 13px; background: var(--hub-card-2); border-radius: 9px; }
 
 .hub-toggle {
   appearance: none; cursor: pointer; flex-shrink: 0;
   width: 38px; height: 22px; border-radius: 999px; border: 0;
-  background: var(--bg-3); position: relative;
+  background: var(--hub-track-off); position: relative;
   transition: background 160ms var(--ease-out);
 }
 .hub-toggle.on { background: var(--status-done); }
 .hub-toggle-knob {
   position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
-  background: #fff; transition: transform 160ms var(--ease-out);
+  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); transition: transform 160ms var(--ease-out);
 }
 .hub-toggle.on .hub-toggle-knob { transform: translateX(16px); }
 

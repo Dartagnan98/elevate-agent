@@ -178,7 +178,7 @@ def test_memory_writes_stay_scoped_and_never_leave_the_machine():
         assert authorize_effects(policy, {outward}).allowed is False
 
 
-def test_the_builtin_memory_tool_is_STILL_BLOCKED_and_here_is_why():
+def test_the_builtin_memory_tool_declaration_is_config_bounded():
     """Honest pin on the limit of this change: memory recall is NOT restored.
 
     Two different surfaces are called "memory":
@@ -207,17 +207,41 @@ def test_the_builtin_memory_tool_is_STILL_BLOCKED_and_here_is_why():
     repair lands, this test fails and must be rewritten to assert the new,
     truthful declaration.
     """
+    # 2026-07-23: the predicted repair landed in the config-bounded form —
+    # instead of severing on_memory_write, the resolver declares
+    # write_local:memory ONLY when the configured provider is local/empty
+    # (the bridge then provably stays on this machine; Realtor Beta pins
+    # memory local). Any external provider still resolves UNKNOWN and is
+    # denied, which this test keeps pinned.
+    import elevate_cli.config as _config_mod
+
     entry = registry.get_entry("memory")
     assert entry is not None
     assert entry.effects is None
-    assert entry.effect_resolver is None
+    assert entry.effect_resolver is not None
 
-    resolved = registry.resolve_effects("memory", {"action": "add", "content": "x"})
-    assert resolved == frozenset({Effect(EffectKind.UNKNOWN)})
+    real_load = _config_mod.load_config
 
-    decision = authorize_effects(_workspace(), resolved)
-    assert decision.allowed is False
-    assert decision.reason == "unknown_effect"
+    def _with_provider(provider):
+        cfg = dict(real_load())
+        cfg["memory"] = dict(cfg.get("memory") or {})
+        cfg["memory"]["provider"] = provider
+        return cfg
+
+    _config_mod.load_config, _saved = (lambda: _with_provider("")), _config_mod.load_config
+    try:
+        resolved = registry.resolve_effects("memory", {"action": "add", "content": "x"})
+        assert resolved == frozenset({Effect(EffectKind.WRITE_LOCAL, "memory")})
+        assert authorize_effects(_workspace(), resolved).allowed is True
+
+        _config_mod.load_config = lambda: _with_provider("honcho")
+        resolved = registry.resolve_effects("memory", {"action": "add", "content": "x"})
+        assert resolved == frozenset({Effect(EffectKind.UNKNOWN)})
+        decision = authorize_effects(_workspace(), resolved)
+        assert decision.allowed is False
+        assert decision.reason == "unknown_effect"
+    finally:
+        _config_mod.load_config = _saved
 
 
 def test_the_external_memory_bridge_is_inert_under_beta(monkeypatch):

@@ -4333,7 +4333,8 @@ html[data-app-theme="dark"] .crm-board {
     30px
     36px
     minmax(150px, 1.05fr)
-    minmax(170px, 1.15fr)
+    minmax(175px, 1fr)
+    128px
     124px
     86px
     minmax(105px, 0.7fr)
@@ -4593,13 +4594,13 @@ html[data-app-theme="dark"] .crm-board {
 @media (max-width: 1300px) {
   .crm-board .lb-profiles-colhead,
   .crm-board .lb-profile-row {
-    grid-template-columns: 30px 36px minmax(145px, 1fr) minmax(160px, 1.1fr) 122px 82px minmax(145px, 1fr) 76px 22px;
+    grid-template-columns: 30px 36px minmax(145px, 1fr) minmax(165px, 1fr) 124px 122px 82px minmax(145px, 1fr) 76px 22px;
   }
   /* Bulk-select is a wide-view feature; the checkbox column is the new span 1. */
   .crm-board .lb-profile-select-cell,
   .crm-board .lb-profiles-colhead > span:nth-child(1),
   .crm-board .lb-profile-source-cell,
-  .crm-board .lb-profiles-colhead > span:nth-child(8) { display: none; }
+  .crm-board .lb-profiles-colhead > span:nth-child(9) { display: none; }
 }
 @media (max-width: 1100px) {
   .crm-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -4608,8 +4609,10 @@ html[data-app-theme="dark"] .crm-board {
   .crm-clear-filters { grid-column: auto; }
   .crm-board .lb-profiles-colhead,
   .crm-board .lb-profile-row { grid-template-columns: 30px 36px minmax(155px, 1fr) 122px 82px minmax(150px, 1fr) 76px 22px; }
-  .crm-board .lb-profile-contact-cell,
-  .crm-board .lb-profiles-colhead > span:nth-child(5) { display: none; }
+  .crm-board .lb-profile-email-cell,
+  .crm-board .lb-profile-phone-cell,
+  .crm-board .lb-profiles-colhead > span:nth-child(5),
+  .crm-board .lb-profiles-colhead > span:nth-child(6) { display: none; }
   .lb-profile-contact-preview { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .crm-contact-body { grid-template-columns: minmax(0, 1fr) 270px; }
 }

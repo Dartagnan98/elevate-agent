@@ -92,8 +92,10 @@ function ProfileRow({
         </span>
         <span className="lb-profile-contact-preview">{profile.email || profile.phone || "No contact details"}</span>
       </button>
-      <div className="lb-profile-contact-cell">
+      <div className="lb-profile-email-cell">
         <span className="lb-profile-email mono">{profile.email || "—"}</span>
+      </div>
+      <div className="lb-profile-phone-cell">
         <span className="lb-profile-phone mono">{profile.phone || "—"}</span>
       </div>
       <div className="lb-profile-status-cell" onClick={(event) => event.stopPropagation()}>
@@ -463,7 +465,8 @@ export function ProfilesList({
         <span>Fav</span>
         <span></span>
         <span>Lead</span>
-        <span>Contact</span>
+        <span>Email</span>
+        <span>Phone</span>
         <span>Pipeline</span>
         <span>Temp</span>
         <span>Source</span>

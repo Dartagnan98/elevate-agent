@@ -10,7 +10,8 @@
     30px
     36px
     minmax(150px, 1.05fr)
-    minmax(170px, 1.15fr)
+    minmax(175px, 1fr)
+    128px
     124px
     86px
     minmax(105px, 0.7fr)
@@ -34,7 +35,7 @@
   .crm-board[data-custom-cols] .lb-profiles-colhead,
   .crm-board[data-custom-cols] .lb-profile-row {
     grid-template-columns:
-      30px 36px minmax(145px, 1fr) minmax(160px, 1.1fr) 122px 82px
+      30px 36px minmax(145px, 1fr) minmax(165px, 1fr) 124px 122px 82px
       minmax(145px, 1fr) var(--crm-custom-cols) 76px 22px;
   }
 }
@@ -64,3 +65,11 @@
 /* Closed-details hygiene: never let the tags popover contribute layout boxes
    (or stray hit targets) while the filter is closed, regardless of UA quirks. */
 .crm-tags-filter:not([open]) .crm-tags-popover { display: none; }
+
+/* The extra tracks can exceed the card width — scroll INSIDE the rounded
+   card instead of painting cells past its edge onto the page background. */
+.crm-board[data-custom-cols] .lb-profiles { overflow-x: auto; }
+.crm-board[data-custom-cols] .lb-profiles-colhead,
+.crm-board[data-custom-cols] .lb-profile-row { min-width: max-content; }
+.crm-board[data-custom-cols] .lb-profiles-list,
+.crm-board[data-custom-cols] .lb-profile-group { min-width: max-content; }

@@ -114,6 +114,25 @@ class _RecordingManager:
 # =========================================================================
 
 
+@pytest.fixture(autouse=True)
+def _local_memory_provider(monkeypatch):
+    """Pin the config-bounded memory resolver to its local branch for every
+    test in this module. Other files' ELEVATE_HOME fixtures can leave an
+    external provider configured, flipping resolve_effects to UNKNOWN and
+    making dispatch tests order-dependent under xdist."""
+    import elevate_cli.config as _config_mod
+
+    real = _config_mod.load_config
+
+    def _local(*args, **kwargs):
+        cfg = dict(real(*args, **kwargs))
+        cfg["memory"] = dict(cfg.get("memory") or {})
+        cfg["memory"]["provider"] = ""
+        return cfg
+
+    monkeypatch.setattr(_config_mod, "load_config", _local)
+
+
 class TestMemoryRegistryDispatchParity:
     def test_legacy_fallback_matches_direct_call_and_runs_impl_once(self):
         """No durable identity → legacy ``registry.dispatch`` payload, and the
@@ -390,6 +409,7 @@ class TestMemoryProviderBridge:
                     handler=entry.handler,
                     check_fn=entry.check_fn,
                     emoji=entry.emoji,
+                    effect_resolver=entry.effect_resolver,
                 )
             return prepared
 
@@ -542,6 +562,7 @@ class TestMemoryRegistryDispatchAdversarial:
             handler=peek_handler,
             check_fn=entry.check_fn,
             emoji=entry.emoji,
+            effect_resolver=entry.effect_resolver,
         )
         try:
             dispatch_builtin_memory_via_registry(
@@ -558,6 +579,7 @@ class TestMemoryRegistryDispatchAdversarial:
                 handler=entry.handler,
                 check_fn=entry.check_fn,
                 emoji=entry.emoji,
+                effect_resolver=entry.effect_resolver,
             )
 
         assert seen["during"] is not None  # visible INSIDE the dispatch

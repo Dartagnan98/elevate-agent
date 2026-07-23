@@ -340,18 +340,8 @@ function PairingApprovalBlock({
           aria-label="Paste Telegram pairing code"
           placeholder="Paste pairing code"
           spellCheck={false}
-          className="mono"
-          style={{
-            flex: 1,
-            minWidth: 0,
-            padding: "8px 10px",
-            borderRadius: 8,
-            background: "var(--bg-2)",
-            border: "1px solid var(--border)",
-            color: "var(--fg)",
-            outline: "none",
-            fontSize: "13px",
-          }}
+          className="hub-input mono"
+          style={{ flex: 1, minWidth: 0 }}
         />
         <button
           type="button"
@@ -617,7 +607,10 @@ function AgentToolsetSkillEditor({
         borderRadius: 999,
         border: "1px solid var(--sidebar-border)",
         background: active ? "var(--accent, #2563eb)" : "transparent",
-        color: active ? "#fff" : "var(--sidebar-text-muted)",
+        /* --accent-fg is the app-wide text-on-accent token (near-black on the
+           gray accent in every theme, ~5.6:1); the old hardcoded #fff was
+           below AA on the #8A8A8A accent in all three themes. */
+        color: active ? "var(--accent-fg, #fff)" : "var(--sidebar-text-muted)",
         fontSize: "0.8rem",
         cursor: "pointer",
       }}
