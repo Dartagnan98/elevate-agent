@@ -102,6 +102,8 @@ export interface LeadsProfile {
   threads: number;
   age: string;
   tags: string[];
+  /** Named-list membership: configured list keys (migration 0038). */
+  lists?: string[];
   sub: string;
   lastMsg: string;
   lastTouch: string;

@@ -85,6 +85,7 @@ export function LeadsDesignShell() {
           onProfileFavoriteChange={boardData.handleProfileFavoriteChange}
           onProfileTop25Change={boardData.handleProfileTop25Change}
           onProfileTagsChange={boardData.handleProfileTagsChange}
+          onProfileListsChange={boardData.handleProfileListsChange}
           onProfileStatusChange={boardData.handleProfileStatusChange}
           onReRunOnboarding={leadsSetup.loading
             ? undefined

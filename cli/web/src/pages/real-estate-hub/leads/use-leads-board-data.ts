@@ -359,6 +359,21 @@ export function useLeadsBoardData() {
     [setSourceInbox],
   );
 
+  const handleProfileListsChange = useCallback(
+    async (profile: LeadsProfile, lists: string[]) => {
+      try {
+        const res = await api.updateSourceInboxProfileLists(profile.id, lists, {
+          contactId: profile.contactIds?.[0] ?? null,
+        });
+        setSourceInbox(res);
+      } catch (err) {
+        console.error("lists update failed", err);
+        throw err;
+      }
+    },
+    [setSourceInbox],
+  );
+
   const handleProfileStatusChange = useCallback(
     async (profile: LeadsProfile, label: string) => {
       let status = sourceInboxProfileStatusForLabel(label);
@@ -404,6 +419,7 @@ export function useLeadsBoardData() {
     handleProfileFavoriteChange,
     handleProfileTop25Change,
     handleProfileTagsChange,
+    handleProfileListsChange,
     handleProfileStatusChange,
     handleToggleDirection,
     refreshSent,

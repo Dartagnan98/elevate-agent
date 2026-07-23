@@ -155,6 +155,7 @@ export function ProfilesList({
   pipelineFilter = "all",
   temperatureFilter = "all",
   tagFilters = [],
+  listFilter = "all",
   searchQuery = "",
   customColumns = [],
   pipelineOptions,
@@ -173,6 +174,8 @@ export function ProfilesList({
   pipelineFilter?: string;
   temperatureFilter?: CrmTemperature;
   tagFilters?: string[];
+  /** Configured list key, or "all" (migration 0038 named lead lists). */
+  listFilter?: string;
   searchQuery?: string;
   customColumns?: CrmColumn[];
   /** Stage choices for the bulk Change Pipeline select (built-ins + custom). */
@@ -231,6 +234,7 @@ export function ProfilesList({
       pipelineFilter,
       temperatureFilter,
       tagFilters,
+      listFilter,
       searchQuery,
     }));
     if (audienceFilter === "verified") list = list.filter((profile) => profile.verified);
@@ -240,7 +244,7 @@ export function ProfilesList({
       const favoriteDelta = Number(Boolean(b.favorite)) - Number(Boolean(a.favorite));
       return favoriteDelta || b.heat - a.heat || a.name.localeCompare(b.name);
     });
-  }, [profiles, sourceFilter, pipelineFilter, temperatureFilter, tagFilters, searchQuery, audienceFilter]);
+  }, [profiles, sourceFilter, pipelineFilter, temperatureFilter, tagFilters, listFilter, searchQuery, audienceFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PROFILE_PAGE));
   const safePage = Math.min(page, totalPages - 1);
@@ -460,6 +464,7 @@ export function ProfilesList({
         {bulkNotice && <div className="lb-bulkbar-notice" role="status">{bulkNotice}</div>}
       </div>
 
+      <div className="lb-table-scroll">
       <div className="lb-profiles-colhead" aria-hidden="true">
         <span></span>
         <span>Fav</span>
@@ -514,6 +519,7 @@ export function ProfilesList({
             </div>
           );
         })}
+      </div>
       </div>
 
       {loading && profiles.length === 0 && (

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "@/lib/api";
-import type { CrmColumn } from "@/lib/api-types";
+import type { CrmColumn, CrmList } from "@/lib/api-types";
 import { Plus, Refresh, Sparkles } from "../../admin/icons";
 import type {
   LeadsActivityEntry,
@@ -76,6 +76,7 @@ export interface LeadsBoardProps {
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onProfileTop25Change?: (profile: LeadsProfile, top25: boolean) => void | Promise<void>;
   onProfileTagsChange?: (profile: LeadsProfile, tags: string[]) => void | Promise<void>;
+  onProfileListsChange?: (profile: LeadsProfile, lists: string[]) => void | Promise<void>;
   onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
@@ -92,6 +93,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const [pipelineFilter, setPipelineFilter] = useState("all");
   const [temperatureFilter, setTemperatureFilter] = useState<CrmTemperature>("all");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [listFilter, setListFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [activeProfile, setActiveProfile] = useState<LeadsProfile | null>(null);
   const [profileStatusError, setProfileStatusError] = useState<string | null>(null);
@@ -109,6 +111,11 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const [addStageLabel, setAddStageLabel] = useState("");
   const [stageBusy, setStageBusy] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
+  const [addListOpen, setAddListOpen] = useState(false);
+  const [addListLabel, setAddListLabel] = useState("");
+  const [listBusy, setListBusy] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  const [crmLists, setCrmLists] = useState<CrmList[]>([]);
   // Custom pipeline stages: fetched once per page load (shared module cache,
   // same store the status pills read), primed here after every PUT.
   const customStages = useCustomStages();
@@ -117,6 +124,9 @@ export function LeadsBoard(props: LeadsBoardProps) {
     let cancelled = false;
     api.getCrmColumns()
       .then((result) => { if (!cancelled) setCustomColumns(result.columns || []); })
+      .catch(() => undefined);
+    api.getCrmLists()
+      .then((result) => { if (!cancelled) setCrmLists(result.lists || []); })
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
@@ -209,6 +219,40 @@ export function LeadsBoard(props: LeadsBoardProps) {
     }
   };
 
+  const handleAddList = async () => {
+    const label = addListLabel.trim();
+    if (!label) return;
+    setListBusy(true);
+    setListError(null);
+    try {
+      // The backend slugs the label into the list key.
+      const result = await api.putCrmLists([...crmLists, { key: "", label }]);
+      setCrmLists(result.lists);
+      setAddListOpen(false);
+      setAddListLabel("");
+    } catch (error) {
+      setListError(error instanceof Error ? error.message : "Could not add the list.");
+    } finally {
+      setListBusy(false);
+    }
+  };
+
+  const handleRemoveList = async (key: string) => {
+    setListBusy(true);
+    setListError(null);
+    try {
+      // Removal only edits the list config — contacts keep their stored
+      // membership keys, which stop rendering until the key is re-added.
+      const result = await api.putCrmLists(crmLists.filter((list) => list.key !== key));
+      setCrmLists(result.lists);
+      if (listFilter === key) setListFilter("all");
+    } catch (error) {
+      setListError(error instanceof Error ? error.message : "Could not remove the list.");
+    } finally {
+      setListBusy(false);
+    }
+  };
+
   // Rendering an empty inbox must stay empty. Demo constants still support
   // isolated design fixtures, but are never a fallback for the live CRM.
   const sources = props.sources ?? EMPTY_SOURCES;
@@ -298,12 +342,14 @@ export function LeadsBoard(props: LeadsBoardProps) {
     setPipelineFilter("all");
     setTemperatureFilter("all");
     setTagFilters([]);
+    setListFilter("all");
     setSearchQuery("");
   };
   const activeFilterCount = Number(sourceFilter !== "all")
     + Number(pipelineFilter !== "all")
     + Number(temperatureFilter !== "all")
     + tagFilters.length
+    + Number(listFilter !== "all")
     + Number(Boolean(searchQuery.trim()));
 
   const kpis = {
@@ -372,7 +418,10 @@ export function LeadsBoard(props: LeadsBoardProps) {
                 <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); setAddStageOpen(true); }}>
                   New pipeline stage
                 </button>
-                {(customColumns.length > 0 || customStages.length > 0) && <div className="crm-addmenu-sep" aria-hidden="true" />}
+                <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); setAddListOpen(true); }}>
+                  New list
+                </button>
+                {(customColumns.length > 0 || customStages.length > 0 || crmLists.length > 0) && <div className="crm-addmenu-sep" aria-hidden="true" />}
                 {customColumns.map((column) => (
                   <button
                     key={column.key}
@@ -396,6 +445,19 @@ export function LeadsBoard(props: LeadsBoardProps) {
                     onClick={() => void handleRemoveStage(stage.key)}
                   >
                     Remove stage “{stage.label}”
+                  </button>
+                ))}
+                {crmLists.map((list) => (
+                  <button
+                    key={list.key}
+                    type="button"
+                    role="menuitem"
+                    className="crm-addmenu-remove"
+                    title="Removes the list from the pickers only — contacts keep their stored membership."
+                    disabled={listBusy}
+                    onClick={() => void handleRemoveList(list.key)}
+                  >
+                    Remove list “{list.label}”
                   </button>
                 ))}
               </div>
@@ -516,6 +578,42 @@ export function LeadsBoard(props: LeadsBoardProps) {
         </div>
       )}
 
+      {addListOpen && (
+        <div
+          className="crm-tagpicker-backdrop"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setAddListOpen(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") setAddListOpen(false); }}
+        >
+          <div className="crm-tagpicker crm-add-lead-modal" role="dialog" aria-modal="true" aria-label="Add a lead list">
+            <div className="crm-tagpicker-head">
+              <h3>New list</h3>
+              <button type="button" aria-label="Close new list form" onClick={() => setAddListOpen(false)}>×</button>
+            </div>
+            <p className="crm-tagpicker-sub">
+              Adds a named lead list. Put leads on it from their card under Lists,
+              then filter the board by it with the List picker.
+            </p>
+            {listError && <div className="crm-contact-error" role="alert">{listError}</div>}
+            <label className="crm-criteria-field">
+              <span>List name</span>
+              <input
+                type="text"
+                value={addListLabel}
+                placeholder="e.g. Spring buyers, Downtown sellers"
+                autoFocus
+                onChange={(event) => setAddListLabel(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void handleAddList(); }}
+              />
+            </label>
+            <div className="crm-tagpicker-foot">
+              <button type="button" disabled={listBusy || !addListLabel.trim()} onClick={() => void handleAddList()}>
+                {listBusy ? "Adding…" : "Add list"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="ab-scroll crm-scroll">
         <div className="crm-viewbar">
           <LeadsTabs tab={tab} onChange={setTab} />
@@ -530,6 +628,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
 
         {profileStatusError && <div className="lb-replies-empty lb-crm-error" role="alert">{profileStatusError}</div>}
         {stageError && !addStageOpen && <div className="lb-replies-empty lb-crm-error" role="alert">{stageError}</div>}
+        {listError && !addListOpen && <div className="lb-replies-empty lb-crm-error" role="alert">{listError}</div>}
 
         {draftSendNotices.length > 0 && (
           <section aria-label="Approved draft send status" aria-live="polite">
@@ -596,6 +695,13 @@ export function LeadsBoard(props: LeadsBoardProps) {
                   <option value="nurture">Nurture · 365d+</option>
                 </select>
               </label>
+              <label className="crm-quick-filter">
+                <span>List</span>
+                <select value={listFilter} onChange={(event) => setListFilter(event.target.value)}>
+                  <option value="all">All lists</option>
+                  {crmLists.map((list) => <option key={list.key} value={list.key}>{list.label}</option>)}
+                </select>
+              </label>
               <details className="crm-tags-filter">
                 <summary>Tags{tagFilters.length ? ` · ${tagFilters.length}` : ""}</summary>
                 <div className="crm-tags-popover">
@@ -643,6 +749,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
               pipelineFilter={pipelineFilter}
               temperatureFilter={temperatureFilter}
               tagFilters={tagFilters}
+              listFilter={listFilter}
               searchQuery={searchQuery}
               customColumns={customColumns}
               pipelineOptions={pipelineOptions}
@@ -716,6 +823,8 @@ export function LeadsBoard(props: LeadsBoardProps) {
           onFavoriteChange={props.onProfileFavoriteChange ? handleFavoriteChange : undefined}
           onTop25Change={props.onProfileTop25Change}
           onTagsChange={props.onProfileTagsChange}
+          onListsChange={props.onProfileListsChange}
+          crmLists={crmLists}
           customColumns={customColumns}
           onContactSaved={props.onRefresh}
           onDraftAction={props.onDraftAction}

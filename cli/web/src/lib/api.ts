@@ -66,6 +66,7 @@ import type {
   ContactPropertyActivity,
   AccountGoals,
   CrmColumn,
+  CrmList,
   CrmStage,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
@@ -2293,6 +2294,21 @@ export const api = {
         returnInbox: options?.returnInbox ?? true,
       }),
     }, 20_000, "Tags update timed out. Refresh the contact before trying again."),
+  updateSourceInboxProfileLists: (
+    profileId: string,
+    lists: string[],
+    options?: { contactId?: string | null; returnInbox?: boolean },
+  ) =>
+    fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/profile/lists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profileId,
+        lists,
+        contactId: options?.contactId ?? null,
+        returnInbox: options?.returnInbox ?? true,
+      }),
+    }, 20_000, "List update timed out. Refresh the contact before trying again."),
   getSourceInboxNotes: (contactId: string, limit = 100) =>
     fetchJSONWithTimeout<{ notes: ContactNote[] }>(
       `/api/source-inbox/notes/${encodeURIComponent(contactId)}?limit=${limit}`,
@@ -2436,6 +2452,14 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ columns }),
     }, 20_000, "Column update timed out. Reload the list before trying again."),
+  getCrmLists: () =>
+    fetchJSONWithTimeout<{ lists: CrmList[] }>("/api/crm/lists"),
+  putCrmLists: (lists: CrmList[]) =>
+    fetchJSONWithTimeout<{ ok: boolean; lists: CrmList[] }>("/api/crm/lists", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lists }),
+    }, 20_000, "List update timed out. Reload the board before trying again."),
   getCrmGoals: () =>
     fetchJSONWithTimeout<AccountGoals>("/api/crm/goals"),
   putCrmGoals: (goals: {

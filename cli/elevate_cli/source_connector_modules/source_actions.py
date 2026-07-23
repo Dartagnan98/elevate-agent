@@ -260,6 +260,35 @@ def update_profile_tags(
     return source_connectors.build_source_inbox_response(config) if return_inbox else {"ok": True}
 
 
+def update_profile_lists(
+    profile_id: str,
+    lists: list[str],
+    *,
+    contact_id: str | None = None,
+    config: dict[str, Any] | None = None,
+    return_inbox: bool = True,
+) -> JsonRecord:
+    """Replace the named-list membership on the contact behind a /leads profile (migration 0038)."""
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profileId is required")
+    if not isinstance(lists, list):
+        raise ValueError("lists must be a list")
+
+    from elevate_cli.data import connect, set_contact_lists
+
+    with connect() as conn:
+        cid = str(contact_id or "").strip() or _resolve_profile_contact_id(conn, pid)
+        if not cid:
+            raise ValueError(
+                "This profile has no contact record yet — lists need a merged contact"
+            )
+        set_contact_lists(conn, cid, lists)
+    source_connectors = _source_connectors()
+    config = config or source_connectors.load_config()
+    return source_connectors.build_source_inbox_response(config) if return_inbox else {"ok": True}
+
+
 def update_source_thread_state(
     source_id: str,
     thread_id: str,

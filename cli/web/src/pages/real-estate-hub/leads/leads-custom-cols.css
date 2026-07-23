@@ -66,10 +66,12 @@
    (or stray hit targets) while the filter is closed, regardless of UA quirks. */
 .crm-tags-filter:not([open]) .crm-tags-popover { display: none; }
 
-/* The extra tracks can exceed the card width — scroll INSIDE the rounded
-   card instead of painting cells past its edge onto the page background. */
-.crm-board[data-custom-cols] .lb-profiles { overflow-x: auto; }
-.crm-board[data-custom-cols] .lb-profiles-colhead,
-.crm-board[data-custom-cols] .lb-profile-row { min-width: max-content; }
-.crm-board[data-custom-cols] .lb-profiles-list,
-.crm-board[data-custom-cols] .lb-profile-group { min-width: max-content; }
+/* The extra tracks can exceed the card width. The dedicated .lb-table-scroll
+   wrapper (colhead + rows only) scrolls INSIDE the card, so the visible
+   viewport always sits on the card surface — scrolling right can never show
+   cells floating on the page background, and the card head/footer stay put. */
+.crm-board .lb-table-scroll { overflow-x: auto; }
+.crm-board[data-custom-cols] .lb-table-scroll .lb-profiles-colhead,
+.crm-board[data-custom-cols] .lb-table-scroll .lb-profile-row,
+.crm-board[data-custom-cols] .lb-table-scroll .lb-profiles-list,
+.crm-board[data-custom-cols] .lb-table-scroll .lb-profile-group { min-width: max-content; }

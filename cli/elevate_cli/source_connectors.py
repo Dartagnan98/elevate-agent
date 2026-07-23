@@ -226,6 +226,7 @@ from elevate_cli.source_connector_modules.source_actions import (
     _source_view_for_state,
     _thread_draft_template_state,
     update_profile_favorite,
+    update_profile_lists,
     update_profile_state,
     update_profile_tags,
     update_profile_top25,

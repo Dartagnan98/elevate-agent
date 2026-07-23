@@ -257,6 +257,8 @@ export interface SourceInboxProfile {
   crmStage: string | null;
   leadSource: string | null;
   tags: string[];
+  /** Named-list membership: configured list keys (migration 0038). */
+  lists?: string[];
   status: SourceInboxProfileStatus | null;
   statusUpdatedAt: string | null;
   favorite?: boolean;
@@ -295,6 +297,11 @@ export interface AccountGoals {
 }
 
 export interface CrmColumn {
+  key: string;
+  label: string;
+}
+
+export interface CrmList {
   key: string;
   label: string;
 }

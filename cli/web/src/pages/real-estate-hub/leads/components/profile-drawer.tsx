@@ -8,6 +8,7 @@ import type {
   ContactPropertyActivity,
   ContactTask,
   CrmColumn,
+  CrmList,
   ThreadContextResponse,
 } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
@@ -143,6 +144,8 @@ export function ProfileDrawer({
   onFavoriteChange,
   onTop25Change,
   onTagsChange,
+  onListsChange,
+  crmLists = [],
   customColumns = [],
   onContactSaved,
   onDraftAction,
@@ -157,6 +160,9 @@ export function ProfileDrawer({
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onTop25Change?: (profile: LeadsProfile, top25: boolean) => void | Promise<void>;
   onTagsChange?: (profile: LeadsProfile, tags: string[]) => void | Promise<void>;
+  onListsChange?: (profile: LeadsProfile, lists: string[]) => void | Promise<void>;
+  /** Configured named lists (migration 0038) — the picker's options. */
+  crmLists?: CrmList[];
   customColumns?: CrmColumn[];
   onContactSaved?: () => void;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
@@ -189,6 +195,9 @@ export function ProfileDrawer({
   const [tagBusy, setTagBusy] = useState(false);
   const [tagError, setTagError] = useState<string | null>(null);
   const [customTag, setCustomTag] = useState("");
+  const [listPickerOpen, setListPickerOpen] = useState(false);
+  const [listBusy, setListBusy] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
   const [criteria, setCriteria] = useState<SearchCriteriaForm>(() => parseCriteria(profile.searchCriteria));
   const [criteriaBusy, setCriteriaBusy] = useState(false);
   const [criteriaNotice, setCriteriaNotice] = useState<string | null>(null);
@@ -601,6 +610,23 @@ export function ProfileDrawer({
     await handleToggleTag(tag);
   };
 
+  const handleToggleList = async (key: string) => {
+    if (!onListsChange || listBusy) return;
+    const current = profile.lists || [];
+    const next = current.includes(key)
+      ? current.filter((item) => item !== key)
+      : [...current, key];
+    setListBusy(true);
+    setListError(null);
+    try {
+      await onListsChange(profile, next);
+    } catch (error) {
+      setListError(error instanceof Error ? error.message : "Could not update lists.");
+    } finally {
+      setListBusy(false);
+    }
+  };
+
   const handleSaveCriteria = async () => {
     if (!contactId || criteriaBusy) return;
     setCriteriaBusy(true);
@@ -637,6 +663,9 @@ export function ProfileDrawer({
   const timeline = useMemo(() => buildConversationTimeline(context, profile), [context, profile]);
   const lead = context?.lead;
   const tags = lead?.tags?.length ? lead.tags : profile.tags;
+  // Named lists (migration 0038): membership lives on the contact row only.
+  const listKeys = profile.lists || [];
+  const listLabelForKey = (key: string) => crmLists.find((list) => list.key === key)?.label || key;
   const emails = lead?.emails?.length ? lead.emails : (profile.email ? [profile.email] : []);
   const phones = lead?.phones?.length ? lead.phones : (profile.phone ? [profile.phone] : []);
   const owner = lead?.assignedUser || context?.source.ownerAgent || "Unassigned";
@@ -716,9 +745,9 @@ export function ProfileDrawer({
           </div>
         </header>
 
-        {(statusError || favoriteError || draftError || top25Error || tagError) && (
+        {(statusError || favoriteError || draftError || top25Error || tagError || listError) && (
           <div className="crm-contact-error" role="alert">
-            {statusError || favoriteError || draftError || top25Error || tagError}
+            {statusError || favoriteError || draftError || top25Error || tagError || listError}
           </div>
         )}
         {trackedDraftSendNotice && (
@@ -1358,6 +1387,44 @@ export function ProfileDrawer({
             </section>
 
             <section className="crm-contact-section">
+              <div className="crm-section-heading">
+                <h3>Lists</h3>
+                <span className="mono">{listKeys.length}</span>
+              </div>
+              {listKeys.length > 0 ? (
+                <div className="crm-contact-tags">
+                  {listKeys.map((key) => (
+                    onListsChange && contactId ? (
+                      <span key={key} className="crm-tag-editable">
+                        {listLabelForKey(key)}
+                        <button
+                          type="button"
+                          aria-label={`Remove from list ${listLabelForKey(key)}`}
+                          disabled={listBusy}
+                          onClick={() => void handleToggleList(key)}
+                        >×</button>
+                      </span>
+                    ) : <span key={key}>{listLabelForKey(key)}</span>
+                  ))}
+                </div>
+              ) : <p className="crm-rail-empty">This contact is not on any list yet.</p>}
+              {onListsChange && (
+                contactId ? (
+                  <button
+                    type="button"
+                    className="crm-tag-add"
+                    onClick={() => setListPickerOpen(true)}
+                    disabled={listBusy}
+                  >
+                    ＋ List
+                  </button>
+                ) : (
+                  <p className="crm-rail-empty">Lists need a merged contact record.</p>
+                )
+              )}
+            </section>
+
+            <section className="crm-contact-section">
               <div className="crm-section-heading"><h3>Tasks</h3><span className="mono">{(contactId ? contactTasks?.length : context?.tasks.length) ?? 0}</span></div>
               {taskError && <div className="crm-contact-error" role="alert">{taskError}</div>}
               {((contactId ? contactTasks : context?.tasks)?.length ?? 0) > 0 ? (
@@ -1458,6 +1525,45 @@ export function ProfileDrawer({
               </div>
               <div className="crm-tagpicker-foot">
                 <button type="button" onClick={() => setTagPickerOpen(false)}>Done</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {listPickerOpen && (
+          <div
+            className="crm-tagpicker-backdrop"
+            onMouseDown={(event) => { if (event.target === event.currentTarget) setListPickerOpen(false); }}
+          >
+            <div className="crm-tagpicker" role="dialog" aria-modal="true" aria-label={`Choose lists for ${profile.name}`}>
+              <div className="crm-tagpicker-head">
+                <h3>Lists</h3>
+                <button type="button" aria-label="Close list picker" onClick={() => setListPickerOpen(false)}>×</button>
+              </div>
+              <p className="crm-tagpicker-sub">Check a list to put {firstName} on it.</p>
+              {listError && <div className="crm-contact-error" role="alert">{listError}</div>}
+              {crmLists.length === 0 ? (
+                <p className="crm-rail-empty">
+                  No lists configured yet — create one from the board's Add New menu.
+                </p>
+              ) : (
+                <fieldset className="crm-listpicker-rows">
+                  <legend className="sr-only">Named lead lists</legend>
+                  {crmLists.map((list) => (
+                    <label key={list.key}>
+                      <input
+                        type="checkbox"
+                        checked={listKeys.includes(list.key)}
+                        disabled={listBusy}
+                        onChange={() => void handleToggleList(list.key)}
+                      />
+                      <span>{list.label}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
+              <div className="crm-tagpicker-foot">
+                <button type="button" onClick={() => setListPickerOpen(false)}>Done</button>
               </div>
             </div>
           </div>

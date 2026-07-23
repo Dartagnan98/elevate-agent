@@ -17,6 +17,8 @@ export interface CrmProfileFilters {
   pipelineFilter: string;
   temperatureFilter: CrmTemperature;
   tagFilters: string[];
+  /** Configured list key, or "all" (migration 0038 named lead lists). */
+  listFilter?: string;
   searchQuery: string;
 }
 
@@ -61,6 +63,8 @@ export function matchesCrmProfile(profile: LeadsProfile, filters: CrmProfileFilt
   }
   const profileTags = new Set(profile.tags.map((tag) => tag.trim().toLowerCase()));
   if (filters.tagFilters.some((tag) => !profileTags.has(tag.trim().toLowerCase()))) return false;
+  const listFilter = (filters.listFilter || "all").trim();
+  if (listFilter !== "all" && !(profile.lists || []).includes(listFilter)) return false;
 
   const query = filters.searchQuery.trim().toLowerCase();
   if (!query) return true;

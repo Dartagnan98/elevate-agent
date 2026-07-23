@@ -183,6 +183,7 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       threads: p.threadCount,
       age: ageLabel(p.latestAt),
       tags: p.tags || [],
+      lists: p.lists || [],
       sub: p.crmStage || (p.leadSource ? `Source: ${p.leadSource}` : ""),
       lastMsg: p.latestText || "",
       lastTouch: ageLabel(p.statusUpdatedAt || p.latestAt),

@@ -51,6 +51,13 @@ class SourceInboxTagsAction(BaseModel):
     returnInbox: bool = True
 
 
+class SourceInboxListsAction(BaseModel):
+    profileId: str
+    lists: list[str]
+    contactId: str | None = None
+    returnInbox: bool = True
+
+
 class SourceInboxNoteCreate(BaseModel):
     contactId: str
     body: str
@@ -138,6 +145,10 @@ class AutomationPause(BaseModel):
 
 class CrmStagesUpdate(BaseModel):
     stages: list[dict]
+
+
+class CrmListsUpdate(BaseModel):
+    lists: list[dict]
 
 
 _SOURCE_INBOX_ACTION_LIMIT = 500
@@ -326,6 +337,26 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
         except Exception as exc:
             log.exception("POST /api/source-inbox/profile/tags failed")
             raise HTTPException(status_code=500, detail=f"Tags update failed: {exc}")
+
+    @router.post("/api/source-inbox/profile/lists")
+    async def update_source_inbox_profile_lists(body: SourceInboxListsAction):
+        try:
+            from elevate_cli.source_connectors import update_profile_lists
+
+            update_profile_lists(
+                body.profileId,
+                body.lists,
+                contact_id=body.contactId,
+                return_inbox=False,
+            )
+            if not body.returnInbox:
+                return {"ok": True}
+            return _source_inbox_response()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("POST /api/source-inbox/profile/lists failed")
+            raise HTTPException(status_code=500, detail=f"Lists update failed: {exc}")
 
     @router.get("/api/source-inbox/notes/{contact_id}")
     async def get_source_inbox_notes(contact_id: str, limit: int = 100):
@@ -998,6 +1029,72 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
         except Exception as exc:
             log.exception("PUT /api/crm/columns failed")
             raise HTTPException(status_code=500, detail=f"Columns update failed: {exc}")
+
+    @router.get("/api/crm/lists")
+    async def get_crm_lists():
+        try:
+            import json as _json
+
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT lead_lists_json FROM crm_settings WHERE id = 'default'",
+                ).fetchone()
+            lists: list[dict] = []
+            if row is not None and row["lead_lists_json"]:
+                try:
+                    parsed = _json.loads(row["lead_lists_json"])
+                    if isinstance(parsed, list):
+                        lists = [x for x in parsed if isinstance(x, dict) and x.get("key")]
+                except (ValueError, TypeError):
+                    lists = []
+            return {"lists": lists}
+        except Exception as exc:
+            log.exception("GET /api/crm/lists failed")
+            raise HTTPException(status_code=500, detail=f"Lists read failed: {exc}")
+
+    @router.put("/api/crm/lists")
+    async def put_crm_lists(body: CrmListsUpdate):
+        try:
+            import json as _json
+            import re as _re
+
+            from elevate_cli.data import connect
+            from elevate_cli.data._util import now_iso
+
+            cleaned: list[dict] = []
+            seen: set[str] = set()
+            for lead_list in body.lists:
+                label = str(lead_list.get("label") or "").strip()
+                if not label:
+                    continue
+                key = str(lead_list.get("key") or "").strip() or _re.sub(
+                    r"[^a-z0-9]+", "_", label.lower()
+                ).strip("_")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append({"key": key, "label": label})
+            if len(cleaned) > 24:
+                raise ValueError("A maximum of 24 lead lists is supported")
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO crm_settings (id, lead_lists_json, updated_at)
+                    VALUES ('default', ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        lead_lists_json = EXCLUDED.lead_lists_json,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (_json.dumps(cleaned, ensure_ascii=False), now_iso()),
+                )
+            return {"ok": True, "lists": cleaned}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            log.exception("PUT /api/crm/lists failed")
+            raise HTTPException(status_code=500, detail=f"Lists update failed: {exc}")
 
     @router.get("/api/crm/goals")
     async def get_account_goals():

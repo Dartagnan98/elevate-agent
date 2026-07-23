@@ -68,6 +68,8 @@ def _row_to_contact(row: sqlite3.Row) -> dict[str, Any]:
         "crmStage": _get("crm_stage"),
         "leadScore": _get("lead_score"),
         "tagsJson": _get("tags_json"),
+        # Named-list membership (migration 0038): JSON array of list keys.
+        "listsJson": _get("lists_json"),
         "segmentsJson": _get("segments_json"),
         "leadTypesJson": _get("lead_types_json"),
         "crmUserId": _get("crm_user_id"),
@@ -853,6 +855,23 @@ def set_contact_tags(
     cleaned = sorted({str(t).strip() for t in tags if str(t).strip()})
     conn.execute(
         "UPDATE contacts SET tags_json = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(cleaned, ensure_ascii=False), now_iso(), contact_id),
+    )
+    return cleaned
+
+
+def set_contact_lists(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    lists: Iterable[str],
+) -> list[str]:
+    """Replace the contact's named-list membership (migration 0038, ``contacts.lists_json``)."""
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+    cleaned = sorted({str(k).strip() for k in lists if str(k).strip()})
+    conn.execute(
+        "UPDATE contacts SET lists_json = ?, updated_at = ? WHERE id = ?",
         (json.dumps(cleaned, ensure_ascii=False), now_iso(), contact_id),
     )
     return cleaned

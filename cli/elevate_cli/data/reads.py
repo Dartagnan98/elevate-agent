@@ -968,7 +968,8 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             for row in conn.execute(
                 f"""
                 SELECT id, pipeline_status, pipeline_status_set_at,
-                       tags_json, search_criteria_json, custom_fields_json,
+                       tags_json, lists_json, search_criteria_json,
+                       custom_fields_json,
                        type, cannot_text, cannot_call, cannot_email
                 FROM contacts
                 WHERE id IN ({placeholders})
@@ -984,6 +985,15 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                             tags = [str(t) for t in parsed if str(t).strip()]
                     except (ValueError, TypeError):
                         tags = []
+                lists: list[str] = []
+                raw_lists = row["lists_json"] if "lists_json" in row.keys() else None
+                if raw_lists:
+                    try:
+                        parsed_lists = json.loads(raw_lists)
+                        if isinstance(parsed_lists, list):
+                            lists = [str(k) for k in parsed_lists if str(k).strip()]
+                    except (ValueError, TypeError):
+                        lists = []
                 custom_fields: dict[str, str] = {}
                 raw_custom = (
                     row["custom_fields_json"]
@@ -1003,6 +1013,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                     "status": row["pipeline_status"],
                     "updated_at": row["pipeline_status_set_at"],
                     "tags": tags,
+                    "lists": lists,
                     "search_criteria": (
                         row["search_criteria_json"]
                         if "search_criteria_json" in row.keys()
@@ -1036,6 +1047,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
     for profile in profiles:
         db_status = None
         db_tags: list[str] = []
+        db_lists: list[str] = []
         db_search_criteria = None
         db_custom_fields: dict[str, str] = {}
         for contact_id in profile.get("contactIds", []):
@@ -1043,6 +1055,8 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             if candidate:
                 if candidate.get("tags") and not db_tags:
                     db_tags = candidate["tags"]
+                if candidate.get("lists") and not db_lists:
+                    db_lists = candidate["lists"]
                 if candidate.get("search_criteria") and db_search_criteria is None:
                     db_search_criteria = candidate["search_criteria"]
                 if candidate.get("custom_fields") and not db_custom_fields:
@@ -1053,6 +1067,9 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         profile["statusUpdatedAt"] = db_status.get("updated_at") if db_status else None
         if db_tags:
             profile["tags"] = sorted({*[str(t) for t in profile.get("tags", []) if t], *db_tags})
+        # Named-list membership (migration 0038): the contact row is the only
+        # source, so assign directly like customFields rather than merging.
+        profile["lists"] = db_lists
         if db_search_criteria is not None:
             profile["searchCriteria"] = db_search_criteria
         profile["customFields"] = db_custom_fields
