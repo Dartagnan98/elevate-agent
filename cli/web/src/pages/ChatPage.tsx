@@ -3577,6 +3577,13 @@ export default function ChatPage() {
   // Side-panel mode for the right aside. "preview" still uses previewArtifact
   // as the WHICH; plan/tasks/files are derived/fetched panels.
   const [sidePanel, setSidePanel] = useState<SidePanelMode>("none");
+  // Browser tools run in their own isolated task workspace. When an agent
+  // acts, follow the workspace emitted by the desktop bridge instead of
+  // assuming it matches the persisted chat/session id.
+  const [agentBrowserWorkspace, setAgentBrowserWorkspace] = useState<{
+    chatKey: string;
+    workspaceId: string;
+  } | null>(null);
   const [planRefreshSignal, setPlanRefreshSignal] = useState(0);
   // True once the agent has presented a plan (present_plan tool) this turn —
   // gates the "Approve & run" bar so it never shows before a plan exists.
@@ -4381,6 +4388,9 @@ export default function ChatPage() {
     }
     if (mode === "plan") planAutoOpenDisabledRef.current = false;
     if (mode === "browser") {
+      // A manual Browser open belongs to the active chat. Agent actions set a
+      // task-specific override through the bridge event listener below.
+      setAgentBrowserWorkspace(null);
       const shell = chatShellRef.current;
       setPreviewPanelWidth(
         clampPreviewPanelWidth(panelShellWidth(shell) * 0.48, shell),
@@ -4404,17 +4414,20 @@ export default function ChatPage() {
   useEffect(() => {
     const bridge = desktopBrowserPane();
     if (!bridge) return;
-    const activeBrowserWorkspace =
-      sessionId ?? artifactStateSessionId() ?? "default";
     return bridge.onEvent((event) => {
-      if (
-        event.type === "agent-action" &&
-        event.workspaceId === activeBrowserWorkspace
-      ) {
+      if (event.type === "agent-action" && event.workspaceId) {
+        setAgentBrowserWorkspace({
+          chatKey,
+          workspaceId: event.workspaceId,
+        });
+        const shell = chatShellRef.current;
+        setPreviewPanelWidth(
+          clampPreviewPanelWidth(panelShellWidth(shell) * 0.48, shell),
+        );
         setSidePanel("browser");
       }
     });
-  }, [artifactStateSessionId, sessionId]);
+  }, [chatKey]);
 
   // Open a subagent's own session as a full chat — reuses the resume flow
   // (resumeId re-keys the page). Reopens a completed child session so the user
@@ -9215,7 +9228,12 @@ export default function ChatPage() {
   // freshly minted id with no history yet. This is the same id artifacts and
   // dismissals key on.
   const dataSessionId = artifactStateSessionId();
-  const browserWorkspaceId = sessionId ?? dataSessionId ?? "default";
+  const agentBrowserWorkspaceId =
+    agentBrowserWorkspace?.chatKey === chatKey
+      ? agentBrowserWorkspace.workspaceId
+      : null;
+  const browserWorkspaceId =
+    agentBrowserWorkspaceId ?? sessionId ?? dataSessionId ?? "default";
   const renderSidePanel = () => {
     const renderPlanPanel = () => (
       <PlanPanel
