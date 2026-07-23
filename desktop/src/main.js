@@ -670,6 +670,7 @@ function createWindow() {
     partition: RELEASE_PROFILE.isBeta
       ? "persist:elevate-browser-beta"
       : "persist:elevate-browser",
+    elevateHome: RUNTIME_PATHS.elevateHome,
     onEvent: (payload) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("browser:event", payload);

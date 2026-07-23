@@ -72,6 +72,38 @@ def status(session_id: str | None, *, timeout: int = 30) -> dict[str, Any] | Non
         return None
 
 
+def profile_status(*, timeout: int = 30) -> dict[str, Any] | None:
+    """Return persistence and prior-import status without exposing cookies."""
+    if not is_available():
+        return None
+    try:
+        return _rpc("profile_status", {}, timeout)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
+def import_cookies(
+    cookies: list[dict[str, Any]],
+    *,
+    source_profile: str,
+    timeout: int = 120,
+) -> dict[str, Any] | None:
+    """Import cookie values over the authenticated local desktop RPC channel."""
+    if not is_available():
+        return None
+    try:
+        return _rpc(
+            "import_cookies",
+            {
+                "cookies": cookies,
+                "sourceProfile": source_profile,
+            },
+            timeout,
+        )
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
 def _active_tab(timeout: int, session_id: str | None) -> dict[str, Any]:
     session_params = _session_params(session_id)
     tabs = _rpc("list", session_params, timeout)

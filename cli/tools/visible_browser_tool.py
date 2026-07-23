@@ -29,6 +29,12 @@ from tools.registry import registry
 
 _READ_EFFECTS = {"read:browser"}
 _SHOT_EFFECTS = {"read:browser", "write_local:browser"}
+_PROFILE_IMPORT_EFFECTS = {
+    "read:browser",
+    "write_local:browser",
+    "credential_access:browser",
+    "spawn:browser",
+}
 _AUTONOMOUS_EFFECTS = {
     "read:browser",
     "write_local:browser",
@@ -64,6 +70,83 @@ def browser_status(task_id: str | None = None) -> str:
             }
         )
     return _json({"success": True, **state})
+
+
+def browser_profile_status() -> str:
+    state = browser_pane.profile_status()
+    if state is None:
+        return _json(
+            {
+                "success": False,
+                "error": "The persistent embedded-browser profile is not available.",
+            }
+        )
+    try:
+        from elevate_cli import debug_browser
+
+        chrome_installed = debug_browser.chrome_binary() is not None
+        active_profile = (
+            debug_browser.profile_label(debug_browser.detect_active_profile())
+            if chrome_installed
+            else None
+        )
+    except Exception:
+        chrome_installed = False
+        active_profile = None
+    return _json(
+        {
+            "success": True,
+            **state,
+            "chromeImportAvailable": chrome_installed,
+            "activeChromeProfile": active_profile,
+        }
+    )
+
+
+def browser_import_chrome(refresh: bool = True) -> str:
+    """Import Chrome login cookies without returning any cookie value."""
+    if not browser_pane.is_available():
+        return _json(
+            {
+                "success": False,
+                "error": "Open the Elevate desktop app before importing Chrome sessions.",
+            }
+        )
+    try:
+        from elevate_cli.chrome_session_import import export_chrome_cookies
+
+        exported = export_chrome_cookies(refresh=bool(refresh))
+        cookies = exported.get("cookies") or []
+        result = browser_pane.import_cookies(
+            cookies,
+            source_profile=str(exported.get("sourceProfile") or "Chrome"),
+        )
+    except Exception as error:
+        return _json({"success": False, "error": f"Chrome session import failed: {error}"})
+    finally:
+        if "cookies" in locals():
+            cookies.clear()
+
+    if result is None:
+        return _json(
+            {
+                "success": False,
+                "error": "The embedded browser stopped before the import completed.",
+            }
+        )
+    imported = int(result.get("imported", 0) or 0)
+    failed = int(result.get("failed", 0) or 0)
+    return _json(
+        {
+            "success": imported > 0,
+            "partial": failed > 0,
+            **result,
+            "next": (
+                "Open the target website in Elevate and verify the imported session. "
+                "Passwords, extensions, and Chrome history are not exposed or imported."
+            ),
+        }
+    )
 
 
 def browser_open(url: str, task_id: str | None = None) -> str:
@@ -418,6 +501,21 @@ _SCHEMAS = {
         "browser_status",
         "Check whether the visible in-app browser is open for this session, list its tabs, and report the active page.",
     ),
+    "browser_profile_status": _schema(
+        "browser_profile_status",
+        "Report whether the embedded browser profile is persistent, its cookie/domain counts, the last Chrome import receipt, and whether Chrome import is available. Cookie values are never returned.",
+    ),
+    "browser_import_chrome": _schema(
+        "browser_import_chrome",
+        "Import authenticated cookies from the user's active Chrome profile into Elevate's persistent embedded browser. Use only when the user asks to import or resync their own Chrome sessions. Cookie values are never returned.",
+        {
+            "refresh": {
+                "type": "boolean",
+                "description": "Re-clone the active Chrome profile before import. Defaults to true.",
+                "default": True,
+            }
+        },
+    ),
     "browser_open": _schema(
         "browser_open",
         "Open a URL in the visible in-app browser. Uses the realtor's persistent cookies and logins.",
@@ -499,6 +597,24 @@ registry.register(
     check_fn=check_browser_requirements,
     emoji="🌐",
     effects=_READ_EFFECTS,
+)
+registry.register(
+    name="browser_profile_status",
+    toolset="browser",
+    schema=_SCHEMAS["browser_profile_status"],
+    handler=lambda _args, **_kw: browser_profile_status(),
+    check_fn=check_browser_requirements,
+    emoji="🪪",
+    effects=_READ_EFFECTS,
+)
+registry.register(
+    name="browser_import_chrome",
+    toolset="browser",
+    schema=_SCHEMAS["browser_import_chrome"],
+    handler=lambda args, **_kw: browser_import_chrome(args.get("refresh", True)),
+    check_fn=check_browser_requirements,
+    emoji="📥",
+    effects=_PROFILE_IMPORT_EFFECTS,
 )
 registry.register(
     name="browser_open",

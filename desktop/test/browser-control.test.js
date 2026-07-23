@@ -10,6 +10,7 @@ const {
   clampPaneBounds,
   normalizeWorkspaceId,
   standardBrowserUserAgent,
+  toElectronCookieDetails,
 } = require("../src/browser-pane");
 
 function waitForEndpoint(filePath) {
@@ -129,6 +130,144 @@ test("embedded browser identity omits Electron and app-brand tokens", () => {
 
   assert.match(userAgent, /Chrome\/142\.0\.7444\.265/);
   assert.doesNotMatch(userAgent, /Electron|Elevate/i);
+});
+
+test("Chrome cookies are normalized for the persistent Electron session", () => {
+  const future = 2_000_000_000;
+  assert.deepEqual(
+    toElectronCookieDetails(
+      {
+        name: "session",
+        value: "secret",
+        domain: ".example.com",
+        path: "/account",
+        expires: future,
+        secure: true,
+        httpOnly: true,
+        sameSite: "None",
+      },
+      1_900_000_000,
+    ),
+    {
+      url: "https://example.com/account",
+      name: "session",
+      value: "secret",
+      domain: ".example.com",
+      path: "/account",
+      secure: true,
+      httpOnly: true,
+      expirationDate: future,
+      sameSite: "no_restriction",
+    },
+  );
+  assert.equal(
+    toElectronCookieDetails(
+      {
+        name: "expired",
+        value: "old",
+        domain: "example.com",
+        expires: 100,
+      },
+      101,
+    ),
+    null,
+  );
+  assert.deepEqual(
+    toElectronCookieDetails({
+      name: "__Host-session",
+      value: "secret",
+      domain: "example.com",
+      path: "/",
+      session: true,
+    }),
+    {
+      url: "https://example.com/",
+      name: "__Host-session",
+      value: "secret",
+      path: "/",
+      secure: true,
+      httpOnly: false,
+    },
+  );
+  assert.equal(
+    toElectronCookieDetails({
+      name: "partitioned",
+      value: "secret",
+      domain: "example.com",
+      partitionKey: { topLevelSite: "https://top.example" },
+    }),
+    null,
+  );
+  assert.deepEqual(
+    toElectronCookieDetails({
+      name: "same-site-none",
+      value: "secret",
+      domain: "example.com",
+      sameSite: "None",
+    }),
+    {
+      url: "http://example.com/",
+      name: "same-site-none",
+      value: "secret",
+      path: "/",
+      secure: true,
+      httpOnly: false,
+      sameSite: "no_restriction",
+    },
+  );
+});
+
+test("browser control imports cookies without returning their values", async (t) => {
+  const elevateHome = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-browser-profile-"));
+  const calls = [];
+  const pane = {
+    profileStatus: async () => ({
+      persistent: true,
+      partition: "persist:elevate-browser-beta",
+      cookieCount: 12,
+    }),
+    importCookies: async (cookies, metadata) => {
+      calls.push({ cookies, metadata });
+      return {
+        source: "chrome",
+        imported: cookies.length,
+        failed: 0,
+        persistent: true,
+      };
+    },
+  };
+  const controller = startControlServer({
+    pane,
+    elevateHome,
+    log: { info() {}, warn() {} },
+  });
+  t.after(() => {
+    controller.stop();
+    fs.rmSync(elevateHome, { recursive: true, force: true });
+  });
+
+  const endpoint = await waitForEndpoint(path.join(elevateHome, "browser-pane.json"));
+  const status = await rpc(endpoint, "profile_status");
+  const imported = await rpc(endpoint, "import_cookies", {
+    sourceProfile: "Person 1",
+    cookies: [{ name: "session", value: "secret", domain: "example.com" }],
+  });
+
+  assert.equal(status.status, 200);
+  assert.equal(status.body.result.persistent, true);
+  assert.deepEqual(imported.body.result, {
+    source: "chrome",
+    imported: 1,
+    failed: 0,
+    persistent: true,
+  });
+  assert.equal(JSON.stringify(imported.body.result).includes("secret"), false);
+  assert.deepEqual(calls, [
+    {
+      cookies: [{ name: "session", value: "secret", domain: "example.com" }],
+      metadata: { sourceProfile: "Person 1" },
+    },
+  ]);
 });
 
 test("agent tab actions activate the matching browser workspace", async (t) => {

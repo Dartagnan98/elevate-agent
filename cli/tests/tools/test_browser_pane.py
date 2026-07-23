@@ -79,6 +79,53 @@ def test_type_targets_the_same_visible_tab(monkeypatch, tmp_path):
     )
 
 
+def test_profile_status_and_cookie_import_use_authenticated_pane_rpc(
+    monkeypatch, tmp_path
+):
+    _install_endpoint(monkeypatch, tmp_path)
+    calls = []
+    secret = "local-cookie-value"
+
+    def fake_rpc(method, params, _timeout):
+        calls.append((method, params))
+        if method == "profile_status":
+            return {
+                "persistent": True,
+                "partition": "persist:elevate-browser-beta",
+                "cookieCount": 5,
+            }
+        if method == "import_cookies":
+            return {"imported": 1, "failed": 0, "persistent": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(browser_pane, "_rpc", fake_rpc)
+
+    status = browser_pane.profile_status()
+    imported = browser_pane.import_cookies(
+        [{"name": "session", "value": secret, "domain": "example.com"}],
+        source_profile="Work",
+    )
+
+    assert status["persistent"] is True
+    assert imported == {"imported": 1, "failed": 0, "persistent": True}
+    assert calls == [
+        ("profile_status", {}),
+        (
+            "import_cookies",
+            {
+                "cookies": [
+                    {
+                        "name": "session",
+                        "value": secret,
+                        "domain": "example.com",
+                    }
+                ],
+                "sourceProfile": "Work",
+            },
+        ),
+    ]
+
+
 def test_new_tab_loads_url_and_returns_session_tabs(monkeypatch, tmp_path):
     _install_endpoint(monkeypatch, tmp_path)
     calls = []
@@ -311,6 +358,8 @@ def test_visible_browser_status_is_scoped_to_the_agent_session(monkeypatch):
     assert result["activeTabId"] == "tab_9"
     assert set(visible_browser_tool._SCHEMAS) == {
         "browser_status",
+        "browser_profile_status",
+        "browser_import_chrome",
         "browser_open",
         "browser_read",
         "browser_forward",
@@ -331,6 +380,119 @@ def test_visible_browser_status_is_scoped_to_the_agent_session(monkeypatch):
     assert browser_tool._BROWSER_SCHEMA_MAP["browser_click"]["parameters"]["required"] == [
         "ref"
     ]
+
+
+def test_browser_profile_status_reports_persistence_without_cookie_values(monkeypatch):
+    from elevate_cli import debug_browser
+    from tools import visible_browser_tool
+
+    monkeypatch.setattr(
+        visible_browser_tool.browser_pane,
+        "profile_status",
+        lambda: {
+            "persistent": True,
+            "partition": "persist:elevate-browser-beta",
+            "cookieCount": 14,
+            "domainCount": 4,
+            "lastImport": {"imported": 12, "failed": 0},
+        },
+    )
+    monkeypatch.setattr(debug_browser, "chrome_binary", lambda: object())
+    monkeypatch.setattr(debug_browser, "detect_active_profile", lambda: "Profile 2")
+    monkeypatch.setattr(debug_browser, "profile_label", lambda _profile: "Work")
+
+    raw = visible_browser_tool.browser_profile_status()
+    result = json.loads(raw)
+
+    assert result["success"] is True
+    assert result["persistent"] is True
+    assert result["cookieCount"] == 14
+    assert result["chromeImportAvailable"] is True
+    assert result["activeChromeProfile"] == "Work"
+    assert "value" not in raw.lower()
+
+
+def test_browser_import_chrome_keeps_cookie_values_out_of_tool_result(monkeypatch):
+    from elevate_cli import chrome_session_import
+    from tools import visible_browser_tool
+
+    secret = "cookie-value-must-stay-local"
+    imported = []
+    monkeypatch.setattr(visible_browser_tool.browser_pane, "is_available", lambda: True)
+    monkeypatch.setattr(
+        chrome_session_import,
+        "export_chrome_cookies",
+        lambda *, refresh: {
+            "sourceProfile": "Work",
+            "exported": 1,
+            "cookies": [
+                {
+                    "name": "session",
+                    "value": secret,
+                    "domain": "example.com",
+                }
+            ],
+        },
+    )
+
+    def fake_import(cookies, *, source_profile):
+        imported.extend(dict(cookie) for cookie in cookies)
+        assert source_profile == "Work"
+        return {
+            "source": "chrome",
+            "sourceProfile": "Work",
+            "persistent": True,
+            "total": 1,
+            "imported": 1,
+            "skipped": 0,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(visible_browser_tool.browser_pane, "import_cookies", fake_import)
+
+    raw = visible_browser_tool.browser_import_chrome(refresh=True)
+    result = json.loads(raw)
+
+    assert result["success"] is True
+    assert result["imported"] == 1
+    assert imported[0]["value"] == secret
+    assert secret not in raw
+
+
+def test_browser_import_chrome_reports_partial_cookie_import_as_usable(monkeypatch):
+    from elevate_cli import chrome_session_import
+    from tools import visible_browser_tool
+
+    monkeypatch.setattr(visible_browser_tool.browser_pane, "is_available", lambda: True)
+    monkeypatch.setattr(
+        chrome_session_import,
+        "export_chrome_cookies",
+        lambda *, refresh: {
+            "sourceProfile": "Work",
+            "cookies": [
+                {"name": "one", "value": "secret", "domain": "example.com"},
+                {"name": "two", "value": "secret", "domain": "example.org"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        visible_browser_tool.browser_pane,
+        "import_cookies",
+        lambda _cookies, *, source_profile: {
+            "source": "chrome",
+            "sourceProfile": source_profile,
+            "total": 2,
+            "imported": 1,
+            "failed": 1,
+        },
+    )
+
+    result = json.loads(visible_browser_tool.browser_import_chrome())
+
+    assert result["success"] is True
+    assert result["partial"] is True
+    assert result["imported"] == 1
+    assert result["failed"] == 1
 
 
 def test_browser_registry_handlers_prefer_chat_session_over_turn_task(monkeypatch):
