@@ -193,6 +193,17 @@ SESSION_SEARCH_GUIDANCE = (
     "asking them to repeat themselves."
 )
 
+BROWSER_GUIDANCE = (
+    "For visible-browser work, call browser_status first. Use browser_read to get "
+    "fresh element refs, then browser_click, browser_fill, browser_drag, and the "
+    "tab/history tools to operate the page; read again after navigation or page "
+    "changes because refs can expire. When the user asks to carry their Chrome "
+    "logins into Elevate, call browser_profile_status and browser_import_chrome, "
+    "then open the target site and verify the session. Imported cookies persist "
+    "across Elevate sessions, while tabs stay scoped to the active agent session. "
+    "Never expose cookie values."
+)
+
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
     "or discovering a non-trivial workflow, save the approach as a "
