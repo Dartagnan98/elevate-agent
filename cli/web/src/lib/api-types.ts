@@ -266,6 +266,11 @@ export interface SourceInboxProfile {
   top25At?: string | null;
   /** JSON string of saved-search criteria (migration 0035). */
   searchCriteria?: string | null;
+  /** Custom field values keyed by crm_settings column key (migration 0036). */
+  customFields?: Record<string, string>;
+  contactType?: string | null;
+  /** Channel consent (inverse of the contacts cannot_* flags). */
+  consent?: { text: boolean; call: boolean; email: boolean };
   leadSectionIds?: string[];
 }
 
@@ -287,6 +292,20 @@ export interface AccountGoals {
   closingsGoal: number | null;
   gciGoal: number | null;
   updatedAt: string | null;
+}
+
+export interface CrmColumn {
+  key: string;
+  label: string;
+}
+
+export interface ContactTask {
+  id: string;
+  title: string;
+  summary: string;
+  status: "open" | "done" | string;
+  dueAt: string | null;
+  timestamp: string | null;
 }
 
 export interface SourceInboxDraft {

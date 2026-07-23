@@ -115,6 +115,11 @@ export interface LeadsProfile {
   top25?: boolean;
   /** JSON string of saved-search criteria (contact card Searches tab). */
   searchCriteria?: string | null;
+  /** Custom field values keyed by configured column key (migration 0036). */
+  customFields?: Record<string, string>;
+  contactType?: string | null;
+  /** Channel consent (inverse of the contacts cannot_* flags). */
+  consent?: { text: boolean; call: boolean; email: boolean };
 }
 
 export interface LeadsTemplateItem {

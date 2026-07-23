@@ -4903,3 +4903,701 @@ html[data-app-theme="dark"] .crm-board {
   .lb-profile-select-cell { display: none; }
   .lb-bulkbar-anchor { display: none; }
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Elevation brand skin — design/crm-redesign/01-leads-list.html +
+   02-contact-card.html, applied via the .crm-board scoped root.
+   Light AND medium app themes map to the mockup light palette; dark maps to
+   the mockup dark palette. Appended last so it wins the cascade without
+   touching the audited token blocks above.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.crm-board {
+  /* Brand primitives — dark defaults before the theme attribute mounts
+     (mirrors the --crm-* bootstrap pattern above). */
+  --elv-paper: #0e121b;
+  --elv-card: #161c29;
+  --elv-ink: #e7eaf2;
+  --elv-sub: #a2a9bc;
+  --elv-faint: #8b93a9;          /* mockup dark faint #767d92 lifted to AA on card */
+  --elv-line: #28303f;
+  --elv-line-2: #1b2130;
+  --elv-row-hover: #1b2233;
+  --elv-navy-text: #cdd8ef;
+  --elv-navy-2: #b3c2e0;
+  --elv-navy-3: #93a6cf;
+  --elv-navy-fill: #33477a;      /* filled navy surfaces stay navy in dark */
+  --elv-terracotta: #e08a63;
+  --elv-terracotta-2: #c46340;
+  --elv-terracotta-fill: #c46340;
+  --elv-blue: #7ba4e2;
+  --elv-blue-2: #5e8ad0;
+  --elv-blue-fill: #5e8ad0;
+  --elv-blue-soft: rgba(123, 164, 226, 0.15);
+  --elv-hot: #e08a63;      --elv-hot-bg: rgba(224, 138, 99, 0.15);
+  --elv-warm: #e0a94e;     --elv-warm-bg: rgba(224, 169, 78, 0.15);
+  --elv-lukewarm: #dcab63; --elv-lukewarm-bg: rgba(220, 171, 99, 0.15);
+  --elv-cool: #7ba4e2;     --elv-cool-bg: rgba(123, 164, 226, 0.15);
+  --elv-soi: #5cc08a;      --elv-soi-bg: rgba(92, 192, 138, 0.15);
+  --elv-nurture: #9aa1b4;  --elv-nurture-bg: rgba(154, 161, 180, 0.14);
+  --elv-warm-text: #e0a94e;
+  --elv-soi-text: #5cc08a;
+  --elv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --elv-shadow-lg: 0 14px 48px rgba(0, 0, 0, 0.5);
+  --elv-shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --elv-scrim: rgba(0, 0, 0, 0.55);
+
+  /* App-token aliases: every component inside this root consumes the brand. */
+  --bg: var(--elv-paper);
+  --bg-1: var(--elv-card);
+  --bg-2: var(--elv-card);
+  --bg-3: var(--elv-paper);
+  --bg-soft: var(--elv-row-hover);
+  --border: var(--elv-line);
+  --border-soft: var(--elv-line-2);
+  --border-strong: var(--elv-line);
+  --fg: var(--elv-ink);
+  --fg-muted: var(--elv-sub);
+  --fg-dim: var(--elv-sub);
+  --fg-faint: var(--elv-faint);
+  --accent: var(--elv-terracotta-fill);
+  --accent-contrast: #ffffff;
+  --accent-fg: #ffffff;
+  --accent-vivid: var(--elv-terracotta-2);
+  --accent-soft: var(--elv-hot-bg);
+  --accent-glow: var(--elv-hot-bg);
+  --status-warn: var(--elv-warm-text);
+  --status-done: var(--elv-soi-text);
+  --crm-navy: var(--elv-navy-text);
+  --crm-terracotta: var(--elv-terracotta);
+}
+
+:root[data-app-theme="light"] .crm-board,
+html[data-app-theme="light"] .crm-board,
+:root[data-app-theme="medium"] .crm-board,
+html[data-app-theme="medium"] .crm-board {
+  --elv-paper: #eef1f6;
+  --elv-card: #ffffff;
+  --elv-ink: #1c2438;
+  --elv-sub: #5c6479;
+  --elv-faint: #6b7285;          /* mockup faint #8a90a3 deepened to AA on card */
+  --elv-line: #e3e6ee;
+  --elv-line-2: #eef0f5;
+  --elv-row-hover: #f5f7fb;
+  --elv-navy-text: #182848;
+  --elv-navy-2: #22355c;
+  --elv-navy-3: #33477a;
+  --elv-navy-fill: #182848;
+  --elv-terracotta: #c46340;
+  --elv-terracotta-2: #b3542f;
+  --elv-terracotta-fill: #c46340;
+  --elv-blue: #5e8ad0;
+  --elv-blue-2: #4a76bc;
+  --elv-blue-fill: #5e8ad0;
+  --elv-blue-soft: rgba(94, 138, 208, 0.12);
+  --elv-hot: #c46340;      --elv-hot-bg: rgba(196, 99, 64, 0.13);
+  --elv-warm: #c98a2e;     --elv-warm-bg: rgba(201, 138, 46, 0.14);
+  --elv-lukewarm: #cf9a52; --elv-lukewarm-bg: rgba(207, 154, 82, 0.15);
+  --elv-cool: #5e8ad0;     --elv-cool-bg: rgba(94, 138, 208, 0.13);
+  --elv-soi: #3f9d6b;      --elv-soi-bg: rgba(63, 157, 107, 0.14);
+  --elv-nurture: #7d8598;  --elv-nurture-bg: rgba(125, 133, 152, 0.14);
+  --elv-warm-text: #8a5f1e;
+  --elv-soi-text: #2e7d54;
+  --elv-shadow: 0 1px 2px rgba(24, 40, 72, 0.05), 0 6px 20px rgba(24, 40, 72, 0.06);
+  --elv-shadow-lg: 0 16px 50px rgba(24, 40, 72, 0.28);
+  --elv-shadow-pop: 0 12px 40px rgba(24, 40, 72, 0.22);
+  --elv-scrim: rgba(24, 40, 72, 0.42);
+}
+
+:root[data-app-theme="dark"] .crm-board,
+html[data-app-theme="dark"] .crm-board {
+  --elv-paper: #0e121b;
+  --elv-card: #161c29;
+  --elv-ink: #e7eaf2;
+  --elv-sub: #a2a9bc;
+  --elv-faint: #8b93a9;
+  --elv-line: #28303f;
+  --elv-line-2: #1b2130;
+  --elv-row-hover: #1b2233;
+  --elv-navy-text: #cdd8ef;
+  --elv-navy-2: #b3c2e0;
+  --elv-navy-3: #93a6cf;
+  --elv-navy-fill: #33477a;
+  --elv-terracotta: #e08a63;
+  --elv-terracotta-2: #c46340;
+  --elv-terracotta-fill: #c46340;
+  --elv-blue: #7ba4e2;
+  --elv-blue-2: #5e8ad0;
+  --elv-blue-fill: #5e8ad0;
+  --elv-blue-soft: rgba(123, 164, 226, 0.15);
+  --elv-hot: #e08a63;      --elv-hot-bg: rgba(224, 138, 99, 0.15);
+  --elv-warm: #e0a94e;     --elv-warm-bg: rgba(224, 169, 78, 0.15);
+  --elv-lukewarm: #dcab63; --elv-lukewarm-bg: rgba(220, 171, 99, 0.15);
+  --elv-cool: #7ba4e2;     --elv-cool-bg: rgba(123, 164, 226, 0.15);
+  --elv-soi: #5cc08a;      --elv-soi-bg: rgba(92, 192, 138, 0.15);
+  --elv-nurture: #9aa1b4;  --elv-nurture-bg: rgba(154, 161, 180, 0.14);
+  --elv-warm-text: #e0a94e;
+  --elv-soi-text: #5cc08a;
+  --elv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --elv-shadow-lg: 0 14px 48px rgba(0, 0, 0, 0.5);
+  --elv-shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --elv-scrim: rgba(0, 0, 0, 0.55);
+}
+
+/* ── Masthead + KPI tiles ─────────────────────────────────────────────── */
+.crm-board .crm-masthead h1 {
+  color: var(--elv-navy-text);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+.crm-board .crm-eyebrow { color: var(--elv-faint); }
+.crm-board .crm-kpis .ab-kpi {
+  border: 1px solid var(--elv-line);
+  border-radius: 12px;
+  background: var(--elv-card);
+  box-shadow: var(--elv-shadow);
+}
+.crm-board .crm-kpis .ab-kpi-value {
+  color: var(--elv-navy-text);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+.crm-board .crm-kpis .ab-kpi-label { color: var(--elv-sub); text-transform: none; letter-spacing: 0.02em; }
+
+/* ── View tabs (Leads / Templates / Sent / Didn't Send) ───────────────── */
+.crm-board .crm-viewbar { border-bottom-color: var(--elv-line); }
+.crm-board .crm-viewbar .lb-tab { color: var(--elv-faint); font-weight: 600; }
+.crm-board .crm-viewbar .lb-tab:hover { color: var(--elv-ink); }
+.crm-board .crm-viewbar .lb-tab.active { color: var(--elv-navy-text); background: transparent; }
+.crm-board .crm-viewbar .lb-tab.active::after { background: var(--elv-terracotta); }
+
+/* ── Filter bar (search, quick filters, tags, clear) ──────────────────── */
+.crm-board .crm-search,
+.crm-board .crm-quick-filter,
+.crm-board .crm-tags-filter > summary,
+.crm-board .crm-clear-filters {
+  border: 1px solid var(--elv-line);
+  border-radius: 10px;
+  background: var(--elv-card);
+  box-shadow: var(--elv-shadow);
+}
+.crm-board .crm-search:focus-within,
+.crm-board .crm-quick-filter:focus-within,
+.crm-board .crm-tags-filter[open] > summary { border-color: var(--elv-blue); }
+.crm-board .crm-tags-popover {
+  border: 1px solid var(--elv-line);
+  border-radius: 12px;
+  background: var(--elv-card);
+  box-shadow: var(--elv-shadow-pop);
+}
+.crm-board .crm-tags-popover input { accent-color: var(--elv-navy-fill); }
+
+/* ── Primary / ghost buttons — mockup .addbtn / .dp-send / .iconbtn ───── */
+.crm-board .ab-btn.primary,
+.crm-board .lb-btn.primary,
+.crm-board .crm-compose-send,
+.crm-board .crm-criteria-save,
+.crm-board .crm-tagpicker-foot button {
+  border: 1px solid transparent;
+  background: var(--elv-navy-fill);
+  color: #ffffff;
+  border-radius: 9px;
+  font-weight: 700;
+}
+.crm-board .ab-btn.primary:hover,
+.crm-board .lb-btn.primary:hover,
+.crm-board .crm-compose-send:hover:not(:disabled),
+.crm-board .crm-criteria-save:hover:not(:disabled),
+.crm-board .crm-tagpicker-foot button:hover {
+  background: var(--elv-navy-fill);
+  filter: brightness(1.08);
+}
+.crm-board .ab-btn.ghost,
+.crm-board .lb-btn.ghost {
+  border: 1px solid var(--elv-line);
+  background: var(--elv-card);
+  color: var(--elv-sub);
+  border-radius: 9px;
+}
+.crm-board .ab-btn.ghost:hover,
+.crm-board .lb-btn.ghost:hover {
+  background: var(--elv-card);
+  border-color: var(--elv-navy-3);
+  color: var(--elv-ink);
+}
+
+/* ── Cards / table shell — mockup .tablewrap / .kpi / .panelcard ──────── */
+.crm-board .ab-card {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 12px;
+  box-shadow: var(--elv-shadow);
+}
+.crm-board .lb-profiles-title { color: var(--elv-navy-text); font-weight: 700; }
+.crm-board .lb-profiles-colhead {
+  background: var(--elv-paper);
+  border-top-color: var(--elv-line);
+  border-bottom-color: var(--elv-line);
+}
+.crm-board .lb-profile-row:hover,
+.crm-board .lb-profile-row:focus-within { background: var(--elv-row-hover); }
+.crm-board .lb-profile-name { font-weight: 650; }
+
+/* ── Avatars — mockup gradient discs, white initials, round ───────────── */
+.crm-board .lb-profile-avatar,
+.crm-board .crm-contact-avatar {
+  border: 0;
+  border-radius: 50%;
+  color: #ffffff;
+  font-weight: 700;
+  background: linear-gradient(135deg, #33477a, #22355c);
+}
+.crm-board .lb-profile-avatar[data-tone="hot"],
+.crm-board .crm-contact-avatar[data-tone="hot"] { background: linear-gradient(135deg, #c46340, #b3542f); }
+.crm-board .lb-profile-avatar[data-tone="warm"],
+.crm-board .crm-contact-avatar[data-tone="warm"] { background: linear-gradient(135deg, #d69a45, #c98a2e); }
+.crm-board .lb-profile-avatar[data-tone="lukewarm"],
+.crm-board .crm-contact-avatar[data-tone="lukewarm"] { background: linear-gradient(135deg, #dcab63, #cf9a52); }
+.crm-board .lb-profile-avatar[data-tone="cool"],
+.crm-board .crm-contact-avatar[data-tone="cool"] { background: linear-gradient(135deg, #33477a, #22355c); }
+.crm-board .lb-profile-avatar[data-tone="soi"],
+.crm-board .crm-contact-avatar[data-tone="soi"] { background: linear-gradient(135deg, #4bbd85, #3f9d6b); }
+.crm-board .lb-profile-avatar[data-tone="nurture"],
+.crm-board .crm-contact-avatar[data-tone="nurture"] { background: linear-gradient(135deg, #9aa1b4, #7d8598); }
+
+/* ── Segment pills — mockup .tpill soft-tint chips ────────────────────── */
+.crm-board .lb-profile-heat-cell,
+.crm-board .crm-temp {
+  border-radius: 999px;
+  font-weight: 700;
+  color: var(--elv-nurture);
+  background: var(--elv-nurture-bg);
+}
+.crm-board .lb-profile-heat-cell.hot,
+.crm-board .crm-temp.hot { color: var(--elv-hot); background: var(--elv-hot-bg); }
+.crm-board .lb-profile-heat-cell.warm,
+.crm-board .crm-temp.warm { color: var(--elv-warm); background: var(--elv-warm-bg); }
+.crm-board .lb-profile-heat-cell.lukewarm,
+.crm-board .crm-temp.lukewarm { color: var(--elv-lukewarm); background: var(--elv-lukewarm-bg); }
+.crm-board .lb-profile-heat-cell.cool,
+.crm-board .crm-temp.cool { color: var(--elv-cool); background: var(--elv-cool-bg); }
+.crm-board .lb-profile-heat-cell.soi,
+.crm-board .crm-temp.soi { color: var(--elv-soi); background: var(--elv-soi-bg); }
+.crm-board .lb-profile-heat-cell.nurture,
+.crm-board .crm-temp.nurture { color: var(--elv-nurture); background: var(--elv-nurture-bg); }
+
+/* ── Pipeline stage pill — mockup .stage (neutral, paper bg) ──────────── */
+.crm-board .lb-profile-status {
+  background: var(--elv-paper);
+  border: 1px solid var(--elv-line);
+  border-radius: 8px;
+  color: var(--elv-ink);
+  font-weight: 600;
+}
+.crm-board .lb-status-menu {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 12px;
+  box-shadow: var(--elv-shadow-pop);
+}
+
+/* ── AI draft chip — mockup .ai-draft terracotta pill ─────────────────── */
+.crm-board .lb-profile-draft-chip {
+  border: 1px solid transparent;
+  background: var(--elv-terracotta-fill);
+  color: #ffffff;
+  font-weight: 700;
+}
+.crm-board .lb-profile-draft-chip:hover { filter: brightness(1.07); }
+.crm-board .lb-profile-draft-chip.active {
+  background: var(--elv-terracotta-2);
+  border-color: transparent;
+}
+.crm-board .lb-profile-inline-draft { background: var(--elv-blue-soft); }
+.crm-board .lb-profile-inline-draft .lb-draft {
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+  background: var(--elv-card);
+}
+
+/* ── Bulk selection bar — mockup .selbar (navy, white controls) ───────── */
+.crm-board .lb-profile-select { accent-color: var(--elv-navy-fill); }
+.crm-board .lb-bulkbar {
+  background: var(--elv-navy-fill);
+  border: 0;
+  border-radius: 11px;
+  color: #ffffff;
+  box-shadow: var(--elv-shadow);
+}
+.crm-board .lb-bulkbar-count { color: #ffffff; font-weight: 700; }
+.crm-board .lb-bulkbar-stage { color: rgba(255, 255, 255, 0.85); }
+.crm-board .lb-bulkbar-stage select {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  color: #ffffff;
+}
+.crm-board .lb-bulkbar-stage select option { background: var(--elv-card); color: var(--elv-ink); }
+.crm-board .lb-bulkbar-select-page {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #ffffff;
+  font-weight: 650;
+}
+.crm-board .lb-bulkbar-select-page:hover { background: rgba(255, 255, 255, 0.26); }
+.crm-board .lb-bulkbar-apply {
+  background: var(--elv-terracotta-fill);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #ffffff;
+  font-weight: 700;
+}
+.crm-board .lb-bulkbar-apply:hover:not(:disabled) { background: var(--elv-terracotta-2); }
+.crm-board .lb-bulkbar-clear {
+  background: transparent;
+  border: 0;
+  color: rgba(255, 255, 255, 0.72);
+}
+.crm-board .lb-bulkbar-clear:hover { color: #ffffff; }
+.crm-board .lb-bulkbar-soon { color: rgba(255, 255, 255, 0.65); }
+
+/* ── Send-later scheduler — mockup .dp-schedule card panel ────────────── */
+.crm-board .lb-draft-scheduler {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+  box-shadow: var(--elv-shadow);
+}
+.crm-board .lb-draft-scheduler-when { color: var(--elv-sub); font-weight: 600; }
+.crm-board .lb-draft-scheduler-when input {
+  background: var(--elv-paper);
+  border: 1px solid var(--elv-line);
+  border-radius: 8px;
+  color: var(--elv-ink);
+}
+.crm-board .lb-draft-scheduler-when input:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+
+/* ── Action-queue tabs — mockup nav chips (navy when on) ──────────────── */
+.crm-board .lb-queue-tab { border-radius: 999px; color: var(--elv-faint); }
+.crm-board .lb-queue-tab.active { background: var(--elv-navy-fill); color: #ffffff; }
+.crm-board .lb-queue-tab.active .lb-queue-tab-count { color: rgba(255, 255, 255, 0.8); }
+.crm-board .lb-draft-edit {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+}
+.crm-board .lb-draft-edit:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+
+/* ── Contact drawer — mockup 02 contact card ──────────────────────────── */
+.crm-board .crm-contact-backdrop,
+.crm-board .crm-tagpicker-backdrop { background: var(--elv-scrim); }
+.crm-board .crm-contact-card {
+  background: var(--elv-paper);
+  border: 1px solid var(--elv-line);
+  border-radius: 16px;
+  box-shadow: var(--elv-shadow-lg);
+}
+.crm-board .crm-contact-name-row h2 { color: var(--elv-navy-text); font-weight: 750; }
+.crm-board .crm-contact-tabs button { color: var(--elv-faint); font-weight: 600; }
+.crm-board .crm-contact-tabs button:hover { color: var(--elv-ink); }
+.crm-board .crm-contact-tabs button.on {
+  color: var(--elv-navy-text);
+  border-bottom-color: var(--elv-terracotta);
+}
+.crm-board .crm-contact-section {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 12px;
+  box-shadow: var(--elv-shadow);
+}
+.crm-board .crm-contact-rail { background: var(--elv-paper); }
+.crm-board .crm-contact-rail .crm-contact-section { background: var(--elv-card); }
+.crm-board .crm-section-heading h3 { color: var(--elv-navy-text); font-weight: 700; }
+
+/* Compose — mockup Note / Text / Email mode pills */
+.crm-board .crm-compose-modes button {
+  background: var(--elv-paper);
+  border: 1px solid var(--elv-line);
+  color: var(--elv-sub);
+  border-radius: 999px;
+}
+.crm-board .crm-compose-modes button.on { border-color: transparent; color: #ffffff; }
+.crm-board .crm-compose-modes button.on[data-mode="note"] { background: var(--elv-navy-fill); }
+.crm-board .crm-compose-modes button.on[data-mode="text"] { background: var(--elv-blue-fill); }
+.crm-board .crm-compose-modes button.on[data-mode="email"] { background: var(--elv-terracotta-fill); }
+.crm-board .crm-compose-box textarea {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+}
+.crm-board .crm-compose-box textarea:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+
+/* Notes — pinned note gets the terracotta treatment */
+.crm-board .crm-note-list li {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 10px;
+}
+.crm-board .crm-note-list li.pinned {
+  border-color: var(--elv-terracotta);
+  border-left: 3px solid var(--elv-terracotta);
+}
+.crm-board .crm-note-pin-badge { color: var(--crm-terracotta-text, var(--elv-terracotta)); }
+
+/* Top 25 — mockup .top25btn outline → filled */
+.crm-board .crm-top25-button { border-radius: 10px; }
+.crm-board .crm-top25-button.on:hover:not(:disabled) { filter: brightness(1.06); }
+
+/* Saved-search criteria — mockup Searches tab inputs */
+.crm-board .crm-criteria-field input,
+.crm-board .crm-criteria-field textarea {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+}
+.crm-board .crm-criteria-field input:focus,
+.crm-board .crm-criteria-field textarea:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+
+/* Tag pills + tag picker — mockup .tag / .tp-opt */
+.crm-board .crm-contact-tags span {
+  background: var(--elv-paper);
+  border: 1px solid var(--elv-line);
+  color: var(--elv-navy-text);
+  font-weight: 650;
+}
+.crm-board .crm-tag-add {
+  border: 1.5px dashed var(--elv-line);
+  color: var(--crm-blue-text, var(--elv-blue-2));
+}
+.crm-board .crm-tag-add:hover { border-color: var(--elv-blue); color: var(--crm-blue-text, var(--elv-blue-2)); }
+.crm-board .crm-tagpicker {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 16px;
+  box-shadow: var(--elv-shadow-lg);
+}
+.crm-board .crm-tagpicker-head h3 { color: var(--elv-navy-text); font-weight: 750; }
+.crm-board .crm-tagpicker-opts button {
+  background: var(--elv-paper);
+  border: 1px solid var(--elv-line);
+  color: var(--elv-ink);
+  border-radius: 999px;
+}
+.crm-board .crm-tagpicker-opts button:hover {
+  border-color: var(--elv-blue);
+  color: var(--crm-blue-text, var(--elv-blue-2));
+}
+.crm-board .crm-tagpicker-opts button.added {
+  background: var(--elv-blue-fill);
+  border-color: transparent;
+  color: #ffffff;
+}
+.crm-board .crm-tagpicker-custom input {
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+}
+.crm-board .crm-tagpicker-custom input:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+.crm-board .crm-tagpicker-custom button {
+  background: var(--elv-blue-fill);
+  border: 1px solid transparent;
+  color: #ffffff;
+  border-radius: 9px;
+  font-weight: 700;
+}
+.crm-board .crm-tagpicker-custom button:hover:not(:disabled) { filter: brightness(1.07); }
+
+/* ── New-markup classes (parallel workstream) — styled ahead of merge ── */
+
+/* Add-lead modal — mockup .nm-card */
+.crm-board .crm-add-lead-modal {
+  width: min(420px, 92vw);
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 16px;
+  box-shadow: var(--elv-shadow-lg);
+  padding: 22px 24px;
+}
+.crm-board .crm-add-lead-modal h3 {
+  margin: 0 0 12px;
+  color: var(--elv-navy-text);
+  font-size: 17px;
+  font-weight: 750;
+}
+.crm-board .crm-add-lead-modal label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--elv-sub);
+  font-size: 12px;
+  font-weight: 700;
+}
+.crm-board .crm-add-lead-modal input,
+.crm-board .crm-add-lead-modal select,
+.crm-board .crm-add-lead-modal textarea {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+  color: var(--elv-ink);
+  font: inherit;
+  font-size: 13.5px;
+}
+.crm-board .crm-add-lead-modal input:focus,
+.crm-board .crm-add-lead-modal select:focus,
+.crm-board .crm-add-lead-modal textarea:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+.crm-board .crm-add-lead-modal button[type="submit"],
+.crm-board .crm-add-lead-modal .primary {
+  border: 1px solid transparent;
+  background: var(--elv-navy-fill);
+  color: #ffffff;
+  border-radius: 9px;
+  padding: 9px 22px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.crm-board .crm-add-lead-modal button[type="submit"]:hover,
+.crm-board .crm-add-lead-modal .primary:hover { filter: brightness(1.08); }
+
+/* Edit-details form — mockup Edit Details grid */
+.crm-board .crm-edit-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+}
+.crm-board .crm-edit-details label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--elv-sub);
+  font-size: 12px;
+  font-weight: 700;
+}
+.crm-board .crm-edit-details input,
+.crm-board .crm-edit-details select,
+.crm-board .crm-edit-details textarea {
+  width: 100%;
+  padding: 9px 11px;
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 9px;
+  color: var(--elv-ink);
+  font: inherit;
+  font-size: 13.5px;
+}
+.crm-board .crm-edit-details input:focus,
+.crm-board .crm-edit-details select:focus,
+.crm-board .crm-edit-details textarea:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+.crm-board .crm-edit-details .crm-consent-row,
+.crm-board .crm-edit-details .full-row { grid-column: 1 / -1; }
+.crm-board .crm-edit-details .crm-consent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--elv-line-2);
+  padding-top: 14px;
+}
+.crm-board .crm-edit-details .crm-consent-row input[type="checkbox"] { width: auto; accent-color: var(--elv-blue-fill); }
+@media (max-width: 760px) {
+  .crm-board .crm-edit-details { grid-template-columns: 1fr; }
+}
+
+/* Inline task add — input + navy add button */
+.crm-board .crm-task-add { display: flex; gap: 8px; margin-top: 10px; }
+.crm-board .crm-task-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 8px;
+  color: var(--elv-ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+.crm-board .crm-task-add input:focus {
+  outline: none;
+  border-color: var(--elv-blue);
+  box-shadow: 0 0 0 3px var(--elv-blue-soft);
+}
+.crm-board .crm-task-add button {
+  flex: none;
+  border: 1px solid transparent;
+  background: var(--elv-navy-fill);
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.crm-board .crm-task-add button:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* Column picker popover — small card with checkbox rows */
+.crm-board .crm-col-picker {
+  min-width: 200px;
+  padding: 8px;
+  background: var(--elv-card);
+  border: 1px solid var(--elv-line);
+  border-radius: 12px;
+  box-shadow: var(--elv-shadow-pop);
+  z-index: 60;
+}
+.crm-board .crm-col-picker label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: var(--elv-ink);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.crm-board .crm-col-picker label:hover { background: var(--elv-row-hover); }
+.crm-board .crm-col-picker input[type="checkbox"] { accent-color: var(--elv-navy-fill); }
+
+/* Custom column cells — 13px ink, mono numerals */
+.crm-board .crm-custom-col-cell {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--elv-ink);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crm-board .crm-custom-col-cell.is-number,
+.crm-board .crm-custom-col-cell[data-kind="number"] {
+  font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

@@ -4,6 +4,7 @@ import { HubDataErrorBanner } from "@/pages/real-estate-hub/_shared";
 import { LeadsSetupLaunch, useLeadsSetup } from "./onboarding";
 import { useLeadsBoardData } from "./use-leads-board-data";
 import "./leads.css";
+import "./leads-custom-cols.css";
 
 export { sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "./use-leads-board-data";
 

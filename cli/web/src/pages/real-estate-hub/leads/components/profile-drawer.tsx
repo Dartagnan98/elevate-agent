@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
-import type { ContactNote, ThreadContextResponse } from "@/lib/api-types";
+import type { ContactNote, ContactTask, CrmColumn, ThreadContextResponse } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
 import type { DraftSendLifecycleNotice } from "../draft-send-lifecycle";
 import { CRM_TEMPERATURE_LABELS, crmTemperatureForProfile } from "./crm-profile-helpers";
@@ -150,6 +150,8 @@ export function ProfileDrawer({
   onFavoriteChange,
   onTop25Change,
   onTagsChange,
+  customColumns = [],
+  onContactSaved,
   onDraftAction,
   onDraftActionComplete,
   draftSendNotices = [],
@@ -162,6 +164,8 @@ export function ProfileDrawer({
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onTop25Change?: (profile: LeadsProfile, top25: boolean) => void | Promise<void>;
   onTagsChange?: (profile: LeadsProfile, tags: string[]) => void | Promise<void>;
+  customColumns?: CrmColumn[];
+  onContactSaved?: () => void;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   draftSendNotices?: DraftSendLifecycleNotice[];
@@ -195,7 +199,100 @@ export function ProfileDrawer({
   const [criteria, setCriteria] = useState<SearchCriteriaForm>(() => parseCriteria(profile.searchCriteria));
   const [criteriaBusy, setCriteriaBusy] = useState(false);
   const [criteriaNotice, setCriteriaNotice] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState(() => ({
+    displayName: profile.name === "Unnamed contact" ? "" : profile.name,
+    primaryEmail: profile.email || "",
+    primaryPhone: profile.phone || "",
+    type: profile.contactType || "unclassified",
+    consentText: profile.consent?.text ?? true,
+    consentCall: profile.consent?.call ?? true,
+    consentEmail: profile.consent?.email ?? true,
+    customFields: { ...(profile.customFields || {}) } as Record<string, string>,
+  }));
+  const [editBusy, setEditBusy] = useState(false);
+  const [editNotice, setEditNotice] = useState<string | null>(null);
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskDue, setTaskDue] = useState("");
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
+  const [contactTasks, setContactTasks] = useState<ContactTask[] | null>(null);
   const contactId = profile.contactIds?.[0] ?? null;
+
+  useEffect(() => {
+    if (!contactId) return;
+    let cancelled = false;
+    api.getContactTasks(contactId)
+      .then((result) => { if (!cancelled) setContactTasks(result.tasks || []); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [contactId]);
+
+  const refetchTasks = async () => {
+    if (!contactId) return;
+    try {
+      const result = await api.getContactTasks(contactId);
+      setContactTasks(result.tasks || []);
+    } catch {
+      /* keep the current list on refresh failure */
+    }
+  };
+
+  const handleSaveDetails = async () => {
+    if (!contactId || editBusy) return;
+    setEditBusy(true);
+    setEditNotice(null);
+    try {
+      await api.updateSourceInboxContact({
+        contactId,
+        displayName: editForm.displayName.trim() || undefined,
+        primaryEmail: editForm.primaryEmail.trim() || undefined,
+        primaryPhone: editForm.primaryPhone.trim() || undefined,
+        type: editForm.type,
+        cannotText: !editForm.consentText,
+        cannotCall: !editForm.consentCall,
+        cannotEmail: !editForm.consentEmail,
+        customFields: editForm.customFields,
+      });
+      setEditNotice("Saved.");
+      onContactSaved?.();
+    } catch (error) {
+      setEditNotice(error instanceof Error ? error.message : "Could not save the contact.");
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const handleAddTask = async () => {
+    const title = taskTitle.trim();
+    if (!title || !contactId || taskBusy) return;
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      await api.createContactTask(contactId, title, taskDue.trim() || undefined);
+      setTaskTitle("");
+      setTaskDue("");
+      await refetchTasks();
+    } catch (error) {
+      setTaskError(error instanceof Error ? error.message : "Could not add the task.");
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
+  const handleToggleTask = async (taskId: string, done: boolean) => {
+    if (taskBusy) return;
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      await api.setContactTaskStatus(taskId, done ? "done" : "open");
+      await refetchTasks();
+    } catch (error) {
+      setTaskError(error instanceof Error ? error.message : "Could not update the task.");
+    } finally {
+      setTaskBusy(false);
+    }
+  };
   const trackedDraftSendNotice = trackedDraftId
     ? draftSendNotices.find((notice) => notice.draftId === trackedDraftId) ?? null
     : null;
@@ -466,6 +563,16 @@ export function ProfileDrawer({
                 {top25Busy ? "Saving…" : profile.top25 ? "★ In Top 25" : "☆ Add to Top 25"}
               </button>
             )}
+            {contactId && (
+              <button
+                type="button"
+                className="crm-favorite-button crm-edit-details-toggle"
+                aria-expanded={editOpen}
+                onClick={() => { setEditNotice(null); setEditOpen((open) => !open); }}
+              >
+                {editOpen ? "Close editor" : "✎ Edit details"}
+              </button>
+            )}
             <button
               ref={closeRef}
               type="button"
@@ -516,6 +623,78 @@ export function ProfileDrawer({
             </button>
           ))}
         </div>
+
+        {editOpen && contactId && (
+          <section className="crm-contact-section crm-edit-details" aria-label={`Edit details for ${profile.name}`}>
+            <div className="crm-section-heading">
+              <div><span className="crm-section-kicker">Edit details</span><h3>Contact record</h3></div>
+              <button
+                type="button"
+                className="crm-criteria-save"
+                onClick={() => void handleSaveDetails()}
+                disabled={editBusy}
+              >
+                {editBusy ? "Saving…" : "Save"}
+              </button>
+            </div>
+            {editNotice && <div className={editNotice === "Saved." ? "crm-contact-scope" : "crm-contact-error"} role="status">{editNotice}</div>}
+            <div className="crm-criteria-grid">
+              <label className="crm-criteria-field">
+                <span>Name</span>
+                <input type="text" value={editForm.displayName} onChange={(event) => setEditForm((c) => ({ ...c, displayName: event.target.value }))} />
+              </label>
+              <label className="crm-criteria-field">
+                <span>Lead type</span>
+                <select value={editForm.type} onChange={(event) => setEditForm((c) => ({ ...c, type: event.target.value }))}>
+                  <option value="buyer">Buyer</option>
+                  <option value="listing">Seller</option>
+                  <option value="other">Other</option>
+                  <option value="unclassified">Unclassified</option>
+                </select>
+              </label>
+              <label className="crm-criteria-field">
+                <span>Email</span>
+                <input type="email" value={editForm.primaryEmail} onChange={(event) => setEditForm((c) => ({ ...c, primaryEmail: event.target.value }))} />
+              </label>
+              <label className="crm-criteria-field">
+                <span>Phone</span>
+                <input type="tel" value={editForm.primaryPhone} onChange={(event) => setEditForm((c) => ({ ...c, primaryPhone: event.target.value }))} />
+              </label>
+              {customColumns.map((column) => (
+                <label key={column.key} className="crm-criteria-field">
+                  <span>{column.label}</span>
+                  <input
+                    type="text"
+                    value={editForm.customFields[column.key] || ""}
+                    onChange={(event) => setEditForm((c) => ({
+                      ...c,
+                      customFields: { ...c.customFields, [column.key]: event.target.value },
+                    }))}
+                  />
+                </label>
+              ))}
+              <div className="crm-criteria-field crm-criteria-notes">
+                <span>Consent to contact · applied to every send</span>
+                <div className="crm-consent-toggles">
+                  {([
+                    ["consentCall", "Call"],
+                    ["consentText", "Text"],
+                    ["consentEmail", "Email"],
+                  ] as const).map(([key, label]) => (
+                    <label key={key} className="crm-consent-toggle">
+                      <input
+                        type="checkbox"
+                        checked={editForm[key]}
+                        onChange={(event) => setEditForm((c) => ({ ...c, [key]: event.target.checked }))}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
         {tab !== "overview" && tab !== "searches" && (
           <div
@@ -789,17 +968,55 @@ export function ProfileDrawer({
             </section>
 
             <section className="crm-contact-section">
-              <div className="crm-section-heading"><h3>Tasks</h3><span className="mono">{context?.tasks.length ?? 0}</span></div>
-              {(context?.tasks.length ?? 0) > 0 ? (
+              <div className="crm-section-heading"><h3>Tasks</h3><span className="mono">{(contactId ? contactTasks?.length : context?.tasks.length) ?? 0}</span></div>
+              {taskError && <div className="crm-contact-error" role="alert">{taskError}</div>}
+              {((contactId ? contactTasks : context?.tasks)?.length ?? 0) > 0 ? (
                 <ul className="crm-task-list">
-                  {context?.tasks.map((task) => (
-                    <li key={task.id}>
-                      <span className={`crm-task-state ${task.status === "done" ? "done" : ""}`} aria-hidden="true" />
-                      <div><strong>{task.title || "Task"}</strong><span>{task.summary || formatTime(task.dueAt || task.timestamp)}</span></div>
-                    </li>
-                  ))}
+                  {(contactId ? contactTasks || [] : context?.tasks || []).map((task) => {
+                    const done = task.status === "done";
+                    return (
+                      <li key={task.id}>
+                        <input
+                          type="checkbox"
+                          className="crm-task-check"
+                          checked={done}
+                          disabled={taskBusy}
+                          aria-label={done ? `Reopen task: ${task.title || "Task"}` : `Complete task: ${task.title || "Task"}`}
+                          onChange={() => void handleToggleTask(task.id, !done)}
+                        />
+                        <div>
+                          <strong className={done ? "crm-task-done" : undefined}>{task.title || "Task"}</strong>
+                          <span>{task.summary || formatTime(task.dueAt || task.timestamp)}</span>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
-              ) : <p className="crm-rail-empty">No tasks on this conversation.</p>}
+              ) : <p className="crm-rail-empty">{contactId ? "No tasks yet — add the first one below." : "No tasks on this conversation."}</p>}
+              {contactId && (
+                <div className="crm-task-add">
+                  <input
+                    type="text"
+                    value={taskTitle}
+                    placeholder="Add a task…"
+                    aria-label={`New task for ${profile.name}`}
+                    onChange={(event) => setTaskTitle(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") void handleAddTask(); }}
+                  />
+                  <input
+                    type="text"
+                    className="crm-task-add-due"
+                    value={taskDue}
+                    placeholder="When (e.g. Fri · call)"
+                    aria-label="When the task is due"
+                    onChange={(event) => setTaskDue(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") void handleAddTask(); }}
+                  />
+                  <button type="button" disabled={taskBusy || !taskTitle.trim()} onClick={() => void handleAddTask()}>
+                    {taskBusy ? "…" : "＋ Add"}
+                  </button>
+                </div>
+              )}
             </section>
           </aside>
         </div>

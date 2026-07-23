@@ -182,6 +182,9 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       favoritedAt: p.favoritedAt ?? null,
       top25: Boolean(p.top25),
       searchCriteria: p.searchCriteria ?? null,
+      customFields: p.customFields || {},
+      contactType: p.contactType ?? null,
+      consent: p.consent,
     };
   });
 }

@@ -867,6 +867,79 @@ def set_contact_search_criteria(
     return criteria
 
 
+_OPERATOR_EDITABLE_TEXT = {
+    "display_name", "primary_email", "primary_phone",
+}
+_OPERATOR_EDITABLE_BOOL = {"cannot_text", "cannot_call", "cannot_email"}
+_CONTACT_TYPES = {"unclassified", "buyer", "listing", "other"}
+
+
+def update_contact_details(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    *,
+    display_name: str | None = None,
+    primary_email: str | None = None,
+    primary_phone: str | None = None,
+    type: str | None = None,
+    cannot_text: bool | None = None,
+    cannot_call: bool | None = None,
+    cannot_email: bool | None = None,
+    custom_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Operator edits from the contact card's Edit Details form (migration 0036).
+
+    Partial update: None means "don't touch". The cannot_* consent flags feed
+    the send engine, so flipping one here really does hold that channel.
+    """
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+
+    sets: list[str] = []
+    args: list[Any] = []
+    for column, value in (
+        ("display_name", display_name),
+        ("primary_email", primary_email),
+        ("primary_phone", primary_phone),
+    ):
+        if value is not None:
+            sets.append(f"{column} = ?")
+            args.append(str(value).strip() or None)
+    if type is not None:
+        norm = str(type).strip().lower()
+        if norm not in _CONTACT_TYPES:
+            raise ValueError(f"invalid contact type {type!r}")
+        sets.append("type = ?")
+        args.append(norm)
+    for column, value in (
+        ("cannot_text", cannot_text),
+        ("cannot_call", cannot_call),
+        ("cannot_email", cannot_email),
+    ):
+        if value is not None:
+            sets.append(f"{column} = ?")
+            args.append(1 if value else 0)
+    if custom_fields is not None:
+        if not isinstance(custom_fields, dict):
+            raise ValueError("customFields must be an object")
+        cleaned = {
+            str(k).strip(): str(v).strip()
+            for k, v in custom_fields.items()
+            if str(k).strip()
+        }
+        sets.append("custom_fields_json = ?")
+        args.append(json.dumps(cleaned, ensure_ascii=False) if cleaned else None)
+
+    if not sets:
+        return contact
+    sets.append("updated_at = ?")
+    args.append(now_iso())
+    args.append(contact_id)
+    conn.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id = ?", args)
+    return get_contact(conn, contact_id) or contact
+
+
 def set_pipeline_status(
     conn: sqlite3.Connection,
     contact_id: str,

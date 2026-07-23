@@ -951,3 +951,178 @@ html[data-app-theme="dark"] .reporting-header-context {
     animation: none;
   }
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Elevation brand skin — design/crm-redesign/03-reporting.html.
+   Extends the audited --report-* palette above (which stays untouched and
+   AA-safe); light AND medium app themes map to the mockup light palette,
+   dark maps to the mockup dark palette. Appended last to win the cascade.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.reporting-root {
+  /* Brand primitives — dark defaults before the theme attribute mounts. */
+  --elvr-paper: #0e121b;
+  --elvr-card: #161c29;
+  --elvr-ink: #e7eaf2;
+  --elvr-navy: #cdd8ef;
+  --elvr-navy-fill: #33477a;
+  --elvr-line: #28303f;
+  --elvr-line-2: #1b2130;
+  --elvr-good: #5cc08a;
+  --elvr-good-text: #5cc08a;
+  --elvr-warn: #e0a94e;
+  --elvr-warn-text: #e0a94e;
+  --elvr-grid: rgba(205, 216, 239, 0.1);
+  --elvr-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --elvr-shadow-lg: 0 18px 54px rgba(0, 0, 0, 0.5);
+
+  /* Route-scoped aliases: card/ink chrome inside reporting only. */
+  --bg-1: var(--elvr-card);
+  --bg-2: var(--elvr-card);
+  --bg-3: var(--elvr-paper);
+  --fg: var(--elvr-ink);
+  --status-done: var(--elvr-good);
+  --report-line: var(--elvr-line);
+  --report-bar-track: var(--elvr-line-2);
+  --report-grid-line: var(--elvr-grid);
+}
+
+:root[data-app-theme="light"] .reporting-root,
+html[data-app-theme="light"] .reporting-root,
+:root[data-app-theme="medium"] .reporting-root,
+html[data-app-theme="medium"] .reporting-root {
+  --elvr-paper: #eef1f6;
+  --elvr-card: #ffffff;
+  --elvr-ink: #1c2438;
+  --elvr-navy: #182848;
+  --elvr-navy-fill: #182848;
+  --elvr-line: #e3e6ee;
+  --elvr-line-2: #eef0f5;
+  --elvr-good: #3f9d6b;
+  --elvr-good-text: #2e7d54;
+  --elvr-warn: #c98a2e;
+  --elvr-warn-text: #8a5f1e;
+  --elvr-grid: rgba(24, 40, 72, 0.08);
+  --elvr-shadow: 0 1px 2px rgba(24, 40, 72, 0.05), 0 6px 20px rgba(24, 40, 72, 0.06);
+  --elvr-shadow-lg: 0 16px 50px rgba(24, 40, 72, 0.24);
+}
+
+:root[data-app-theme="dark"] .reporting-root,
+html[data-app-theme="dark"] .reporting-root {
+  --elvr-paper: #0e121b;
+  --elvr-card: #161c29;
+  --elvr-ink: #e7eaf2;
+  --elvr-navy: #cdd8ef;
+  --elvr-navy-fill: #33477a;
+  --elvr-line: #28303f;
+  --elvr-line-2: #1b2130;
+  --elvr-good: #5cc08a;
+  --elvr-good-text: #5cc08a;
+  --elvr-warn: #e0a94e;
+  --elvr-warn-text: #e0a94e;
+  --elvr-grid: rgba(205, 216, 239, 0.1);
+  --elvr-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --elvr-shadow-lg: 0 18px 54px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Page chrome ──────────────────────────────────────────────────────── */
+.reporting-root h1 {
+  color: var(--elvr-navy);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.report-goalbtn {
+  background: var(--elvr-navy-fill);
+  border-radius: 9px;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.report-goalbtn:hover {
+  background: var(--elvr-navy-fill);
+  filter: brightness(1.08);
+}
+
+.report-range {
+  background: var(--elvr-card);
+  border-color: var(--elvr-line);
+  border-radius: 9px;
+  box-shadow: var(--elvr-shadow);
+}
+
+/* ── Cards — mockup white card, 1px line, 12px radius, soft shadow ────── */
+.report-goalcard,
+.report-kpi,
+.report-mathcard,
+.report-panel,
+.report-loading {
+  background: var(--elvr-card);
+  border: 1px solid var(--elvr-line);
+  border-radius: 12px;
+  box-shadow: var(--elvr-shadow);
+}
+
+.report-mathcard {
+  border-left: 3px solid var(--report-terracotta);
+}
+
+.report-goalcard-hd h2,
+.report-math-hd h2,
+.report-panel h2 {
+  color: var(--elvr-navy);
+  font-weight: 700;
+}
+
+/* ── KPI numbers — navy, weight 750, sans (mockup .kpi .n) ────────────── */
+.report-kpi-value {
+  color: var(--elvr-navy);
+  font-family: var(--theme-font-sans);
+  font-size: 24px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.report-kpi.is-unavailable .report-kpi-value {
+  color: var(--fg-muted);
+}
+
+/* ── Goal bars — #3f9d6b good / #5E8AD0 data / #c98a2e warn ───────────── */
+.report-goal-bar > span.is-good {
+  background: var(--elvr-good);
+}
+
+.report-goal-bar > span.is-neutral {
+  background: var(--report-blue);
+}
+
+.report-goal-bar > span.is-warn {
+  background: var(--elvr-warn);
+}
+
+.report-goal-pct.is-good {
+  color: var(--elvr-good-text);
+}
+
+.report-goal-pct.is-warn {
+  color: var(--elvr-warn-text);
+}
+
+/* ── Activity math — terracotta hero numbers (large text, mockup .br-n) ─ */
+.report-bigratio-n {
+  color: var(--report-terracotta);
+}
+
+.report-mathstep-n {
+  color: var(--elvr-navy);
+  font-weight: 750;
+}
+
+.report-mathstep.is-goal .report-mathstep-n {
+  color: var(--report-terracotta);
+}
+
+.report-mathrow {
+  background: var(--elvr-paper);
+  border-radius: 10px;
+}

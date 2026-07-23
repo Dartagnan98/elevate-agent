@@ -60,7 +60,9 @@ import type {
   TodayDashboardResponse,
   SourceInboxProfileStatus,
   ContactNote,
+  ContactTask,
   AccountGoals,
+  CrmColumn,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
   IntegrationTestResponse,
@@ -2312,6 +2314,60 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contactId, criteria }),
     }, 20_000, "Search criteria save timed out. Refresh the contact before trying again."),
+  createSourceInboxLead: (lead: {
+    name: string;
+    email?: string;
+    phone?: string;
+    type?: string;
+  }) =>
+    fetchJSONWithTimeout<{ ok: boolean; contact: { id: string } }>(
+      "/api/source-inbox/lead",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(lead),
+      }, 20_000, "Lead create timed out. Refresh the list before trying again.",
+    ),
+  updateSourceInboxContact: (update: {
+    contactId: string;
+    displayName?: string;
+    primaryEmail?: string;
+    primaryPhone?: string;
+    type?: string;
+    cannotText?: boolean;
+    cannotCall?: boolean;
+    cannotEmail?: boolean;
+    customFields?: Record<string, string>;
+  }) =>
+    fetchJSONWithTimeout<{ ok: boolean }>("/api/source-inbox/contact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    }, 20_000, "Contact update timed out. Refresh the contact before trying again."),
+  getContactTasks: (contactId: string, limit = 200) =>
+    fetchJSONWithTimeout<{ tasks: ContactTask[] }>(
+      `/api/source-inbox/tasks/${encodeURIComponent(contactId)}?limit=${limit}`,
+    ),
+  createContactTask: (contactId: string, title: string, dueLabel?: string) =>
+    fetchJSONWithTimeout<{ ok: boolean; taskId: string }>("/api/source-inbox/task", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contactId, title, dueLabel: dueLabel || null }),
+    }, 20_000, "Task create timed out. Refresh the contact before trying again."),
+  setContactTaskStatus: (taskId: string, status: "open" | "done") =>
+    fetchJSONWithTimeout<{ ok: boolean }>("/api/source-inbox/task/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskId, status }),
+    }, 20_000, "Task update timed out. Refresh the contact before trying again."),
+  getCrmColumns: () =>
+    fetchJSONWithTimeout<{ columns: CrmColumn[] }>("/api/crm/columns"),
+  putCrmColumns: (columns: CrmColumn[]) =>
+    fetchJSONWithTimeout<{ ok: boolean; columns: CrmColumn[] }>("/api/crm/columns", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ columns }),
+    }, 20_000, "Column update timed out. Reload the list before trying again."),
   getCrmGoals: () =>
     fetchJSONWithTimeout<AccountGoals>("/api/crm/goals"),
   putCrmGoals: (goals: {

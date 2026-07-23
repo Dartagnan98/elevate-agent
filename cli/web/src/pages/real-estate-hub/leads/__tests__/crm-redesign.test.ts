@@ -303,7 +303,9 @@ describe("CRM truth guards", () => {
     const board = readFileSync(new URL("../components/leads-board.tsx", import.meta.url), "utf8");
     expect(board).not.toContain("DEFAULT_PROFILES");
     expect(board).not.toContain("DEFAULT_DRAFTS");
-    expect(board).toContain("not yet an all-contacts CRM directory");
+    // Migration 0036: the reader appends CRM-only/manual contacts, so the
+    // list is a full directory and the note must say so honestly.
+    expect(board).toContain("Full directory: every contact on record is listed");
   });
 
   it("offers Send later now that the backend persists scheduledAt (next_retry_at)", () => {

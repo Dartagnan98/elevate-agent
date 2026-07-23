@@ -38,6 +38,7 @@ from elevate_cli.data.contacts import (
     set_lead_profile_top25,
     set_pipeline_status,
     unpark_contact,
+    update_contact_details,
     update_contact_stage,
     update_flags,
     upsert_contact,
@@ -295,7 +296,8 @@ __all__ = [
     "get_contact", "park_contact", "set_contact_search_criteria",
     "set_contact_tags", "set_lead_profile_favorite",
     "set_lead_profile_top25", "set_pipeline_status", "unpark_contact",
-    "update_contact_stage", "update_flags", "upsert_contact",
+    "update_contact_details", "update_contact_stage", "update_flags",
+    "upsert_contact",
     # identities
     "add_identity", "list_open_conflicts", "merge_contacts",
     "record_identity_conflict", "resolve_identity",

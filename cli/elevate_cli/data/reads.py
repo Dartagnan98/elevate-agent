@@ -437,6 +437,76 @@ def db_private_search_buyers(
 # ─── Source inbox ──────────────────────────────────────────────────────
 
 
+def _directory_profiles_for_missing_contacts(
+    thread_profiles: list[dict[str, Any]], *, limit: int = 3000
+) -> list[dict[str, Any]]:
+    """Full-CRM directory rows (migration 0036): contacts with no open
+    conversation still appear on /leads as synthesized profiles.
+
+    Thread-derived profiles stay authoritative — a contact already covered by
+    one is skipped. Synthesized rows carry the contact identity only; heat
+    comes from the AI-maintained contact flags, and hasConversation=False so
+    the card explains that no thread is attached.
+    """
+    covered: set[str] = set()
+    for profile in thread_profiles:
+        for contact_id in profile.get("contactIds", []):
+            if str(contact_id or "").strip():
+                covered.add(str(contact_id))
+
+    out: list[dict[str, Any]] = []
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, display_name, primary_email, primary_phone,
+                   stage, heat_label, heat_score, last_activity_at, updated_at
+            FROM contacts
+            ORDER BY COALESCE(last_activity_at, updated_at) DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    for row in rows:
+        contact_id = str(row["id"])
+        if contact_id in covered:
+            continue
+        email = str(row["primary_email"] or "").strip()
+        phone = str(row["primary_phone"] or "").strip()
+        verifiers = []
+        if email:
+            verifiers.append({"kind": "email", "value": email, "key": f"email:{email.lower()}"})
+        if phone:
+            verifiers.append({"kind": "phone", "value": phone, "key": f"phone:{phone}"})
+        heat_score = _safe_int(row["heat_score"])
+        out.append({
+            "id": contact_id,
+            "displayName": row["display_name"] or email or phone or "Unnamed contact",
+            "sources": [],
+            "sourceIds": [],
+            "channels": [],
+            "contactIds": [contact_id],
+            "conversationIds": [],
+            "verifiers": verifiers,
+            "phones": [phone] if phone else [],
+            "emails": [email] if email else [],
+            "threadIds": [],
+            "threadCount": 0,
+            "latestText": "",
+            "latestAt": row["last_activity_at"] or row["updated_at"],
+            "heatScore": heat_score,
+            "heatLabel": row["heat_label"] or "normal",
+            "hasCrm": True,
+            "hasConversation": False,
+            "isPotentialLead": False,
+            "crmStage": row["stage"],
+            "leadSource": None,
+            "tags": [],
+            "status": None,
+            "statusUpdatedAt": None,
+        })
+    return out
+
+
 def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
     """DB-derived equivalent of
     :func:`elevate_cli.source_connectors.build_source_inbox_response`.
@@ -847,6 +917,9 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             draft_id=draft.get("id") or draft.get("taskId"),
         )
     profiles = _profiles_from_threads(threads, source_by_id)
+    profiles.extend(
+        _directory_profiles_for_missing_contacts(profiles, limit=max(safe_limit, 3000))
+    )
     profile_contact_ids = sorted({
         str(contact_id)
         for profile in profiles
@@ -895,7 +968,8 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             for row in conn.execute(
                 f"""
                 SELECT id, pipeline_status, pipeline_status_set_at,
-                       tags_json, search_criteria_json
+                       tags_json, search_criteria_json, custom_fields_json,
+                       type, cannot_text, cannot_call, cannot_email
                 FROM contacts
                 WHERE id IN ({placeholders})
                 """,
@@ -910,6 +984,21 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                             tags = [str(t) for t in parsed if str(t).strip()]
                     except (ValueError, TypeError):
                         tags = []
+                custom_fields: dict[str, str] = {}
+                raw_custom = (
+                    row["custom_fields_json"]
+                    if "custom_fields_json" in row.keys()
+                    else None
+                )
+                if raw_custom:
+                    try:
+                        parsed_custom = json.loads(raw_custom)
+                        if isinstance(parsed_custom, dict):
+                            custom_fields = {
+                                str(k): str(v) for k, v in parsed_custom.items()
+                            }
+                    except (ValueError, TypeError):
+                        custom_fields = {}
                 profile_status_by_contact[str(row["id"])] = {
                     "status": row["pipeline_status"],
                     "updated_at": row["pipeline_status_set_at"],
@@ -919,6 +1008,13 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                         if "search_criteria_json" in row.keys()
                         else None
                     ),
+                    "custom_fields": custom_fields,
+                    "contact_type": row["type"],
+                    "consent": {
+                        "text": not _safe_int(row["cannot_text"]),
+                        "call": not _safe_int(row["cannot_call"]),
+                        "email": not _safe_int(row["cannot_email"]),
+                    },
                 }
         if profile_ids:
             placeholders = ",".join("?" for _ in profile_ids)
@@ -941,6 +1037,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         db_status = None
         db_tags: list[str] = []
         db_search_criteria = None
+        db_custom_fields: dict[str, str] = {}
         for contact_id in profile.get("contactIds", []):
             candidate = profile_status_by_contact.get(str(contact_id))
             if candidate:
@@ -948,6 +1045,8 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                     db_tags = candidate["tags"]
                 if candidate.get("search_criteria") and db_search_criteria is None:
                     db_search_criteria = candidate["search_criteria"]
+                if candidate.get("custom_fields") and not db_custom_fields:
+                    db_custom_fields = candidate["custom_fields"]
             if candidate and candidate.get("status") and db_status is None:
                 db_status = candidate
         profile["status"] = db_status.get("status") if db_status else None
@@ -956,6 +1055,13 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             profile["tags"] = sorted({*[str(t) for t in profile.get("tags", []) if t], *db_tags})
         if db_search_criteria is not None:
             profile["searchCriteria"] = db_search_criteria
+        profile["customFields"] = db_custom_fields
+        for contact_id in profile.get("contactIds", []):
+            candidate = profile_status_by_contact.get(str(contact_id))
+            if candidate and candidate.get("consent") is not None:
+                profile["contactType"] = candidate.get("contact_type")
+                profile["consent"] = candidate["consent"]
+                break
         flag = profile_flags_by_id.get(str(profile.get("id") or ""))
         is_favorite = bool(flag and flag["favorite"])
         profile["favorite"] = is_favorite

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 
+import type { CrmColumn } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
 import {
   crmTemperatureForProfile,
@@ -25,6 +26,7 @@ function ProfileRow({
   favoriteBusy,
   selected,
   onToggleSelect,
+  customColumns = [],
 }: {
   profile: LeadsProfile;
   draft?: LeadsDraft;
@@ -36,6 +38,7 @@ function ProfileRow({
   favoriteBusy?: boolean;
   selected?: boolean;
   onToggleSelect?: (profile: LeadsProfile) => void;
+  customColumns?: CrmColumn[];
 }) {
   const heatTone = crmTemperatureForProfile(profile);
   const initials = profile.name
@@ -115,6 +118,14 @@ function ProfileRow({
           <span className="lb-profile-preview">{profile.lastMsg || "No next action recorded"}</span>
         )}
       </div>
+      {customColumns.map((column) => {
+        const value = profile.customFields?.[column.key] || "";
+        return (
+          <div key={column.key} className={"crm-custom-col-cell" + (value ? "" : " empty")}>
+            {value || "—"}
+          </div>
+        );
+      })}
       <div className="lb-profile-touch-cell mono">{profile.lastTouch || profile.age}</div>
       <button
         type="button"
@@ -136,6 +147,7 @@ export function ProfilesList({
   temperatureFilter = "all",
   tagFilters = [],
   searchQuery = "",
+  customColumns = [],
   loading = false,
   onOpen,
   onStatusChange,
@@ -151,6 +163,7 @@ export function ProfilesList({
   temperatureFilter?: CrmTemperature;
   tagFilters?: string[];
   searchQuery?: string;
+  customColumns?: CrmColumn[];
   loading?: boolean;
   onOpen: (p: LeadsProfile) => void;
   onStatusChange: (profile: LeadsProfile, value: string) => void;
@@ -353,6 +366,9 @@ export function ProfilesList({
         <span>Temp</span>
         <span>Source</span>
         <span>Next / AI</span>
+        {customColumns.map((column) => (
+          <span key={column.key} className="crm-custom-col-head">{column.label}</span>
+        ))}
         <span className="lb-profile-touch-col">Last touch</span>
         <span></span>
       </div>
@@ -374,6 +390,7 @@ export function ProfilesList({
                 favoriteBusy={Boolean(favoriteBusy[profile.id])}
                 selected={selectedIds.has(profile.id)}
                 onToggleSelect={toggleSelect}
+                customColumns={customColumns}
               />
               {draft && draftExpanded && (
                 <div className="lb-profile-inline-draft">
