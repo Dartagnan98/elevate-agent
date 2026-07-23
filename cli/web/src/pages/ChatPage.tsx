@@ -1766,6 +1766,7 @@ function sessionStopDisposition(
 export const __chatPageTestables = {
   activeSnapshotAlreadyCompleted,
   buildBreakdownSteps,
+  completedAnswerLost,
   contextRingTitle,
   defaultActivityDigestOpen,
   describeToolGroup,
@@ -2422,6 +2423,39 @@ function settleQueuedDelivery(
   acknowledged: boolean,
 ): QueuedInput[] {
   return acknowledged ? items.filter((item) => item.id !== queuedId) : items;
+}
+
+/** Would this messages transition EVICT a rendered, SETTLED assistant
+ * answer? Mirrors the blankTrace observer at the render layer: a prev
+ * assistant with >80 non-whitespace content chars counts as lost when its
+ * content fingerprint is absent from `next` (so an id remap — the same
+ * answer re-keyed on resume — is NOT a loss) AND its own id is either gone
+ * or shrunk past half. Only settled answers are protected — a still
+ * `streaming` message is exempt so an in-flight placeholder can be replaced
+ * or cleaned up (manual-compaction cancel, stub removal) and a growing
+ * streamed answer is never flagged. Used as a SILENT guard so a completed
+ * answer can never transiently vanish during close / new-chat clear /
+ * resume. */
+function completedAnswerLost(
+  prev: ChatMessage[],
+  next: ChatMessage[],
+): boolean {
+  const nonspace = (s: string | undefined) => (s ?? "").replace(/\s+/g, "").length;
+  const cfp = (m: ChatMessage) =>
+    `${m.role}:${(m.content ?? "").replace(/\s+/g, " ").trim().slice(0, 160)}`;
+  const nextByCfp = new Set(next.map(cfp));
+  const nextById = new Map(next.map((m) => [m.id, m] as const));
+  for (const pm of prev) {
+    if (pm.role !== "assistant") continue;
+    if (pm.status === "streaming") continue; // in-flight placeholder — replaceable
+    const prevLen = nonspace(pm.content);
+    if (prevLen <= 80) continue;
+    if (nextByCfp.has(cfp(pm))) continue; // content preserved (id remap) — not a loss
+    const now = nextById.get(pm.id);
+    const nowLen = now ? nonspace(now.content) : -1;
+    if (nowLen === -1 || nowLen < prevLen * 0.5) return true;
+  }
+  return false;
 }
 
 /** Durable steer id for a queued strip item. The "steer." prefix is the
@@ -3840,6 +3874,23 @@ export default function ChatPage() {
           }
           // Deliberate new chat — allow the intentional clear.
           blankTrace("list cleared for new chat", { prevCount: prev.length });
+        }
+        // Partial-drop guard (SILENT). The empty-wipe branch above only
+        // catches populated -> []. A transition that keeps the user row but
+        // evicts the COMPLETED assistant answer ([user, answer] -> [user]) —
+        // the transient the live-smoke's blankTrace observer caught during
+        // close -> resume -> close — slips past a length-0 check. Block it
+        // for the SAME reason and with the SAME deliberate-navigation
+        // exception, but WITHOUT tracing: a blankTrace here would itself emit
+        // the [BLANK-TRACE] token the release smoke treats as fatal, and the
+        // whole point is that nothing was actually lost — keep what is on
+        // screen and let the correct hydrate under the right id re-commit.
+        if (
+          !wipeAllowed &&
+          Array.isArray(next) &&
+          completedAnswerLost(prev, next)
+        ) {
+          return prev;
         }
         return next;
       });

@@ -4681,6 +4681,23 @@ html[data-app-theme="dark"] .crm-board {
   .leads-setup-inline { align-items: stretch; flex-direction: column; margin-inline: 14px; }
   .leads-setup-inline .lb-btn { width: 100%; min-height: 44px; }
 }
+/* Desktop (≥1024px = the app's `lg` breakpoint, where the outer nav sidebar is
+   docked/sticky). The contact drawer backdrop is `position: fixed; inset: 0`, so it
+   spans the whole viewport and centers the card across the full width — which puts
+   the card's left edge (avatar, name, tabs) UNDERNEATH the fixed left nav sidebar
+   (width: --sidebar-w + gap*2). Push the backdrop's left edge past the sidebar so
+   the card centers within the content area, and cap the card width to the remaining
+   space (minus the 44px = 2×22px backdrop padding) so it can never underlap the
+   sidebar at any desktop width. Below 1024px the nav sidebar is off-canvas, so the
+   backdrop stays full-width (inset:0) and the ≤860px fullscreen variant is untouched. */
+@media (min-width: 1024px) {
+  .crm-contact-backdrop {
+    left: calc(var(--sidebar-w) + var(--sidebar-gap) * 2);
+  }
+  .crm-contact-card {
+    width: min(1180px, calc(100vw - (var(--sidebar-w) + var(--sidebar-gap) * 2) - 44px));
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .crm-board *,
   .crm-contact-backdrop * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
