@@ -450,7 +450,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         "src/pages/real-estate-hub/admin/__tests__/forms-provider-option-b.test.ts",
         "src/lib/__tests__/approval-ui-policy.test.ts",
       ),
-      resultContract: { kind: "vitest", minimum_tests: 147, expected_tests: 147 },
+      resultContract: { kind: "vitest", minimum_tests: 148, expected_tests: 148 },
     },
     {
       id: "web-production-build",
