@@ -68,6 +68,9 @@ const COMMANDS = {
 };
 
 const AGENT_ACTION_COMMANDS = new Set([
+  "new_tab",
+  "close_tab",
+  "select_tab",
   "navigate",
   "click",
   "drag",

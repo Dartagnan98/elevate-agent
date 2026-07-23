@@ -131,6 +131,78 @@ test("embedded browser identity omits Electron and app-brand tokens", () => {
   assert.doesNotMatch(userAgent, /Electron|Elevate/i);
 });
 
+test("agent tab actions activate the matching browser workspace", async (t) => {
+  const elevateHome = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-browser-tabs-"));
+  const calls = [];
+  const pane = {
+    newTab: (url, sessionKey) => {
+      calls.push({ action: "newTab", url, sessionKey });
+      return "tab_2";
+    },
+    selectTab: (tabId, sessionKey) => {
+      calls.push({ action: "selectTab", tabId, sessionKey });
+      return true;
+    },
+    closeTab: (tabId, sessionKey) => {
+      calls.push({ action: "closeTab", tabId, sessionKey });
+      return true;
+    },
+    noteAgentAction: (sessionKey, method) => {
+      calls.push({ action: "noteAgentAction", sessionKey, method });
+    },
+  };
+  const controller = startControlServer({
+    pane,
+    elevateHome,
+    log: { info() {}, warn() {} },
+  });
+  t.after(() => {
+    controller.stop();
+    fs.rmSync(elevateHome, { recursive: true, force: true });
+  });
+
+  const endpoint = await waitForEndpoint(
+    path.join(elevateHome, "browser-pane.json"),
+  );
+  await rpc(endpoint, "new_tab", {
+    sessionKey: "chat-tabs",
+    url: "https://example.com/",
+  });
+  await rpc(endpoint, "select_tab", {
+    sessionKey: "chat-tabs",
+    tabId: "tab_2",
+  });
+  await rpc(endpoint, "close_tab", {
+    sessionKey: "chat-tabs",
+    tabId: "tab_2",
+  });
+
+  assert.deepEqual(calls, [
+    {
+      action: "noteAgentAction",
+      sessionKey: "chat-tabs",
+      method: "new_tab",
+    },
+    {
+      action: "newTab",
+      url: "https://example.com/",
+      sessionKey: "chat-tabs",
+    },
+    {
+      action: "noteAgentAction",
+      sessionKey: "chat-tabs",
+      method: "select_tab",
+    },
+    { action: "selectTab", tabId: "tab_2", sessionKey: "chat-tabs" },
+    {
+      action: "noteAgentAction",
+      sessionKey: "chat-tabs",
+      method: "close_tab",
+    },
+    { action: "closeTab", tabId: "tab_2", sessionKey: "chat-tabs" },
+  ]);
+});
+
 test("embedded browser bounds cannot escape the app content area", () => {
   assert.deepEqual(
     clampPaneBounds(

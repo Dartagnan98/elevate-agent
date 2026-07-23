@@ -99,6 +99,16 @@ def test_realtor_advice_questions_drafts_and_previews_stay_conversational(user_r
     assert run_agent._classify_action_obligation(user_request) is None
 
 
+def test_browser_acceptance_url_does_not_create_document_obligation():
+    request = (
+        "Run a signed-app browser acceptance test on "
+        "https://www.selenium.dev/selenium/web/web-form.html and submit it"
+    )
+
+    assert run_agent._classify_action_obligation(request) is None
+    assert run_agent._classify_action_obligations(request) == []
+
+
 def test_compound_realtor_request_builds_one_entry_per_physical_side_effect():
     request = "Create MLC and FINTRAC PDFs, attach them, and email the package"
 

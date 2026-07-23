@@ -331,6 +331,18 @@ def browser_cdp(
         JSON string ``{"success": True, "method": ..., "result": {...}}`` on
         success, or ``{"error": "..."}`` on failure.
     """
+    try:
+        from tools.browser_pane import is_available as embedded_pane_available
+
+        if embedded_pane_available():
+            return tool_error(
+                "Raw CDP is disabled while Elevate's embedded browser is active "
+                "because a separate CDP endpoint would target the wrong browser. "
+                "Use the visible browser tools instead."
+            )
+    except ImportError:
+        pass
+
     # --- Route iframe-scoped calls through the supervisor ---------------
     if frame_id:
         return _browser_cdp_via_supervisor(
@@ -542,13 +554,14 @@ def _browser_cdp_check() -> bool:
     """
     try:
         from tools.browser_tool import (  # type: ignore[import-not-found]
+            _embedded_browser_available,
             _get_cdp_override,
             check_browser_requirements,
         )
     except ImportError as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp check: browser_tool import failed: %s", exc)
         return False
-    if not check_browser_requirements():
+    if _embedded_browser_available() or not check_browser_requirements():
         return False
     return bool(_get_cdp_override())
 

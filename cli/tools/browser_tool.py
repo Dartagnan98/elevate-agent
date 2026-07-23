@@ -3168,7 +3168,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         if is_first_nav and "features" in session_info:
             features = session_info["features"]
             active_features = [k for k, v in features.items() if v]
-            if not features.get("proxies"):
+            if not features.get("proxies") and not features.get("embedded_pane"):
                 response["stealth_warning"] = (
                     "Running WITHOUT residential proxies. Bot detection may be more aggressive. "
                     "Consider upgrading Browserbase plan for proxy support."
@@ -3251,15 +3251,16 @@ def browser_snapshot(
         # Merge supervisor state (pending dialogs + frame tree) when a CDP
         # supervisor is attached to this task. No-op otherwise. See
         # website/docs/developer-guide/browser-supervisor.md.
-        try:
-            from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-            _supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
-            if _supervisor is not None:
-                _sv_snap = _supervisor.snapshot()
-                if _sv_snap.active:
-                    response.update(_sv_snap.to_dict())
-        except Exception as _sv_exc:
-            logger.debug("supervisor snapshot merge failed: %s", _sv_exc)
+        if not _embedded_browser_available():
+            try:
+                from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
+                _supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
+                if _supervisor is not None:
+                    _sv_snap = _supervisor.snapshot()
+                    if _sv_snap.active:
+                        response.update(_sv_snap.to_dict())
+            except Exception as _sv_exc:
+                logger.debug("supervisor snapshot merge failed: %s", _sv_exc)
 
         return json.dumps(response, ensure_ascii=False)
     else:
@@ -3579,44 +3580,45 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     # spawning an ``agent-browser eval`` CLI process.  Falls through to the
     # subprocess path on any error so behaviour is unchanged when no
     # supervisor is running (e.g. plain agent-browser without a CDP backend).
-    try:
-        from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-        supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
-        if supervisor is not None:
-            sup_result = supervisor.evaluate_runtime(expression)
-            if sup_result.get("ok"):
-                raw_result = sup_result.get("result")
-                # Match the agent-browser path: if the value is a JSON string,
-                # parse it so the model gets structured data.
-                parsed = raw_result
-                if isinstance(raw_result, str):
-                    try:
-                        parsed = json.loads(raw_result)
-                    except (json.JSONDecodeError, ValueError):
-                        pass  # keep as string
-                response = {
-                    "success": True,
-                    "result": parsed,
-                    "result_type": type(parsed).__name__,
-                    "method": "cdp_supervisor",
-                }
-                return json.dumps(response, ensure_ascii=False, default=str)
-            # JS exception is a real failure — surface it instead of falling
-            # through to the subprocess path (which would just re-run and
-            # produce the same exception, but slower).
-            err = sup_result.get("error") or "evaluate_runtime failed"
-            if "supervisor" not in err.lower():
-                # Real JS-side error — return it.
-                return json.dumps({"success": False, "error": err}, ensure_ascii=False)
-            # Supervisor-side failure (loop down, no session) — fall through.
-            logger.debug(
-                "browser_eval: supervisor path unavailable (%s), falling back to subprocess",
-                err,
-            )
-    except ImportError:
-        pass
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.debug("browser_eval: supervisor path errored (%s), falling back", exc)
+    if not _embedded_browser_available():
+        try:
+            from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
+            supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
+            if supervisor is not None:
+                sup_result = supervisor.evaluate_runtime(expression)
+                if sup_result.get("ok"):
+                    raw_result = sup_result.get("result")
+                    # Match the agent-browser path: if the value is a JSON string,
+                    # parse it so the model gets structured data.
+                    parsed = raw_result
+                    if isinstance(raw_result, str):
+                        try:
+                            parsed = json.loads(raw_result)
+                        except (json.JSONDecodeError, ValueError):
+                            pass  # keep as string
+                    response = {
+                        "success": True,
+                        "result": parsed,
+                        "result_type": type(parsed).__name__,
+                        "method": "cdp_supervisor",
+                    }
+                    return json.dumps(response, ensure_ascii=False, default=str)
+                # JS exception is a real failure — surface it instead of falling
+                # through to the subprocess path (which would just re-run and
+                # produce the same exception, but slower).
+                err = sup_result.get("error") or "evaluate_runtime failed"
+                if "supervisor" not in err.lower():
+                    # Real JS-side error — return it.
+                    return json.dumps({"success": False, "error": err}, ensure_ascii=False)
+                # Supervisor-side failure (loop down, no session) — fall through.
+                logger.debug(
+                    "browser_eval: supervisor path unavailable (%s), falling back to subprocess",
+                    err,
+                )
+        except ImportError:
+            pass
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("browser_eval: supervisor path errored (%s), falling back", exc)
 
     # --- Fallback: agent-browser CLI subprocess (original path) -------------
     result = _run_browser_command(effective_task_id, "eval", [expression])

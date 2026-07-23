@@ -399,6 +399,19 @@ def test_check_fn_true_when_cdp_url_set(monkeypatch):
     assert browser_cdp_tool._browser_cdp_check() is True
 
 
+def test_check_fn_false_when_embedded_pane_is_active(monkeypatch):
+    """A stale external CDP endpoint must not target a different browser."""
+    import tools.browser_tool as bt
+
+    monkeypatch.setattr(bt, "_embedded_browser_available", lambda: True)
+    monkeypatch.setattr(bt, "check_browser_requirements", lambda: True)
+    monkeypatch.setattr(
+        bt, "_get_cdp_override", lambda: "ws://localhost:9222/devtools/browser/x"
+    )
+
+    assert browser_cdp_tool._browser_cdp_check() is False
+
+
 def test_check_fn_false_when_browser_requirements_fail(monkeypatch):
     """Even with a CDP URL, gate closes if the overall browser toolset is
     unavailable (e.g. agent-browser not installed)."""

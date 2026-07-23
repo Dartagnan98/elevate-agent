@@ -96,6 +96,38 @@ class TestBrowserConsole:
         assert result["total_messages"] == 0
         assert result["total_errors"] == 0
 
+    def test_expression_prefers_visible_pane_over_stale_cdp_supervisor(self):
+        from tools.browser_tool import browser_console
+
+        supervisor = MagicMock()
+        supervisor.evaluate_runtime.return_value = {
+            "ok": True,
+            "result": "New Tab",
+        }
+        pane_result = {
+            "success": True,
+            "data": {"result": "Web form"},
+        }
+        with (
+            patch("tools.browser_tool._embedded_browser_available", return_value=True),
+            patch(
+                "tools.browser_tool._run_browser_command",
+                return_value=pane_result,
+            ) as mock_cmd,
+            patch(
+                "tools.browser_supervisor.SUPERVISOR_REGISTRY.get",
+                return_value=supervisor,
+            ),
+        ):
+            result = json.loads(
+                browser_console(expression="document.title", task_id="test")
+            )
+
+        assert result["success"] is True
+        assert result["result"] == "Web form"
+        mock_cmd.assert_called_once_with("test", "eval", ["document.title"])
+        supervisor.evaluate_runtime.assert_not_called()
+
 
 # ── browser_console schema ───────────────────────────────────────────
 

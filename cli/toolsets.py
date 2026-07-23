@@ -46,6 +46,8 @@ _ELEVATE_CORE_TOOLS = [
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
     "browser_status", "browser_open", "browser_read", "browser_fill",
     "browser_drag", "browser_login", "browser_shot",
+    "browser_forward", "browser_reload", "browser_new_tab",
+    "browser_select_tab", "browser_close_tab",
     "browser_recordings", "browser_play",
     # Text-to-speech
     "text_to_speech",
@@ -142,6 +144,8 @@ TOOLSETS = {
             "browser_dialog",
             "browser_status", "browser_open", "browser_read", "browser_fill",
             "browser_drag", "browser_login", "browser_shot",
+            "browser_forward", "browser_reload", "browser_new_tab",
+            "browser_select_tab", "browser_close_tab",
             "browser_recordings", "browser_play",
             "web_search"
         ],
@@ -336,6 +340,8 @@ TOOLSETS = {
             "skills_list", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
+            "browser_forward", "browser_reload", "browser_new_tab",
+            "browser_select_tab", "browser_close_tab",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
             "todo", "memory",
@@ -361,6 +367,8 @@ TOOLSETS = {
             # Browser automation
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
+            "browser_forward", "browser_reload", "browser_new_tab",
+            "browser_select_tab", "browser_close_tab",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
             # Planning & memory

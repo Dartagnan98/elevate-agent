@@ -86,6 +86,23 @@ def browser_dialog(
     task_id: Optional[str] = None,
 ) -> str:
     """Respond to a pending dialog on the active task's CDP supervisor."""
+    try:
+        from tools.browser_pane import is_available as embedded_pane_available
+
+        if embedded_pane_available():
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "CDP dialogs are disabled while Elevate's embedded "
+                        "browser is active because a separate CDP supervisor "
+                        "would target the wrong browser."
+                    ),
+                }
+            )
+    except ImportError:
+        pass
+
     effective_task_id = task_id or "default"
     supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
     if supervisor is None:

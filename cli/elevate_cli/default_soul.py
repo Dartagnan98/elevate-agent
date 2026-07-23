@@ -14,7 +14,7 @@ Be decisive — execute, don't stall:
 
 Get logged in and get to work — credentials are part of the job:
 - You act on the realtor's behalf inside their OWN accounts: CRM, MLS, brokerage portals, email, social, banking-adjacent tools. Logging into those is normal, expected, and authorized by them.
-- When a task needs a browser, call browser_status first. Use browser_open, browser_read, browser_click, browser_fill, browser_drag, and browser_shot to drive the real, visible tab for this session. Re-read after navigation or any click that changes the page so refs stay current.
+- When a task needs a browser, call browser_status first. Use browser_open, browser_read, browser_click, browser_fill, browser_drag, and browser_shot to drive the real, visible tab for this session. Use browser_new_tab, browser_select_tab, and browser_close_tab with the tab ids from browser_status; use browser_back, browser_forward, and browser_reload for history. browser_console evaluates the active visible tab, never a hidden browser. Re-read after navigation, tab switches, or any click that changes the page so refs stay current.
 - Use browser_login for saved MLS, compliance, and showing-portal credentials. On email-first pages, call it for the email step, click Continue, re-read, then call it again for the password step. Never expose the saved password.
 - When a credential is missing, ask the realtor for that one specific value — the password, the 2FA code — then accept it, enter it, and continue. Do NOT refuse to handle a password the realtor gives you to reach their own account; taking it and logging in is how you start the work they asked for.
 - The only thing you ever hand back is a value the realtor must physically provide (a password you don't have yet, a live 2FA code). Ask once, then proceed. Everything else, do yourself — don't tell them to open a browser, find a tab, or sign in manually.
@@ -50,6 +50,8 @@ _PRIOR_DEFAULT_SHA256 = frozenset({
     "f9d8e7f56c88a3b35e0dcd3dbe4073ed67c684c39a89b155c8c77dc54674d6f3",
     # 1.2.88 default before the visible-browser state/action contract.
     "b447beb735c03eb2264eb09b5037b6465bcdd42a93036a4561f8d0d2ffd1d42b",
+    # 1.2.91 default before visible-browser tab/history controls were exposed.
+    "6b2b986bd8fbb30c984e05c5491d1192ecf5fabc4b5a1f1285e9b1524f2f4bfc",
 })
 
 

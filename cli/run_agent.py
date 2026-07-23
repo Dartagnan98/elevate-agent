@@ -1444,6 +1444,11 @@ def _unverified_action_failure_text(obligation: str) -> str:
     )
 
 
+def _strip_action_urls(text: str) -> str:
+    """Ignore URL tokens when inferring requested file/document mutations."""
+    return re.sub(r"\b(?:https?://|www\.)[^\s<>()]+", " ", text)
+
+
 def _classify_action_obligation(
     user_message: Any,
 ) -> Optional[str]:
@@ -1456,23 +1461,24 @@ def _classify_action_obligation(
     body = _action_request_body(user_message)
     if body is None:
         return None
+    action_body = _strip_action_urls(body)
 
     document_artifact = re.search(
         r"\b(?:cps|doc|docs|document|documents|docx|file|form|forms|"
         r"contract|contracts|agreement|offer|paperwork|pdf|pdfs|"
         r"signing\s+package|transaction\s+(?:docs|documents|package))\b",
-        body,
+        action_body,
     )
 
     # Drafting/wording requests can be fulfilled in the answer itself. Write
     # is exempt only when it is wording, not when the request explicitly names
     # a persisted file/document/path.
-    if re.match(r"^(?:compose|draft|preview)\b", body):
+    if re.match(r"^(?:compose|draft|preview)\b", action_body):
         return None
-    if re.match(r"^write\b", body):
+    if re.match(r"^write\b", action_body):
         persisted_write = bool(
-            re.search(r"\b(?:download|file|pdf|document|docx|path|save)\b", body)
-            or re.search(r"(?:^|\s)(?:/|~\/|[a-z]:\\)", body)
+            re.search(r"\b(?:download|file|pdf|document|docx|path|save)\b", action_body)
+            or re.search(r"(?:^|\s)(?:/|~\/|[a-z]:\\)", action_body)
         )
         return "create_document" if document_artifact and persisted_write else None
 
@@ -1482,35 +1488,35 @@ def _classify_action_obligation(
     if re.match(
         r"^send\s+(?:me|us)\s+(?:the\s+)?(?:latest\s+)?"
         r"(?:deal\s+)?(?:details|information|overview|status|summary|update)\b",
-        body,
+        action_body,
     ) and not re.search(
         r"\b(?:email|gmail|slack|sms|telegram|text|via|whatsapp)\b",
-        body,
+        action_body,
     ):
         return None
 
     passive_external_send = re.search(
         r"\b(?:delivered|emailed|forwarded|sent|texted)\s+to\s+"
         r"(?!(?:here|me|us|you)\b)\S+",
-        body,
+        action_body,
     )
     if passive_external_send and re.search(
         r"\b(?:agreement|contract|document|email|file|follow-up|form|message|"
         r"package|pdf|summary)\b",
-        body,
+        action_body,
     ):
         return "send"
 
     if re.search(
         r"\b(?:agreement|contract|document|file|form|package|pdf)\b"
         r".{0,30}\bneeds?\s+(?:to\s+be\s+)?(?:delivered|emailed|sent|sending|forwarded)\b",
-        body,
+        action_body,
     ):
         return "send"
 
     if re.match(
         r"^(?:send|e-?mail|text|forward|deliver|notify)\b",
-        body,
+        action_body,
     ):
         return "send"
 
@@ -1520,7 +1526,7 @@ def _classify_action_obligation(
     if document_artifact and re.match(
         r"^(?:build|complete|create|do|fill(?:\s+out)?|finish|generate|get|make|"
         r"prepare|produce|put\s+together|run|start)\b",
-        body,
+        action_body,
     ):
         return "create_document"
 
@@ -1531,7 +1537,7 @@ def _classify_action_obligation(
         return None
     deal_surface = re.search(
         r"\b(?:admin\s+run|board|checklist|crm|deal|lead|listing|transaction|stage)\b",
-        body,
+        action_body,
     )
     if deal_surface and re.match(
         r"^(?:add|assign|change|close(?:\s+out)?|mark|move|record|remove|reopen|save|set|update)\b",

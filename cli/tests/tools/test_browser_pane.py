@@ -79,6 +79,126 @@ def test_type_targets_the_same_visible_tab(monkeypatch, tmp_path):
     )
 
 
+def test_new_tab_loads_url_and_returns_session_tabs(monkeypatch, tmp_path):
+    _install_endpoint(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_rpc(method, params, _timeout):
+        calls.append((method, params))
+        if method == "new_tab":
+            return {"tabId": "tab_8"}
+        if method == "navigate":
+            return {"ok": True, "url": params["url"]}
+        if method == "list":
+            return [
+                {
+                    "id": "tab_8",
+                    "active": True,
+                    "url": "https://example.com/",
+                    "title": "Example",
+                }
+            ]
+        raise AssertionError(method)
+
+    monkeypatch.setattr(browser_pane, "_rpc", fake_rpc)
+    result = browser_pane.run_command(
+        "new_tab",
+        ["https://example.com/"],
+        session_id="chat-tabs",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["tabId"] == "tab_8"
+    assert calls == [
+        (
+            "new_tab",
+            {"sessionKey": "chat-tabs", "url": "about:blank"},
+        ),
+        (
+            "navigate",
+            {
+                "sessionKey": "chat-tabs",
+                "tabId": "tab_8",
+                "url": "https://example.com/",
+            },
+        ),
+        ("list", {"sessionKey": "chat-tabs"}),
+    ]
+
+
+def test_select_and_close_tab_use_requested_session(monkeypatch, tmp_path):
+    _install_endpoint(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_rpc(method, params, _timeout):
+        calls.append((method, params))
+        if method in {"select_tab", "close_tab"}:
+            return {"ok": True}
+        if method == "list":
+            return [
+                {
+                    "id": "tab_2",
+                    "active": True,
+                    "url": "https://two.example/",
+                    "title": "Two",
+                }
+            ]
+        raise AssertionError(method)
+
+    monkeypatch.setattr(browser_pane, "_rpc", fake_rpc)
+    selected = browser_pane.run_command(
+        "select_tab",
+        ["tab_2"],
+        session_id="chat-tabs",
+    )
+    closed = browser_pane.run_command(
+        "close_tab",
+        ["tab_1"],
+        session_id="chat-tabs",
+    )
+
+    assert selected["success"] is True
+    assert selected["data"]["tabId"] == "tab_2"
+    assert closed["success"] is True
+    assert closed["data"]["closedTabId"] == "tab_1"
+    assert (
+        "select_tab",
+        {"sessionKey": "chat-tabs", "tabId": "tab_2"},
+    ) in calls
+    assert (
+        "close_tab",
+        {"sessionKey": "chat-tabs", "tabId": "tab_1"},
+    ) in calls
+
+
+def test_forward_and_reload_target_active_visible_tab(monkeypatch, tmp_path):
+    _install_endpoint(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_rpc(method, params, _timeout):
+        calls.append((method, params))
+        if method == "list":
+            return [{"id": "tab_4", "active": True}]
+        if method in {"forward", "reload"}:
+            return {"ok": True, "url": "https://example.com/next"}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(browser_pane, "_rpc", fake_rpc)
+    forwarded = browser_pane.run_command("forward", [], session_id="chat-history")
+    reloaded = browser_pane.run_command("reload", [], session_id="chat-history")
+
+    assert forwarded["success"] is True
+    assert reloaded["success"] is True
+    assert (
+        "forward",
+        {"sessionKey": "chat-history", "tabId": "tab_4"},
+    ) in calls
+    assert (
+        "reload",
+        {"sessionKey": "chat-history", "tabId": "tab_4"},
+    ) in calls
+
+
 def test_missing_desktop_endpoint_falls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(browser_pane, "get_elevate_home", lambda: tmp_path)
     assert browser_pane.run_command("snapshot", ["-c"]) is None
@@ -105,6 +225,51 @@ def test_browser_tool_prefers_embedded_pane_before_cli_discovery(monkeypatch):
 
     assert result["success"] is True
     assert result["data"] == {"command": "snapshot", "args": ["-c"], "timeout": 9}
+
+
+def test_embedded_snapshot_ignores_stale_external_supervisor(monkeypatch):
+    from tools import browser_tool
+
+    supervisor = type(
+        "Supervisor",
+        (),
+        {
+            "snapshot": lambda self: type(
+                "Snapshot",
+                (),
+                {
+                    "active": True,
+                    "to_dict": lambda self: {
+                        "pending_dialogs": [{"message": "wrong browser"}],
+                        "frame_tree": {"top": {"url": "chrome://newtab"}},
+                    },
+                },
+            )()
+        },
+    )()
+    monkeypatch.setattr(browser_tool, "_embedded_browser_available", lambda: True)
+    monkeypatch.setattr(
+        browser_tool,
+        "_run_browser_command",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "data": {
+                "snapshot": '- document "Visible page"',
+                "refs": {},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "tools.browser_supervisor.SUPERVISOR_REGISTRY.get",
+        lambda _task_id: supervisor,
+    )
+
+    result = json.loads(browser_tool.browser_snapshot(task_id="visible-chat"))
+
+    assert result["success"] is True
+    assert result["snapshot"] == '- document "Visible page"'
+    assert "pending_dialogs" not in result
+    assert "frame_tree" not in result
 
 
 def test_embedded_pane_satisfies_browser_requirements_without_cli(monkeypatch):
@@ -148,6 +313,11 @@ def test_visible_browser_status_is_scoped_to_the_agent_session(monkeypatch):
         "browser_status",
         "browser_open",
         "browser_read",
+        "browser_forward",
+        "browser_reload",
+        "browser_new_tab",
+        "browser_select_tab",
+        "browser_close_tab",
         "browser_fill",
         "browser_drag",
         "browser_login",
@@ -248,8 +418,104 @@ def test_saved_browser_login_never_returns_the_password(monkeypatch):
     assert result["success"] is True
     assert result["filled"] == ["email", "password"]
     assert secret not in raw
-    assert calls[-1] == (
+    assert (
         "fill",
         ["ref_2", secret],
         "chat-login",
+    ) in calls
+
+
+def test_saved_browser_login_does_not_require_a_duplicate_login_url(monkeypatch):
+    from tools import visible_browser_tool
+
+    secret = "never-echo-this-password"
+    monkeypatch.delenv("SKYSLOPE_LOGIN_URL", raising=False)
+    monkeypatch.delenv("COMPLIANCE_LOGIN_URL", raising=False)
+    monkeypatch.delenv("SKYSLOPE_URL", raising=False)
+    monkeypatch.setenv("SKYSLOPE_USERNAME", "agent@example.com")
+    monkeypatch.setenv("SKYSLOPE_PASSWORD", secret)
+    monkeypatch.setattr(
+        visible_browser_tool.browser_pane,
+        "status",
+        lambda _task_id: {"url": "https://app.skyslope.com/login"},
     )
+
+    def fake_run(command, _args, *, session_id):
+        assert session_id == "chat-login"
+        if command == "snapshot":
+            return {
+                "success": True,
+                "data": {
+                    "refs": {
+                        "ref_1": {
+                            "tag": "input",
+                            "type": "email",
+                            "name": "Email",
+                        },
+                        "ref_2": {
+                            "tag": "input",
+                            "type": "password",
+                            "name": "Password",
+                        },
+                    }
+                },
+            }
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(visible_browser_tool.browser_pane, "run_command", fake_run)
+
+    raw = visible_browser_tool.browser_login("chat-login")
+    result = json.loads(raw)
+
+    assert result["success"] is True
+    assert result["filled"] == ["email", "password"]
+    assert secret not in raw
+
+
+def test_saved_browser_login_waits_for_a_dynamic_login_form(monkeypatch):
+    from tools import visible_browser_tool
+
+    monkeypatch.setenv("SKYSLOPE_USERNAME", "agent@example.com")
+    monkeypatch.setenv("SKYSLOPE_PASSWORD", "secret")
+    monkeypatch.setattr(visible_browser_tool.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        visible_browser_tool.browser_pane,
+        "status",
+        lambda _task_id: {"url": "https://app.skyslope.com/login"},
+    )
+    snapshots = 0
+
+    def fake_run(command, _args, *, session_id):
+        nonlocal snapshots
+        assert session_id == "dynamic-login"
+        if command == "snapshot":
+            snapshots += 1
+            if snapshots == 1:
+                return {"success": True, "data": {"refs": {}}}
+            return {
+                "success": True,
+                "data": {
+                    "refs": {
+                        "ref_1": {
+                            "tag": "input",
+                            "type": "email",
+                            "name": "Email",
+                        },
+                        "ref_2": {
+                            "tag": "input",
+                            "type": "submit",
+                            "name": "Next",
+                        },
+                    }
+                },
+            }
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(visible_browser_tool.browser_pane, "run_command", fake_run)
+
+    result = json.loads(visible_browser_tool.browser_login("dynamic-login"))
+
+    assert result["success"] is True
+    assert result["filled"] == ["email"]
+    assert result["action_ref"] == "ref_2"
+    assert snapshots >= 3

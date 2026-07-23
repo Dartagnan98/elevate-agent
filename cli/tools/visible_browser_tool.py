@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -73,6 +74,61 @@ def browser_read(task_id: str | None = None) -> str:
     return browser_snapshot(full=True, task_id=_task_id(task_id))
 
 
+def _browser_navigation(command: str, task_id: str | None = None) -> str:
+    result = _run_browser_command(_task_id(task_id), command, [])
+    if not result.get("success"):
+        return _json(
+            {
+                "success": False,
+                "error": result.get("error", f"Failed to {command} the visible browser."),
+            }
+        )
+    return _json({"success": True, **(result.get("data") or {})})
+
+
+def _pane_action(
+    command: str,
+    args: list[str],
+    task_id: str | None,
+) -> str:
+    result = browser_pane.run_command(
+        command,
+        args,
+        session_id=_task_id(task_id),
+    )
+    if not result:
+        return _json({"success": False, "error": "The visible browser is not available."})
+    if not result.get("success"):
+        return _json(result)
+    return _json({"success": True, **(result.get("data") or {})})
+
+
+def browser_forward(task_id: str | None = None) -> str:
+    return _browser_navigation("forward", task_id)
+
+
+def browser_reload(task_id: str | None = None) -> str:
+    return _browser_navigation("reload", task_id)
+
+
+def browser_new_tab(
+    url: str = "about:blank",
+    task_id: str | None = None,
+) -> str:
+    return _pane_action("new_tab", [str(url or "about:blank")], task_id)
+
+
+def browser_select_tab(tab_id: str, task_id: str | None = None) -> str:
+    return _pane_action("select_tab", [str(tab_id or "")], task_id)
+
+
+def browser_close_tab(
+    tab_id: str | None = None,
+    task_id: str | None = None,
+) -> str:
+    return _pane_action("close_tab", [str(tab_id)] if tab_id else [], task_id)
+
+
 def browser_fill(ref: str, value: str, task_id: str | None = None) -> str:
     task = _task_id(task_id)
     normalized = ref if ref.startswith("@") else f"@{ref}"
@@ -115,11 +171,11 @@ def _portal_for_url(url: str) -> str | None:
     if any(name in host for name in ("matrix", "paragon", "xposure", "mls")):
         return "mls"
 
-    configured = [
-        portal
-        for portal in PORTAL_ENV_ALIASES
-        if resolve_portal_env(os.environ, portal).get("configured")
-    ]
+    configured = []
+    for portal in PORTAL_ENV_ALIASES:
+        credential = resolve_portal_env(os.environ, portal)
+        if credential.get("hasLoginEmail") and credential.get("hasLoginPassword"):
+            configured.append(portal)
     return configured[0] if len(configured) == 1 else None
 
 
@@ -150,6 +206,37 @@ def _pick_login_ref(
     return max(candidates, default=(0, ""))[1] or None
 
 
+def _pick_login_action_ref(refs: dict[str, Any]) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for ref, raw in refs.items():
+        if not isinstance(raw, dict) or raw.get("disabled"):
+            continue
+        tag = str(raw.get("tag") or "").lower()
+        field_type = str(raw.get("type") or "").lower()
+        if tag != "button" and not (tag == "input" and field_type in {"button", "submit"}):
+            continue
+        name = str(raw.get("name") or raw.get("value") or "").lower()
+        score = 10
+        if re.search(r"\b(?:continue|next|sign\s*in|log\s*in|submit)\b", name):
+            score += 100
+        candidates.append((score, ref))
+    return max(candidates, default=(0, ""))[1] or None
+
+
+def _login_snapshot(task: str, attempts: int = 8) -> tuple[dict[str, Any], str | None, str | None]:
+    refs: dict[str, Any] = {}
+    for attempt in range(attempts):
+        snap = browser_pane.run_command("snapshot", [], session_id=task)
+        candidate_refs = ((snap or {}).get("data") or {}).get("refs") or {}
+        refs = candidate_refs if isinstance(candidate_refs, dict) else {}
+        email_ref = _pick_login_ref(refs, password=False)
+        password_ref = _pick_login_ref(refs, password=True)
+        if email_ref or password_ref or attempt == attempts - 1:
+            return refs, email_ref, password_ref
+        time.sleep(0.5)
+    return refs, None, None
+
+
 def browser_login(task_id: str | None = None) -> str:
     """Fill the visible login step without returning stored credentials."""
     task = _task_id(task_id)
@@ -169,20 +256,18 @@ def browser_login(task_id: str | None = None) -> str:
             }
         )
     credential = resolve_portal_env(os.environ, portal)
-    if not credential.get("configured"):
+    if not (
+        credential.get("hasLoginEmail")
+        and credential.get("hasLoginPassword")
+    ):
         return _json(
             {
                 "success": False,
-                "error": f"No complete saved {portal} portal credential is configured.",
+                "error": f"No saved username and password are configured for the {portal} portal.",
             }
         )
 
-    snap = browser_pane.run_command("snapshot", [], session_id=task)
-    refs = ((snap or {}).get("data") or {}).get("refs") or {}
-    if not isinstance(refs, dict):
-        refs = {}
-    email_ref = _pick_login_ref(refs, password=False)
-    password_ref = _pick_login_ref(refs, password=True)
+    refs, email_ref, password_ref = _login_snapshot(task)
     filled: list[str] = []
 
     if email_ref:
@@ -209,12 +294,16 @@ def browser_login(task_id: str | None = None) -> str:
                 "error": "No visible email, username, or password field was found.",
             }
         )
+    time.sleep(0.2)
+    refreshed, _, _ = _login_snapshot(task, attempts=2)
+    action_ref = _pick_login_action_ref(refreshed)
     return _json(
         {
             "success": True,
             "portal": portal,
             "filled": filled,
             "submitted": False,
+            "action_ref": action_ref,
             "next": "Review the visible page and click Continue or Sign in.",
         }
     )
@@ -339,6 +428,36 @@ _SCHEMAS = {
         "browser_read",
         "Read the current visible page as text plus ref-addressed interactive elements.",
     ),
+    "browser_forward": _schema(
+        "browser_forward",
+        "Navigate the active visible-browser tab forward in its history.",
+    ),
+    "browser_reload": _schema(
+        "browser_reload",
+        "Reload the active visible-browser tab.",
+    ),
+    "browser_new_tab": _schema(
+        "browser_new_tab",
+        "Open a new session-scoped visible-browser tab and make it active.",
+        {
+            "url": {
+                "type": "string",
+                "description": "Optional URL to load; defaults to a blank tab.",
+                "default": "about:blank",
+            }
+        },
+    ),
+    "browser_select_tab": _schema(
+        "browser_select_tab",
+        "Switch to a visible-browser tab using an id returned by browser_status or browser_new_tab.",
+        {"tab_id": {"type": "string"}},
+        ["tab_id"],
+    ),
+    "browser_close_tab": _schema(
+        "browser_close_tab",
+        "Close a visible-browser tab. Omit tab_id to close the active tab.",
+        {"tab_id": {"type": "string"}},
+    ),
     "browser_fill": _schema(
         "browser_fill",
         "Type a value into a visible browser field by its ref from browser_read.",
@@ -401,6 +520,60 @@ registry.register(
     check_fn=check_browser_requirements,
     emoji="📖",
     effects=_READ_EFFECTS,
+)
+registry.register(
+    name="browser_forward",
+    toolset="browser",
+    schema=_SCHEMAS["browser_forward"],
+    handler=lambda _args, **kw: browser_forward(_browser_handler_session(kw)),
+    check_fn=check_browser_requirements,
+    emoji="➡️",
+    effects=_AUTONOMOUS_EFFECTS,
+)
+registry.register(
+    name="browser_reload",
+    toolset="browser",
+    schema=_SCHEMAS["browser_reload"],
+    handler=lambda _args, **kw: browser_reload(_browser_handler_session(kw)),
+    check_fn=check_browser_requirements,
+    emoji="🔄",
+    effects=_AUTONOMOUS_EFFECTS,
+)
+registry.register(
+    name="browser_new_tab",
+    toolset="browser",
+    schema=_SCHEMAS["browser_new_tab"],
+    handler=lambda args, **kw: browser_new_tab(
+        args.get("url", "about:blank"),
+        _browser_handler_session(kw),
+    ),
+    check_fn=check_browser_requirements,
+    emoji="➕",
+    effects=_AUTONOMOUS_EFFECTS,
+)
+registry.register(
+    name="browser_select_tab",
+    toolset="browser",
+    schema=_SCHEMAS["browser_select_tab"],
+    handler=lambda args, **kw: browser_select_tab(
+        args.get("tab_id", ""),
+        _browser_handler_session(kw),
+    ),
+    check_fn=check_browser_requirements,
+    emoji="🗂️",
+    effects=_AUTONOMOUS_EFFECTS,
+)
+registry.register(
+    name="browser_close_tab",
+    toolset="browser",
+    schema=_SCHEMAS["browser_close_tab"],
+    handler=lambda args, **kw: browser_close_tab(
+        args.get("tab_id"),
+        _browser_handler_session(kw),
+    ),
+    check_fn=check_browser_requirements,
+    emoji="✖️",
+    effects=_AUTONOMOUS_EFFECTS,
 )
 registry.register(
     name="browser_fill",

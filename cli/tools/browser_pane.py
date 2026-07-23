@@ -133,6 +133,78 @@ def run_command(
     session_params = _session_params(session_id)
 
     try:
+        if command == "new_tab":
+            target = argv[0] if argv else "about:blank"
+            created = _rpc(
+                "new_tab",
+                {**session_params, "url": "about:blank"},
+                timeout,
+            )
+            tab_id = created["tabId"]
+            if target != "about:blank":
+                _rpc(
+                    "navigate",
+                    {**session_params, "tabId": tab_id, "url": target},
+                    timeout,
+                )
+            tabs = _rpc("list", session_params, timeout)
+            tab = next((item for item in tabs if item.get("id") == tab_id), {})
+            return {
+                "success": True,
+                "data": {
+                    "tabId": tab_id,
+                    "url": tab.get("url") or target,
+                    "title": tab.get("title") or "",
+                    "tabs": tabs,
+                },
+            }
+
+        if command == "select_tab":
+            if not argv:
+                return {"success": False, "error": "select_tab requires a tab id"}
+            tab_id = argv[0]
+            result = _rpc(
+                "select_tab",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
+            if not result.get("ok"):
+                return {"success": False, "error": f"No visible browser tab named {tab_id}"}
+            tabs = _rpc("list", session_params, timeout)
+            tab = next((item for item in tabs if item.get("id") == tab_id), {})
+            return {
+                "success": True,
+                "data": {
+                    "tabId": tab_id,
+                    "url": tab.get("url") or "",
+                    "title": tab.get("title") or "",
+                    "tabs": tabs,
+                },
+            }
+
+        if command == "close_tab":
+            tab = _active_tab(timeout, session_id)
+            tab_id = argv[0] if argv else tab["id"]
+            result = _rpc(
+                "close_tab",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
+            if not result.get("ok"):
+                return {"success": False, "error": f"No visible browser tab named {tab_id}"}
+            tabs = _rpc("list", session_params, timeout)
+            active = next((item for item in tabs if item.get("active")), {})
+            return {
+                "success": True,
+                "data": {
+                    "closedTabId": tab_id,
+                    "activeTabId": active.get("id"),
+                    "url": active.get("url") or "",
+                    "title": active.get("title") or "",
+                    "tabs": tabs,
+                },
+            }
+
         tab = _active_tab(timeout, session_id)
         tab_id = tab["id"]
 
@@ -258,7 +330,7 @@ def run_command(
                 {**session_params, "tabId": tab_id},
                 timeout,
             )
-            if not result.get("ok"):
+            if not result.get("ok") or not result.get("png_base64"):
                 return {"success": False, "error": "embedded browser screenshot failed"}
             return {
                 "success": True,

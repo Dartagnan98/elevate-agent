@@ -79,6 +79,7 @@ import {
   type ApprovalSurfacePolicy,
   type PermissionModeId,
 } from "@/lib/approval-ui-policy";
+import { isRealtorBetaStatus } from "@/lib/beta-runtime";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import {
   AlertCircle,
@@ -3956,6 +3957,10 @@ export default function ChatPage() {
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
   const [approvalSurfacePolicy, setApprovalSurfacePolicy] =
     useState<ApprovalSurfacePolicy>("restricted");
+  const [realtorBetaRuntime, setRealtorBetaRuntime] =
+    useState<boolean | null>(null);
+  const [permissionModeReadySessionId, setPermissionModeReadySessionId] =
+    useState<string | null>(null);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [resumeFallback, setResumeFallback] = useState(false);
   const [portalRoot] = useState<HTMLElement | null>(() =>
@@ -6970,8 +6975,40 @@ export default function ChatPage() {
   // the gateway is up. The mode is session-scoped (composer picker), so it
   // is re-fetched whenever the gateway session id changes.
   useEffect(() => {
-    if (state !== "open" || !sessionId) return;
+    if (
+      state !== "open" ||
+      !sessionId ||
+      realtorBetaRuntime === null
+    ) return;
     let cancelled = false;
+    if (realtorBetaRuntime) {
+      void gw
+        .request(
+          "config.set",
+          {
+            key: "permission_mode",
+            value: "bypassPermissions",
+            session_id: sessionId,
+          },
+          8_000,
+        )
+        .then(() => {
+          if (!cancelled) {
+            setPermissionModeId("bypassPermissions");
+            setPermissionModeReadySessionId(sessionId);
+          }
+        })
+        .catch((error: Error) => {
+          if (!cancelled) {
+            setStatusText(
+              `Could not enable Beta browser autonomy: ${error.message}`,
+            );
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
     gw
       .request<{ value?: string }>(
         "config.get",
@@ -6979,15 +7016,18 @@ export default function ChatPage() {
         8_000,
       )
       .then((res) => {
-        if (!cancelled && res?.value) setPermissionModeId(res.value);
+        if (!cancelled) {
+          if (res?.value) setPermissionModeId(res.value);
+          setPermissionModeReadySessionId(sessionId);
+        }
       })
       .catch(() => {
-        /* permission mode is non-critical to chat */
+        if (!cancelled) setPermissionModeReadySessionId(sessionId);
       });
     return () => {
       cancelled = true;
     };
-  }, [gw, state, sessionId]);
+  }, [gw, realtorBetaRuntime, state, sessionId]);
 
   const selectPermissionMode = useCallback(
     (mode: PermissionMode) => {
@@ -8674,6 +8714,9 @@ export default function ChatPage() {
 
   const canSend =
     (!!input.trim() || hasReadyAttachment) &&
+    realtorBetaRuntime !== null &&
+    (state !== "open" ||
+      (!!sessionId && permissionModeReadySessionId === sessionId)) &&
     (state === "open" ? !!(sessionId || draftChat) : state !== "error" && state !== "closed");
   const canPickModel = state === "open" && !!sessionId;
   const traceMessageIds = useMemo(() => {
@@ -9165,6 +9208,7 @@ export default function ChatPage() {
       .then((status) => {
         if (cancelled) return;
         setApprovalSurfacePolicy(approvalSurfacePolicyForStatus(status));
+        setRealtorBetaRuntime(isRealtorBetaStatus(status));
         const root = status.project_root || status.elevate_home || "";
         const basename = root
           .replace(/\/+$/, "")
@@ -9173,7 +9217,9 @@ export default function ChatPage() {
           .pop();
         if (basename) setFolderLabel(basename);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setRealtorBetaRuntime(false);
+      });
     return () => {
       cancelled = true;
     };

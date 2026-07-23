@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -309,6 +310,11 @@ def test_installed_fault_child_contract_against_current_cli(tmp_path: Path):
     # This exercises the same isolated child contract used with an installed
     # app. The release run replaces this source CLI root with the
     # candidate-verified Contents/Resources/cli tree.
+    # Fresh bytecode compilation of the full installed CLI can exceed the
+    # suite's generic 30-second unit-test watchdog on slower macOS volumes.
+    # Keep this integration test bounded below its 10-minute release lane.
+    if hasattr(signal, "alarm"):
+        signal.alarm(300)
     short_root = Path("/tmp") / f"erb-test-{os.getpid()}-{tmp_path.name[-6:]}"
     short_root.mkdir(mode=0o700)
     home = short_root / "home"
@@ -342,7 +348,7 @@ def test_installed_fault_child_contract_against_current_cli(tmp_path: Path):
             env=env,
             text=True,
             capture_output=True,
-            timeout=120,
+            timeout=300,
             check=False,
         )
     finally:

@@ -8,7 +8,7 @@ const DEFAULT_WORKSPACE = "default";
 const MAX_CONSOLE_ENTRIES = 200;
 
 const READ_PAGE_JS = `(() => {
-  const selector = 'a[href],button,input,select,textarea,summary,[role],[onclick],[contenteditable="true"]';
+  const selector = 'a[href],button,input,select,textarea,summary,[role],[onclick],[contenteditable="true"],[draggable="true"],[ondragstart],[ondrop],.ui-draggable,.ui-droppable';
   const documents = [];
   const visitDocument = (doc, framePath = [], offsetX = 0, offsetY = 0) => {
     if (!doc || documents.some((entry) => entry.doc === doc)) return;
