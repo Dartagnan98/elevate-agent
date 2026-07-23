@@ -32,6 +32,10 @@ const securityHeaders = [
 ];
 
 const config: NextConfig = {
+  // The release machine also has an unrelated lockfile under $HOME. Without
+  // this pin Next can infer the whole home directory as its workspace root and
+  // spend the release gate tracing unrelated projects.
+  outputFileTracingRoot: process.cwd(),
   // Don't leak the framework/version in the Server header.
   poweredByHeader: false,
   // This value is deliberately public and immutable inside the compiled
