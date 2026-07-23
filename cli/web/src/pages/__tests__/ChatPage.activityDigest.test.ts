@@ -785,6 +785,52 @@ describe("terminal truth containment", () => {
     ]);
   });
 
+  it("keeps a partially saved active tool turn streaming without a false error", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript(
+      [
+        { content: "Check the board.", role: "user", timestamp: 1_700_000_000 },
+        {
+          content: "",
+          role: "assistant",
+          timestamp: 1_700_000_001,
+          tool_calls: [
+            {
+              function: { arguments: "{}", name: "leads_overview" },
+              id: "call-active-leads",
+            },
+          ],
+        },
+        {
+          content: '{"success":true,"total":3}',
+          role: "tool",
+          timestamp: 1_700_000_002,
+          tool_call_id: "call-active-leads",
+          tool_name: "leads_overview",
+        },
+      ],
+      {
+        activeAssistantId: "live-assistant",
+        turnIsActive: true,
+      },
+    );
+
+    expect(hydrated).toHaveLength(2);
+    expect(hydrated[1]).toMatchObject({
+      content: "",
+      id: "live-assistant",
+      status: "streaming",
+    });
+    expect(hydrated[1].warning).toBeUndefined();
+    expect(hydrated[1].completedAt).toBeUndefined();
+    expect(hydrated[1].tools).toMatchObject([
+      {
+        messageId: "live-assistant",
+        name: "leads_overview",
+        status: "done",
+      },
+    ]);
+  });
+
   it("rehydrates one tool turn with the same logical timing and output tokens as live", () => {
     const hydrated = __chatPageTestables.normalizeStoredTranscript([
       {

@@ -1371,6 +1371,11 @@ def handle_function_call(
                 "task_id": task_id,
                 "user_task": user_task,
             }
+            # Browser state belongs to the durable chat, not the random
+            # per-turn task used to isolate terminal/VM work. This keeps tabs
+            # available when the same chat continues on a later turn.
+            if function_name.startswith("browser_"):
+                handler_kwargs["session_id"] = session_id
 
         prepared_call, beta_preflight_block = _prepare_exact_beta_registry_call(
             function_name,

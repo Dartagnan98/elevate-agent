@@ -141,7 +141,7 @@ registry.register(
         action=args.get("action", ""),
         prompt_text=args.get("prompt_text"),
         dialog_id=args.get("dialog_id"),
-        task_id=kw.get("task_id"),
+        task_id=kw.get("session_id") or kw.get("task_id"),
     ),
     check_fn=_browser_dialog_check,
     emoji="💬",

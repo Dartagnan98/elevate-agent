@@ -48,6 +48,10 @@ def _task_id(value: str | None) -> str:
     return str(value or "default")
 
 
+def _browser_handler_session(kwargs: dict[str, Any]) -> str | None:
+    return kwargs.get("session_id") or kwargs.get("task_id")
+
+
 def browser_status(task_id: str | None = None) -> str:
     state = browser_pane.status(_task_id(task_id))
     if state is None:
@@ -372,7 +376,7 @@ registry.register(
     name="browser_status",
     toolset="browser",
     schema=_SCHEMAS["browser_status"],
-    handler=lambda _args, **kw: browser_status(kw.get("task_id")),
+    handler=lambda _args, **kw: browser_status(_browser_handler_session(kw)),
     check_fn=check_browser_requirements,
     emoji="🌐",
     effects=_READ_EFFECTS,
@@ -381,7 +385,10 @@ registry.register(
     name="browser_open",
     toolset="browser",
     schema=_SCHEMAS["browser_open"],
-    handler=lambda args, **kw: browser_open(args.get("url", ""), kw.get("task_id")),
+    handler=lambda args, **kw: browser_open(
+        args.get("url", ""),
+        _browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="🌐",
     effects=_AUTONOMOUS_EFFECTS,
@@ -390,7 +397,7 @@ registry.register(
     name="browser_read",
     toolset="browser",
     schema=_SCHEMAS["browser_read"],
-    handler=lambda _args, **kw: browser_read(kw.get("task_id")),
+    handler=lambda _args, **kw: browser_read(_browser_handler_session(kw)),
     check_fn=check_browser_requirements,
     emoji="📖",
     effects=_READ_EFFECTS,
@@ -402,7 +409,7 @@ registry.register(
     handler=lambda args, **kw: browser_fill(
         args.get("ref", ""),
         args.get("value", ""),
-        kw.get("task_id"),
+        _browser_handler_session(kw),
     ),
     check_fn=check_browser_requirements,
     emoji="⌨️",
@@ -415,7 +422,7 @@ registry.register(
     handler=lambda args, **kw: browser_drag(
         args.get("from_ref", ""),
         args.get("to_ref", ""),
-        kw.get("task_id"),
+        _browser_handler_session(kw),
     ),
     check_fn=check_browser_requirements,
     emoji="↔️",
@@ -425,7 +432,7 @@ registry.register(
     name="browser_login",
     toolset="browser",
     schema=_SCHEMAS["browser_login"],
-    handler=lambda _args, **kw: browser_login(kw.get("task_id")),
+    handler=lambda _args, **kw: browser_login(_browser_handler_session(kw)),
     check_fn=check_browser_requirements,
     emoji="🔐",
     effects=_AUTONOMOUS_EFFECTS,
@@ -434,7 +441,7 @@ registry.register(
     name="browser_shot",
     toolset="browser",
     schema=_SCHEMAS["browser_shot"],
-    handler=lambda _args, **kw: browser_shot(kw.get("task_id")),
+    handler=lambda _args, **kw: browser_shot(_browser_handler_session(kw)),
     check_fn=check_browser_requirements,
     emoji="📸",
     effects=_SHOT_EFFECTS,
@@ -452,7 +459,10 @@ registry.register(
     name="browser_play",
     toolset="browser",
     schema=_SCHEMAS["browser_play"],
-    handler=lambda args, **kw: browser_play(args.get("slug", ""), kw.get("task_id")),
+    handler=lambda args, **kw: browser_play(
+        args.get("slug", ""),
+        _browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="▶️",
     effects=_AUTONOMOUS_EFFECTS,

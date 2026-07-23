@@ -57,6 +57,29 @@ class TestHandleFunctionCall:
         assert "error" in result
         assert "totally_fake_tool_xyz" in result["error"]
 
+    def test_browser_dispatch_binds_the_durable_chat_session(self):
+        with (
+            patch(
+                "model_tools._dispatch_model_registry_call",
+                return_value=('{"ok":true}', False, None),
+            ) as dispatch,
+            patch("elevate_cli.plugins.invoke_hook", return_value=[]),
+        ):
+            result = handle_function_call(
+                "browser_status",
+                {},
+                task_id="random-turn-task",
+                session_id="durable-chat-session",
+                skip_pre_tool_call_hook=True,
+            )
+
+        assert result == '{"ok":true}'
+        assert dispatch.call_args.kwargs["handler_kwargs"] == {
+            "task_id": "random-turn-task",
+            "user_task": None,
+            "session_id": "durable-chat-session",
+        }
+
     def test_exception_returns_json_error(self):
         # Even if something goes wrong, should return valid JSON
         result = handle_function_call("web_search", None)  # None args may cause issues

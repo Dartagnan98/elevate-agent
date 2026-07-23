@@ -5,10 +5,10 @@ import source from "../ChatPage.tsx?raw";
 describe("agent browser workspace", () => {
   it("opens the visible pane on the workspace emitted by the agent action", () => {
     expect(source).toMatch(
-      /event\.type === "agent-action" && event\.workspaceId[\s\S]*setAgentBrowserWorkspace\(\{[\s\S]*workspaceId: event\.workspaceId[\s\S]*setSidePanel\("browser"\)/,
+      /event\.type === "agent-action" && event\.workspaceId[\s\S]*setAgentBrowserWorkspaceId\(event\.workspaceId\)[\s\S]*setSidePanel\("browser"\)/,
     );
     expect(source).toContain(
-      "agentBrowserWorkspaceId ?? sessionId ?? dataSessionId ?? \"default\"",
+      "activeAgentBrowserWorkspaceId ?? dataSessionId ?? sessionId ?? \"default\"",
     );
     expect(source).not.toContain(
       "event.workspaceId === activeBrowserWorkspace",
@@ -17,13 +17,13 @@ describe("agent browser workspace", () => {
 
   it("returns manual browser opens to the current chat workspace", () => {
     expect(source).toMatch(
-      /if \(mode === "browser"\) \{[\s\S]*setAgentBrowserWorkspace\(null\)/,
+      /if \(mode === "browser"\) \{[\s\S]*setAgentBrowserWorkspaceId\(null\)/,
     );
   });
 
   it("does not leak an agent browser workspace into another chat", () => {
     expect(source).toMatch(
-      /agentBrowserWorkspace\?\.chatKey === chatKey[\s\S]*agentBrowserWorkspace\.workspaceId/,
+      /agentBrowserWorkspaceId === dataSessionId[\s\S]*activeAgentBrowserWorkspaceId/,
     );
   });
 });

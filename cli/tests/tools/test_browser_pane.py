@@ -163,6 +163,43 @@ def test_visible_browser_status_is_scoped_to_the_agent_session(monkeypatch):
     ]
 
 
+def test_browser_registry_handlers_prefer_chat_session_over_turn_task(monkeypatch):
+    from tools import browser_tool
+    from tools import visible_browser_tool
+    from tools.registry import registry
+
+    visible_sessions = []
+    generic_sessions = []
+    monkeypatch.setattr(
+        visible_browser_tool,
+        "browser_status",
+        lambda session_id: visible_sessions.append(session_id) or "{}",
+    )
+    monkeypatch.setattr(
+        browser_tool,
+        "browser_navigate",
+        lambda *, url, task_id: generic_sessions.append((url, task_id)) or "{}",
+    )
+
+    visible_handler = registry.get_entry("browser_status").handler
+    generic_handler = registry.get_entry("browser_navigate").handler
+    visible_handler(
+        {},
+        task_id="random-turn-task",
+        session_id="durable-chat-session",
+    )
+    generic_handler(
+        {"url": "https://example.com"},
+        task_id="random-turn-task",
+        session_id="durable-chat-session",
+    )
+
+    assert visible_sessions == ["durable-chat-session"]
+    assert generic_sessions == [
+        ("https://example.com", "durable-chat-session"),
+    ]
+
+
 def test_saved_browser_login_never_returns_the_password(monkeypatch):
     from tools import visible_browser_tool
 

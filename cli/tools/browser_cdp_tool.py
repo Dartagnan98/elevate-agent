@@ -563,7 +563,7 @@ registry.register(
         target_id=args.get("target_id"),
         frame_id=args.get("frame_id"),
         timeout=args.get("timeout", 30.0),
-        task_id=kw.get("task_id"),
+        task_id=kw.get("session_id") or kw.get("task_id"),
     ),
     check_fn=_browser_cdp_check,
     emoji="🧪",

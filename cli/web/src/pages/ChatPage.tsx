@@ -1338,7 +1338,13 @@ function terminalErrorCompletionTarget(
     : null;
 }
 
-function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
+function normalizeStoredTranscript(
+  messages?: StoredSessionMessage[],
+  options?: {
+    activeAssistantId?: string | null;
+    turnIsActive?: boolean;
+  },
+): ChatMessage[] {
   const list = messages ?? [];
   const total = list.length;
 
@@ -1403,20 +1409,33 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       resetPendingTurn();
       return;
     }
-    const messageId = pendingTurnMessageId ?? id("stored-orphan");
+    const turnIsActive = options?.turnIsActive === true;
+    const messageId =
+      (turnIsActive ? options?.activeAssistantId : null) ??
+      pendingTurnMessageId ??
+      id("stored-orphan");
     const createdAt =
       pendingTurnStartedAt ??
       pendingTraces[0]?.createdAt ??
       pendingTools[0]?.startedAt ??
       Date.now();
     out.push({
-      completedAt: pendingTurnCompletedAt ?? createdAt,
+      ...(turnIsActive
+        ? {}
+        : { completedAt: pendingTurnCompletedAt ?? createdAt }),
       content: "",
       createdAt,
       id: messageId,
       role: "assistant",
-      status: pendingTurnTerminalStatus ?? "error",
-      warning: "Saved turn ended after tool execution without a final assistant response.",
+      status: turnIsActive
+        ? "streaming"
+        : pendingTurnTerminalStatus ?? "error",
+      ...(turnIsActive
+        ? {}
+        : {
+            warning:
+              "Saved turn ended after tool execution without a final assistant response.",
+          }),
       ...(pendingTools.length
         ? { tools: pendingTools.map((tool) => ({ ...tool, messageId })) }
         : {}),
@@ -3577,13 +3596,12 @@ export default function ChatPage() {
   // Side-panel mode for the right aside. "preview" still uses previewArtifact
   // as the WHICH; plan/tasks/files are derived/fetched panels.
   const [sidePanel, setSidePanel] = useState<SidePanelMode>("none");
-  // Browser tools run in their own isolated task workspace. When an agent
-  // acts, follow the workspace emitted by the desktop bridge instead of
-  // assuming it matches the persisted chat/session id.
-  const [agentBrowserWorkspace, setAgentBrowserWorkspace] = useState<{
-    chatKey: string;
-    workspaceId: string;
-  } | null>(null);
+  // Browser tools run in an isolated workspace for each durable chat. When an
+  // agent acts, follow the workspace emitted by the desktop bridge so the
+  // visible pane and tool stay on the same tab set.
+  const [agentBrowserWorkspaceId, setAgentBrowserWorkspaceId] = useState<
+    string | null
+  >(null);
   const [planRefreshSignal, setPlanRefreshSignal] = useState(0);
   // True once the agent has presented a plan (present_plan tool) this turn —
   // gates the "Approve & run" bar so it never shows before a plan exists.
@@ -4388,9 +4406,9 @@ export default function ChatPage() {
     }
     if (mode === "plan") planAutoOpenDisabledRef.current = false;
     if (mode === "browser") {
-      // A manual Browser open belongs to the active chat. Agent actions set a
-      // task-specific override through the bridge event listener below.
-      setAgentBrowserWorkspace(null);
+      // A manual Browser open belongs to the active chat. Agent actions set
+      // the same durable-chat workspace through the bridge listener below.
+      setAgentBrowserWorkspaceId(null);
       const shell = chatShellRef.current;
       setPreviewPanelWidth(
         clampPreviewPanelWidth(panelShellWidth(shell) * 0.48, shell),
@@ -4416,10 +4434,7 @@ export default function ChatPage() {
     if (!bridge) return;
     return bridge.onEvent((event) => {
       if (event.type === "agent-action" && event.workspaceId) {
-        setAgentBrowserWorkspace({
-          chatKey,
-          workspaceId: event.workspaceId,
-        });
+        setAgentBrowserWorkspaceId(event.workspaceId);
         const shell = chatShellRef.current;
         setPreviewPanelWidth(
           clampPreviewPanelWidth(panelShellWidth(shell) * 0.48, shell),
@@ -4427,7 +4442,7 @@ export default function ChatPage() {
         setSidePanel("browser");
       }
     });
-  }, [chatKey]);
+  }, []);
 
   // Open a subagent's own session as a full chat — reuses the resume flow
   // (resumeId re-keys the page). Reopens a completed child session so the user
@@ -7866,7 +7881,10 @@ export default function ChatPage() {
           ) {
             return;
           }
-          const hydrated = normalizeStoredTranscript(resp.messages);
+          const hydrated = normalizeStoredTranscript(resp.messages, {
+            activeAssistantId: currentAssistantRef.current,
+            turnIsActive: true,
+          });
           if (!hydrated.length) return;
           setMessages((prev) =>
             reconcileWithServerTruth(
@@ -9228,12 +9246,12 @@ export default function ChatPage() {
   // freshly minted id with no history yet. This is the same id artifacts and
   // dismissals key on.
   const dataSessionId = artifactStateSessionId();
-  const agentBrowserWorkspaceId =
-    agentBrowserWorkspace?.chatKey === chatKey
-      ? agentBrowserWorkspace.workspaceId
+  const activeAgentBrowserWorkspaceId =
+    agentBrowserWorkspaceId === dataSessionId
+      ? agentBrowserWorkspaceId
       : null;
   const browserWorkspaceId =
-    agentBrowserWorkspaceId ?? sessionId ?? dataSessionId ?? "default";
+    activeAgentBrowserWorkspaceId ?? dataSessionId ?? sessionId ?? "default";
   const renderSidePanel = () => {
     const renderPlanPanel = () => (
       <PlanPanel

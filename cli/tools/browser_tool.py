@@ -4511,11 +4511,19 @@ _BROWSER_AUTONOMOUS_EFFECTS = {
     "spawn:browser",
 }
 
+
+def _browser_handler_session(kwargs: Dict[str, Any]) -> Optional[str]:
+    return kwargs.get("session_id") or kwargs.get("task_id")
+
+
 registry.register(
     name="browser_navigate",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_navigate(
+        url=args.get("url", ""),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="🌐",
     effects=_BROWSER_AUTONOMOUS_EFFECTS,
@@ -4525,7 +4533,10 @@ registry.register(
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_snapshot"],
     handler=lambda args, **kw: browser_snapshot(
-        full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
+        full=args.get("full", False),
+        task_id=_browser_handler_session(kw),
+        user_task=kw.get("user_task"),
+    ),
     check_fn=check_browser_requirements,
     emoji="📸",
     effects=_BROWSER_READ_EFFECTS,
@@ -4534,7 +4545,10 @@ registry.register(
     name="browser_click",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_click"],
-    handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_click(
+        ref=args.get("ref", ""),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="👆",
     effects=_BROWSER_AUTONOMOUS_EFFECTS,
@@ -4543,7 +4557,11 @@ registry.register(
     name="browser_type",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_type"],
-    handler=lambda args, **kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_type(
+        ref=args.get("ref", ""),
+        text=args.get("text", ""),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="⌨️",
     effects=_BROWSER_AUTONOMOUS_EFFECTS,
@@ -4552,7 +4570,10 @@ registry.register(
     name="browser_scroll",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_scroll"],
-    handler=lambda args, **kw: browser_scroll(direction=args.get("direction", "down"), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_scroll(
+        direction=args.get("direction", "down"),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="📜",
     effects=_BROWSER_READ_EFFECTS,
@@ -4561,7 +4582,9 @@ registry.register(
     name="browser_back",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_back"],
-    handler=lambda args, **kw: browser_back(task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_back(
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="◀️",
     effects=_BROWSER_READ_EFFECTS,
@@ -4570,7 +4593,10 @@ registry.register(
     name="browser_press",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_press"],
-    handler=lambda args, **kw: browser_press(key=args.get("key", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_press(
+        key=args.get("key", ""),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="⌨️",
     effects=_BROWSER_AUTONOMOUS_EFFECTS,
@@ -4580,7 +4606,9 @@ registry.register(
     name="browser_get_images",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_get_images"],
-    handler=lambda args, **kw: browser_get_images(task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_get_images(
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="🖼️",
     effects=_BROWSER_READ_EFFECTS,
@@ -4589,7 +4617,11 @@ registry.register(
     name="browser_vision",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_vision"],
-    handler=lambda args, **kw: browser_vision(question=args.get("question", ""), annotate=args.get("annotate", False), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_vision(
+        question=args.get("question", ""),
+        annotate=args.get("annotate", False),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="👁️",
     effects=_BROWSER_AUTONOMOUS_EFFECTS,
@@ -4598,7 +4630,11 @@ registry.register(
     name="browser_console",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_console"],
-    handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_console(
+        clear=args.get("clear", False),
+        expression=args.get("expression"),
+        task_id=_browser_handler_session(kw),
+    ),
     check_fn=check_browser_requirements,
     emoji="🖥️",
     effects=_BROWSER_AUTONOMOUS_EFFECTS,
