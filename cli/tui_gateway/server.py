@@ -6145,6 +6145,26 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     sid = str(params.get("session_id") or "")
+    # Parity with session.steer's stale-binding repair: a cold re-resume can
+    # leave the client addressing an idle duplicate while the conversation's
+    # ORIGINAL session is the one actually running. Stopping the idle twin
+    # reported "stopped" while the real turn kept streaming — the button that
+    # did nothing. Re-target the running twin by session_key so Stop always
+    # hits the generation the user is watching.
+    if not session.get("running"):
+        key = session.get("session_key")
+        if key:
+            for other_sid, other in list(_sessions.items()):
+                if other is session or not isinstance(other, dict):
+                    continue
+                if (
+                    other.get("session_key") == key
+                    and other.get("running")
+                    and other.get("agent") is not None
+                ):
+                    session = other
+                    sid = other_sid
+                    break
     return _ok(rid, _request_session_stop(sid, session))
 
 
@@ -6595,6 +6615,12 @@ def _(rid, params: dict) -> dict:
     text = (params.get("text") or "").strip()
     if not text:
         return _err(rid, 4002, "text is required")
+    # Client-supplied durable id for this steer. Threading it through
+    # queue_soft_interrupt makes the whole path exactly-once (the agent
+    # dedupes by id, so a client retry after a lost response cannot inject
+    # twice) and lets steer.queued / steer.applied address the exact strip
+    # item instead of the legacy match-by-text fallback.
+    client_message_id = str(params.get("client_message_id") or "").strip() or None
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -6632,11 +6658,22 @@ def _(rid, params: dict) -> dict:
 
     try:
         if hasattr(agent, "queue_soft_interrupt"):
-            accepted = agent.queue_soft_interrupt(text, source="dashboard_steer")
+            accepted = agent.queue_soft_interrupt(
+                text,
+                source="dashboard_steer",
+                client_message_id=client_message_id,
+            )
         elif hasattr(agent, "steer"):
             accepted = agent.steer(text)
         else:
             return _err(rid, 4010, "agent does not support steer")
+    except TypeError:
+        # Older agent builds lack the client_message_id kwarg. The enqueue is
+        # idempotent-by-id only on new builds anyway — retry without the id.
+        try:
+            accepted = agent.queue_soft_interrupt(text, source="dashboard_steer")
+        except Exception as exc:
+            return _err(rid, 5000, f"steer failed: {exc}")
     except Exception as exc:
         return _err(rid, 5000, f"steer failed: {exc}")
     if not accepted:
@@ -6679,7 +6716,10 @@ def _(rid, params: dict) -> dict:
             # envelope ("[Elevation Hub interface context]…"), which is for
             # the model, never for the screen.
             display = str(params.get("display_text") or "").strip() or text
-            _emit("steer.queued", steer_sid, {"text": display})
+            queued_payload = {"text": display}
+            if client_message_id:
+                queued_payload["client_message_id"] = client_message_id
+            _emit("steer.queued", steer_sid, queued_payload)
     return _ok(
         rid,
         {"status": status, "text": text, "forwarded_children": forwarded},

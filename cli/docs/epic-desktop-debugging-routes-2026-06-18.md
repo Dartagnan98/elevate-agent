@@ -226,7 +226,7 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 564 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `00cfad7baa0d1581`.
+- Caller inventory fingerprint: `d3c000f4248411b8`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test, served-SPA
   `HttpOnly` session-cookie authorization test,

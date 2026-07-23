@@ -2502,8 +2502,9 @@ def _plan_block_message(what: str) -> str:
         f"BLOCKED (plan mode): {what} is a state-changing action and plan mode "
         "is read-only. Keep researching with read-only tools and finish your "
         "written plan. When it's ready, tell the user to approve it — they "
-        "leave plan mode (the /run command or the permission picker) and you "
-        "execute it then."
+        "approve with the Approve & run control (or switch the permission "
+        "mode picker back to default) and you execute it then. Do not tell "
+        "the user to type slash commands."
     )
 
 

@@ -9395,10 +9395,11 @@ class AIAgent:
                 "3. Risks, edge cases, and how each step will be verified.\n"
                 "4. Anything you could not confirm in read-only mode (call it "
                 "out explicitly rather than guessing).\n\n"
-                "End by telling the user: approve to execute by leaving plan "
-                "mode — type /run (or switch the permission picker / Settings "
-                "to default), then re-send or say 'go' and you'll carry out "
-                "the plan."
+                "End by telling the user the plan is ready for review: they "
+                "approve it with the Approve & run control (or by switching "
+                "the permission mode picker back to default) and telling you "
+                "to go ahead. Do not instruct the user to type slash "
+                "commands — commands like /run do not exist in the chat app."
             )
 
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())

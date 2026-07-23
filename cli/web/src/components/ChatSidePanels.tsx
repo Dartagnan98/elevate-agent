@@ -15,6 +15,7 @@ import {
   FileText,
   Folder,
   Globe2,
+  History as HistoryIcon,
   Image as ImageIcon,
   ListChecks,
   Loader2,
@@ -22,11 +23,12 @@ import {
   PanelRight,
   Plus,
   RefreshCw,
+  Search,
   Square,
   X,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
@@ -35,6 +37,16 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
 import { Markdown } from "@/components/Markdown";
+import {
+  BROWSER_HISTORY_STORAGE_KEY,
+  browserTarget,
+  buildSuggestions,
+  parseHistory,
+  recordVisit,
+  retitleVisit,
+  type OmniboxHistoryEntry,
+  type OmniboxSuggestion,
+} from "@/lib/omnibox";
 import { cn } from "@/lib/utils";
 
 export type SidePanelMode =
@@ -199,14 +211,20 @@ export function desktopBrowserPane(): BrowserPaneBridge | null {
   ).elevateDesktop?.browserPane ?? null;
 }
 
-function browserTarget(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return "about:blank";
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  if (trimmed.includes(" ") || !trimmed.includes(".")) {
-    return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+function loadBrowserHistory(): OmniboxHistoryEntry[] {
+  try {
+    return parseHistory(
+      JSON.parse(window.localStorage?.getItem(BROWSER_HISTORY_STORAGE_KEY) || "[]"),
+    );
+  } catch {
+    return [];
   }
-  return `https://${trimmed}`;
+}
+
+function suggestionKindIcon(kind: OmniboxSuggestion["kind"]) {
+  if (kind === "search") return <Search className="h-3.5 w-3.5" />;
+  if (kind === "history") return <HistoryIcon className="h-3.5 w-3.5" />;
+  return <Globe2 className="h-3.5 w-3.5" />;
 }
 
 export function BrowserPanel({
@@ -221,7 +239,19 @@ export function BrowserPanel({
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [address, setAddress] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<OmniboxHistoryEntry[]>(loadBrowserHistory);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const lastTabUrls = useRef(new Map<string, string>());
+  const listboxId = useId();
   const active = tabs.find((tab) => tab.active) ?? tabs[0] ?? null;
+
+  const suggestions = useMemo(
+    () => (suggestionsOpen ? buildSuggestions(address, history) : []),
+    [address, history, suggestionsOpen],
+  );
+  const dropdownVisible = suggestionsOpen && suggestions.length > 0;
+  const activeIndex = Math.min(selectedIndex, Math.max(0, suggestions.length - 1));
 
   const refresh = useCallback(async () => {
     if (!bridge) return;
@@ -261,6 +291,55 @@ export function BrowserPanel({
     }
   }, [active]);
 
+  // Record real navigations into local omnibox history: a visit is counted
+  // when a tab settles on a new http(s) URL; later title updates retitle the
+  // entry without recounting. Suggestions come only from this recorded data.
+  useEffect(() => {
+    const seen = lastTabUrls.current;
+    const liveIds = new Set(tabs.map((tab) => tab.id));
+    for (const id of [...seen.keys()]) {
+      if (!liveIds.has(id)) seen.delete(id);
+    }
+    const now = Date.now();
+    const visits: { url: string; title: string; now: number }[] = [];
+    const retitles: { url: string; title: string }[] = [];
+    for (const tab of tabs) {
+      if (tab.loading || !/^https?:\/\//i.test(tab.url)) continue;
+      if (seen.get(tab.id) !== tab.url) {
+        seen.set(tab.id, tab.url);
+        visits.push({ url: tab.url, title: tab.title, now });
+      } else if (tab.title) {
+        retitles.push({ url: tab.url, title: tab.title });
+      }
+    }
+    if (!visits.length && !retitles.length) return;
+    setHistory((prev) => {
+      let next = prev;
+      for (const visit of visits) next = recordVisit(next, visit);
+      for (const retitle of retitles) next = retitleVisit(next, retitle.url, retitle.title);
+      return next;
+    });
+  }, [tabs]);
+
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(BROWSER_HISTORY_STORAGE_KEY, JSON.stringify(history));
+    } catch {
+      /* private mode / quota — history stays in-memory for the session */
+    }
+  }, [history]);
+
+  // The page is a native WebContentsView composited over the DOM, so the DOM
+  // dropdown can never paint above it. Hide the native view while the
+  // dropdown is open; the mount effect below restores visibility on close.
+  useEffect(() => {
+    if (!bridge || !dropdownVisible) return;
+    void bridge.setVisible(false);
+    return () => {
+      void bridge.setVisible(true);
+    };
+  }, [bridge, dropdownVisible]);
+
   useEffect(() => {
     if (!bridge || !holeRef.current) return;
     const hole = holeRef.current;
@@ -285,16 +364,21 @@ export function BrowserPanel({
     };
   }, [bridge]);
 
-  const navigate = useCallback(async () => {
-    if (!bridge || !active) return;
-    try {
-      setError(null);
-      await bridge.navigate(workspaceId, active.id, browserTarget(address));
-      await refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [active, address, bridge, refresh, workspaceId]);
+  const navigateTo = useCallback(
+    async (target: string) => {
+      if (!bridge || !active) return;
+      try {
+        setError(null);
+        setSuggestionsOpen(false);
+        setAddress(target === "about:blank" ? "" : target);
+        await bridge.navigate(workspaceId, active.id, target);
+        await refresh();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [active, bridge, refresh, workspaceId],
+  );
 
   const newTab = useCallback(async () => {
     if (!bridge) return;
@@ -337,18 +421,100 @@ export function BrowserPanel({
         >
           <RefreshCw className={cn("h-3.5 w-3.5", active?.loading && "animate-spin")} />
         </Button>
-        <input
-          aria-label="Browser address"
-          className="h-8 min-w-0 flex-1 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 text-xs text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)] focus:border-[var(--chat-accent)]"
-          data-browser-address="true"
-          onChange={(event) => setAddress(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void navigate();
-          }}
-          placeholder="Search or enter a website"
-          spellCheck={false}
-          value={address}
-        />
+        <div className="relative min-w-0 flex-1">
+          <input
+            aria-activedescendant={
+              dropdownVisible ? `${listboxId}-option-${activeIndex}` : undefined
+            }
+            aria-autocomplete="list"
+            aria-controls={listboxId}
+            aria-expanded={dropdownVisible}
+            aria-label="Browser address"
+            autoComplete="off"
+            className="h-8 w-full min-w-0 rounded-[7px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 text-xs text-[var(--chat-text)] outline-none placeholder:text-[var(--chat-muted)] focus:border-[var(--chat-accent)]"
+            data-browser-address="true"
+            onBlur={() => setSuggestionsOpen(false)}
+            onChange={(event) => {
+              setAddress(event.target.value);
+              setSelectedIndex(0);
+              setSuggestionsOpen(true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                if (!suggestionsOpen) {
+                  setSelectedIndex(0);
+                  setSuggestionsOpen(true);
+                  return;
+                }
+                if (!suggestions.length) return;
+                setSelectedIndex(
+                  event.key === "ArrowDown"
+                    ? (activeIndex + 1) % suggestions.length
+                    : (activeIndex - 1 + suggestions.length) % suggestions.length,
+                );
+                return;
+              }
+              if (event.key === "Escape") {
+                if (suggestionsOpen) {
+                  // Swallow the first Escape: close only the dropdown, not
+                  // the surrounding panel/overlay.
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setSuggestionsOpen(false);
+                }
+                return;
+              }
+              if (event.key === "Enter") {
+                const chosen = dropdownVisible ? suggestions[activeIndex] : undefined;
+                void navigateTo(chosen ? chosen.url : browserTarget(address));
+              }
+            }}
+            placeholder="Search or enter a website"
+            role="combobox"
+            spellCheck={false}
+            value={address}
+          />
+          {dropdownVisible ? (
+            <div
+              aria-label="Address suggestions"
+              className="absolute left-0 right-0 top-full z-30 mt-1 overflow-hidden rounded-[9px] border border-[var(--chat-border)] bg-[var(--chat-surface)] py-1 shadow-[0_18px_44px_-14px_rgba(0,0,0,0.65)]"
+              id={listboxId}
+              role="listbox"
+            >
+              {suggestions.map((suggestion, index) => (
+                <button
+                  aria-selected={index === activeIndex}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
+                    index === activeIndex
+                      ? "bg-[var(--chat-surface-strong)] text-[var(--chat-text)]"
+                      : "text-[var(--chat-muted-strong)]",
+                  )}
+                  id={`${listboxId}-option-${index}`}
+                  key={suggestion.id}
+                  onClick={() => void navigateTo(suggestion.url)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  role="option"
+                  type="button"
+                >
+                  <span aria-hidden="true" className="shrink-0 text-[var(--chat-muted)]">
+                    {suggestionKindIcon(suggestion.kind)}
+                  </span>
+                  <span className="min-w-0 shrink-0 truncate" style={{ maxWidth: "60%" }}>
+                    {suggestion.title}
+                  </span>
+                  {suggestion.detail && suggestion.detail !== suggestion.title ? (
+                    <span className="min-w-0 truncate text-[11px] text-[var(--chat-muted)]">
+                      {suggestion.detail}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
         <Button
           aria-label="New browser tab"
           className="h-7 w-7 shrink-0 rounded-[7px] p-0"

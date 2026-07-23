@@ -3919,6 +3919,127 @@ def test_session_steer_errors_when_agent_has_no_steer_method():
     assert resp["error"]["code"] == 4010
 
 
+def test_session_steer_forwards_client_message_id_and_emits_it(monkeypatch):
+    """The dashboard's durable steer id must ride the whole path: into
+    queue_soft_interrupt (so a transport retry dedupes to exactly-once) and
+    out on the steer.queued event (so the sender's strip item flips in
+    place instead of the legacy match-by-text append)."""
+    calls = {}
+    emitted = []
+
+    class _Agent:
+        def queue_soft_interrupt(
+            self, text, *, source="user", client_message_id=None, urgent=False
+        ):
+            calls["text"] = text
+            calls["source"] = source
+            calls["client_message_id"] = client_message_id
+            return True
+
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload)),
+    )
+    server._sessions["sid"] = _session(agent=_Agent(), running=True)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.steer",
+                "params": {
+                    "session_id": "sid",
+                    "text": "go",
+                    "client_message_id": "steer.queued-abc",
+                    "display_text": "go",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["status"] == "queued"
+    assert calls["text"] == "go"
+    assert calls["source"] == "dashboard_steer"
+    assert calls["client_message_id"] == "steer.queued-abc"
+    queued_events = [e for e in emitted if e[0] == "steer.queued"]
+    assert len(queued_events) == 1
+    assert queued_events[0][2]["text"] == "go"
+    assert queued_events[0][2]["client_message_id"] == "steer.queued-abc"
+
+
+def test_session_steer_reports_rejected_when_agent_lane_closed(monkeypatch):
+    """Reproduction of the live 'ERROR - not sent' trigger: a steer landing
+    in the turn-handoff window (agent pending-input lane closed →
+    queue_soft_interrupt returns False) must surface status='rejected' and
+    emit NO steer.queued event. The client converts that into ordinary
+    next-turn queue delivery — the message is never dropped."""
+    emitted = []
+
+    class _Agent:
+        def queue_soft_interrupt(
+            self, text, *, source="user", client_message_id=None, urgent=False
+        ):
+            return False  # lane closed for terminal handoff
+
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append(event),
+    )
+    server._sessions["sid"] = _session(agent=_Agent(), running=True)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.steer",
+                "params": {
+                    "session_id": "sid",
+                    "text": "go",
+                    "client_message_id": "steer.queued-def",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["status"] == "rejected"
+    assert "steer.queued" not in emitted
+
+
+def test_session_steer_tolerates_agents_without_client_message_id_kwarg():
+    """Older agent builds take queue_soft_interrupt(text, source=...) only.
+    The handler must fall back to the id-less call instead of erroring."""
+
+    class _OldAgent:
+        def __init__(self):
+            self.calls = []
+
+        def queue_soft_interrupt(self, text, *, source="user", urgent=False):
+            self.calls.append(text)
+            return True
+
+    agent = _OldAgent()
+    server._sessions["sid"] = _session(agent=agent, running=True)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.steer",
+                "params": {
+                    "session_id": "sid",
+                    "text": "go",
+                    "client_message_id": "steer.queued-old",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["status"] == "queued"
+    assert agent.calls == ["go"]
+
+
 def test_session_info_includes_mcp_servers(monkeypatch):
     fake_status = [
         {"name": "github", "transport": "http", "tools": 12, "connected": True},
@@ -4288,6 +4409,49 @@ def test_session_stop_stays_busy_and_scopes_process_termination(monkeypatch):
         ]
     finally:
         server._sessions.pop("sid", None)
+
+
+def test_session_stop_retargets_running_twin(monkeypatch):
+    """Stop parity with session.steer's stale-binding repair: a cold
+    re-resume can leave the client addressing an idle duplicate while the
+    conversation's ORIGINAL session is the one actually running. Stopping
+    the idle twin used to report 'stopped' while the real turn kept
+    streaming — the Stop button that did nothing. The handler must
+    re-target the running twin by session_key and cancel THAT."""
+    calls = {"idle": 0, "running": 0}
+
+    class _IdleAgent:
+        def interrupt(self):
+            calls["idle"] += 1
+
+    class _RunningAgent:
+        def interrupt(self):
+            calls["running"] += 1
+
+    fake_registry = types.ModuleType("tools.process_registry")
+    fake_registry.process_registry = types.SimpleNamespace(
+        kill_all=lambda *, session_key: 0
+    )
+    monkeypatch.setitem(sys.modules, "tools.process_registry", fake_registry)
+
+    server._sessions["sid-idle"] = _session(agent=_IdleAgent(), running=False)
+    server._sessions["sid-live"] = _session(agent=_RunningAgent(), running=True)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.stop",
+                "params": {"session_id": "sid-idle"},
+            }
+        )
+
+        assert calls == {"idle": 0, "running": 1}
+        assert resp["result"]["interrupted"] is True
+        assert resp["result"]["running"] is True
+        assert resp["result"]["status"] == "stopping"
+    finally:
+        server._sessions.pop("sid-idle", None)
+        server._sessions.pop("sid-live", None)
 
 
 def test_session_stop_does_not_kill_sibling_sharing_default_task_id(monkeypatch):

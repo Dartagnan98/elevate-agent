@@ -355,5 +355,73 @@ class TestSteerCommandRegistry:
         assert should_bypass_active_session("steer") is True
 
 
+class TestSteerClosedLane:
+    """The terminal-handoff contract behind the live 'not sent' bug.
+
+    ``_drain_pending_inputs(close_for_handoff=True)`` is the exact moment a
+    finishing turn hands its queue back to the host. A steer landing after
+    that boundary must be REJECTED cleanly (False — the host then delivers
+    it as the next user turn); it must never disappear into the finished
+    generation. The lane reopens for the next generation.
+    """
+
+    def test_second_rapid_steer_during_handoff_rejected_then_reopens(self):
+        agent = _bare_agent()
+        # First steer mid-turn: accepted.
+        assert agent.steer("use the one I said", client_message_id="steer.one") is True
+        # The turn ends: the terminal drain closes the producer lane and
+        # takes ownership of everything queued so far.
+        items = agent._drain_pending_inputs(close_for_handoff=True)
+        assert [i["client_message_id"] for i in items] == ["steer.one"]
+        # Second rapid steer lands in the handoff window: clean False.
+        assert agent.steer("go", client_message_id="steer.two") is False
+        # Nothing stranded on the closed lane.
+        assert agent._drain_pending_inputs() == []
+        # The next generation reopens the lane (run_conversation does this
+        # once receipt + startup are durable) — the same steer, same id, is
+        # accepted then.
+        with agent._pending_inputs_lock:
+            agent._pending_inputs_closed = False
+        assert agent.steer("go", client_message_id="steer.two") is True
+
+    def test_dashboard_soft_steer_rejected_during_handoff(self):
+        agent = _bare_agent()
+        agent.quiet_mode = True
+        assert (
+            agent.queue_soft_interrupt(
+                "first", source="dashboard_steer", client_message_id="steer.a"
+            )
+            is True
+        )
+        agent._drain_pending_inputs(close_for_handoff=True)
+        assert (
+            agent.queue_soft_interrupt(
+                "go", source="dashboard_steer", client_message_id="steer.b"
+            )
+            is False
+        )
+
+    def test_retry_with_same_id_and_content_is_idempotent(self):
+        """A client transport retry re-sends the same client_message_id and
+        text. The enqueue must dedupe to ONE queued item (exactly-once), and
+        still report acceptance to the caller."""
+        agent = _bare_agent()
+        agent.quiet_mode = True
+        assert (
+            agent.queue_soft_interrupt(
+                "go", source="dashboard_steer", client_message_id="steer.r"
+            )
+            is True
+        )
+        assert (
+            agent.queue_soft_interrupt(
+                "go", source="dashboard_steer", client_message_id="steer.r"
+            )
+            is True
+        )
+        with agent._pending_inputs_lock:
+            assert len(agent._pending_inputs) == 1
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

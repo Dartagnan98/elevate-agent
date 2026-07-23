@@ -315,6 +315,8 @@ interface QueuedInput {
   routedText: string;
   status: "queued" | "error" | "steering";
   text: string;
+  /** Optional strip-row status line overriding the default for `status`. */
+  hint?: string;
 }
 
 interface HeldSteer {
@@ -1778,9 +1780,12 @@ export const __chatPageTestables = {
   repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
   queueAfterConnectionReset,
+  reconcileSteerAccepted,
+  requeueUndeliveredSteer,
   resolveActivityDigestVisibility,
   routePromptForAgent,
   sessionStopDisposition,
+  steerClientMessageId,
   shouldClearUsageForStatus,
   shouldClearUsageForStatusUpdate,
   shouldHandlePreviewShortcut,
@@ -2417,6 +2422,73 @@ function settleQueuedDelivery(
   acknowledged: boolean,
 ): QueuedInput[] {
   return acknowledged ? items.filter((item) => item.id !== queuedId) : items;
+}
+
+/** Durable steer id for a queued strip item. The "steer." prefix is the
+ * gateway/transcript marker for a mid-run injected user row, so the same id
+ * works as the RPC client_message_id, the steer.queued/steer.applied
+ * correlation key, and the persisted row id the hydrator folds inline. */
+function steerClientMessageId(queuedId: string): string {
+  return queuedId.startsWith("steer.") ? queuedId : `steer.${queuedId}`;
+}
+
+/** A steer the gateway could not inject (rejected mid-handoff, or the RPC
+ * failed after retry) returns to the ORDINARY queue in place — never to a
+ * dead "error" state. The !busy drain then delivers it as the next user
+ * turn, which is exactly what the rejection banner promises. Position is
+ * preserved so a re-queued steer still sends before anything typed later. */
+function requeueUndeliveredSteer(
+  items: QueuedInput[],
+  queuedId: string,
+  hint: string,
+): QueuedInput[] {
+  return items.map((item) =>
+    item.id === queuedId || item.id === steerClientMessageId(queuedId)
+      ? { ...item, status: "queued" as const, hint }
+      : item,
+  );
+}
+
+/** Reconcile a gateway-accepted steer (steer.queued event or RPC success)
+ * with the local strip. Exactly-once: the accepted steer ADOPTS the local
+ * queued copy of the same message (matched by durable id first, then by
+ * text for legacy events) instead of duplicating it — a duplicate left
+ * behind as "queued" would re-send the steer as a fresh next-turn prompt. */
+function reconcileSteerAccepted(
+  items: QueuedInput[],
+  steerId: string,
+  text: string,
+  createdAt: number,
+): QueuedInput[] {
+  if (items.some((q) => q.id === steerId && q.status === "steering")) {
+    return items;
+  }
+  const localIdx = items.findIndex(
+    (q) =>
+      q.status !== "steering" &&
+      (q.id === steerId || steerClientMessageId(q.id) === steerId || q.text === text),
+  );
+  if (localIdx >= 0) {
+    return items.map((q, i) =>
+      i === localIdx
+        ? { ...q, id: steerId, status: "steering" as const, hint: undefined }
+        : q,
+    );
+  }
+  if (items.some((q) => q.status === "steering" && q.text === text)) {
+    return items;
+  }
+  return [
+    ...items,
+    {
+      agentId: "",
+      createdAt,
+      id: steerId,
+      routedText: text,
+      status: "steering" as const,
+      text,
+    },
+  ].slice(-5);
 }
 
 function terminalDuplicatePromptStatus(value: unknown): string | null {
@@ -4652,6 +4724,25 @@ export default function ChatPage() {
     }
   }, [tools, sidePanel, openSidePanel]);
 
+  // Fallback arming for the "Approve & run" bar: a plan-mode turn that
+  // settled with a real reply IS the plan presentation, even when the agent
+  // wrote the plan as chat text and never called present_plan. Without this,
+  // plan mode showed NO approval affordance at all and the agent's prose was
+  // the only exit path (historically: telling the user to type commands).
+  useEffect(() => {
+    if (busy || permissionModeId !== "plan") return;
+    const lastAssistant = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (
+      lastAssistant &&
+      lastAssistant.status !== "streaming" &&
+      (lastAssistant.content || "").trim()
+    ) {
+      setPlanReadyForApproval(true);
+    }
+  }, [busy, permissionModeId, messages]);
+
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
       const isReasoning = kind === "thinking" || kind === "reasoning";
@@ -6333,23 +6424,12 @@ export default function ChatPage() {
           heldSteersRef.current.push({ id: steerId, legacy: !clientMessageId, text });
           pendingSteerCountRef.current = heldSteersRef.current.length;
         }
+        // Exactly-once with the local strip: the accepted steer ADOPTS the
+        // sender's queued copy (flips it to "steering…" under the durable
+        // id) instead of appending a duplicate. A duplicate left "queued"
+        // would re-send the same message as a fresh turn after the run.
         setQueuedInputs((prev) =>
-          prev.some((q) =>
-            q.status === "steering" &&
-            (clientMessageId ? q.id === clientMessageId : q.text === text),
-          )
-            ? prev
-            : [
-                ...prev,
-                {
-                  agentId: "",
-                  createdAt: eventMillis(ev),
-                  id: steerId,
-                  routedText: text,
-                  status: "steering" as const,
-                  text,
-                },
-              ].slice(-5),
+          reconcileSteerAccepted(prev, steerId, text, eventMillis(ev)),
         );
       }),
     );
@@ -6968,7 +7048,11 @@ export default function ChatPage() {
 
   // Load the effective Claude-style permission mode for this session once
   // the gateway is up. The mode is session-scoped (composer picker), so it
-  // is re-fetched whenever the gateway session id changes.
+  // is re-fetched whenever the gateway session id changes — and on every
+  // busy transition: plan mode can be flipped SERVER-side mid-session (a
+  // /plan command from another surface, an auto-entered planning turn), and
+  // a stale client mode hid the "Approve & run" bar while the agent was
+  // genuinely planning (it then told the user to type commands instead).
   useEffect(() => {
     if (state !== "open" || !sessionId) return;
     let cancelled = false;
@@ -6987,7 +7071,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [gw, state, sessionId]);
+  }, [gw, state, sessionId, busy]);
 
   const selectPermissionMode = useCallback(
     (mode: PermissionMode) => {
@@ -7576,9 +7660,44 @@ export default function ChatPage() {
         if (disposition === "already-settled") return;
         setBusy(true);
         setStatusText(result.status === "finishing" ? "Finishing..." : "Stopping...");
+        // The user explicitly pressed Stop — reconcile with the gateway's
+        // authoritative running latch NOW instead of leaving them on
+        // "Stopping..." for the busy watchdog's multi-poll window when the
+        // terminal message.complete frame was missed (the wedged-busy case).
+        // If the server still reports running, the fenced completion will
+        // settle the view normally and this probe is a no-op.
+        window.setTimeout(() => {
+          void gw
+            .request<{ running?: boolean }>("session.running", { session_id: sessionId })
+            .then((res) => {
+              if (res && res.running === false) {
+                setBusy(false);
+                setMessages((prev) => {
+                  const interrupted = markStreamingTurnsInterrupted(prev);
+                  setStatusText(settledChatStatusText(interrupted));
+                  return interrupted;
+                });
+              }
+            })
+            .catch(() => {
+              /* transient — the busy watchdog keeps polling */
+            });
+        }, 1500);
       })
       .catch((error) => {
         const stopMessage = error instanceof Error ? error.message : String(error);
+        if (/session not found/i.test(stopMessage)) {
+          // Authoritative, not transient: the gateway restarted and the
+          // in-memory session died with it — nothing is running. Settle the
+          // view instead of reporting a failed stop on a dead turn.
+          setBusy(false);
+          setMessages((prev) => {
+            const interrupted = markStreamingTurnsInterrupted(prev);
+            setStatusText(settledChatStatusText(interrupted));
+            return interrupted;
+          });
+          return;
+        }
         setBanner(`Stop failed: ${stopMessage}`);
         setStatusText("Stop failed");
       });
@@ -7648,13 +7767,16 @@ export default function ChatPage() {
           ),
         );
       }
-      // the strip items for these steers are done
+      // The strip items for these steers are done. Scoped applies drop the
+      // matching item in ANY status — a retry race can have flipped it back
+      // to "queued", and leaving that copy behind would re-send an already
+      // APPLIED steer as a duplicate next-turn message.
       setQueuedInputs((prev) =>
-        prev.filter(
-          (q) =>
-            q.status !== "steering" ||
-            (!applyAll && !appliedIds.has(q.id)),
-        ),
+        prev.filter((q) => {
+          if (applyAll) return q.status !== "steering";
+          if (appliedIds.has(q.id)) return false;
+          return true;
+        }),
       );
     },
     [addActivityTrace, flushAssistantDelta, updateAssistant],
@@ -7674,85 +7796,119 @@ export default function ChatPage() {
       const item = queuedInputs.find((q) => q.id === queuedId);
       if (!item) return;
       const text = item.routedText || item.text;
+      // Durable id for this steer: the RPC's client_message_id, the
+      // steer.queued/steer.applied correlation key, AND (server-side) the
+      // persisted user row id. Makes a transport-level retry exactly-once —
+      // the agent dedupes the enqueue by this id.
+      const steerClientId = steerClientMessageId(item.id);
       setQueuedInputs((prev) =>
         prev.map((q) => (q.id === queuedId ? { ...q, status: "queued" } : q)),
       );
       setStatusText("Steering current turn...");
-      steerInFlightRef.current += 1;
-      void gw
-        .request("session.steer", {
-          session_id: sessionId,
-          text,
-          // What the user actually typed — the gateway echoes this in
-          // steer.queued for the inline bubble; `text` may carry the
-          // routing envelope, which must never render.
-          display_text: item.text,
-        })
-        .finally(() => {
-          steerInFlightRef.current = Math.max(0, steerInFlightRef.current - 1);
-        })
-        .then((response) => {
-          const status =
-            response && typeof response === "object" && "status" in response
-              ? String((response as Record<string, unknown>).status)
-              : "queued";
-          if (status === "rejected") {
+      const attemptSteer = (attempt: number) => {
+        steerInFlightRef.current += 1;
+        void gw
+          .request("session.steer", {
+            session_id: sessionId,
+            text,
+            client_message_id: steerClientId,
+            // What the user actually typed — the gateway echoes this in
+            // steer.queued for the inline bubble; `text` may carry the
+            // routing envelope, which must never render.
+            display_text: item.text,
+          })
+          .finally(() => {
+            steerInFlightRef.current = Math.max(0, steerInFlightRef.current - 1);
+          })
+          .then((response) => {
+            const status =
+              response && typeof response === "object" && "status" in response
+                ? String((response as Record<string, unknown>).status)
+                : "queued";
+            if (status === "rejected") {
+              // The agent's mid-run lane was closed (turn handoff/startup
+              // window). NOT an error state: the message returns to the
+              // ordinary queue in place, and the !busy drain sends it as
+              // the next user turn — guaranteed delivery, never dropped.
+              setQueuedInputs((prev) =>
+                requeueUndeliveredSteer(prev, queuedId, "sends when the turn ends"),
+              );
+              setStatusText("Steer queued for next turn");
+              setBanner(
+                "The agent can't take a mid-run message right now — it stays queued and will be sent as the next turn.",
+              );
+              return;
+            }
+            // The steer is queued server-side (queue_soft_interrupt) and the
+            // agent applies it at its next safe boundary. The CURRENT assistant
+            // message must keep streaming in place until its real
+            // message.complete, and the agent's response to the steer arrives as
+            // its OWN next turn (a fresh message.start → new bubble). Do NOT
+            // finalize the in-flight message or clear currentAssistantRef here:
+            // that truncated the answer mid-sentence and made the continued
+            // deltas spawn a DUPLICATE bubble with the steer stranded between
+            // them (the reported glitch where the steer "stays above the
+            // answer"). Just show the steer bubble (below the streaming answer)
+            // and let the stream finish naturally.
+            const steerState: ChatMessage["steer"] =
+              status === "steering_delegation"
+                ? "delegation"
+                : status === "queued_delegation"
+                  ? "delegation-wait"
+                  : "pending";
+            if (steerState === "pending") {
+              // The steer.queued event (which rides the replay ring) is the
+              // canonical driver, but the strip must acknowledge NOW even if
+              // that event frame was lost: the local item flips to
+              // "steering…" (same id) instead of being removed. It leaves
+              // the strip at steer.applied. Idempotent with the event.
+              if (
+                !heldSteersRef.current.some(
+                  (held) => held.id === steerClientId || held.text === item.text,
+                )
+              ) {
+                heldSteersRef.current.push({ id: steerClientId, text: item.text });
+                pendingSteerCountRef.current = heldSteersRef.current.length;
+              }
+              setQueuedInputs((prev) =>
+                reconcileSteerAccepted(prev, steerClientId, item.text, Date.now()),
+              );
+            } else {
+              const steeredId = appendMessage("user", item.text, {
+                steer: steerState,
+              });
+              if (steeredId) pendingSteerIdsRef.current.push(steeredId);
+              setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
+            }
+            setStatusText(
+              steerState === "delegation"
+                ? "Steering the running delegation..."
+                : steerState === "delegation-wait"
+                  ? "Queued — applies when the delegation returns"
+                  : "Steering current turn...",
+            );
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (attempt === 0) {
+              // One transport-level retry. Safe: the enqueue is deduped by
+              // client_message_id, so even if the first request landed and
+              // only its response was lost, the retry cannot inject twice.
+              window.setTimeout(() => attemptSteer(1), 800);
+              return;
+            }
+            // Still unreachable — fall back to ordinary queue delivery so
+            // the message is never stranded in a dead "not sent" state.
             setQueuedInputs((prev) =>
-              prev.map((q) =>
-                q.id === queuedId ? { ...q, status: "error" } : q,
-              ),
+              requeueUndeliveredSteer(prev, queuedId, "sends when the turn ends"),
             );
-            setStatusText("Steer rejected");
+            setStatusText("Steer failed — queued for next turn");
             setBanner(
-              "The agent rejected the steer — it will go out as the next turn instead.",
+              `Steer failed (${message}) — the message stays queued and will be sent as the next turn.`,
             );
-            return;
-          }
-          // The steer is queued server-side (queue_soft_interrupt) and the
-          // agent applies it at its next safe boundary. The CURRENT assistant
-          // message must keep streaming in place until its real
-          // message.complete, and the agent's response to the steer arrives as
-          // its OWN next turn (a fresh message.start → new bubble). Do NOT
-          // finalize the in-flight message or clear currentAssistantRef here:
-          // that truncated the answer mid-sentence and made the continued
-          // deltas spawn a DUPLICATE bubble with the steer stranded between
-          // them (the reported glitch where the steer "stays above the
-          // answer"). Just show the steer bubble (below the streaming answer)
-          // and let the stream finish naturally.
-          const steerState: ChatMessage["steer"] =
-            status === "steering_delegation"
-              ? "delegation"
-              : status === "queued_delegation"
-                ? "delegation-wait"
-                : "pending";
-          if (steerState === "pending") {
-            // The steer.queued event (which rides the replay ring) drives
-            // both the strip's "steering…" item and, at apply time, the
-            // inline bubble. Nothing to draw locally.
-          } else {
-            const steeredId = appendMessage("user", item.text, {
-              steer: steerState,
-            });
-            if (steeredId) pendingSteerIdsRef.current.push(steeredId);
-          }
-          setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
-          setStatusText(
-            steerState === "delegation"
-              ? "Steering the running delegation..."
-              : steerState === "delegation-wait"
-                ? "Queued — applies when the delegation returns"
-                : "Steering current turn...",
-          );
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          setQueuedInputs((prev) =>
-            prev.map((q) =>
-              q.id === queuedId ? { ...q, status: "error" } : q,
-            ),
-          );
-          setBanner(`Steer failed: ${message}`);
-        });
+          });
+      };
+      attemptSteer(0);
     },
     [appendMessage, gw, queuedInputs, sessionId, state],
   );
@@ -10117,12 +10273,11 @@ function QueuedInputStrip({
           <span className="steer-text" title={item.text}>{item.text}</span>
           <span className="steer-hint">
             {item.status === "error"
-              ? "not sent"
+              ? item.hint || "not sent"
               : item.status === "steering"
                 ? "applies at the next safe moment"
-                : busy
-                  ? "waits for current turn"
-                  : nowLabel(item.createdAt)}
+                : item.hint ||
+                  (busy ? "waits for current turn" : nowLabel(item.createdAt))}
           </span>
           <div className="steer-actions">
             {item.status !== "steering" && (
