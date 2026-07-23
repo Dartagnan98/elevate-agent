@@ -2049,6 +2049,7 @@ def _run_browser_command(
         command,
         args,
         timeout=timeout,
+        session_id=task_id,
     )
     if pane_result is not None:
         return pane_result
@@ -4385,6 +4386,12 @@ def check_browser_requirements() -> bool:
     """
     # Camofox backend — only needs the server URL, no agent-browser CLI
     if _is_camofox_mode():
+        return True
+
+    # The signed desktop app's embedded browser is a complete backend by
+    # itself. Do not hide browser tools merely because the fallback
+    # agent-browser CLI or a second Chromium installation is absent.
+    if _embedded_browser_available():
         return True
 
     # CDP override mode can connect to an existing remote/local browser endpoint

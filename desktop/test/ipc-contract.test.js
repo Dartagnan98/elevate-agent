@@ -50,6 +50,7 @@ const allowedInvokeChannels = [
   "updater:status",
   "updater:check",
   "updater:install",
+  "browser:set-workspace",
   "browser:set-bounds",
   "browser:set-visible",
   "browser:list",

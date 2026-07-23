@@ -295,11 +295,11 @@ def test_exact_beta_gateway_resolver_reduces_affirmative_scope_to_once(
     assert entry.result == "once"
 
 
-def test_exact_beta_ignores_bypass_permissions():
+def test_exact_beta_honors_explicit_bypass_permissions():
     approval.set_session_permission_mode(_SESSION_KEY, "bypassPermissions")
 
     assert approval.get_session_permission_mode(_SESSION_KEY) == "bypassPermissions"
-    assert _combined_result()["approved"] is False
+    assert _combined_result()["approved"] is True
 
 
 def test_exact_beta_cron_approve_config_still_denies(monkeypatch):

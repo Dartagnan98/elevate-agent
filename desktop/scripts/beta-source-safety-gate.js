@@ -119,6 +119,7 @@ const REQUIRED_FILES_BY_SUITE = Object.freeze({
     "cli/tests/tools/test_beta_unrouted_lane_containment.py",
     "cli/tests/elevate_cli/test_beta_sender_containment.py",
     "cli/tests/run_agent/test_exact_beta_lane_dispatch_outcome.py",
+    "cli/tests/tools/test_browser_pane.py",
   ]),
   "python-tool-policy-runtime": Object.freeze([
     "cli/tests/run_agent/test_run_agent.py",
@@ -140,6 +141,7 @@ const REQUIRED_FILES_BY_SUITE = Object.freeze({
     "cli/web/src/pages/agent-onboarding/__tests__/beta-memory-policy.test.ts",
     "cli/web/src/pages/agent-onboarding/__tests__/beta-provider-ui.test.ts",
     "cli/web/src/pages/agent-onboarding/__tests__/oauth-readiness.test.ts",
+    "cli/web/src/lib/__tests__/approval-ui-policy.test.ts",
   ]),
   "desktop-release-tests": Object.freeze([
     "desktop/test/backend-runner.test.js",
@@ -149,6 +151,8 @@ const REQUIRED_FILES_BY_SUITE = Object.freeze({
     "desktop/test/recovery-containment.test.js",
     "desktop/test/recovery-packaging.test.js",
     "desktop/test/rollback-realtor-beta.test.js",
+    "desktop/test/browser-control.test.js",
+    "desktop/test/ipc-contract.test.js",
   ]),
 });
 
@@ -293,7 +297,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         (relative) => path.join(REPO, relative),
       ),
       ...pytest(
-        1365,
+        1372,
         "tests/test_model_tools.py",
         "tests/tools/test_registry_shadow_execution.py",
         "tests/tools/test_terminal_approval_effect_receipts.py",
@@ -346,6 +350,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         "tests/tools/test_beta_unrouted_lane_containment.py",
         "tests/elevate_cli/test_beta_sender_containment.py",
         "tests/run_agent/test_exact_beta_lane_dispatch_outcome.py",
+        "tests/tools/test_browser_pane.py",
       ),
     },
     {
@@ -443,8 +448,9 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
         "src/pages/real-estate-hub/admin/__tests__/admin-onboarding-behavior.test.ts",
         "src/pages/real-estate-hub/admin/__tests__/admin-ui-recovery.test.ts",
         "src/pages/real-estate-hub/admin/__tests__/forms-provider-option-b.test.ts",
+        "src/lib/__tests__/approval-ui-policy.test.ts",
       ),
-      resultContract: { kind: "vitest", minimum_tests: 142, expected_tests: 142 },
+      resultContract: { kind: "vitest", minimum_tests: 147, expected_tests: 147 },
     },
     {
       id: "web-production-build",
@@ -477,7 +483,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       command: process.execPath,
       displayCommand: "<active-node>",
       args: ["--test", "--test-reporter=tap", ...desktopTests],
-      resultContract: { kind: "node-test", minimum_tests: 507, expected_tests: 507 },
+      resultContract: { kind: "node-test", minimum_tests: 510, expected_tests: 510 },
     },
   ];
 }

@@ -6,6 +6,11 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { startControlServer } = require("../src/browser-control");
+const {
+  clampPaneBounds,
+  normalizeWorkspaceId,
+  standardBrowserUserAgent,
+} = require("../src/browser-pane");
 
 function waitForEndpoint(filePath) {
   return new Promise((resolve, reject) => {
@@ -57,10 +62,13 @@ test("browser control endpoint authenticates and targets the shared pane", async
   const elevateHome = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-browser-control-"));
   const calls = [];
   const pane = {
-    list: () => [{ id: "tab_1", active: true }],
-    navigate: async (tabId, url) => {
-      calls.push({ tabId, url });
+    list: (sessionKey) => [{ id: "tab_1", active: true, sessionKey }],
+    navigate: async (tabId, url, sessionKey) => {
+      calls.push({ tabId, url, sessionKey });
       return { ok: true, url };
+    },
+    noteAgentAction: (sessionKey, method) => {
+      calls.push({ sessionKey, method });
     },
   };
   const controller = startControlServer({
@@ -75,22 +83,54 @@ test("browser control endpoint authenticates and targets the shared pane", async
 
   const endpointPath = path.join(elevateHome, "browser-pane.json");
   const endpoint = await waitForEndpoint(endpointPath);
-  const listed = await rpc(endpoint, "list");
+  const listed = await rpc(endpoint, "list", { sessionKey: "chat-a" });
   const navigated = await rpc(endpoint, "navigate", {
+    sessionKey: "chat-a",
     tabId: "tab_1",
     url: "https://example.com/",
   });
 
   assert.equal(listed.status, 200);
-  assert.deepEqual(listed.body.result, [{ id: "tab_1", active: true }]);
+  assert.deepEqual(listed.body.result, [{
+    id: "tab_1",
+    active: true,
+    sessionKey: "chat-a",
+  }]);
   assert.equal(navigated.status, 200);
   assert.deepEqual(navigated.body.result, {
     ok: true,
     url: "https://example.com/",
   });
-  assert.deepEqual(calls, [{
-    tabId: "tab_1",
-    url: "https://example.com/",
-  }]);
+  assert.deepEqual(calls, [
+    { sessionKey: "chat-a", method: "navigate" },
+    {
+      tabId: "tab_1",
+      url: "https://example.com/",
+      sessionKey: "chat-a",
+    },
+  ]);
   assert.equal(fs.statSync(endpointPath).mode & 0o777, 0o600);
+});
+
+test("embedded browser identity omits Electron and app-brand tokens", () => {
+  const userAgent = standardBrowserUserAgent("darwin", "142.0.7444.265");
+
+  assert.match(userAgent, /Chrome\/142\.0\.7444\.265/);
+  assert.doesNotMatch(userAgent, /Electron|Elevate/i);
+});
+
+test("embedded browser bounds cannot escape the app content area", () => {
+  assert.deepEqual(
+    clampPaneBounds(
+      { x: -50, y: 40, width: 2000, height: 1200 },
+      { width: 1280, height: 800 },
+    ),
+    { x: 0, y: 40, width: 1280, height: 760 },
+  );
+});
+
+test("browser workspace ids are stable and bounded", () => {
+  assert.equal(normalizeWorkspaceId(""), "default");
+  assert.equal(normalizeWorkspaceId(" chat-a "), "chat-a");
+  assert.equal(normalizeWorkspaceId("x".repeat(300)).length, 256);
 });

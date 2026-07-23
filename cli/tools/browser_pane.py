@@ -58,11 +58,26 @@ def _rpc(method: str, params: dict[str, Any], timeout: int) -> Any:
     return payload.get("result")
 
 
-def _active_tab(timeout: int) -> dict[str, Any]:
-    tabs = _rpc("list", {}, timeout)
+def _session_params(session_id: str | None) -> dict[str, Any]:
+    return {"sessionKey": str(session_id or "default")}
+
+
+def status(session_id: str | None, *, timeout: int = 30) -> dict[str, Any] | None:
+    """Return the visible-pane state for one agent/chat session."""
+    if not is_available():
+        return None
+    try:
+        return _rpc("status", _session_params(session_id), timeout)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
+def _active_tab(timeout: int, session_id: str | None) -> dict[str, Any]:
+    session_params = _session_params(session_id)
+    tabs = _rpc("list", session_params, timeout)
     if not tabs:
-        tab_id = _rpc("new_tab", {}, timeout)["tabId"]
-        tabs = _rpc("list", {}, timeout)
+        tab_id = _rpc("new_tab", session_params, timeout)["tabId"]
+        tabs = _rpc("list", session_params, timeout)
         return next(tab for tab in tabs if tab["id"] == tab_id)
     return next((tab for tab in tabs if tab.get("active")), tabs[0])
 
@@ -104,6 +119,7 @@ def run_command(
     args: list[str] | None = None,
     *,
     timeout: int = 30,
+    session_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Run one agent-browser-shaped command against the embedded pane.
 
@@ -114,15 +130,24 @@ def run_command(
     if not is_available():
         return None
     argv = list(args or [])
+    session_params = _session_params(session_id)
 
     try:
-        tab = _active_tab(timeout)
+        tab = _active_tab(timeout, session_id)
         tab_id = tab["id"]
 
         if command == "open":
             target = argv[0] if argv else "about:blank"
-            result = _rpc("navigate", {"tabId": tab_id, "url": target}, timeout)
-            page = _rpc("read_page", {"tabId": tab_id}, timeout)
+            result = _rpc(
+                "navigate",
+                {**session_params, "tabId": tab_id, "url": target},
+                timeout,
+            )
+            page = _rpc(
+                "read_page",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
             return {
                 "success": True,
                 "data": {
@@ -132,12 +157,35 @@ def run_command(
             }
 
         if command == "snapshot":
-            page = _rpc("read_page", {"tabId": tab_id}, timeout)
+            page = _rpc(
+                "read_page",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
             snapshot, refs = _snapshot(page, compact="-c" in argv)
             return {"success": True, "data": {"snapshot": snapshot, "refs": refs}}
 
         if command == "click":
-            result = _rpc("click", {"tabId": tab_id, "ref": argv[0]}, timeout)
+            result = _rpc(
+                "click",
+                {**session_params, "tabId": tab_id, "ref": argv[0]},
+                timeout,
+            )
+            return {"success": bool(result.get("ok")), "data": result}
+
+        if command == "drag":
+            if len(argv) < 2:
+                return {"success": False, "error": "drag requires source and target refs"}
+            result = _rpc(
+                "drag",
+                {
+                    **session_params,
+                    "tabId": tab_id,
+                    "sourceRef": argv[0],
+                    "targetRef": argv[1],
+                },
+                timeout,
+            )
             return {"success": bool(result.get("ok")), "data": result}
 
         if command in {"fill", "type"}:
@@ -145,13 +193,22 @@ def run_command(
                 return {"success": False, "error": f"{command} requires a ref and text"}
             result = _rpc(
                 "fill",
-                {"tabId": tab_id, "ref": argv[0], "value": argv[1]},
+                {
+                    **session_params,
+                    "tabId": tab_id,
+                    "ref": argv[0],
+                    "value": argv[1],
+                },
                 timeout,
             )
             return {"success": bool(result.get("ok")), "data": result}
 
         if command == "press":
-            result = _rpc("key", {"tabId": tab_id, "key": argv[0]}, timeout)
+            result = _rpc(
+                "key",
+                {**session_params, "tabId": tab_id, "key": argv[0]},
+                timeout,
+            )
             return {"success": bool(result.get("ok")), "data": result}
 
         if command == "scroll":
@@ -159,13 +216,21 @@ def run_command(
             amount = int(argv[1]) if len(argv) > 1 else 500
             result = _rpc(
                 "scroll",
-                {"tabId": tab_id, "dy": -amount if direction == "up" else amount},
+                {
+                    **session_params,
+                    "tabId": tab_id,
+                    "dy": -amount if direction == "up" else amount,
+                },
                 timeout,
             )
             return {"success": bool(result.get("ok")), "data": result}
 
         if command in {"back", "forward", "reload"}:
-            result = _rpc(command, {"tabId": tab_id}, timeout)
+            result = _rpc(
+                command,
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
             return {
                 "success": bool(result.get("ok")),
                 "data": {"url": result.get("url") or ""},
@@ -175,7 +240,11 @@ def run_command(
             expression = argv[0] if argv else ""
             result = _rpc(
                 "eval",
-                {"tabId": tab_id, "expression": expression},
+                {
+                    **session_params,
+                    "tabId": tab_id,
+                    "expression": expression,
+                },
                 timeout,
             )
             return {
@@ -184,7 +253,11 @@ def run_command(
             }
 
         if command == "screenshot":
-            result = _rpc("screenshot", {"tabId": tab_id}, timeout)
+            result = _rpc(
+                "screenshot",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
             if not result.get("ok"):
                 return {"success": False, "error": "embedded browser screenshot failed"}
             return {
@@ -193,10 +266,23 @@ def run_command(
             }
 
         if command in {"console", "errors"}:
+            result = _rpc(
+                "console",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
             key = "messages" if command == "console" else "errors"
-            return {"success": True, "data": {key: []}}
+            return {"success": True, "data": {key: result.get(key, [])}}
 
-        if command in {"scrollintoview", "close", "record"}:
+        if command == "close":
+            result = _rpc(
+                "close_tab",
+                {**session_params, "tabId": tab_id},
+                timeout,
+            )
+            return {"success": bool(result.get("ok")), "data": result}
+
+        if command in {"scrollintoview", "record"}:
             return {"success": True, "data": {}}
 
         return {"success": False, "error": f"unsupported embedded browser command: {command}"}

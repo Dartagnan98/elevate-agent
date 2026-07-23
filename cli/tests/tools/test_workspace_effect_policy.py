@@ -344,7 +344,7 @@ def beta_channel(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "permission_mode", ["default", "acceptEdits", "bypassPermissions"]
+    "permission_mode", ["default", "acceptEdits"]
 )
 def test_the_mode_a_realtor_actually_runs_in_reaches_the_board(
     beta_channel, permission_mode: str
@@ -374,6 +374,18 @@ def test_the_mode_a_realtor_actually_runs_in_reaches_the_board(
         assert authorize_effects(policy, {effect}).allowed is False, effect
 
 
+def test_explicit_beta_bypass_reaches_the_standard_autonomous_ceiling(
+    beta_channel,
+) -> None:
+    policy = execution_policy_for_permission_mode(
+        "turn-beta-bypass",
+        "bypassPermissions",
+    )
+    assert policy.mode is ExecutionPolicyMode.DEFAULT
+    for effect in ("message_external:sms", "write_external:crm", "spawn"):
+        assert authorize_effects(policy, {effect}).allowed is True, effect
+
+
 def test_beta_operator_can_still_narrow_below_the_board(beta_channel) -> None:
     assert (
         execution_policy_for_permission_mode("t", "read_only").mode
@@ -385,18 +397,17 @@ def test_beta_operator_can_still_narrow_below_the_board(beta_channel) -> None:
     )
 
 
-def test_a_wider_than_cohort_binding_still_degrades_to_no_policy(
+def test_an_explicit_bypass_binding_is_carried_intact_under_beta(
     beta_channel,
 ) -> None:
-    """A DEFAULT policy replayed into a Beta process inherits nothing."""
     wide = ExecutionPolicy.for_mode("turn-wide", ExecutionPolicyMode.DEFAULT)
     token = set_current_execution_policy(wide, policy_revision=7)
     try:
         binding = capture_inherited_execution_policy(parent_session_id="s")
     finally:
         reset_current_execution_policy(token)
-    assert binding.policy is None
-    assert binding.policy_revision is None
+    assert binding.policy == wide
+    assert binding.policy_revision == 7
 
 
 def test_a_workspace_binding_is_carried_intact_under_beta(beta_channel) -> None:
@@ -531,15 +542,15 @@ def test_the_gateway_accepts_the_policy_a_realtor_turn_produces(
     assert authorize_effects(restored, {"write_local:kanban"}).allowed is True
 
 
-def test_the_gateway_still_refuses_a_receipt_wider_than_the_cohort(
+def test_the_gateway_accepts_an_explicit_bypass_receipt(
     beta_channel,
 ) -> None:
-    """A receipt accepted on another channel cannot widen a Beta process."""
     from tui_gateway.server import _execution_policy_from_receipt
 
     wide = ExecutionPolicy.for_mode("msg-wide", ExecutionPolicyMode.DEFAULT)
-    with pytest.raises(ValueError, match="exceeds Beta ceiling"):
-        _execution_policy_from_receipt(_receipt_for(wide))
+    assert _execution_policy_from_receipt(_receipt_for(wide)).mode is (
+        ExecutionPolicyMode.DEFAULT
+    )
 
 
 @pytest.mark.parametrize(
@@ -549,6 +560,7 @@ def test_the_gateway_still_refuses_a_receipt_wider_than_the_cohort(
         ExecutionPolicyMode.PLAN,
         ExecutionPolicyMode.DRAFT_ONLY,
         ExecutionPolicyMode.WORKSPACE,
+        ExecutionPolicyMode.DEFAULT,
     ],
 )
 def test_the_gateway_accepts_every_mode_at_or_below_the_cohort(
@@ -567,7 +579,7 @@ def test_the_two_beta_clamps_agree() -> None:
     from tools import approval
     from tui_gateway import server
 
-    assert approval.BETA_COHORT_POLICY_MODE is ExecutionPolicyMode.WORKSPACE
+    assert approval.BETA_COHORT_POLICY_MODE is ExecutionPolicyMode.DEFAULT
     source = inspect.getsource(server._execution_policy_from_receipt)
     assert "BETA_COHORT_POLICY_MODE" in source
     # A hardcoded mode here is what rotted last time.

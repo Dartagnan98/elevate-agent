@@ -30,16 +30,25 @@ contextBridge.exposeInMainWorld("elevateDesktop", {
   },
 
   browserPane: {
+    setWorkspace: (workspaceId) =>
+      ipcRenderer.invoke("browser:set-workspace", workspaceId),
     setBounds: (rect) => ipcRenderer.invoke("browser:set-bounds", rect),
     setVisible: (visible) => ipcRenderer.invoke("browser:set-visible", visible),
-    list: () => ipcRenderer.invoke("browser:list"),
-    newTab: (url) => ipcRenderer.invoke("browser:new-tab", url),
-    closeTab: (id) => ipcRenderer.invoke("browser:close-tab", id),
-    selectTab: (id) => ipcRenderer.invoke("browser:select-tab", id),
-    navigate: (id, url) => ipcRenderer.invoke("browser:navigate", id, url),
-    back: (id) => ipcRenderer.invoke("browser:back", id),
-    forward: (id) => ipcRenderer.invoke("browser:forward", id),
-    reload: (id) => ipcRenderer.invoke("browser:reload", id),
+    list: (workspaceId) => ipcRenderer.invoke("browser:list", workspaceId),
+    newTab: (workspaceId, url) =>
+      ipcRenderer.invoke("browser:new-tab", workspaceId, url),
+    closeTab: (workspaceId, id) =>
+      ipcRenderer.invoke("browser:close-tab", workspaceId, id),
+    selectTab: (workspaceId, id) =>
+      ipcRenderer.invoke("browser:select-tab", workspaceId, id),
+    navigate: (workspaceId, id, url) =>
+      ipcRenderer.invoke("browser:navigate", workspaceId, id, url),
+    back: (workspaceId, id) =>
+      ipcRenderer.invoke("browser:back", workspaceId, id),
+    forward: (workspaceId, id) =>
+      ipcRenderer.invoke("browser:forward", workspaceId, id),
+    reload: (workspaceId, id) =>
+      ipcRenderer.invoke("browser:reload", workspaceId, id),
     onEvent: (callback) => {
       const handler = (_event, payload) => callback(payload);
       ipcRenderer.on("browser:event", handler);

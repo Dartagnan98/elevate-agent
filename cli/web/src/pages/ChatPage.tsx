@@ -9,6 +9,7 @@ import {
   ArtifactsPanel,
   BackgroundTasksPanel,
   BrowserPanel,
+  desktopBrowserPane,
   type BackgroundTaskItem,
   EmptyPreviewPanel,
   FilesPanel,
@@ -544,7 +545,9 @@ function fallbackCopyText(text: string): boolean {
 const ARTIFACT_LIMIT = 32;
 const TOOL_LIMIT = 24;
 const PREVIEW_PANEL_MIN_WIDTH = 340;
-const PREVIEW_PANEL_CHAT_MIN_WIDTH = 260;
+const PREVIEW_PANEL_CHAT_MIN_WIDTH = 520;
+const PREVIEW_PANEL_MAX_SHARE = 0.58;
+const SIDE_PANEL_OVERLAY_BREAKPOINT = 920;
 
 const ARTIFACT_DISMISS_STORAGE_PREFIX = "elevate.chat.artifacts.dismissed.v1:";
 const MESSAGE_PIN_STORAGE_KEY = "elevate.chat.messagePins.v1";
@@ -706,11 +709,24 @@ function writeSessionArtifacts(
   }
 }
 
-function clampPreviewPanelWidth(width: number): number {
+function panelShellWidth(shell?: HTMLElement | null): number {
+  if (shell) return shell.clientWidth;
+  if (typeof document !== "undefined") {
+    const current = document.querySelector<HTMLElement>(".elevate-chat-shell");
+    if (current?.clientWidth) return current.clientWidth;
+  }
+  return typeof window === "undefined" ? 1100 : window.innerWidth;
+}
+
+function clampPreviewPanelWidth(width: number, shell?: HTMLElement | null): number {
   if (typeof window === "undefined") return Math.round(width);
+  const shellWidth = panelShellWidth(shell);
   const max = Math.max(
     PREVIEW_PANEL_MIN_WIDTH,
-    window.innerWidth - PREVIEW_PANEL_CHAT_MIN_WIDTH,
+    Math.min(
+      shellWidth * PREVIEW_PANEL_MAX_SHARE,
+      shellWidth - PREVIEW_PANEL_CHAT_MIN_WIDTH,
+    ),
   );
   const min = Math.min(PREVIEW_PANEL_MIN_WIDTH, max);
   return Math.round(Math.min(max, Math.max(min, width)));
@@ -724,9 +740,7 @@ function defaultPreviewPanelWidth(): number {
   } catch {
     // Ignore malformed local storage.
   }
-  // Default to ~1/3 of the window (was 1/2 — too wide). Still drag-resizable
-  // bigger via the handle; a dragged width persists in localStorage.
-  return clampPreviewPanelWidth(window.innerWidth * 0.34);
+  return clampPreviewPanelWidth(panelShellWidth() * 0.48);
 }
 
 // User-resizable chat column width. Returns null when the user hasn't dragged it
@@ -3927,6 +3941,8 @@ export default function ChatPage() {
       ? window.matchMedia("(max-width: 1023px)").matches
       : false,
   );
+  const chatShellRef = useRef<HTMLDivElement | null>(null);
+  const [compactSidePanel, setCompactSidePanel] = useState(narrow);
 
   const activeComposerAgents = useMemo(() => {
     const enabled = composerAgents.filter((agent) => agent.enabled);
@@ -4346,7 +4362,9 @@ export default function ChatPage() {
       // includes the sidebar and would make the preview bigger than half).
       const shellEl = document.querySelector<HTMLElement>(".elevate-chat-shell");
       const shellWidth = shellEl?.clientWidth || window.innerWidth;
-      setPreviewPanelWidth(clampPreviewPanelWidth(Math.round(shellWidth * 0.5)));
+      setPreviewPanelWidth(
+        clampPreviewPanelWidth(Math.round(shellWidth * 0.5), shellEl),
+      );
       setPreviewArtifact(artifact);
       setSidePanel("preview");
     },
@@ -4362,6 +4380,12 @@ export default function ChatPage() {
       return;
     }
     if (mode === "plan") planAutoOpenDisabledRef.current = false;
+    if (mode === "browser") {
+      const shell = chatShellRef.current;
+      setPreviewPanelWidth(
+        clampPreviewPanelWidth(panelShellWidth(shell) * 0.48, shell),
+      );
+    }
     setSidePanel(mode);
   }, []);
 
@@ -4376,6 +4400,21 @@ export default function ChatPage() {
       return "none";
     });
   }, []);
+
+  useEffect(() => {
+    const bridge = desktopBrowserPane();
+    if (!bridge) return;
+    const activeBrowserWorkspace =
+      sessionId ?? artifactStateSessionId() ?? "default";
+    return bridge.onEvent((event) => {
+      if (
+        event.type === "agent-action" &&
+        event.workspaceId === activeBrowserWorkspace
+      ) {
+        setSidePanel("browser");
+      }
+    });
+  }, [artifactStateSessionId, sessionId]);
 
   // Open a subagent's own session as a full chat — reuses the resume flow
   // (resumeId re-keys the page). Reopens a completed child session so the user
@@ -4480,7 +4519,7 @@ export default function ChatPage() {
 
       const onPointerMove = (moveEvent: PointerEvent) => {
         const delta = startX - moveEvent.clientX;
-        const clamped = clampPreviewPanelWidth(startWidth + delta);
+        const clamped = clampPreviewPanelWidth(startWidth + delta, shell);
         if (shell) shell.style.setProperty("--preview-panel-width", `${clamped}px`);
       };
 
@@ -4491,9 +4530,12 @@ export default function ChatPage() {
         const finalWidth = shell
           ? parseInt(shell.style.getPropertyValue("--preview-panel-width") || String(startWidth), 10)
           : startWidth;
-        setPreviewPanelWidth(clampPreviewPanelWidth(finalWidth));
+        setPreviewPanelWidth(clampPreviewPanelWidth(finalWidth, shell));
         try {
-          localStorage.setItem("elevate-preview-width", String(clampPreviewPanelWidth(finalWidth)));
+          localStorage.setItem(
+            "elevate-preview-width",
+            String(clampPreviewPanelWidth(finalWidth, shell)),
+          );
         } catch {
           // Preview width persistence is best-effort.
         }
@@ -4680,6 +4722,24 @@ export default function ChatPage() {
     mql.addEventListener("change", sync);
     return () => mql.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    const shell = chatShellRef.current;
+    if (!shell) return;
+    const sync = () => {
+      const width = shell.clientWidth;
+      setCompactSidePanel(
+        narrow || width < SIDE_PANEL_OVERLAY_BREAKPOINT,
+      );
+      setPreviewPanelWidth((current) =>
+        clampPreviewPanelWidth(current, shell),
+      );
+    };
+    const observer = new ResizeObserver(sync);
+    observer.observe(shell);
+    sync();
+    return () => observer.disconnect();
+  }, [narrow]);
 
   useEffect(() => {
     // Dismissals are persisted under the STABLE persisted-session id, not the
@@ -9155,6 +9215,7 @@ export default function ChatPage() {
   // freshly minted id with no history yet. This is the same id artifacts and
   // dismissals key on.
   const dataSessionId = artifactStateSessionId();
+  const browserWorkspaceId = sessionId ?? dataSessionId ?? "default";
   const renderSidePanel = () => {
     const renderPlanPanel = () => (
       <PlanPanel
@@ -9182,7 +9243,12 @@ export default function ChatPage() {
 
     switch (sidePanel) {
       case "browser":
-        return <BrowserPanel onClose={closeSidePanel} />;
+        return (
+          <BrowserPanel
+            onClose={closeSidePanel}
+            workspaceId={browserWorkspaceId}
+          />
+        );
       case "preview":
         return previewArtifact ? (
           <ArtifactPreviewPane artifact={previewArtifact} onClose={dismissPreviewArtifact} />
@@ -9271,7 +9337,7 @@ export default function ChatPage() {
     );
 
   const mobilePreviewPortal =
-    narrow &&
+    compactSidePanel &&
     wideOpen &&
     portalRoot &&
     createPortal(
@@ -9299,6 +9365,7 @@ export default function ChatPage() {
 
   return (
     <div
+      ref={chatShellRef}
       className="elevate-chat-shell relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--chat-bg)] text-[var(--chat-text)] normal-case"
       style={previewPanelLayoutStyle}
     >
@@ -9742,12 +9809,13 @@ export default function ChatPage() {
 
         <aside
           className={cn(
-            "hidden min-h-0 shrink-0 lg:flex",
-            wideOpen
+            "min-h-0 shrink-0",
+            !compactSidePanel && wideOpen
               ? "flex-col pb-[var(--sidebar-gap)] pl-0 pr-[var(--sidebar-gap)] pt-[var(--sidebar-gap)]"
               // No activity card anymore — collapse the reserved column to zero
               // width so the chat reclaims the space when no panel is open.
-              : "w-0 overflow-hidden",
+              : "hidden w-0 overflow-hidden",
+            !compactSidePanel && wideOpen && "flex",
           )}
           style={
             wideOpen ? { width: "var(--preview-panel-width)" } : undefined

@@ -10,6 +10,8 @@ export type PermissionModeId =
   | "plan";
 
 const REALTOR_BETA_PERMISSION_MODES = new Set<PermissionModeId>([
+  "acceptEdits",
+  "bypassPermissions",
   "default",
   "plan",
 ]);

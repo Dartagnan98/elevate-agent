@@ -158,10 +158,6 @@ def _valid_beta_config():
         ({"approvals": {"mode": "smart"}}, "beta_approval_mode_not_allowed"),
         ({"approvals": {"mode": False}}, "beta_approval_mode_not_allowed"),
         (
-            {"approvals": {"permission_mode": "bypassPermissions"}},
-            "beta_permission_mode_not_allowed",
-        ),
-        (
             {"approvals": {"cron_mode": "approve"}},
             "beta_cron_approval_not_allowed",
         ),

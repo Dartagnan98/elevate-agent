@@ -358,14 +358,6 @@ def _validate_beta_runtime_config(config: Mapping[str, Any]) -> None:
                 "Realtor Beta requires human review and does not allow automatic approval modes.",
                 code="beta_approval_mode_not_allowed",
             )
-        permission_mode = str(
-            approvals.get("permission_mode") or "default"
-        ).strip()
-        if permission_mode == "bypassPermissions":
-            raise BetaProviderPolicyError(
-                "Realtor Beta does not allow bypassing action permissions.",
-                code="beta_permission_mode_not_allowed",
-            )
         cron_mode = str(approvals.get("cron_mode") or "deny").strip().lower()
         if cron_mode != "deny":
             raise BetaProviderPolicyError(

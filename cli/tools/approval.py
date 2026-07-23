@@ -1536,15 +1536,14 @@ PERMISSION_MODE_POLICY_MODES = MappingProxyType({
     "bypassPermissions": ExecutionPolicyMode.DEFAULT,
     "read_only": ExecutionPolicyMode.READ_ONLY,
 })
-# The Realtor Beta cohort maximum is WORKSPACE, and it is reached from the
-# permission mode a realtor actually runs in (``default``) — a ceiling that
-# only worked in an opt-in mode would not be a fix.  ``plan`` and an explicit
-# ``read_only`` still narrow, so the operator retains a way down.
+# Realtor Beta keeps its normal modes at the WORKSPACE ceiling. An explicit
+# user-selected bypass mode receives the standard DEFAULT policy; unconditional
+# hardline, sudo-stdin, secret-URL, and metadata-service floors still apply.
 _BETA_PERMISSION_MODE_POLICY_MODES = MappingProxyType({
     "default": ExecutionPolicyMode.WORKSPACE,
     "acceptEdits": ExecutionPolicyMode.WORKSPACE,
     "plan": ExecutionPolicyMode.PLAN,
-    "bypassPermissions": ExecutionPolicyMode.WORKSPACE,
+    "bypassPermissions": ExecutionPolicyMode.DEFAULT,
     "read_only": ExecutionPolicyMode.READ_ONLY,
 })
 
@@ -1865,7 +1864,7 @@ def derive_child_execution_policy(
     return derived
 
 
-BETA_COHORT_POLICY_MODE = ExecutionPolicyMode.WORKSPACE
+BETA_COHORT_POLICY_MODE = ExecutionPolicyMode.DEFAULT
 
 
 def beta_cohort_policy_active() -> bool:
@@ -1879,7 +1878,7 @@ def beta_cohort_policy_active() -> bool:
 
 
 def _beta_ceiling_rejects(policy: ExecutionPolicy) -> bool:
-    """True when *policy* exceeds the exact-Beta workspace cohort ceiling."""
+    """True when *policy* exceeds Beta's explicit-mode cohort ceiling."""
     ceiling = ExecutionPolicy.for_mode(
         policy.accepted_turn_id,
         BETA_COHORT_POLICY_MODE,
@@ -2329,6 +2328,8 @@ PLAN_MODE_READ_ONLY_TOOLS = frozenset({
     "session_search", "skill_view", "skills_list",  # session / skill inspection
     "ha_get_state", "ha_list_entities", "ha_list_services",  # home-assistant reads
     "todo", "clarify", "present_plan",      # planning + asking the user
+    "browser_snapshot", "browser_status", "browser_read",
+    "browser_shot", "browser_recordings", "browser_console",
 })
 _PLAN_MEMORY_READ_ACTIONS = frozenset(
     {"get", "search", "recall", "list", "view", "read", "show"}
@@ -2744,13 +2745,15 @@ def _get_cron_approval_mode() -> str:
 def _approval_bypass_enabled(approval_mode: Optional[str] = None) -> bool:
     """Return whether a legacy approval bypass is active for this call.
 
-    Exact Realtor Beta has no approval bypass surface.  Reading all inputs
-    behind this single policy gate prevents an old environment variable,
-    session flag, config file, or permission-mode selection from silently
-    re-enabling dangerous command execution.
+    Exact Realtor Beta honors only the explicit per-session permission picker.
+    Old environment variables, process flags, config approval modes, and stale
+    session YOLO state remain unable to turn bypass on implicitly.
     """
     if _beta_approval_policy_active():
-        return False
+        return bool(
+            approval_mode is not None
+            and get_permission_mode() == "bypassPermissions"
+        )
     return bool(
         is_truthy_value(os.getenv("ELEVATE_YOLO_MODE"))
         or is_current_session_yolo_enabled()
@@ -3076,8 +3079,9 @@ def check_all_command_guards(command: str, env_type: str,
         return _sudo_stdin_block_result(sudo_guess_desc)
 
     # Stable supports process/session YOLO, approvals.mode=off, and
-    # bypassPermissions. Exact Beta ignores all four behind one policy gate.
-    # The hardline + sudo-stdin floors above still run before this.
+    # bypassPermissions. Exact Beta accepts only its explicit session picker;
+    # legacy process/config bypass inputs stay disabled. The hardline +
+    # sudo-stdin floors above still run before either channel's bypass.
     approval_mode = _get_approval_mode()
     if _approval_bypass_enabled(approval_mode):
         return {"approved": True, "message": None}

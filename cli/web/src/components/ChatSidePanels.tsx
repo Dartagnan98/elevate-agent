@@ -154,6 +154,7 @@ type BrowserTab = {
   id: string;
   url: string;
   title: string;
+  favicon?: string | null;
   active: boolean;
   loading?: boolean;
   canGoBack?: boolean;
@@ -162,24 +163,35 @@ type BrowserTab = {
 };
 
 type BrowserPaneEvent =
-  | { type: "tabs"; tabs: BrowserTab[] }
-  | { type: "blocked" | "load-failed"; reason?: string; description?: string; url?: string };
+  | { type: "tabs"; workspaceId: string; tabs: BrowserTab[] }
+  | {
+      type: "agent-action" | "blocked" | "load-failed";
+      workspaceId?: string;
+      reason?: string;
+      description?: string;
+      url?: string;
+    };
 
 type BrowserPaneBridge = {
+  setWorkspace: (workspaceId: string) => Promise<unknown>;
   setBounds: (rect: { x: number; y: number; width: number; height: number }) => Promise<void>;
   setVisible: (visible: boolean) => Promise<void>;
-  list: () => Promise<BrowserTab[]>;
-  newTab: (url?: string) => Promise<string>;
-  closeTab: (id: string) => Promise<boolean>;
-  selectTab: (id: string) => Promise<boolean>;
-  navigate: (id: string, url: string) => Promise<{ ok: boolean; url?: string }>;
-  back: (id: string) => Promise<unknown>;
-  forward: (id: string) => Promise<unknown>;
-  reload: (id: string) => Promise<unknown>;
+  list: (workspaceId: string) => Promise<BrowserTab[]>;
+  newTab: (workspaceId: string, url?: string) => Promise<string>;
+  closeTab: (workspaceId: string, id: string) => Promise<boolean>;
+  selectTab: (workspaceId: string, id: string) => Promise<boolean>;
+  navigate: (
+    workspaceId: string,
+    id: string,
+    url: string,
+  ) => Promise<{ ok: boolean; url?: string }>;
+  back: (workspaceId: string, id: string) => Promise<unknown>;
+  forward: (workspaceId: string, id: string) => Promise<unknown>;
+  reload: (workspaceId: string, id: string) => Promise<unknown>;
   onEvent: (callback: (event: BrowserPaneEvent) => void) => () => void;
 };
 
-function desktopBrowserPane(): BrowserPaneBridge | null {
+export function desktopBrowserPane(): BrowserPaneBridge | null {
   return (
     window as unknown as {
       elevateDesktop?: { browserPane?: BrowserPaneBridge };
@@ -197,7 +209,13 @@ function browserTarget(value: string): string {
   return `https://${trimmed}`;
 }
 
-export function BrowserPanel({ onClose }: { onClose: () => void }) {
+export function BrowserPanel({
+  onClose,
+  workspaceId,
+}: {
+  onClose: () => void;
+  workspaceId: string;
+}) {
   const bridge = useMemo(desktopBrowserPane, []);
   const holeRef = useRef<HTMLDivElement>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
@@ -208,33 +226,34 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
   const refresh = useCallback(async () => {
     if (!bridge) return;
     try {
-      let next = await bridge.list();
+      let next = await bridge.list(workspaceId);
       if (!next.length) {
-        await bridge.newTab();
-        next = await bridge.list();
+        await bridge.newTab(workspaceId);
+        next = await bridge.list(workspaceId);
       }
       setTabs(next);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [bridge]);
+  }, [bridge, workspaceId]);
 
   useEffect(() => {
     if (!bridge) {
       setError("The embedded browser is available in the Elevate desktop app.");
       return;
     }
-    void refresh();
+    void bridge.setWorkspace(workspaceId).then(refresh);
     return bridge.onEvent((event) => {
+      if (event.workspaceId && event.workspaceId !== workspaceId) return;
       if (event.type === "tabs") {
         setTabs(event.tabs);
         setError(null);
-      } else {
+      } else if (event.type === "blocked" || event.type === "load-failed") {
         setError(event.reason || event.description || "The page could not be loaded.");
       }
     });
-  }, [bridge, refresh]);
+  }, [bridge, refresh, workspaceId]);
 
   useEffect(() => {
     if (active && document.activeElement?.getAttribute("data-browser-address") !== "true") {
@@ -270,18 +289,18 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
     if (!bridge || !active) return;
     try {
       setError(null);
-      await bridge.navigate(active.id, browserTarget(address));
+      await bridge.navigate(workspaceId, active.id, browserTarget(address));
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [active, address, bridge, refresh]);
+  }, [active, address, bridge, refresh, workspaceId]);
 
   const newTab = useCallback(async () => {
     if (!bridge) return;
-    await bridge.newTab();
+    await bridge.newTab(workspaceId);
     await refresh();
-  }, [bridge, refresh]);
+  }, [bridge, refresh, workspaceId]);
 
   return (
     <div className="@container flex h-full min-h-[320px] flex-col overflow-hidden rounded-xl border border-[var(--chat-border)] bg-[var(--chat-bg)] text-[var(--chat-text)] shadow-[0_24px_60px_-20px_rgba(0,0,0,0.7),0_1px_0_rgba(255,255,255,0.04)_inset]">
@@ -290,7 +309,7 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
           aria-label="Back"
           className="h-7 w-7 shrink-0 rounded-[7px] p-0"
           disabled={!active?.canGoBack}
-          onClick={() => active && void bridge?.back(active.id)}
+          onClick={() => active && void bridge?.back(workspaceId, active.id)}
           size="sm"
           type="button"
           variant="ghost"
@@ -301,7 +320,7 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
           aria-label="Forward"
           className="h-7 w-7 shrink-0 rounded-[7px] p-0"
           disabled={!active?.canGoForward}
-          onClick={() => active && void bridge?.forward(active.id)}
+          onClick={() => active && void bridge?.forward(workspaceId, active.id)}
           size="sm"
           type="button"
           variant="ghost"
@@ -311,7 +330,7 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
         <Button
           aria-label="Reload"
           className="h-7 w-7 shrink-0 rounded-[7px] p-0"
-          onClick={() => active && void bridge?.reload(active.id)}
+          onClick={() => active && void bridge?.reload(workspaceId, active.id)}
           size="sm"
           type="button"
           variant="ghost"
@@ -365,16 +384,28 @@ export function BrowserPanel({ onClose }: { onClose: () => void }) {
           >
             <button
               className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pl-2"
-              onClick={() => void bridge?.selectTab(tab.id)}
+              onClick={() => void bridge?.selectTab(workspaceId, tab.id)}
               type="button"
             >
-              <Globe2 className="h-3 w-3 shrink-0" />
+              <span className="relative h-3 w-3 shrink-0">
+                <Globe2 className="absolute inset-0 h-3 w-3" />
+                {tab.favicon ? (
+                  <img
+                    alt=""
+                    className="absolute inset-0 h-3 w-3 rounded-[2px] bg-[var(--chat-surface)] object-contain"
+                    onError={(event) => {
+                      event.currentTarget.style.display = "none";
+                    }}
+                    src={tab.favicon}
+                  />
+                ) : null}
+              </span>
               <span className="truncate">{tab.title || tab.url || "New tab"}</span>
             </button>
             <button
               aria-label="Close tab"
               className="mx-1 rounded-sm px-0.5 opacity-0 hover:bg-[var(--chat-border)] focus:opacity-100 group-hover:opacity-100"
-              onClick={() => void bridge?.closeTab(tab.id)}
+              onClick={() => void bridge?.closeTab(workspaceId, tab.id)}
               type="button"
             >
               ×

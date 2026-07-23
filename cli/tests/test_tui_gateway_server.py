@@ -1167,7 +1167,7 @@ def test_config_set_yolo_is_rejected_in_exact_beta(monkeypatch):
 
 @pytest.mark.parametrize(
     "requested",
-    ["bypassPermissions", "smart", "off", "acceptEdits"],
+    ["smart", "off"],
 )
 def test_config_set_permission_mode_canonicalizes_unsupported_exact_beta_modes(
     monkeypatch, requested
@@ -1201,7 +1201,10 @@ def test_config_set_permission_mode_canonicalizes_unsupported_exact_beta_modes(
         server._sessions.clear()
 
 
-@pytest.mark.parametrize("requested", ["default", "plan"])
+@pytest.mark.parametrize(
+    "requested",
+    ["default", "acceptEdits", "plan", "bypassPermissions"],
+)
 def test_config_set_permission_mode_keeps_supported_exact_beta_modes(
     monkeypatch, requested
 ):
@@ -1232,7 +1235,7 @@ def test_config_set_permission_mode_keeps_supported_exact_beta_modes(
         server._sessions.clear()
 
 
-def test_config_get_permission_mode_canonicalizes_stale_exact_beta_override(
+def test_config_get_permission_mode_keeps_explicit_exact_beta_override(
     monkeypatch,
 ):
     from tools.approval import clear_session, set_session_permission_mode
@@ -1249,11 +1252,7 @@ def test_config_get_permission_mode_canonicalizes_stale_exact_beta_override(
             }
         )
 
-        assert response["result"] == {
-            "canonicalized": True,
-            "reason": "beta_human_review_required",
-            "value": "default",
-        }
+        assert response["result"] == {"value": "bypassPermissions"}
     finally:
         clear_session("session-key")
         server._sessions.clear()

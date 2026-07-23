@@ -44,6 +44,9 @@ _ELEVATE_CORE_TOOLS = [
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
+    "browser_status", "browser_open", "browser_read", "browser_fill",
+    "browser_drag", "browser_login", "browser_shot",
+    "browser_recordings", "browser_play",
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
@@ -136,7 +139,11 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp",
-            "browser_dialog", "web_search"
+            "browser_dialog",
+            "browser_status", "browser_open", "browser_read", "browser_fill",
+            "browser_drag", "browser_login", "browser_shot",
+            "browser_recordings", "browser_play",
+            "web_search"
         ],
         "includes": []
     },

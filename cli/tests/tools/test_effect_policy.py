@@ -60,6 +60,16 @@ WORKSPACE_EFFECT_NAMES = {
     "spawn:browser",
     "credential_access:composio",
 }
+DEFAULT_EFFECT_NAMES = {
+    "read",
+    "write_local",
+    "write_external",
+    "message_external",
+    "destructive",
+    "credential_access",
+    "financial",
+    "spawn",
+}
 
 
 def test_effect_vocabulary_parses_scoped_values_canonically() -> None:
@@ -197,8 +207,8 @@ def test_unknown_session_and_config_modes_reach_policy_mapper_unsanitized(
         ),
         (
             "bypassPermissions",
-            ExecutionPolicyMode.WORKSPACE,
-            WORKSPACE_EFFECT_NAMES,
+            ExecutionPolicyMode.DEFAULT,
+            DEFAULT_EFFECT_NAMES,
         ),
         (
             "plan",
@@ -208,7 +218,7 @@ def test_unknown_session_and_config_modes_reach_policy_mapper_unsanitized(
         ("read_only", ExecutionPolicyMode.READ_ONLY, {"read"}),
     ],
 )
-def test_realtor_beta_permission_modes_are_immutably_workspace_clamped(
+def test_realtor_beta_permission_modes_map_to_their_explicit_ceiling(
     monkeypatch,
     permission_mode: str,
     expected_mode: ExecutionPolicyMode,

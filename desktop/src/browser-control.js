@@ -32,23 +32,53 @@ function tokenMatches(header, token) {
 }
 
 const COMMANDS = {
-  list: (pane) => pane.list(),
-  new_tab: (pane, params) => ({ tabId: pane.newTab(params.url) }),
-  close_tab: (pane, params) => ({ ok: pane.closeTab(params.tabId) }),
-  select_tab: (pane, params) => ({ ok: pane.selectTab(params.tabId) }),
-  navigate: (pane, params) => pane.navigate(params.tabId, params.url),
-  read_page: (pane, params) => pane.readPage(params.tabId),
-  click: (pane, params) => pane.click(params.tabId, params.ref),
-  fill: (pane, params) => pane.fill(params.tabId, params.ref, params.value),
-  type: (pane, params) => pane.type(params.tabId, params.text),
-  key: (pane, params) => pane.key(params.tabId, params.key),
-  scroll: (pane, params) => pane.scroll(params.tabId, params.dy),
-  back: (pane, params) => pane.back(params.tabId),
-  forward: (pane, params) => pane.forward(params.tabId),
-  reload: (pane, params) => pane.reload(params.tabId),
-  eval: (pane, params) => pane.evaluate(params.tabId, params.expression),
-  screenshot: (pane, params) => pane.screenshot(params.tabId),
+  status: (pane, params) => pane.status(params.sessionKey),
+  list: (pane, params) => pane.list(params.sessionKey),
+  new_tab: (pane, params) => ({
+    tabId: pane.newTab(params.url, params.sessionKey),
+  }),
+  close_tab: (pane, params) => ({
+    ok: pane.closeTab(params.tabId, params.sessionKey),
+  }),
+  select_tab: (pane, params) => ({
+    ok: pane.selectTab(params.tabId, params.sessionKey),
+  }),
+  navigate: (pane, params) =>
+    pane.navigate(params.tabId, params.url, params.sessionKey),
+  read_page: (pane, params) => pane.readPage(params.tabId, params.sessionKey),
+  click: (pane, params) =>
+    pane.click(params.tabId, params.ref, params.sessionKey),
+  drag: (pane, params) =>
+    pane.drag(params.tabId, params.sourceRef, params.targetRef, params.sessionKey),
+  fill: (pane, params) =>
+    pane.fill(params.tabId, params.ref, params.value, params.sessionKey),
+  type: (pane, params) =>
+    pane.type(params.tabId, params.text, params.sessionKey),
+  key: (pane, params) => pane.key(params.tabId, params.key, params.sessionKey),
+  scroll: (pane, params) =>
+    pane.scroll(params.tabId, params.dy, params.sessionKey),
+  back: (pane, params) => pane.back(params.tabId, params.sessionKey),
+  forward: (pane, params) => pane.forward(params.tabId, params.sessionKey),
+  reload: (pane, params) => pane.reload(params.tabId, params.sessionKey),
+  eval: (pane, params) =>
+    pane.evaluate(params.tabId, params.expression, params.sessionKey),
+  screenshot: (pane, params) =>
+    pane.screenshot(params.tabId, params.sessionKey),
+  console: (pane, params) => pane.console(params.tabId, params.sessionKey),
 };
+
+const AGENT_ACTION_COMMANDS = new Set([
+  "navigate",
+  "click",
+  "drag",
+  "fill",
+  "type",
+  "key",
+  "scroll",
+  "back",
+  "forward",
+  "reload",
+]);
 
 function startControlServer({ pane, elevateHome, log = console }) {
   const token = crypto.randomBytes(32).toString("hex");
@@ -79,6 +109,9 @@ function startControlServer({ pane, elevateHome, log = console }) {
       if (!handler) {
         send(400, { error: `unknown method: ${payload.method}` });
         return;
+      }
+      if (AGENT_ACTION_COMMANDS.has(payload.method)) {
+        pane.noteAgentAction(payload.params?.sessionKey, payload.method);
       }
       send(200, { result: await handler(pane, payload.params || {}) });
     } catch (error) {

@@ -9852,12 +9852,7 @@ def _(rid, params: dict) -> dict:
         canon = {m.lower(): m for m in allowed_pm}
         resolved = canon.get(nv.lower())
         canonicalized = False
-        if exact_realtor_beta_active() and nv.lower() in {
-            "acceptedits",
-            "bypasspermissions",
-            "off",
-            "smart",
-        }:
+        if exact_realtor_beta_active() and nv.lower() in {"off", "smart"}:
             resolved = "default"
             canonicalized = True
         if resolved is None:
@@ -10179,18 +10174,6 @@ def _(rid, params: dict) -> dict:
             except Exception:
                 override = None
             if override:
-                if exact_realtor_beta_active() and override not in {
-                    "default",
-                    "plan",
-                }:
-                    return _ok(
-                        rid,
-                        {
-                            "value": "default",
-                            "canonicalized": True,
-                            "reason": "beta_human_review_required",
-                        },
-                    )
                 return _ok(rid, {"value": override})
         approvals = _load_cfg().get("approvals")
         raw = (

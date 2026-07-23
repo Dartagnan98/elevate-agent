@@ -28,11 +28,11 @@ describe("approval UI policy", () => {
     expect(approvalSurfacePolicyForStatus(statusFor("Beta"))).toBe("standard");
   });
 
-  it("offers only truthful exact-Beta modes and one-request decisions", () => {
+  it("offers every explicit exact-Beta mode and one-request decisions", () => {
     expect(permissionModeAvailable("default", "restricted")).toBe(true);
     expect(permissionModeAvailable("plan", "restricted")).toBe(true);
-    expect(permissionModeAvailable("acceptEdits", "restricted")).toBe(false);
-    expect(permissionModeAvailable("bypassPermissions", "restricted")).toBe(false);
+    expect(permissionModeAvailable("acceptEdits", "restricted")).toBe(true);
+    expect(permissionModeAvailable("bypassPermissions", "restricted")).toBe(true);
     expect(approvalChoicesForPolicy("restricted")).toEqual(["once", "deny"]);
   });
 
