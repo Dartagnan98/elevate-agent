@@ -3,8 +3,8 @@
 const packageJson = require("./package.json");
 const { BETA } = require("./src/release-profile");
 
-const CANDIDATE_VERSION = "1.2.95";
-const RECOVERY_VERSION = "1.2.96";
+const CANDIDATE_VERSION = "1.2.96";
+const RECOVERY_VERSION = "1.2.97";
 const RECOVERY_ARTIFACT_PREFIX = "Elevate-Beta-Recovery";
 const RECOVERY_OUTPUT_DIRECTORY = "dist/recovery";
 const UPDATE_BASE_URL = "https://api.elevationrealestatehq.com/updates";
