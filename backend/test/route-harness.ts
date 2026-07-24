@@ -180,6 +180,20 @@ type CatalogRow = {
   created_at: string;
 };
 
+type BugReportRow = {
+  id: string;
+  created_at: string;
+  user_id: string | null;
+  license_id: string | null;
+  reporter_email: string | null;
+  app_version: string | null;
+  note: string;
+  context: Record<string, unknown>;
+  screenshot: string | null;
+  status: string;
+  resolved_at: string | null;
+};
+
 type FakeDb = {
   users: UserRow[];
   licenses: LicenseRow[];
@@ -199,6 +213,7 @@ type FakeDb = {
   device_grants: DeviceGrantRow[];
   login_codes: LoginCodeRow[];
   password_reset_tokens: PasswordResetTokenRow[];
+  bug_reports: BugReportRow[];
   skill_invocations: unknown[];
   audit_log: unknown[];
   session_diagnostic_events: Record<string, unknown>[];
@@ -332,6 +347,7 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     device_grants: [],
     login_codes: [],
     password_reset_tokens: [],
+    bug_reports: [],
     skill_invocations: [],
     audit_log: [],
     session_diagnostic_events: [],
@@ -855,6 +871,26 @@ function insertRows(table: string, body: unknown): unknown {
     });
     return inserted[0];
   }
+  if (table === "bug_reports") {
+    const inserted = rows.map((row) => {
+      const report: BugReportRow = {
+        id: `bug-report-${activeDb.bug_reports.length + 1}`,
+        created_at: new Date().toISOString(),
+        user_id: (row.user_id as string | null | undefined) ?? null,
+        license_id: (row.license_id as string | null | undefined) ?? null,
+        reporter_email: (row.reporter_email as string | null | undefined) ?? null,
+        app_version: (row.app_version as string | null | undefined) ?? null,
+        note: String(row.note ?? ""),
+        context: (row.context as Record<string, unknown> | undefined) ?? {},
+        screenshot: (row.screenshot as string | null | undefined) ?? null,
+        status: String(row.status ?? "open"),
+        resolved_at: (row.resolved_at as string | null | undefined) ?? null,
+      };
+      activeDb.bug_reports.push(report);
+      return report;
+    });
+    return inserted[0];
+  }
   if (table === "audit_log") {
     activeDb.audit_log.push(...rows);
     return rows;
@@ -1175,6 +1211,19 @@ function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean
     const tokenHash = readEq(params, "token_hash");
     if (id) rows = rows.filter((row) => row.id === id);
     if (tokenHash) rows = rows.filter((row) => row.token_hash === tokenHash);
+    return maybeSingle(wantsSingle, rows);
+  }
+  if (table === "bug_reports") {
+    let rows = [...activeDb.bug_reports];
+    const id = readEq(params, "id");
+    const status = readEq(params, "status");
+    if (id) rows = rows.filter((row) => row.id === id);
+    if (status) rows = rows.filter((row) => row.status === status);
+    if ((params.get("order") || "").startsWith("created_at.desc")) {
+      rows = [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    }
+    const limit = Number(params.get("limit"));
+    if (Number.isFinite(limit) && limit > 0) rows = rows.slice(0, limit);
     return maybeSingle(wantsSingle, rows);
   }
   throw new Error(`unexpected select from ${table}`);
