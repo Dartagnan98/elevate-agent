@@ -34,6 +34,11 @@ from typing import Any
 from elevate_cli import composio_client
 from elevate_cli.config import load_config
 from elevate_cli.source_connectors import _candidate_tools_root, get_source_root_info
+from elevate_cli.source_connector_modules.source_io import (
+    _read_json,
+    _source_dir,
+    _write_json,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -271,6 +276,68 @@ def _now_iso() -> str:
 
 def _source_id_for_toolkit(toolkit: str) -> str:
     return f"composio-{toolkit}"
+
+
+def _toolkit_display_name(toolkit: str) -> str:
+    """Human-facing label for a composio toolkit slug (``gmail`` -> ``Gmail``)."""
+    slug = (toolkit or "").strip()
+    if not slug:
+        return slug
+    return slug[:1].upper() + slug[1:]
+
+
+def _write_social_status(dead: list[dict[str, Any]], *, live_accounts: bool) -> None:
+    """Surface composio connection health on the ``social`` connector card.
+
+    The leads Source-Connectors step and Config → Composio read
+    ``<sourceRoot>/social/status.json`` via the (unchanged, read-side)
+    ``connector_state`` / ``connector_view`` helpers. When a Composio account
+    has been REVOKED/EXPIRED the puller can no longer poll it, so flip the
+    social connector to blocked with a reconnect instruction; when accounts are
+    all healthy write the connected/blocked=False equivalent. Mirrors the
+    apple-messages status writer (``source_connector_modules/apple_messages.py``).
+
+    Existing status keys are preserved (merge, not overwrite) so operator- or
+    setup-written fields such as ``provider`` survive a health tick. When
+    nothing is connected at all (no accounts, no dead accounts) the connector's
+    configured state is left untouched.
+    """
+    try:
+        config = load_config() or {}
+        info = get_source_root_info(config)
+        social_dir = _source_dir(Path(info["sourceRoot"]), "social")
+    except Exception:
+        _log.debug("composio_inbound: could not resolve social source dir", exc_info=True)
+        return
+
+    status = dict(_read_json(social_dir / "status.json") or {})
+    now = _now_iso()
+    if dead:
+        toolkits = sorted({str(d.get("toolkit") or "").strip() for d in dead if d.get("toolkit")})
+        labels = ", ".join(_toolkit_display_name(t) for t in toolkits) or "Social"
+        status.update({
+            "connected": False,
+            "blocked": True,
+            "last_error": f"{labels} connection revoked — reconnect in Config → Composio",
+            "next_operator_step": f"Open Config → Composio and reconnect {labels}",
+            "last_checked_at": now,
+        })
+    elif live_accounts:
+        status.update({
+            "connected": True,
+            "blocked": False,
+            "last_error": None,
+            "next_operator_step": None,
+            "last_checked_at": now,
+        })
+    else:
+        # Nothing connected — don't overwrite the connector's configured state.
+        return
+
+    try:
+        _write_json(social_dir / "status.json", status)
+    except Exception:
+        _log.debug("composio_inbound: failed to write social status.json", exc_info=True)
 
 
 def _source_dir_for_toolkit(toolkit: str) -> Path:
@@ -886,6 +953,7 @@ def pull_toolkit(toolkit: str, *, page_size: int = 50, max_pages: int = 5) -> di
     cursors = _load_cursors(toolkit)
     new_records: list[dict[str, Any]] = []
     in_run_seen: set[str] = set()
+    dead: list[dict[str, Any]] = []
     fetched = 0
 
     for account in accounts:
@@ -910,6 +978,7 @@ def pull_toolkit(toolkit: str, *, page_size: int = 50, max_pages: int = 5) -> di
                 "composio_inbound[%s/%s]: skipping inbound — connection status %s (reconnect to resume)",
                 toolkit, account_id, status,
             )
+            dead.append({"account_id": account_id, "status": status, "toolkit": toolkit})
             continue
 
         account_user_id = account.get("user_id") or account.get("entity_id") or None
@@ -977,6 +1046,7 @@ def pull_toolkit(toolkit: str, *, page_size: int = 50, max_pages: int = 5) -> di
         "toolkit": toolkit,
         "kind": kind,
         "accounts": len(accounts),
+        "dead": dead,
         "fetched": fetched,
         "new": len(new_records),
     }
@@ -1002,12 +1072,25 @@ def pull_all_supported() -> dict[str, Any]:
                 "fetched": 0,
                 "new": 0,
             })
+    # Surface connection health on the 'social' connector card: accumulate the
+    # REVOKED/EXPIRED accounts detected across every toolkit and (only when
+    # there is something connected to report) write social/status.json so the
+    # leads Source-Connectors step + Config → Composio show the reconnect alert.
+    dead_all: list[dict[str, Any]] = []
+    live_accounts = 0
+    for r in results:
+        toolkit_dead = r.get("dead") or []
+        dead_all.extend(toolkit_dead)
+        live_accounts += max(0, int(r.get("accounts", 0)) - len(toolkit_dead))
+    _write_social_status(dead_all, live_accounts=live_accounts > 0)
+
     summary = {
         "tick_at": _now_iso(),
         "toolkits": results,
         "total_new": sum(r.get("new", 0) for r in results),
         "total_fetched": sum(r.get("fetched", 0) for r in results),
+        "total_dead": len(dead_all),
     }
-    if summary["total_new"]:
+    if summary["total_new"] or summary["total_dead"]:
         _log.info("composio_inbound.tick %s", summary)
     return summary

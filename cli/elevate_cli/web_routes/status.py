@@ -75,6 +75,24 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
     return False, None
 
 
+def _probe_database() -> tuple[bool, float | None, str | None]:
+    """Probe operational DB liveness for the always-visible status rail (B2).
+
+    Delegates to ``connection.database_reachable()`` (B1) — a direct,
+    short-timeout ``SELECT 1`` that never runs migrations and never raises.
+    Returns ``(reachable, latency_ms, error)``. A missing/failed import is
+    itself reported as unreachable rather than blanking the rail.
+    """
+    try:
+        from elevate_cli.data.connection import database_reachable
+    except Exception as exc:
+        return (False, None, f"database probe unavailable: {exc}")
+    try:
+        return database_reachable()
+    except Exception as exc:  # defensive — the contract says it never raises
+        return (False, None, str(exc))
+
+
 def _cached_status_payload() -> dict[str, Any] | None:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
@@ -87,7 +105,16 @@ def _cached_status_payload() -> dict[str, Any] | None:
     with _status_cache_lock:
         if _status_cache_payload is None or _status_cache_expires_at <= now:
             return None
-        return dict(_status_cache_payload)
+        cached = dict(_status_cache_payload)
+    # An unreachable database must never be masked by a still-warm happy
+    # cache. When the cached payload recorded database.reachable == False,
+    # recompute so the health rail reflects the live state and recovers
+    # promptly once the database comes back (the fresh recompute re-probes
+    # off the event loop via run_in_executor).
+    db_info = cached.get("database")
+    if isinstance(db_info, dict) and db_info.get("reachable") is False:
+        return None
+    return cached
 
 
 def _store_status_payload(payload: dict[str, Any]) -> None:
@@ -220,6 +247,7 @@ def create_status_router(
     read_runtime_status_func=read_runtime_status,
     gateway_health_url_func=lambda: _GATEWAY_HEALTH_URL,
     probe_gateway_health_func=_probe_gateway_health,
+    probe_database_func=_probe_database,
     read_raw_config_func=read_raw_config,
     get_elevate_home_func=get_elevate_home,
     read_beta_codex_auth_status_func=read_beta_codex_auth_status,
@@ -292,7 +320,13 @@ def create_status_router(
         if gateway_running and gateway_state is None and remote_health_body is not None:
             gateway_state = "running"
 
+        loop = asyncio.get_event_loop()
+        db_reachable, db_latency_ms, db_error = await loop.run_in_executor(
+            None, probe_database_func
+        )
+
         active_sessions = 0
+        active_sessions_ok = True
         try:
             from elevate_cli.data.chat_sessions import active_session_count
 
@@ -312,7 +346,15 @@ def create_status_router(
                 finally:
                     db.close()
             except Exception:
+                active_sessions_ok = False
                 _log.debug("status active session count failed", exc_info=True)
+
+        # A failure to read the session store is itself a DB-health signal —
+        # surface it as an unreachable database instead of masking it as
+        # "0 active sessions" behind a healthy rail.
+        if not active_sessions_ok and db_reachable:
+            db_reachable = False
+            db_error = db_error or "session count query failed"
 
         payload = {
             "version": __version__,
@@ -331,6 +373,11 @@ def create_status_router(
             "gateway_exit_reason": gateway_exit_reason,
             "gateway_updated_at": gateway_updated_at,
             "active_sessions": active_sessions,
+            "database": {
+                "reachable": db_reachable,
+                "latency_ms": db_latency_ms,
+                "error": db_error,
+            },
         }
         if beta_provider_policy_active():
             elevate_home = get_elevate_home_func()

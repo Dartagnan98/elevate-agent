@@ -566,8 +566,13 @@ function ComposioPanel() {
                     <span className="truncate text-sm font-medium text-foreground">
                       {conn.toolkit?.name ?? conn.toolkit?.slug ?? "Unknown app"}
                     </span>
-                    {conn.status === "ACTIVE" && (
+                    {conn.status === "ACTIVE" ? (
                       <CheckCircle2 className="h-3.5 w-3.5 text-success" aria-label="Active" />
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[10.5px] font-medium text-destructive">
+                        <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                        Expired — reconnect
+                      </span>
                     )}
                   </div>
                   {conn.user_id && (

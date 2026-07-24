@@ -1971,10 +1971,22 @@ class GatewayRunner:
                 from elevate_cli.config import load_config as _load_full_config
                 _sess_cfg = (_load_full_config().get("sessions") or {})
                 if _sess_cfg.get("auto_prune", False):
+                    # Pass sessions_dir so stale on-disk JSONL/request_dump
+                    # transcripts are actually swept (the previous call omitted
+                    # it). JSONL-only: no DB rows deleted. The active-process
+                    # guard is belt-and-suspenders on top of the age threshold.
+                    try:
+                        from tools.process_registry import process_registry as _proc_reg
+                        _active_fn = _proc_reg.has_active_for_session
+                    except Exception:
+                        _active_fn = None
                     self._session_db.maybe_auto_prune_and_vacuum(
                         retention_days=int(_sess_cfg.get("retention_days", 90)),
                         min_interval_hours=int(_sess_cfg.get("min_interval_hours", 24)),
                         vacuum=bool(_sess_cfg.get("vacuum_after_prune", True)),
+                        sessions_dir=get_elevate_home() / "sessions",
+                        files_only=True,
+                        has_active_processes_fn=_active_fn,
                     )
             except Exception as exc:
                 logger.debug("state.db auto-maintenance skipped: %s", exc)

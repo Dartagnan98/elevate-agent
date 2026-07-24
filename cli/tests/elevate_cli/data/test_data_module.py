@@ -437,3 +437,37 @@ def test_payload_spillover_for_oversize_event():
         assert row["payload_ref"] is not None
         # The inline payload is the small "_spilled" stub.
         assert "_spilled" in row["payload_json"]
+
+
+def test_events_insert_is_idempotent_on_event_hash():
+    """C (#4): a re-sync re-attempting the same event is a no-op, not an
+    IntegrityError against ``uniq_events_event_hash`` — ``ON CONFLICT
+    (event_hash) DO NOTHING`` keeps exactly one row and stops Postgres logging
+    the full duplicate STATEMENT on every retry."""
+    with data.connect() as conn:
+        c = data.upsert_contact(conn, display_name="Dup Event")
+        cv = data.get_or_create_conversation(
+            conn, contact_id=c["id"], source_id="apple-messages",
+            channel="sms", thread_key="dup-thread",
+        )
+        kwargs = dict(
+            contact_id=c["id"],
+            conversation_id=cv["id"],
+            channel="sms",
+            body="hello world",
+            source_id="apple-messages",
+            thread_key="dup-thread",
+            ts="2026-07-23T00:00:00+00:00",
+        )
+        first = data.record_inbound(conn, **kwargs)
+        # Identical (source_id, thread_key, ts, body) ⇒ identical event_hash.
+        # Before the ON CONFLICT clause this second insert raised
+        # sqlite3.IntegrityError (translated from psycopg) and poisoned the tx.
+        second = data.record_inbound(conn, **kwargs)
+        assert first["eventHash"] == second["eventHash"]
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_hash=?",
+            (first["eventHash"],),
+        ).fetchone()
+        assert count[0] == 1

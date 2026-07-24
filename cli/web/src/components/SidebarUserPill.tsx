@@ -17,7 +17,7 @@ import {
 import { api } from "@/lib/api";
 import type { LicenseStatusResponse } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
-import { useSidebarStatus } from "@/hooks/useSidebarStatus";
+import { useSidebarStatus, isBackendUnreachable } from "@/hooks/useSidebarStatus";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import { useI18n } from "@/i18n";
 
@@ -97,6 +97,11 @@ export function SidebarUserPill() {
   const gatewayState = status?.gateway_state || (status?.gateway_running ? "running" : "stopped");
   const gatewayRunning = gatewayState === "running" || status?.gateway_running;
   const activeSessions = status?.active_sessions ?? 0;
+  const backendUnreachable = isBackendUnreachable(status);
+  const dbReachable = status?.database?.reachable;
+  const dbError = status?.database?.error;
+  // Surface-only health signal on the always-visible avatar. Never gates.
+  const showHealthBadge = backendUnreachable || dbReachable === false;
   const hasUpdate = Boolean(updateStatus?.available);
   const updateBehind = updateStatus?.behind ?? 0;
   const desktopManagedUpdate =
@@ -213,6 +218,17 @@ export function SidebarUserPill() {
               </span>
             </div>
             <div className="user-menu-status">
+              <span className="dim">Database</span>
+              <span
+                className={dbReachable ? "ok" : "warn"}
+                style={dbReachable ? undefined : { color: "var(--status-error)" }}
+              >
+                {dbReachable
+                  ? "● reachable"
+                  : `● unreachable${dbError ? ` — ${dbError}` : ""}`}
+              </span>
+            </div>
+            <div className="user-menu-status">
               <span className="dim">Active sessions</span>
               <span>{activeSessions}</span>
             </div>
@@ -266,7 +282,28 @@ export function SidebarUserPill() {
         onClick={() => setOpen((value) => !value)}
         className={cn("user-pill", open && "open")}
       >
-        <div className="avatar">{initial}</div>
+        <div
+          className="avatar"
+          style={showHealthBadge ? { position: "relative" } : undefined}
+        >
+          {initial}
+          {showHealthBadge && (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                top: "-3px",
+                right: "-3px",
+                width: "7px",
+                height: "7px",
+                borderRadius: "50%",
+                background: "var(--status-error)",
+                boxShadow:
+                  "0 0 0 2px color-mix(in srgb, var(--status-error) 18%, transparent)",
+              }}
+            />
+          )}
+        </div>
         <div className="who">
           <div className="name">
             {nameLabel}

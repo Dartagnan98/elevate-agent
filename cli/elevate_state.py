@@ -58,7 +58,7 @@ _PROCESS_IMPORT_PID = os.getpid()
 _PROCESS_START_ID = uuid.uuid4().hex
 _PROCESS_CREATE_TIME = psutil.Process(_PROCESS_IMPORT_PID).create_time()
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -467,9 +467,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_usage_dedup
     WHERE source <> '' AND session_key <> '' AND message_id <> '';
 """
 
+# External-content source for the message FTS5 tables. Both indexes cover the
+# same text — content + tool_name + tool_calls concatenated — so this view
+# exposes exactly that as a single ``content`` column keyed by ``messages.id``.
+# The FTS5 tables below are EXTERNAL-CONTENT (``content='messages_fts_source'``),
+# meaning FTS5 stores only the inverted index and reads the original text from
+# this view when it needs it (snippet()/highlight()/rebuild). It therefore does
+# NOT keep the redundant per-message %_content copy that inline-mode FTS5 stores
+# — the copies that ballooned state.db (~456MB of a 627MB DB). The indexed text
+# is byte-identical to the previous inline index, so search results are
+# unchanged (tool_name/tool_calls stay searchable; #16751 is preserved).
+FTS_CONTENT_VIEW_SQL = """
+CREATE VIEW IF NOT EXISTS messages_fts_source AS
+SELECT
+    id,
+    COALESCE(content, '') || ' ' || COALESCE(tool_name, '') || ' ' || COALESCE(tool_calls, '') AS content
+FROM messages;
+"""
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content
+    content,
+    content='messages_fts_source',
+    content_rowid='id'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
@@ -480,11 +500,19 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES (
+        'delete',
+        old.id,
+        COALESCE(old.content, '') || ' ' || COALESCE(old.tool_name, '') || ' ' || COALESCE(old.tool_calls, '')
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES (
+        'delete',
+        old.id,
+        COALESCE(old.content, '') || ' ' || COALESCE(old.tool_name, '') || ' ' || COALESCE(old.tool_calls, '')
+    );
     INSERT INTO messages_fts(rowid, content) VALUES (
         new.id,
         COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
@@ -495,11 +523,15 @@ END;
 # Trigram FTS5 table for CJK substring search.  The default unicode61
 # tokenizer splits CJK characters into individual tokens, breaking phrase
 # matching.  The trigram tokenizer creates overlapping 3-byte sequences so
-# substring queries work natively for any script (CJK, Thai, etc.).
+# substring queries work natively for any script (CJK, Thai, etc.).  Also
+# external-content (same ``messages_fts_source`` view) so it stores no
+# redundant text copy.
 FTS_TRIGRAM_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
     content,
-    tokenize='trigram'
+    tokenize='trigram',
+    content='messages_fts_source',
+    content_rowid='id'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
@@ -510,11 +542,19 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON message
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content) VALUES (
+        'delete',
+        old.id,
+        COALESCE(old.content, '') || ' ' || COALESCE(old.tool_name, '') || ' ' || COALESCE(old.tool_calls, '')
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content) VALUES (
+        'delete',
+        old.id,
+        COALESCE(old.content, '') || ' ' || COALESCE(old.tool_name, '') || ' ' || COALESCE(old.tool_calls, '')
+    );
     INSERT INTO messages_fts_trigram(rowid, content) VALUES (
         new.id,
         COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
@@ -999,6 +1039,47 @@ class SessionDB:
                     "COALESCE(tool_calls, '') "
                     "FROM messages"
                 )
+            if current_version < 16:
+                # v16: convert the message FTS5 tables from inline mode (each
+                # kept a full redundant copy of every message's text in a
+                # %_content shadow table — ~456MB of a 627MB state.db) to
+                # EXTERNAL-CONTENT mode backed by the messages_fts_source
+                # view. The indexed text is unchanged (content||tool_name||
+                # tool_calls) so search results are identical; only the
+                # duplicate stored copy is removed. VACUUM (run after the next
+                # retention sweep) reclaims the freed pages. Non-destructive:
+                # no messages or sessions are deleted.
+                for _trig in (
+                    "messages_fts_insert",
+                    "messages_fts_delete",
+                    "messages_fts_update",
+                    "messages_fts_trigram_insert",
+                    "messages_fts_trigram_delete",
+                    "messages_fts_trigram_update",
+                ):
+                    try:
+                        cursor.execute(f"DROP TRIGGER IF EXISTS {_trig}")
+                    except sqlite3.OperationalError:
+                        pass
+                for _tbl in ("messages_fts", "messages_fts_trigram"):
+                    try:
+                        cursor.execute(f"DROP TABLE IF EXISTS {_tbl}")
+                    except sqlite3.OperationalError:
+                        pass
+                # The external-content view must exist before the FTS tables
+                # rebuild from it.
+                cursor.executescript(FTS_CONTENT_VIEW_SQL)
+                cursor.executescript(FTS_SQL)
+                cursor.executescript(FTS_TRIGRAM_SQL)
+                # Rebuild reads the original text from the view and repopulates
+                # the inverted index for every existing message row.
+                try:
+                    cursor.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+                    cursor.execute(
+                        "INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')"
+                    )
+                except sqlite3.OperationalError as exc:
+                    logger.warning("messages FTS external-content rebuild failed: %s", exc)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -1013,6 +1094,11 @@ class SessionDB:
             )
         except sqlite3.OperationalError:
             pass  # Index already exists
+
+        # External-content view backing both FTS5 tables — must exist before
+        # either table is created/rebuilt (fresh DBs and the recreation paths
+        # below both reference it).
+        cursor.executescript(FTS_CONTENT_VIEW_SQL)
 
         # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
         try:
@@ -6291,17 +6377,65 @@ class SessionDB:
         older_than_days: int = 90,
         source: str = None,
         sessions_dir: Optional[Path] = None,
+        *,
+        files_only: bool = False,
+        has_active_processes_fn: Optional[Callable[[str], bool]] = None,
     ) -> int:
-        """Delete sessions older than N days. Returns count of deleted sessions.
+        """Prune sessions older than N days. Returns count of pruned sessions.
 
-        Only prunes ended sessions (not active ones).  Child sessions outside
-        the prune window are orphaned (parent_session_id set to NULL) rather
-        than cascade-deleted.  When *sessions_dir* is provided, also removes
-        on-disk transcript files (``.json`` / ``.jsonl`` /
-        ``request_dump_*``) for every pruned session, outside the DB
-        transaction.
+        Two modes:
+
+        * Default (``files_only=False``) — the manual ``elevate sessions
+          prune`` behaviour: delete ended sessions' DB rows (and, when
+          *sessions_dir* is given, their on-disk transcript files).  Only
+          ended sessions are touched; child sessions outside the window are
+          orphaned rather than cascade-deleted.
+
+        * ``files_only=True`` — the auto-retention sweep (see
+          :meth:`maybe_auto_prune_and_vacuum`): remove **only** on-disk
+          transcript files (``.json`` / ``.jsonl`` / ``request_dump_*``) for
+          stale sessions and delete **no** DB rows, so full-text search recall
+          over history is preserved.  The predicate is broadened to
+          ``COALESCE(ended_at, started_at) < cutoff`` so never-ended (orphaned)
+          sessions are aged out too; the age threshold plus the optional
+          *has_active_processes_fn* guard ensure a live session is never swept.
         """
         cutoff = time.time() - (older_than_days * 86400)
+
+        if files_only:
+            if sessions_dir is None:
+                return 0
+            with self._lock:
+                if source:
+                    rows = self._conn.execute(
+                        "SELECT id FROM sessions "
+                        "WHERE COALESCE(ended_at, started_at) < ? AND source = ?",
+                        (cutoff, source),
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT id FROM sessions WHERE COALESCE(ended_at, started_at) < ?",
+                        (cutoff,),
+                    ).fetchall()
+            candidate_ids = [row["id"] for row in rows]
+            swept = 0
+            for sid in candidate_ids:
+                if has_active_processes_fn is not None:
+                    try:
+                        if has_active_processes_fn(sid):
+                            continue
+                    except Exception as exc:
+                        # Guard errored — keep the files (never delete a
+                        # session that might still be live).
+                        logger.debug(
+                            "has_active_processes_fn raised during file sweep for %s: %s",
+                            sid, exc,
+                        )
+                        continue
+                self._remove_session_files(sessions_dir, sid)
+                swept += 1
+            return swept
+
         removed_ids: list[str] = []
 
         def _do(conn):
@@ -6846,6 +6980,8 @@ class SessionDB:
         min_interval_hours: int = 24,
         vacuum: bool = True,
         sessions_dir: Optional[Path] = None,
+        files_only: bool = False,
+        has_active_processes_fn: Optional[Callable[[str], bool]] = None,
     ) -> Dict[str, Any]:
         """Idempotent auto-maintenance: prune old sessions + optional VACUUM.
 
@@ -6853,16 +6989,26 @@ class SessionDB:
         within ``min_interval_hours`` no-op. Designed to be called once at
         startup from long-lived entrypoints (CLI, gateway, cron scheduler).
 
-        When *sessions_dir* is provided, on-disk transcript files
-        (``.json`` / ``.jsonl`` / ``request_dump_*``) for pruned sessions
-        are removed as part of the same sweep (issue #3015).
+        Retention mode follows :meth:`prune_sessions`:
+
+        * ``files_only=False`` (default) — delete ended sessions' DB rows (and,
+          with *sessions_dir*, their on-disk transcripts). The legacy behaviour.
+        * ``files_only=True`` — the reliability-release auto-retention path
+          wired from the CLI/gateway startup callers: sweep **only** on-disk
+          transcript files (``.json`` / ``.jsonl`` / ``request_dump_*``) for
+          sessions past *retention_days* and delete **no** DB rows, so full-text
+          search recall over history is preserved. Requires *sessions_dir*;
+          *has_active_processes_fn* + the age threshold keep live sessions safe.
+
+        VACUUM (when it runs) reclaims freed pages — chiefly the one-time
+        external-content FTS migration in ``files_only`` mode.
 
         Never raises. On any failure, logs a warning and returns a dict
         with ``"error"`` set.
 
         Returns a dict with keys:
           - ``"skipped"`` (bool) — true if within min_interval_hours of last run
-          - ``"pruned"`` (int)   — number of sessions deleted
+          - ``"pruned"`` (int)   — sessions pruned (rows deleted, or files swept)
           - ``"vacuumed"`` (bool) — true if VACUUM ran
           - ``"error"`` (str, optional) — present only on failure
         """
@@ -6883,6 +7029,8 @@ class SessionDB:
             pruned = self.prune_sessions(
                 older_than_days=retention_days,
                 sessions_dir=sessions_dir,
+                files_only=files_only,
+                has_active_processes_fn=has_active_processes_fn,
             )
             result["pruned"] = pruned
 
@@ -6901,7 +7049,8 @@ class SessionDB:
 
             if pruned > 0:
                 logger.info(
-                    "state.db auto-maintenance: pruned %d session(s) older than %d days%s",
+                    "state.db auto-maintenance: %s %d session(s) older than %d days%s",
+                    "swept transcript files for" if files_only else "pruned",
                     pruned,
                     retention_days,
                     " + VACUUM" if result["vacuumed"] else "",

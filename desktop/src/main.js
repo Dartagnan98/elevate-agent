@@ -156,6 +156,9 @@ const computerUseOverlay = createComputerUseOverlay({
 });
 let ownsBackend = false;
 let backendReady = false;
+// Set true by the before-quit handler so the supervisor treats the deliberate
+// backend kill as an intentional shutdown and does not respawn it.
+let shuttingDown = false;
 let backendPort = PREFERRED_PORT;
 let backendUrl = `http://${HOST}:${backendPort}`;
 const startupTracker = startupLog.createStartupLogger(log);
@@ -212,8 +215,17 @@ const backendRunner = createBackendRunner({
   embeddedChat: EMBEDDED_CHAT,
   ensureGatewayInstalled,
   envWithPath,
+  fs,
+  getBackendLogPath,
   getBackendPort: () => backendPort,
+  isShuttingDown: () => shuttingDown,
   markStartup,
+  onBackendGaveUp: () => {
+    // Repeated fast failures: stop thrashing and surface the outage instead of
+    // presenting a dead UI. backendReady was already flipped false.
+    markStartup("desktop:backend-supervisor-giveup");
+    loadLocalPage("install.html");
+  },
   path,
   resolveElevateLauncher,
   runtimeMetadata: {
@@ -226,6 +238,7 @@ const backendRunner = createBackendRunner({
   setBackendProcess: (proc) => {
     backendProcess = proc;
   },
+  setBackendReady,
   setOwnsBackend: (value) => {
     ownsBackend = value;
   },
@@ -314,6 +327,9 @@ const appLifecycle = createAppLifecycle({
   ownsBackend: () => ownsBackend,
   process,
   protocolScheme: RELEASE_PROFILE.protocolScheme,
+  setShuttingDown: () => {
+    shuttingDown = true;
+  },
   startDesktop,
   startPath: START_PATH,
   startSmsOutboxWatcher,
@@ -634,6 +650,24 @@ function appendBackendLog(data) {
   backendRunner.appendBackendLog(data);
 }
 
+// Raw backend stdout/stderr is captured here (same dir electron-log uses) so a
+// backend that dies in a packaged .app leaves a record; console.log alone is
+// discarded once bundled. The supervisor size-rotates this file.
+function getBackendLogPath() {
+  return path.join(app.getPath("logs"), "backend.log");
+}
+
+// Single owner of backend-health mutation. Flipping readiness also tells the
+// renderer, so a dead backend stops the UI presenting itself as live. Backend
+// health is now decoupled from the 60s license refresh loop, which used to be
+// the only thing still logging during an outage.
+function setBackendReady(ready) {
+  backendReady = ready;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("backend:health", { ready });
+  }
+}
+
 function scheduleGatewaySelfHeal(launcher, baseEnv) {
   backendRunner.scheduleGatewaySelfHeal(launcher, baseEnv);
 }
@@ -758,7 +792,7 @@ async function startDesktop() {
   loadLocalPage("loading.html");
 
   const ready = await ensureBackend();
-  backendReady = ready;
+  setBackendReady(ready);
   if (ready) {
     markStartup("desktop:backend-ready");
     // The auth gate is enforced inside the chat endpoint, not at window load,

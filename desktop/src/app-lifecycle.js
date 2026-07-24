@@ -16,6 +16,7 @@ function createAppLifecycle({
   ownsBackend,
   process,
   protocolScheme = "elevate",
+  setShuttingDown = () => {},
   startDesktop,
   startPath,
   startSmsOutboxWatcher,
@@ -93,6 +94,9 @@ function createAppLifecycle({
 
     app.on("before-quit", () => {
       computerUseOverlay.dispose();
+      // Mark the shutdown BEFORE killing so the supervisor's exit handler sees
+      // this as an intentional quit and does not respawn the backend.
+      setShuttingDown();
       const proc = backendProcess();
       if (ownsBackend() && proc) proc.kill();
     });

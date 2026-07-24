@@ -21,6 +21,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Iterator, Optional, Sequence
@@ -118,7 +119,9 @@ def _pool_sizing() -> tuple[int, float]:
     several can hold a connection at once; with the old cap of 10 a few
     concurrent dashboard scans + an active turn could exhaust the pool and
     block. The explicit checkout timeout turns exhaustion into a fast,
-    retryable error instead of an indefinite hang (G3). Both knobs are
+    retryable error instead of an indefinite hang (G3). Kept short (A3) so a
+    dead postmaster or a saturated pool becomes a fast 503 rather than a 10s
+    hang that saturates FastAPI's bounded anyio thread pool. Both knobs are
     env-overridable: ELEVATE_PG_POOL_MAX_SIZE, ELEVATE_PG_POOL_TIMEOUT_S.
     """
     try:
@@ -127,10 +130,61 @@ def _pool_sizing() -> tuple[int, float]:
         max_size = 20
     max_size = max(4, max_size)
     try:
-        checkout_timeout = float(os.getenv("ELEVATE_PG_POOL_TIMEOUT_S", "10"))
+        checkout_timeout = float(os.getenv("ELEVATE_PG_POOL_TIMEOUT_S", "3"))
     except (TypeError, ValueError):
-        checkout_timeout = 10.0
+        checkout_timeout = 3.0
     return max_size, checkout_timeout
+
+
+def _reconnect_timeout_s() -> float:
+    """Seconds the pool's background worker keeps retrying a dead server before
+    it gives up and invokes ``reconnect_failed`` (which restarts the embedded
+    postmaster and drops the pool). Kept short so a crashed postmaster
+    self-heals in seconds rather than psycopg's 5-minute default. Env override:
+    ELEVATE_PG_POOL_RECONNECT_TIMEOUT_S."""
+    try:
+        return max(1.0, float(os.getenv("ELEVATE_PG_POOL_RECONNECT_TIMEOUT_S", "10")))
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def _safe_close_pool(pool: ConnectionPool) -> None:
+    """Best-effort close of a discarded pool; swallows shutdown errors."""
+    try:
+        pool.close()
+    except Exception:
+        pass
+
+
+def _rebuild_pool_after_failure(failed_pool: ConnectionPool) -> None:
+    """``reconnect_failed`` hook (A3): the embedded postmaster is unreachable
+    and the pool's background reconnection gave up. Restart embedded Postgres
+    against the existing data dir (A2) and drop the dead pool so the next
+    checkout rebuilds it against the recovered server.
+
+    Runs on one of the pool's own worker threads, so it must never call
+    ``failed_pool.close()`` synchronously — ``close()`` joins the workers,
+    including this one, and would deadlock. Nulling ``_pool`` is enough for
+    ``_get_pool`` to rebuild; the dead pool is closed on a detached daemon
+    thread.
+    """
+    global _pool, _pool_account
+    try:
+        pg_server.restart_server()
+    except Exception:
+        # Restart is best-effort: even if it fails right now, dropping the pool
+        # lets a later checkout retry recovery instead of reusing dead conns.
+        pass
+    with _pool_lock:
+        if _pool is failed_pool:
+            _pool = None
+            _pool_account = None
+    threading.Thread(
+        target=_safe_close_pool,
+        args=(failed_pool,),
+        name="elevate-pg-pool-close",
+        daemon=True,
+    ).start()
 
 
 def _get_pool() -> ConnectionPool:
@@ -160,6 +214,20 @@ def _get_pool() -> ConnectionPool:
             min_size=1,
             max_size=max_size,
             timeout=checkout_timeout,
+            # Bound the wait queue (A3): once 20 requests are already queued for
+            # a connection, further checkouts fail fast with PoolTimeout instead
+            # of piling up unbounded and saturating FastAPI's anyio thread pool.
+            max_waiting=20,
+            # Validate a cached connection on checkout: a broken/stale conn is
+            # replaced (or a dead server surfaced as a fast error) rather than
+            # handed to a caller that would then hang for the full checkout
+            # timeout mid-query.
+            check=ConnectionPool.check_connection,
+            # Self-heal a crashed embedded postmaster: the background worker
+            # gives up after this window and calls reconnect_failed, which
+            # restarts PG and drops the pool for rebuild.
+            reconnect_timeout=_reconnect_timeout_s(),
+            reconnect_failed=_rebuild_pool_after_failure,
             kwargs={
                 "row_factory": dict_row,
                 "autocommit": False,
@@ -542,6 +610,33 @@ class PgConnection:
 # ─── Public API ────────────────────────────────────────────────────────
 
 
+def database_reachable() -> tuple[bool, float | None, str | None]:
+    """Probe the operational database with a direct, short-timeout connect (B1).
+
+    Opens its OWN ``psycopg`` connection to the active account's operational DB
+    with ``connect_timeout=2`` and runs ``SELECT 1`` — deliberately NOT through
+    the shared pool, so a truly dead embedded postmaster is distinguishable
+    from mere pool exhaustion and surfaces fast instead of blocking on a pool
+    checkout. This powers the always-visible health rail.
+
+    Purely observational: it never runs migrations, never adopts the legacy
+    database, never creates a database, and never raises. Returns
+    ``(True, latency_ms, None)`` on success and ``(False, None, error)`` on any
+    failure.
+    """
+    start = time.monotonic()
+    try:
+        uri = pg_server.get_uri(_app_db_name())
+        with psycopg.connect(uri, connect_timeout=2) as probe:
+            with probe.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 — a health probe must never raise
+        return (False, None, str(exc))
+    latency_ms = (time.monotonic() - start) * 1000.0
+    return (True, latency_ms, None)
+
+
 @contextmanager
 def connect() -> Iterator[PgConnection]:
     """Open a pooled connection to the operational DB and yield it.
@@ -577,10 +672,13 @@ def connect_ready_read_only() -> Iterator[PgConnection]:
     adopt a legacy database, create an account database, run migrations, or
     import legacy state just because the model asked to inspect data.
 
-    The pool lock stays held for the bounded read so an account switch or test
-    reset cannot close/rebind the selected pool between validation and query.
-    PostgreSQL enforces the read-only contract, and ``force_rollback`` ensures
-    the transaction is never committed even after a successful read.
+    The pool lock is held only long enough to snapshot the active pool; the
+    connection is then checked out WITHOUT the lock (A3) so one slow or blocked
+    read cannot serialize every other reader behind the global lock. An account
+    switch or test reset that rebinds the pool mid-read is caught by the
+    post-read revalidation, which fails closed. PostgreSQL enforces the
+    read-only contract, and ``force_rollback`` ensures the transaction is never
+    committed even after a successful read.
     """
     key = get_account_key()
     with _schema_lock:
@@ -604,26 +702,30 @@ def connect_ready_read_only() -> Iterator[PgConnection]:
                 raise OperationalStoreNotReady(
                     "operational store is not ready for the active account"
                 )
-
             pool = _pool
-            with pool.connection() as raw:
-                with raw.transaction(force_rollback=True):
-                    with raw.cursor() as cur:
-                        cur.execute("SET TRANSACTION READ ONLY")
-                    yield PgConnection(raw)
-                    # The license file can change without taking _pool_lock.
-                    # Revalidate after the caller computed its snapshot so a
-                    # mid-query account switch discards old-account rows
-                    # instead of returning them to the new active account.
-                    if (
-                        get_account_key() != key
-                        or _pool is not pool
-                        or _pool_account != key
-                        or _schema_ready_for != key
-                    ):
-                        raise OperationalStoreNotReady(
-                            "active account changed during operational store read"
-                        )
+
+        # Check the connection out OUTSIDE _pool_lock (A3): holding the global
+        # lock across the checkout serialized every read behind one slow or
+        # blocked connection. The account-identity revalidation below still
+        # fails closed on a mid-read license switch.
+        with pool.connection() as raw:
+            with raw.transaction(force_rollback=True):
+                with raw.cursor() as cur:
+                    cur.execute("SET TRANSACTION READ ONLY")
+                yield PgConnection(raw)
+                # The license file can change without taking _pool_lock.
+                # Revalidate after the caller computed its snapshot so a
+                # mid-query account switch discards old-account rows
+                # instead of returning them to the new active account.
+                if (
+                    get_account_key() != key
+                    or _pool is not pool
+                    or _pool_account != key
+                    or _schema_ready_for != key
+                ):
+                    raise OperationalStoreNotReady(
+                        "active account changed during operational store read"
+                    )
     except (PoolClosed, PoolTimeout) as exc:
         raise OperationalStoreNotReady(
             "operational store read pool is not available"
@@ -657,6 +759,7 @@ def transaction(conn: PgConnection) -> Iterator[PgConnection]:
 __all__ = [
     "connect",
     "connect_ready_read_only",
+    "database_reachable",
     "OperationalStoreNotReady",
     "transaction",
     "PgConnection",

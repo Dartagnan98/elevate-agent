@@ -1441,12 +1441,15 @@ DEFAULT_CONFIG = {
     # reports 384MB+ databases with 68K+ messages, which slows down FTS5
     # inserts, /resume listing, and insights queries.
     "sessions": {
-        # When true, prune ended sessions older than retention_days once
-        # per (roughly) min_interval_hours at CLI/gateway/cron startup.
-        # Only touches ended sessions — active sessions are always preserved.
-        # Default false: session history is valuable for search recall, and
-        # silently deleting it could surprise users.  Opt in explicitly.
-        "auto_prune": False,
+        # When true, sweep on-disk session transcript files (JSONL /
+        # request_dump) older than retention_days once per (roughly)
+        # min_interval_hours at CLI/gateway/cron startup.  The auto sweep is
+        # JSONL-only: it removes stale on-disk transcript files but never
+        # deletes state.db rows, so search recall over history is preserved.
+        # Active sessions are always kept (age threshold + active-process
+        # guard).  Enabled by default so a heavy user's sessions/ directory
+        # (which was never swept before) stops growing without bound.
+        "auto_prune": True,
         # How many days of ended-session history to keep.  Matches the
         # default of ``elevate sessions prune``.
         "retention_days": 90,

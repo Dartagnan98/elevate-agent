@@ -25,4 +25,14 @@ describe("Config source connector recovery UI", () => {
     expect(page).toContain("Could not copy prompt.");
     expect(page).toContain("{copyStatus[connector.id].message}");
   });
+
+  it("surfaces a red 'Expired — reconnect' pill for non-ACTIVE Composio accounts", () => {
+    const page = source("../ConfigPage.tsx");
+
+    // ACTIVE keeps the green check; every other conn.status flips to the pill.
+    expect(page).toContain('conn.status === "ACTIVE" ? (');
+    expect(page).toContain("Expired — reconnect");
+    expect(page).toContain("text-destructive");
+    expect(page).toContain("bg-destructive/10");
+  });
 });

@@ -70,20 +70,35 @@ def _insert_event(
         ts=ts_,
         body=body_for_hash if body_for_hash is not None else (pj or eid),
     )
-    conn.execute(
+    # Idempotent on the natural event key: a re-sync re-attempting the same
+    # event is a no-op instead of an IntegrityError against uniq_events_event_hash.
+    # Before this, every duplicate re-attempt made Postgres log the full ~1-2 KB
+    # STATEMENT before the savepoint rolled it back (the #4 write/log-amp bleed).
+    # RETURNING id lets callers distinguish a real insert (a row comes back) from
+    # a skipped duplicate (no row) WITHOUT relying on the raised IntegrityError —
+    # the backfill's written-vs-skipped stats depend on that signal. Live callers
+    # ignore the return, so they are unaffected.
+    cur = conn.execute(
         """
         INSERT INTO events(
             id, contact_id, conversation_id, kind, channel, source_id,
             actor, template_id, payload_json, payload_ref, ingest_run_id,
             event_hash, ts
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (event_hash) DO NOTHING
+        RETURNING id
         """,
         (
             eid, contact_id, conversation_id, kind, channel, source_id,
             actor, template_id, pj, pref, ingest_run_id, eh, ts_,
         ),
     )
-    _contacts.touch_last_activity(conn, contact_id, ts_)
+    inserted = cur.fetchone() is not None
+    # Only advance the contact's activity clock for a genuinely new event; a
+    # replayed duplicate stays a true no-op (matching the pre-ON-CONFLICT
+    # behaviour where the IntegrityError rolled the whole savepoint back).
+    if inserted:
+        _contacts.touch_last_activity(conn, contact_id, ts_)
     return {
         "id": eid,
         "contactId": contact_id,
@@ -96,6 +111,7 @@ def _insert_event(
         "ingestRunId": ingest_run_id,
         "eventHash": eh,
         "ts": ts_,
+        "inserted": inserted,
     }
 
 

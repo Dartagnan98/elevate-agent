@@ -1889,6 +1889,7 @@ export interface StatusResponse {
   release_date: string;
   version: string;
   beta_runtime?: BetaRuntimeReceipt;
+  database?: { reachable: boolean; latency_ms: number | null; error: string | null };
 }
 
 export type AgentHandoffStatus =

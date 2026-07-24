@@ -968,7 +968,7 @@ def walk_jsonl_source(
             recorder = record_outbound if kind == "outbound" else record_inbound
             try:
                 with _savepoint(conn, "sp_msg"):
-                    recorder(
+                    result = recorder(
                         conn,
                         contact_id=contact_id,
                         conversation_id=conv_id,
@@ -979,18 +979,24 @@ def walk_jsonl_source(
                         ts=ts,
                         actor=row.get("actor") or "legacy_backfill",
                     )
-                stats.messages += 1
-                # Bump the conversation counter the way the live path
-                # would. The events_unique_event_hash UNIQUE keeps
-                # replay safe; this counter is a best-effort estimate
-                # that recomputes on Sprint 2 cutover.
-                try:
-                    with _savepoint(conn, "sp_bump"):
-                        bump_conversation_counters(
-                            conn, conv_id, direction=kind, ts=ts,
-                        )
-                except Exception:
-                    pass
+                if result.get("inserted", True):
+                    stats.messages += 1
+                    # Bump the conversation counter the way the live path
+                    # would. This counter is a best-effort estimate that
+                    # recomputes on Sprint 2 cutover.
+                    try:
+                        with _savepoint(conn, "sp_bump"):
+                            bump_conversation_counters(
+                                conn, conv_id, direction=kind, ts=ts,
+                            )
+                    except Exception:
+                        pass
+                else:
+                    # ON CONFLICT (event_hash) DO NOTHING → this message was
+                    # already backfilled on a prior run, so a rerun writes zero
+                    # new rows. The unique event_hash still keeps replay safe;
+                    # the RETURNING signal replaces the old IntegrityError path.
+                    stats.messages_skipped += 1
             except _DB_INTEGRITY_ERRORS:
                 stats.messages_skipped += 1
         except Exception as exc:
