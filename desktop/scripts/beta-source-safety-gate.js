@@ -406,7 +406,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       command: process.execPath,
       displayCommand: "<active-node>",
       args: ["--import", "tsx", "--test", "--test-reporter=tap", ...backendTests],
-      resultContract: { kind: "node-test", minimum_tests: 187, expected_tests: 187 },
+      resultContract: { kind: "node-test", minimum_tests: 193, expected_tests: 193 },
     },
     {
       id: "backend-deploy-static",
