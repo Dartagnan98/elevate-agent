@@ -245,7 +245,7 @@ export function BugReporter() {
                   <Check className="h-6 w-6 text-[#5E8AD0]" />
                 </div>
                 <p className="text-sm font-medium text-foreground">
-                  Sent to Skyleigh — report #{doneNumber}
+                  Bug reported — thanks! (#{doneNumber})
                 </p>
                 <p className="text-xs text-muted-foreground">
                   Thanks. It's saved to the Bug Reports list.

@@ -2,8 +2,14 @@
 
 A lightweight, file-backed capture so anyone on the team can flag a bug, a
 clunky flow, or a design nit from the top-right "Report a bug" button. No DB
-migration — reports live under ~/.elevate/bug-reports/ as an append-only JSONL
-index plus one screenshot file per report.
+migration — reports live under <ELEVATE_HOME>/bug-reports/ (e.g. ~/.elevate or
+~/.elevate-beta) as an append-only JSONL index plus one screenshot file per
+report.
+
+Each report is also mirrored, best-effort, to Elevation HQ
+(``POST /api/bug-reports``) so bugs collect centrally. The local copy is the
+source of truth for the per-box ``/bugs`` view and the offline fallback; the HQ
+forward is fire-and-forget and never blocks or fails the user's submission.
 
   POST /api/bug-reports              -> submit {note, screenshot?, context...}
   GET  /api/bug-reports              -> list newest-first (screenshots inlined)
@@ -26,10 +32,35 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-_STORE = os.path.expanduser("~/.elevate/bug-reports")
-_INDEX = os.path.join(_STORE, "index.jsonl")
-_SHOTS = os.path.join(_STORE, "shots")
+def _elevate_home() -> str:
+    """Resolve the active app home so Beta writes under ~/.elevate-beta.
+
+    Mirrors how sibling web_routes modules (e.g. social.py) resolve the home:
+    honor ``ELEVATE_HOME`` when set, else fall back to ``~/.elevate``. Resolved
+    at call time (not import time) because ELEVATE_HOME is pinned during process
+    startup, which may run after this module is imported.
+    """
+    return os.environ.get("ELEVATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".elevate"
+    )
+
+
+def _store_dir() -> str:
+    return os.path.join(_elevate_home(), "bug-reports")
+
+
+def _index_path() -> str:
+    return os.path.join(_store_dir(), "index.jsonl")
+
+
+def _shots_dir() -> str:
+    return os.path.join(_store_dir(), "shots")
+
+
 _LOCK = threading.Lock()
+
+# How long the best-effort HQ mirror may block before we give up on it.
+_HQ_FORWARD_TIMEOUT = 5.0
 
 # Cap a single screenshot at ~5 MB of base64 so a giant capture can't wedge the
 # store; the client already downscales, this is a backstop.
@@ -37,7 +68,7 @@ _MAX_SHOT_B64 = 5 * 1024 * 1024
 
 
 def _ensure_dirs() -> None:
-    os.makedirs(_SHOTS, exist_ok=True)
+    os.makedirs(_shots_dir(), exist_ok=True)
 
 
 def _now_iso() -> str:
@@ -45,10 +76,11 @@ def _now_iso() -> str:
 
 
 def _read_all() -> List[Dict[str, Any]]:
-    if not os.path.exists(_INDEX):
+    index = _index_path()
+    if not os.path.exists(index):
         return []
     out: List[Dict[str, Any]] = []
-    with open(_INDEX, "r", encoding="utf-8") as fh:
+    with open(index, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -77,7 +109,7 @@ def _save_screenshot(report_id: str, data_url: Optional[str]) -> Optional[str]:
     except Exception:
         return None
     fname = f"{report_id}.{ext}"
-    with open(os.path.join(_SHOTS, fname), "wb") as fh:
+    with open(os.path.join(_shots_dir(), fname), "wb") as fh:
         fh.write(raw)
     return fname
 
@@ -85,7 +117,7 @@ def _save_screenshot(report_id: str, data_url: Optional[str]) -> Optional[str]:
 def _shot_data_url(fname: Optional[str]) -> Optional[str]:
     if not fname:
         return None
-    path = os.path.join(_SHOTS, fname)
+    path = os.path.join(_shots_dir(), fname)
     if not os.path.exists(path):
         return None
     ext = fname.rsplit(".", 1)[-1].lower()
@@ -96,6 +128,80 @@ def _shot_data_url(fname: Optional[str]) -> Optional[str]:
         return f"data:{mime};base64,{b64}"
     except Exception:
         return None
+
+
+def _forward_to_hq(
+    rec: Dict[str, Any],
+    screenshot: Optional[str],
+    _log: logging.Logger,
+) -> None:
+    """Best-effort mirror of one report to Elevation HQ.
+
+    Reuses the SAME hosted-HQ auth the client already uses for license refresh
+    and entitlement calls — no new credential is invented:
+
+    * ``license.ensure_valid()`` returns a ``License`` carrying a fresh
+      ``access_token`` (refreshing it first when the token is near expiry).
+    * ``license.backend_url()`` yields the HQ origin
+      (``https://api.elevationrealestatehq.com``, or the signed Beta origin).
+
+    Fire-and-forget: this runs off the request thread and swallows every
+    failure. The local save is the source of truth for the ``/bugs`` view and
+    the offline fallback, so a forward failure must never surface to the user.
+    """
+    try:
+        import httpx  # local import keeps module import cheap + failure-proof
+
+        from elevate_cli import license as _license
+
+        lic = _license.ensure_valid()
+        base = _license.backend_url().rstrip("/")
+
+        payload: Dict[str, Any] = {
+            "note": rec.get("note"),
+            "screenshot": screenshot,
+            "page": rec.get("page"),
+            "pageTitle": rec.get("pageTitle"),
+            "dealId": rec.get("dealId"),
+            "dealTitle": rec.get("dealTitle"),
+            "userAgent": rec.get("userAgent"),
+            "viewport": rec.get("viewport"),
+            "reporter": rec.get("reporter"),
+            "consoleErrors": rec.get("consoleErrors") or [],
+            "context": {
+                "localId": rec.get("id"),
+                "localNumber": rec.get("number"),
+                "createdAt": rec.get("createdAt"),
+            },
+        }
+        try:
+            from elevate_cli import __version__ as _app_version
+
+            payload["appVersion"] = _app_version
+            payload["version"] = _app_version
+        except Exception:
+            pass
+
+        with httpx.Client(timeout=_HQ_FORWARD_TIMEOUT) as client:
+            resp = client.post(
+                f"{base}/api/bug-reports",
+                json=payload,
+                headers={"Authorization": f"Bearer {lic.access_token}"},
+            )
+        if resp.status_code >= 400:
+            _log.warning(
+                "bug report #%s: HQ forward returned %s (kept local copy)",
+                rec.get("number"),
+                resp.status_code,
+            )
+        else:
+            _log.info("bug report #%s mirrored to HQ", rec.get("number"))
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget mirror
+        _log.warning(
+            "bug report #%s: HQ forward failed, kept local copy (%s)",
+            rec.get("number"),
+            exc,
+        )
 
 
 class BugReportIn(BaseModel):
@@ -147,9 +253,18 @@ def create_bug_reports_router(*, log: logging.Logger | None = None) -> APIRouter
                 "createdAt": _now_iso(),
                 "resolvedAt": None,
             }
-            with open(_INDEX, "a", encoding="utf-8") as fh:
+            with open(_index_path(), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
         _log.info("bug report #%s submitted (%s)", number, rid)
+        # Local copy is now durable. Mirror to Elevation HQ off the request
+        # thread so a slow/unreachable HQ never blocks or fails the user's
+        # submission; any error is logged inside _forward_to_hq.
+        threading.Thread(
+            target=_forward_to_hq,
+            args=(rec, body.screenshot, _log),
+            name=f"bug-report-hq-forward-{rid}",
+            daemon=True,
+        ).start()
         return {"ok": True, "id": rid, "number": number}
 
     @router.get("/api/bug-reports")
@@ -197,11 +312,12 @@ def create_bug_reports_router(*, log: logging.Logger | None = None) -> APIRouter
                     break
             if not found:
                 raise HTTPException(status_code=404, detail="Report not found.")
-            tmp = _INDEX + ".tmp"
+            index = _index_path()
+            tmp = index + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 for r in records:
                     fh.write(json.dumps(r) + "\n")
-            os.replace(tmp, _INDEX)
+            os.replace(tmp, index)
         return {"ok": True, "id": report_id,
                 "status": "resolved" if body.resolved else "open"}
 
