@@ -13,6 +13,7 @@ from elevate_cli.web_routes.admin_desk_sections import create_admin_desk_section
 from elevate_cli.web_routes.admin_onboarding import create_admin_onboarding_router
 from elevate_cli.web_routes.admin_pack import create_admin_pack_router
 from elevate_cli.web_routes.admin_setup import create_admin_setup_router
+from elevate_cli.web_routes.bug_reports import create_bug_reports_router
 from elevate_cli.web_routes.chat_websockets import create_chat_websocket_router
 from elevate_cli.web_routes.heartbeats import create_heartbeats_router
 
@@ -48,6 +49,7 @@ def register_agent_admin_routes(
     app.include_router(create_admin_deal_chat_router(log=log))
     app.include_router(create_admin_desk_sections_router(log=log))
     app.include_router(create_admin_pack_router(web_actor=web_actor, log=log))
+    app.include_router(create_bug_reports_router(log=log))
     app.include_router(
         create_heartbeats_router(
             fs_cache_get=fs_cache_get,

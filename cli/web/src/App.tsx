@@ -29,6 +29,7 @@ import {
   AlertTriangle,
   Brain,
   BriefcaseBusiness,
+  Bug,
   Building2,
   ChevronDown,
   ChevronRight,
@@ -83,6 +84,7 @@ import type { AccessStatusResponse, LicenseStatusResponse } from "@/lib/api-type
 import { LoginCard } from "@/components/LoginCard";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
+import { BugReporter } from "@/components/BugReporter";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { Toast } from "@/components/Toast";
@@ -135,6 +137,8 @@ const loadRealEstateTodayPage = () =>
   import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage }));
 const loadAgentOnboardingPage = () =>
   import("@/pages/agent-onboarding").then((m) => ({ default: m.AgentOnboardingPage }));
+const loadBugReportsPage = () =>
+  import("@/pages/BugReportsPage").then((m) => ({ default: m.BugReportsPage }));
 
 const ConfigPage = lazy(loadConfigPage);
 const DocsPage = lazy(loadDocsPage);
@@ -162,6 +166,7 @@ const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
 const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
 const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
 const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
+const BugReportsPage = lazy(loadBugReportsPage);
 
 const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/today": loadRealEstateTodayPage,
@@ -192,6 +197,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/config": loadConfigPage,
   "/env": loadEnvPage,
   "/docs": loadDocsPage,
+  "/bugs": loadBugReportsPage,
 };
 
 const PRELOADED_ROUTES = new Set<string>();
@@ -640,6 +646,7 @@ function buildAccessControlledBuiltinRoutes(
       : PendingOrLocked,
     "/marketing": packs.realEstateMarketing ? MarketingRedirect : PendingOrLocked,
     "/memory": RealEstateMemoryPage,
+    "/bugs": BugReportsPage,
     ...BUILTIN_ROUTES_BASE,
     ...(embeddedChat ? { "/chat": ChatPage } : {}),
   };
@@ -926,6 +933,7 @@ export default function App() {
       <SelectionSwitcher />
       <OnboardingGate />
       <Backdrop />
+      {!isConfigRoute && accessChecked && <BugReporter />}
       <PluginSlot name="backdrop" />
 
       <header
@@ -1939,6 +1947,7 @@ function DesktopSidebar({
     { icon: Activity, label: "Activity", path: "/activity" },
     { icon: Puzzle, label: "Skills", path: "/skills" },
     { icon: Brain, label: "Memory graph", path: "/memory" },
+    { icon: Bug, label: "Bug Reports", path: "/bugs" },
   ];
   const agentMoreActive = agentMoreNavItems.some((item) =>
     location.pathname === item.path || location.pathname.startsWith(`${item.path}/`),
