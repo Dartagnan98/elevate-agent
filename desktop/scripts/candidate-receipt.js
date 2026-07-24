@@ -35,8 +35,8 @@ const CANDIDATE_RECEIPT_SCHEMA_VERSION = 2;
 const PRE_SIGN_EVIDENCE_SCHEMA_VERSION = 1;
 const PUBLIC_BASE_URL = "https://api.elevationrealestatehq.com/updates";
 const RECOVERY_RECEIPT_SCHEMA_VERSION = 1;
-const REALTOR_BETA_RECOVERY_CANDIDATE_VERSION = "1.2.96";
-const REALTOR_BETA_RECOVERY_VERSION = "1.2.97";
+const REALTOR_BETA_RECOVERY_CANDIDATE_VERSION = "1.2.97";
+const REALTOR_BETA_RECOVERY_VERSION = "1.2.98";
 const REALTOR_BETA_RECOVERY_PROCEDURE_ID = "realtor-beta-recovery-roll-forward-v1";
 const RECOVERY_FEED_NAME = "beta-mac.yml";
 const RECOVERY_ARTIFACT_PREFIX = "Elevate-Beta-Recovery";
@@ -2213,7 +2213,7 @@ function buildRemotePublishInnerScript({
     `{ path_absent ${shellQuote(`${remote}${name}`)} || hash_is ${shellQuote(`${remote}${name}`)} ${shellQuote(candidate.artifacts[name].sha256)}; }`).join(" && ");
   // Roll-forward recovery retention: every recovery byte must be committed to
   // its final public/retained name before any candidate pointer moves, so an
-  // incident can activate 1.2.97 without any build-machine dependency.
+  // incident can activate 1.2.98 without any build-machine dependency.
   const recoveryFinalPairs = recoveryPlan
     ? [
       ...recoveryPlan.names.map((name) => ({ staged: name, final: name, hash: recoveryPlan.artifactSha256[name] })),
