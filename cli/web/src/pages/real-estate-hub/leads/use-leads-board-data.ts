@@ -76,6 +76,7 @@ export function useLeadsBoardData() {
   const [sentError, setSentError] = useState<string | null>(null);
   const [sentPartial, setSentPartial] = useState(false);
   const [draftSendLifecycleById, setDraftSendLifecycleById] = useState<Record<string, DraftSendLifecycleNotice>>({});
+  const [tempOverrides, setTempOverrides] = useState<Record<string, string>>({});
 
   const refreshTemplates = useCallback(async () => {
     setTemplatesLoading(true);
@@ -151,6 +152,14 @@ export function useLeadsBoardData() {
       .finally(() => {
         if (!cancelled) setSentLoading(false);
       });
+    api
+      .getAdminContactTemperatures()
+      .then((res) => {
+        if (!cancelled) setTempOverrides(res.overrides ?? {});
+      })
+      .catch(() => {
+        if (!cancelled) setTempOverrides({});
+      });
     return () => {
       cancelled = true;
     };
@@ -193,8 +202,8 @@ export function useLeadsBoardData() {
     [inbox],
   );
   const profiles = useMemo(
-    () => (inbox ? mapLeadsProfiles(inbox.profiles ?? []) : undefined),
-    [inbox],
+    () => (inbox ? mapLeadsProfiles(inbox.profiles ?? [], tempOverrides) : undefined),
+    [inbox, tempOverrides],
   );
   const pipeline = useMemo(
     () =>
@@ -266,9 +275,17 @@ export function useLeadsBoardData() {
       }
       if (action === "approve" && !scheduledAt) updateDraftSendLifecycle(draft, initialDraftSendLifecycleState());
       try {
+        // For a channel switch, draft.channel carries the TARGET channel the
+        // toggle picked (e.g. "sms" or "email"); everything else sends the body.
+        const options =
+          action === "channel"
+            ? { channel: draft.channel }
+            : scheduledAt
+              ? { scheduledAt }
+              : undefined;
         const res = await api.updateSourceInboxDraft(
           sourceId, taskId, action, draft.body ?? "",
-          scheduledAt ? { scheduledAt } : undefined,
+          options,
         );
         setSourceInbox(res);
         if (action === "approve" && scheduledAt) {
@@ -392,6 +409,29 @@ export function useLeadsBoardData() {
     [setSourceInbox],
   );
 
+  // Bulk tag/segment/pipeline change from the redesigned Leads table selection
+  // bar. Fans the selected profiles out to their contactIds, calls the bulk
+  // endpoint, then refreshes so the board reflects the write.
+  const handleBulkUpdate = useCallback(
+    async (
+      profiles: LeadsProfile[],
+      action: "tags" | "segments" | "pipeline",
+      value: unknown,
+      mode?: "add" | "replace" | "remove",
+    ) => {
+      const contactIds = Array.from(
+        new Set(profiles.flatMap((p) => p.contactIds ?? []).filter(Boolean)),
+      );
+      if (contactIds.length === 0) {
+        throw new Error("None of the selected leads have a linked contact to update.");
+      }
+      const res = await api.bulkUpdateContacts(contactIds, action, value, mode);
+      await data.refresh({ force: true });
+      return res;
+    },
+    [data],
+  );
+
   return {
     data,
     inbox,
@@ -421,6 +461,7 @@ export function useLeadsBoardData() {
     handleProfileTagsChange,
     handleProfileListsChange,
     handleProfileStatusChange,
+    handleBulkUpdate,
     handleToggleDirection,
     refreshSent,
     templateMutations,

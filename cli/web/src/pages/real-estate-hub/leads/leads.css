@@ -3409,6 +3409,50 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
+  /* Channel toggle (email <-> text) */
+  .lb-chan-toggle {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 2px 0 8px;
+    flex-wrap: wrap;
+  }
+  .lb-chan-label {
+    font: 500 10px/1 "Geist Mono", monospace;
+    color: var(--fg-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .lb-chan-seg {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--bg-1);
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    padding: 2px;
+  }
+  .lb-chan-opt {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--fg-muted);
+    font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+    padding: 4px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .lb-chan-opt:not(.on):not(:disabled):hover { color: var(--fg); background: var(--bg-2); }
+  .lb-chan-opt.on {
+    background: var(--accent);
+    color: var(--accent-fg);
+    cursor: default;
+  }
+  .lb-chan-opt:disabled:not(.on) { opacity: 0.5; cursor: not-allowed; }
+  .lb-chan-err {
+    font: 500 11px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
+    color: var(--status-bad, #d9534f);
+  }
   .lb-draft-edit {
     width: 100%;
     background: var(--bg);

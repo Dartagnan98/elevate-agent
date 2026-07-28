@@ -87,6 +87,7 @@ export function LeadsDesignShell() {
           onProfileTagsChange={boardData.handleProfileTagsChange}
           onProfileListsChange={boardData.handleProfileListsChange}
           onProfileStatusChange={boardData.handleProfileStatusChange}
+          onBulkUpdate={boardData.handleBulkUpdate}
           onReRunOnboarding={leadsSetup.loading
             ? undefined
             : setupSnapshot

@@ -32,18 +32,22 @@ Lead in /leads (listing_active=1)
 
 ## Required Inputs
 
-These are hard requirements — the skill must collect them before drafting, because they double as the verifiers used to promote the contact to /admin:
+**Only these hard verifiers can block a draft** — they are what promote the contact to /admin:
 
 - `contact_id` — the contact in /leads being closed into admin.
 - `seller_names` — full legal name(s) of the seller(s).
-- `seller_email` — primary email for the seller.
-- `seller_phone` — primary phone for the seller (E.164 or local format).
+- `seller_email` OR `seller_phone` — at least one reachable channel (both is better; either one is enough to draft).
 - `listing_address` — property address (line + city + province + postal code if known).
-- `appointment_date` — date/time of the listing appointment.
 - Realtor profile, brokerage, value proposition, and local proof points from memory/onboarding.
 - Email account for draft creation.
 
-If any required field is missing, return `status: "waiting_human"` with a `human_prompt` listing the missing fields in `requiredFields`. Do not draft a package without all four verifier fields.
+**Optional — never block on these. Record if present, otherwise proceed and leave blank:**
+
+- `appointment_date` — date/time of the listing appointment. A pre-CMA / pre-appointment package routinely has no appointment yet. Missing appointment_date is NOT a reason to park `waiting_human`; draft the package anyway.
+
+Only return `status: "waiting_human"` when a hard verifier above (name, address, or a reachable email/phone) is genuinely missing AND cannot be enriched from Contacts/CRM/Gmail/iMessage. List only those in `requiredFields`. Never park a draft for a merely-nice-to-have field.
+
+**Never fabricate a field to avoid parking.** Leaving an optional field (appointment date, etc.) blank is correct; inventing a value for it is a defect. Only write values that came from a real cited source (intake form, a CRM record you read, or the user). Never guess a name, email, phone, address, appointment, or date.
 
 ## Rules
 

@@ -541,6 +541,28 @@ DEFAULT_CONFIG = {
         "market": "",
         "package_key": "generic.real-estate",
     },
+    "admin": {
+        # Per-install Admin deal-flow behaviour switches. Both default to the
+        # mainline behaviour; a brokerage whose process differs flips them in
+        # ~/.elevate/config.yaml instead of forking the code. Both are read at
+        # call time, so a config edit takes effect without a restart.
+        #
+        # auto_advance_enabled (default true): completing a stage's checklist
+        # (or clearing the stage's phase gate) moves the card to the next
+        # stage automatically, which fires that stage's workflows/skills.
+        # Set to false when the agent wants to move every card between phases
+        # by hand — Skyleigh's install does, because auto-advancing a card
+        # auto-fires the next stage's automations before she has reviewed it.
+        # Manual stage moves and the accepted-offer auto-move (stage 5 -> 6)
+        # are unaffected by this switch either way.
+        "auto_advance_enabled": True,
+        # buyer_agency_agreement_required (default true): include the
+        # "Buyer's Agency Agreement signed (BAEC)" item in the buyer Client
+        # Onboarding checklist. Set to false for an install that does not use
+        # a written buyer's agency agreement, so the gate is not blocked by a
+        # form the agent never collects.
+        "buyer_agency_agreement_required": True,
+    },
     "goals": {
         # Max autonomous continuation turns for /goal before pausing.
         "max_turns": 20,
@@ -3941,6 +3963,65 @@ def load_config() -> Dict[str, Any]:
     _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(expanded)
     _CONFIG_CACHE_BY_PATH[cache_key] = (stamp, copy.deepcopy(expanded))
     return expanded
+
+
+# ── Admin deal-flow behaviour switches ────────────────────────────────────
+# These are read through ``load_config()`` on every call (it is cached by
+# config-file stamp, so this is cheap) rather than captured in a module-level
+# constant. Resolving at call time means editing ``admin.*`` in
+# ``~/.elevate/config.yaml`` takes effect on the next deal operation without
+# reloading the process.
+
+
+def _admin_flag(name: str, default: bool) -> bool:
+    """Read a boolean ``admin.*`` switch, falling back to the shipped default.
+
+    Accepts YAML booleans as well as the usual string spellings, because
+    users hand-edit ``config.yaml``. Anything unrecognisable (or a config
+    that cannot be read at all) falls back to ``default`` — a malformed
+    config must never silently change deal behaviour.
+    """
+    try:
+        value = cfg_get(load_config(), "admin", name, default=default)
+    except Exception:
+        return default
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def admin_auto_advance_enabled() -> bool:
+    """Whether completing a stage may advance the deal card automatically.
+
+    True (default) keeps the mainline behaviour: a completed stage checklist
+    or a cleared phase gate moves the card forward, firing the next stage's
+    automations. False disables both checklist-driven auto-advance paths for
+    installs that move every card by hand. See ``admin.auto_advance_enabled``
+    in :data:`DEFAULT_CONFIG`.
+    """
+    return _admin_flag("auto_advance_enabled", True)
+
+
+def admin_buyer_agency_agreement_required() -> bool:
+    """Whether the buyer onboarding checklist includes the BAEC item.
+
+    True (default) keeps the mainline "Buyer's Agency Agreement signed
+    (BAEC)" checklist item. False omits it for installs that do not use a
+    written buyer's agency agreement. See
+    ``admin.buyer_agency_agreement_required`` in :data:`DEFAULT_CONFIG`.
+    """
+    return _admin_flag("buyer_agency_agreement_required", True)
 
 
 _SECURITY_COMMENT = """

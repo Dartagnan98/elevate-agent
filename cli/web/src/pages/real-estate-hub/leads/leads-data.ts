@@ -3,6 +3,9 @@
 
 export type LeadsSourceHealth = "live" | "blocked" | "error";
 export type LeadsHeat = "hot" | "warm" | "cold";
+// Follow-up segment (her cadence): Hot 0-30d, Warm 30-90d, Lukewarm 90-180d,
+// Cool 180d+, plus SOI / Nurture when explicitly tagged/segmented.
+export type LeadsTemperature = "hot" | "warm" | "lukewarm" | "cool" | "soi" | "nurture";
 
 export interface LeadsSource {
   id: string;
@@ -53,7 +56,7 @@ export interface LeadsDraft {
   templateName?: string;
 }
 
-export type LeadsDraftAction = "approve" | "skip" | "restore" | "edit";
+export type LeadsDraftAction = "approve" | "skip" | "restore" | "edit" | "channel";
 
 export interface LeadsHotEntry {
   id: string;
@@ -122,6 +125,10 @@ export interface LeadsProfile {
   contactType?: string | null;
   /** Channel consent (inverse of the contacts cannot_* flags). */
   consent?: { text: boolean; call: boolean; email: boolean };
+  // Redesigned Leads table dimensions (carried by mapLeadsProfiles).
+  pipelineStage?: string;
+  temperature?: LeadsTemperature;
+  latestAtIso?: string | null;
 }
 
 export interface LeadsTemplateItem {

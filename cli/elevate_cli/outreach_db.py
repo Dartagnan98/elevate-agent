@@ -1181,6 +1181,153 @@ def update_pending_send_draft(
     return _row_to_send(out)
 
 
+# Canonical outbound channels the /leads email<->text toggle can target.
+# "text" (UI word) and "imessage" both collapse to "sms" (the native macOS
+# Messages dispatcher auto-detects iMessage vs SMS per recipient).
+_CANONICAL_CHANNEL = {
+    "sms": "sms",
+    "text": "sms",
+    "imessage": "sms",
+    "email": "email",
+    "gmail": "email",
+}
+
+
+def _canonical_channel(channel: str) -> str:
+    return _CANONICAL_CHANNEL.get(str(channel or "").strip().lower(), str(channel or "").strip().lower())
+
+
+def _normalize_body_for_channel(body: str, channel: str) -> str:
+    """Light, deterministic reshape of a draft body for the target channel.
+
+    Her texts have no subject line and no formal sign-off; her emails may.
+    When switching TO text we strip an email ``Subject:`` header line and a
+    trailing formal sign-off block so the message reads like a text, not a
+    pasted email. Safe no-op on bodies that are already text-shaped (which is
+    what the outreach lanes produce), so nothing good gets mangled. Switching
+    TO email leaves the body untouched (the email dispatcher composes its own
+    subject).
+    """
+    text = str(body or "")
+    if _canonical_channel(channel) != "sms":
+        return text
+    lines = text.split("\n")
+    # Drop a leading "Subject: ..." header if present.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines and lines[0].strip().lower().startswith("subject:"):
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+    # Drop a trailing formal sign-off ("Best,\nSkyleigh" / "Warm regards," etc.).
+    signoffs = (
+        "best,", "best regards,", "warm regards,", "kind regards,", "regards,",
+        "sincerely,", "cheers,", "thanks so much,", "many thanks,",
+    )
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip().lower()
+        if not stripped:
+            continue
+        if stripped in signoffs:
+            lines = lines[:i]
+        break
+    # Collapse 3+ blank lines to a single blank line.
+    out: list[str] = []
+    blanks = 0
+    for ln in lines:
+        if ln.strip():
+            blanks = 0
+            out.append(ln)
+        else:
+            blanks += 1
+            if blanks <= 1:
+                out.append(ln)
+    return "\n".join(out).strip()
+
+
+def set_pending_send_channel(
+    source_id: str, task_id: str, channel: str
+) -> dict[str, Any] | None:
+    """Switch a ``pending_approval`` send_queue row's outbound channel between
+    email and text (the /leads channel toggle), WITHOUT releasing it.
+
+    Validates that the target channel has a usable recipient (a phone for text,
+    an email for email) BEFORE changing anything, so the badge never shows a
+    channel that would fail at send time. Records ``channel_override`` in the
+    payload so ``_pending_send_release_channel`` honors the choice at approve,
+    and lightly reshapes the body for the target channel. Returns the updated
+    row, or None when no pending row matches.
+
+    Raises ValueError with a human message on an unusable target (surfaced as a
+    400 to the UI).
+    """
+    target = _canonical_channel(channel)
+    if target not in ("sms", "email"):
+        raise ValueError(f"Unsupported channel: {channel!r}. Use text or email.")
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            row = conn.execute(
+                """
+                SELECT * FROM send_queue
+                 WHERE status = 'pending_approval'
+                   AND source_id = ?
+                   AND (task_id = ? OR id = ?)
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                (source_id, task_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+            except Exception:  # noqa: BLE001
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            recipient = payload.get("recipient")
+            recipient = recipient if isinstance(recipient, dict) else {}
+            phone = recipient.get("phone") or payload.get("phone") or payload.get("recipient_phone")
+            email = recipient.get("email") or payload.get("email") or payload.get("recipient_email")
+            # The send_queue row's recipient often lacks the phone/email even
+            # though the contact record has it — fall back to the contact so we
+            # don't wrongly block a switch, and backfill the payload so the
+            # actual send has what it needs.
+            contact_id = recipient.get("contact_id") or payload.get("contact_id")
+            if contact_id and (not phone or not email):
+                try:
+                    crow = conn.execute(
+                        "SELECT primary_phone, primary_email FROM contacts WHERE id = ?",
+                        (contact_id,),
+                    ).fetchone()
+                except Exception:  # noqa: BLE001
+                    crow = None
+                if crow is not None:
+                    phone = phone or crow["primary_phone"]
+                    email = email or crow["primary_email"]
+            if target == "sms" and not phone:
+                raise ValueError("No phone number on file for this lead, so it can't be switched to text.")
+            if target == "email" and not email:
+                raise ValueError("No email address on file for this lead, so it can't be switched to email.")
+            # Backfill the resolved recipient so the send path has phone/email.
+            if phone:
+                recipient["phone"] = phone
+            if email:
+                recipient["email"] = email
+            payload["recipient"] = recipient
+            existing_body = payload.get("draft_text") or payload.get("draftText") or ""
+            payload["channel"] = target
+            payload["channel_override"] = target
+            payload["draft_text"] = _normalize_body_for_channel(existing_body, target)
+            conn.execute(
+                "UPDATE send_queue SET channel=?, payload_json=?, updated_at=? WHERE id=?",
+                (target, json.dumps(payload, ensure_ascii=False), now, row["id"]),
+            )
+        out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
+    return _row_to_send(out)
+
+
 def skip_pending_send(
     source_id: str, task_id: str
 ) -> dict[str, Any] | None:

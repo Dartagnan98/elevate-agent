@@ -3322,7 +3322,8 @@
 .abm-waiting-fields { margin: 0; padding-left: 18px; }
 .abm-waiting-fields li { font-size: 12.5px; line-height: 1.45; margin: 3px 0; color: color-mix(in srgb, var(--fg, #f2f2f2) 90%, transparent); }
 
-.abm-waiting-actions { display: flex; gap: 8px; margin-top: 10px; }
+.abm-waiting-err { color: #c0392b; font-size: 12px; margin: 6px 0 2px; }
+.abm-waiting-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .abm-waiting-btn {
   appearance: none; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600;
   padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;
@@ -3429,3 +3430,37 @@ textarea.abm-waiting-textarea { resize: vertical; min-height: 64px; line-height:
 
 /* The "Waiting on you" panel now lives inside .ab-modal-scroll and scrolls with
    the rest of the modal content, so it no longer needs its own cap/scroll. 2026-06-22 */
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Phone pass (2026-07-11): the dashboard was built desktop-first. The outer
+   shell already reflows (hamburger nav, KPI grid collapses), but the deal
+   modal + its class-based grids kept desktop padding/columns and clipped on a
+   phone. Give the modal the full viewport, tighten the chrome gutters, and
+   collapse the multi-column grids to one column. The inline-styled wizards
+   (CMA / Offer Kit / Listing Kit) reflow via the useIsMobile hook, not here —
+   CSS media queries can't override their inline styles.
+   ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Modal fills the viewport — no wasted backdrop gutter on a phone. */
+  .ab-modal-backdrop { padding: 0; }
+  .ab-modal {
+    max-width: 100vw;
+    width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+  /* Tighten header + card gutters that ate horizontal room. */
+  .abm-head       { padding: 14px 16px 10px; }
+  .abm-card       { margin: 0 12px 8px; }
+  .abm-phase      { margin: 0 12px 4px; }
+  .abm-conditions { padding: 14px 16px 24px; }
+  .abm-actionbar  { padding: 10px 16px; }
+  /* Every class-based multi-column grid collapses to a single column. */
+  .abm-toggles,
+  .abm-grid-2,
+  .abm-grid-3,
+  .abm-doctray-grid { grid-template-columns: 1fr; column-gap: 0; }
+  /* Performance stat strip: two per row reads cleaner than six squished. */
+  .abm-perf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .abm-perf-cell:nth-child(2n) { border-right: none; }
+}

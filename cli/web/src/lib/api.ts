@@ -1,6 +1,13 @@
 const BASE = "";
 
 import type {
+  AdminContactDetail,
+  AdminContactNote,
+  AdminContactNotesResponse,
+  AdminContactItem,
+  AdminContactItemsResponse,
+  ReportingSummary,
+  ReportingGoals,
   LicenseStatusResponse,
   LicenseActivateResponse,
   LicenseSyncSkillsResponse,
@@ -58,7 +65,6 @@ import type {
   SourceInboxDraftSendStatusResponse,
   SourceInboxSentResponse,
   TodayDashboardResponse,
-  SourceInboxProfileStatus,
   ContactNote,
   ContactTask,
   ContactDocument,
@@ -1953,7 +1959,7 @@ export const api = {
     }),
   // CMA wizard — checkpointed phase pipeline + comp review.
   getCmaPhases: (dealId: string) =>
-    fetchJSON<{ ok: boolean; done: number; total: number; pdfUrl?: string | null; phases: { id: string; label: string; browser: boolean; manual: boolean; status: string; attempts: number; error?: string | null }[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/phases`),
+    fetchJSON<{ ok: boolean; done: number; total: number; pdfUrl?: string | null; photosUrl?: string; photosUrlSet?: boolean; phases: { id: string; label: string; browser: boolean; manual: boolean; status: string; attempts: number; error?: string | null }[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/phases`),
   runCmaPhase: (dealId: string, phase: string) =>
     fetchJSON<{ ok: boolean; phase?: string; status?: string; error?: string | null }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/run`, {
       method: "POST",
@@ -1963,6 +1969,11 @@ export const api = {
   skipCmaPhotos: (dealId: string) =>
     fetchJSON<{ ok: boolean; skipped?: boolean; note?: string; error?: string | null }>(
       `/api/admin/deals/${encodeURIComponent(dealId)}/cma/skip-photos`,
+      { method: "POST" },
+    ),
+  scoreCmaPhotos: (dealId: string) =>
+    fetchJSON<{ ok: boolean; started?: boolean; photosUrl?: string; error?: string | null }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/score-photos`,
       { method: "POST" },
     ),
   regenerateCmaComps: (dealId: string, instructions: string) =>
@@ -2164,6 +2175,173 @@ export const api = {
     fetchJSONWithTimeout<ThreadContextResponse>(
       `/api/source-inbox/thread/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}?limit=${limit}`,
     ),
+
+  // ── CRM contact card ─────────────────────────────────────────────────
+  getAdminContact: (contactId: string) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}`,
+    ),
+  getAdminContactNotes: (contactId: string, limit = 50) =>
+    fetchJSON<AdminContactNotesResponse>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/notes?limit=${limit}`,
+    ),
+  deleteContact: (contactId: string) =>
+    fetchJSON<{ ok: boolean; deletedContactId: string; name: string; deleted: Record<string, number> }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}`,
+      { method: "DELETE" },
+    ),
+  saveAdminContactTags: (contactId: string, tags: string[]) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/tags`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
+      },
+    ),
+  saveAdminContactSegments: (contactId: string, segments: string[]) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/segments`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segments }),
+      },
+    ),
+  setAdminContactPipeline: (contactId: string, status: string | null) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/pipeline`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      },
+    ),
+  setAdminContactConsent: (
+    contactId: string,
+    consent: { call: boolean; text: boolean; email: boolean },
+  ) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/consent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(consent),
+      },
+    ),
+  addAdminContactNote: (contactId: string, body: string, pinned = false) =>
+    fetchJSON<AdminContactNote>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/notes`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body, pinned }),
+      },
+    ),
+  pinAdminContactNote: (contactId: string, noteId: string, pinned: boolean) =>
+    fetchJSON<{ id: string; pinned: boolean }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/notes/${encodeURIComponent(noteId)}/pin`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned }),
+      },
+    ),
+  setAdminContactTop25: (contactId: string, on: boolean) =>
+    fetchJSON<{ contactId: string; top25: boolean }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/top25`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on }),
+      },
+    ),
+  // All manual temperature overrides, keyed by contact id (for the leads list).
+  getAdminContactTemperatures: () =>
+    fetchJSON<{ overrides: Record<string, string> }>(
+      `/api/admin/contact-temperatures`,
+    ),
+  // Persist a manual lead-temperature override (empty string clears it, so the
+  // contact falls back to the derived recency/tag temperature).
+  setAdminContactTemperature: (contactId: string, temperature: string) =>
+    fetchJSON<{ contactId: string; temperature: string | null }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/temperature`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ temperature }),
+      },
+    ),
+  patchAdminContact: (
+    contactId: string,
+    fields: Partial<{
+      displayName: string;
+      primaryEmail: string;
+      primaryPhone: string;
+      buyingTimeFrame: string;
+      preQualStatus: string;
+      address: string;
+      birthday: string;
+    }>,
+  ) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      },
+    ),
+  // Contact items: Tasks / Appointments / Family on the card's right rail.
+  getContactItems: (
+    contactId: string,
+    kind?: "task" | "appointment" | "family",
+  ) =>
+    fetchJSON<AdminContactItemsResponse>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items${
+        kind ? `?kind=${encodeURIComponent(kind)}` : ""
+      }`,
+    ),
+  addContactItem: (
+    contactId: string,
+    body: {
+      kind: "task" | "appointment" | "family";
+      title: string;
+      subtitle?: string;
+      whenAt?: string;
+    },
+  ) =>
+    fetchJSON<AdminContactItem>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  updateContactItem: (
+    contactId: string,
+    itemId: string,
+    body: Partial<{
+      title: string;
+      subtitle: string;
+      whenAt: string;
+      done: boolean;
+    }>,
+  ) =>
+    fetchJSON<AdminContactItem>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items/${encodeURIComponent(itemId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteContactItem: (contactId: string, itemId: string) =>
+    fetchJSON<{ deleted: boolean; id: string }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items/${encodeURIComponent(itemId)}`,
+      { method: "DELETE" },
+    ),
   // Manual trigger for the composio inbound puller — used by the hub Refresh
   // button so a click pulls new DMs/replies in addition to re-reading state.
   pullComposioInbound: () =>
@@ -2194,9 +2372,9 @@ export const api = {
   updateSourceInboxDraft: (
     sourceId: string,
     taskId: string,
-    action: "approve" | "edit" | "skip" | "restore" | "open",
+    action: "approve" | "edit" | "skip" | "restore" | "open" | "channel",
     draftText = "",
-    options?: { returnInbox?: boolean; scheduledAt?: string },
+    options?: { returnInbox?: boolean; scheduledAt?: string; channel?: string },
   ) => {
     const outcomeMessage = action === "approve"
       ? "Approval outcome is unknown. Refresh the queue and send status before trying again."
@@ -2209,6 +2387,7 @@ export const api = {
         taskId,
         action,
         draftText,
+        channel: options?.channel ?? null,
         scheduledAt: options?.scheduledAt ?? null,
         returnInbox: options?.returnInbox ?? true,
       }),
@@ -2241,7 +2420,9 @@ export const api = {
     ),
   updateSourceInboxProfile: (
     profileId: string,
-    status: SourceInboxProfileStatus | null,
+    // Accepts the AI's 6 legacy slugs, Skyleigh's 9 operator slugs, or null to
+    // clear. Widened from SourceInboxProfileStatus so operator picks persist.
+    status: string | null,
     options?: { returnInbox?: boolean },
   ) =>
     fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/profile", {
@@ -2473,6 +2654,23 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(goals),
     }, 20_000, "Goals save timed out. Reopen the goals dialog before trying again."),
+  // Bulk update many contacts at once from the /leads redesigned table
+  // selection bar. action picks the dimension; mode is the set-op for
+  // tags/segments (ignored for pipeline). Returns {updated, failed[]}.
+  bulkUpdateContacts: (
+    contactIds: string[],
+    action: "tags" | "segments" | "pipeline",
+    value: unknown,
+    mode?: "add" | "replace" | "remove",
+  ) =>
+    fetchJSON<{ updated: number; failed: Array<{ contactId: string; error: string }> }>(
+      "/api/admin/contacts/bulk",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactIds, action, value, mode: mode ?? "add" }),
+      },
+    ),
   // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
   // (status=sent by default). Set includePending=true to also see queued /
   // sending / retrying / failed for debugging mid-flight rows.
@@ -2547,6 +2745,20 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...crm, action: "test" }),
+    }),
+
+  // ── Reporting page ───────────────────────────────────────────────────
+  getReportingSummary: (window = 30) =>
+    fetchJSON<ReportingSummary>(
+      `/api/admin/reporting/summary?window=${encodeURIComponent(window)}`,
+    ),
+  getReportingGoals: () =>
+    fetchJSON<ReportingGoals>("/api/admin/reporting/goals"),
+  saveReportingGoals: (body: Partial<ReportingGoals>) =>
+    fetchJSON<ReportingGoals>("/api/admin/reporting/goals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
 };
 

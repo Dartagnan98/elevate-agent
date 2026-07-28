@@ -760,6 +760,31 @@ def walk_jsonl_source(
                 resolved_id
                 or (existing_by_sk["id"] if existing_by_sk else None)
             )
+            # DEDUP-ON-IMPORT: if neither an identity nor the source_key matched,
+            # fall back to an existing contact by exact email / last-10 phone before
+            # inserting -- catches twins whose email/phone lives in contacts.* but was
+            # never written as an identity (how ~1k dup contacts get created per day).
+            if not existing_id:
+                _fb_email = _first_str(row.get("primary_email"), row.get("email"), row.get("emails"))
+                _fb_phone = _first_str(row.get("primary_phone"), row.get("phone"), row.get("phones"))
+                _fb = None
+                if _fb_email:
+                    _fb = conn.execute(
+                        "SELECT id FROM contacts WHERE lower(primary_email)=lower(?) "
+                        "AND coalesce(primary_email,'')<>'' LIMIT 1",
+                        (_fb_email,),
+                    ).fetchone()
+                if _fb is None and _fb_phone:
+                    _fb_digits = "".join(ch for ch in str(_fb_phone) if ch.isdigit())[-10:]
+                    if len(_fb_digits) == 10:
+                        _fb = conn.execute(
+                            "SELECT id FROM contacts WHERE "
+                            "right(regexp_replace(coalesce(primary_phone,''),'[^0-9]','','g'),10)=? LIMIT 1",
+                            (_fb_digits,),
+                        ).fetchone()
+                if _fb is not None:
+                    resolved_id = _fb["id"]
+                    existing_id = _fb["id"]
 
             if dry_run:
                 if existing_id:

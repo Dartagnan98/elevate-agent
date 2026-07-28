@@ -202,6 +202,9 @@ html[data-app-theme="light"] {
      (chat + Social/Automations/Sessions/Skills surfaces). Overriding the
      bases re-themes every color-mix()-derived --color-* token at runtime. */
   --background-base: #F7F3EC;
+  /* Keep --background (used by bg-background utility) tracking the themed base,
+     or every solid input/textarea/select renders near-black in light themes. */
+  --background:      var(--background-base);
   --midground-base:  #182848;
   --midground:       #182848;
   /* Hardcoded --color-* tokens that don't derive from the bases — remap them. */
@@ -235,6 +238,7 @@ html[data-app-theme="medium"] {
 
   /* Foundation bases feeding shadcn @theme inline --color-* (see light block). */
   --background-base: #E8E9EC;
+  --background:      var(--background-base);
   --midground-base:  #182848;
   --midground:       #182848;
   --color-border:           var(--border);
@@ -268,6 +272,7 @@ html[data-app-theme="dark"] {
   /* Foundation bases feeding shadcn @theme inline --color-* (see light block).
      Dark stays close to the original near-black defaults. */
   --background-base: #1E1E22;
+  --background:      var(--background-base);
   --midground-base:  #ECF0FA;
   --midground:       color-mix(in srgb, #ECF0FA 100%, transparent);
   --color-border:           var(--border);

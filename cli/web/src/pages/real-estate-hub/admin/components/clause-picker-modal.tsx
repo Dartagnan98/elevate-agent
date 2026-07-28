@@ -3,6 +3,7 @@
 // System = the curated/BCREA-scraped library; Office = brokerage; Personal =
 // the agent's saved clauses. OK inserts the basket into the deal's selection.
 import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 
 const BLUE = "#5E8AD0";
 const INK = "#182848";
@@ -11,16 +12,54 @@ const BORDER = "#e3e6eb";
 
 type Clause = { id: string; title?: string; primary_wording?: string; wording?: string; category?: string };
 
+// Inline "+ Add a personal clause" form, shown at the top of the Personal folder.
+// Saves to the shared library (so it's reusable) via the parent callback.
+function PersonalAdder({ onAdd }: { onAdd: (title: string, wording: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [wording, setWording] = useState("");
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    const w = wording.trim();
+    if (!w) return;
+    setSaving(true);
+    try {
+      await onAdd(title.trim() || "Personal clause", w);
+      setTitle(""); setWording(""); setOpen(false);
+    } catch { /* keep the form open so nothing is lost */ }
+    finally { setSaving(false); }
+  };
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} style={{ display: "inline-flex", alignItems: "center", gap: 8, margin: "8px 0 12px 30px", background: "none", border: "1px dashed #b9c0cc", color: BLUE, borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+        <span style={{ fontSize: 17, lineHeight: 1 }}>+</span> Add a personal clause
+      </button>
+    );
+  }
+  return (
+    <div style={{ margin: "8px 0 12px 30px", padding: 12, border: `1px solid ${BORDER}`, borderRadius: 8, background: "#fafbfc" }}>
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Clause title (optional)" style={{ width: "100%", boxSizing: "border-box", fontSize: 13.5, padding: "8px 10px", borderRadius: 7, border: `1px solid ${BORDER}`, color: INK, marginBottom: 8 }} />
+      <textarea value={wording} onChange={(e) => setWording(e.target.value)} placeholder="Clause wording…" rows={3} style={{ width: "100%", boxSizing: "border-box", fontSize: 13.5, padding: "8px 10px", borderRadius: 7, border: `1px solid ${BORDER}`, color: INK, fontFamily: "inherit", marginBottom: 8 }} />
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" onClick={save} disabled={saving || !wording.trim()} style={{ background: BLUE, color: "#fff", border: "none", borderRadius: 7, padding: "8px 16px", fontWeight: 700, fontSize: 13, cursor: saving || !wording.trim() ? "default" : "pointer", opacity: saving || !wording.trim() ? 0.6 : 1 }}>{saving ? "Saving…" : "Save to Personal"}</button>
+        <button type="button" onClick={() => { setOpen(false); setTitle(""); setWording(""); }} style={{ background: "none", border: `1px solid ${BORDER}`, color: MUTED, borderRadius: 7, padding: "8px 16px", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 export default function ClausePickerModal({
   open,
   onClose,
   onInsert,
+  onAddPersonalClause,
   folders,
   preselected,
 }: {
   open: boolean;
   onClose: () => void;
   onInsert: (clauses: Clause[]) => void;
+  onAddPersonalClause?: (title: string, wording: string) => Promise<void>;
   folders: { key: string; label: string; clauses: Clause[] }[];
   preselected?: Set<string>;
 }) {
@@ -58,7 +97,11 @@ export default function ClausePickerModal({
     );
   };
 
-  return (
+  // Portal to <body> so the overlay escapes the deal modal's scroll container
+  // and its backdrop-filter (which otherwise becomes the containing block for a
+  // position:fixed child and anchors this picker to the top of that modal
+  // instead of the viewport). Rendered at the body root, inset:0 = the viewport.
+  return createPortal(
     <div style={{ position: "fixed", inset: 0, background: "#0008", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, width: "min(820px, 100%)", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px #0006" }}>
         {/* header */}
@@ -96,6 +139,7 @@ export default function ClausePickerModal({
                   </button>
                   {expanded && (
                     <div style={{ paddingBottom: 8 }}>
+                      {f.key === "personal" && onAddPersonalClause && <PersonalAdder onAdd={onAddPersonalClause} />}
                       {items.length === 0 ? <div style={{ color: MUTED, fontSize: 13, padding: "4px 0 10px 30px" }}>No clauses{q ? " match the search" : " yet"}.</div> : items.map(clauseRow)}
                     </div>
                   )}
@@ -105,6 +149,7 @@ export default function ClausePickerModal({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

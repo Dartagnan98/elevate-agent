@@ -19,7 +19,12 @@ export function OzzieLoader({
   showDots = true,
   assetBasePath = "/ozzie-loader",
 }: OzzieLoaderProps) {
-  const src = `${assetBasePath}/${sequence}/ozzie-${sequence}-${size}.webp`;
+  // Display size is `size`, but always FETCH a high-res variant (>=256) and let
+  // CSS downscale it. The small webp variants (64/96/128) are both pixelated and
+  // carry a white-square artifact in the top-left corner; the 256 source is clean
+  // and sharp. Decoupling asset resolution from display size fixes both.
+  const assetSize: OzzieSize = size >= 256 ? size : 256;
+  const src = `${assetBasePath}/${sequence}/ozzie-${sequence}-${assetSize}.webp`;
 
   return (
     <span

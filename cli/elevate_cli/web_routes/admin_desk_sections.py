@@ -17,6 +17,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 
 # ── date parsing (the deal date columns are free-text TEXT) ──
@@ -105,6 +106,46 @@ def _rel_label(days: int) -> str:
     return f"in {days} day{'s' if days != 1 else ''}"
 
 
+def _date_specs(d: Dict[str, Any]):
+    """(kind, raw_date, include) tuples for one deal — the single source of truth
+    shared by the critical-dates GET and the bulk resolve POST so they can never
+    drift apart."""
+    side = (d.get("side") or "listing")
+    specs = [
+        ("deposit_due", d.get("depositDueDate") or d.get("deposit_due_date") or _toggles(d).get("depositDueDate"), not _deposit_resolved(d)),
+        ("subject_removal", d.get("subjectRemovalDate") or d.get("subject_removal_date"),
+         not d.get("subjectsRemovedAt") and not d.get("subjects_removed_at")),
+        ("completion", d.get("completionDate") or d.get("completion_date"), True),
+        ("possession", d.get("possessionDate") or d.get("possession_date"), True),
+    ]
+    if side == "listing":
+        specs.append(("expiry", d.get("expirationDate") or d.get("expiration_date"), True))
+    return specs
+
+
+def _deal_buckets(d: Dict[str, Any], today: date) -> set:
+    """Set of surfacing buckets ({overdue, today, this_week, upcoming}) a deal
+    currently has, using the same specs as the GET aggregation."""
+    out: set = set()
+    for _kind, raw, include in _date_specs(d):
+        if not include:
+            continue
+        dt = _parse_date(raw)
+        if not dt:
+            continue
+        b = _bucket((dt - today).days)
+        if b:
+            out.add(b)
+    return out
+
+
+class _ResolveBody(BaseModel):
+    # bucket="overdue" (default) closes every active deal that currently has an
+    # overdue critical-date row. Optionally scope to specific deal ids.
+    bucket: str = "overdue"
+    dealIds: Optional[List[str]] = None
+
+
 def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> APIRouter:
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
@@ -127,15 +168,7 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
         for d in deals:
             addr = d.get("listingAddress") or d.get("addr") or d.get("address") or "(no address)"
             side = (d.get("side") or "listing")
-            specs = [
-                ("deposit_due", d.get("depositDueDate") or d.get("deposit_due_date") or _toggles(d).get("depositDueDate"), not _deposit_resolved(d)),
-                ("subject_removal", d.get("subjectRemovalDate") or d.get("subject_removal_date"),
-                 not d.get("subjectsRemovedAt") and not d.get("subjects_removed_at")),
-                ("completion", d.get("completionDate") or d.get("completion_date"), True),
-                ("possession", d.get("possessionDate") or d.get("possession_date"), True),
-            ]
-            if side == "listing":
-                specs.append(("expiry", d.get("expirationDate") or d.get("expiration_date"), True))
+            specs = _date_specs(d)
             for kind, raw, include in specs:
                 if not include:
                     continue
@@ -167,6 +200,49 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
             "upcoming": sum(1 for i in items if i["bucket"] == "upcoming"),
         }
         return {"ok": True, "items": items, "counts": counts}
+
+    @router.post("/api/admin/critical-dates/resolve")
+    def resolve_critical_dates(body: _ResolveBody):
+        """Bulk-resolve critical-date items. The completion/possession/expiry
+        dates have no per-date "done" flag, so the only way they leave the
+        section is the whole deal leaving status='active'. For fully-closed
+        properties that's exactly right: close the deal and every one of its
+        date rows drops off at once.
+
+        bucket='overdue' (default) closes every active deal that currently has an
+        overdue critical-date row. Pass dealIds to scope to specific cards."""
+        try:
+            from elevate_cli.data import connect, list_deals, set_deal_status
+
+            target_ids = set(body.dealIds or [])
+            want_bucket = body.bucket or "overdue"
+            today = date.today()
+            closed: List[str] = []
+            skipped: List[Dict[str, Any]] = []
+            with connect() as conn:
+                deals = list_deals(conn, status="active", limit=500)
+                for d in deals:
+                    did = d.get("id")
+                    if not did:
+                        continue
+                    if target_ids and did not in target_ids:
+                        continue
+                    if want_bucket not in _deal_buckets(d, today):
+                        continue
+                    try:
+                        set_deal_status(
+                            conn, did, status="closed",
+                            actor="dashboard:critical-dates-resolve-all",
+                        )
+                        closed.append(did)
+                    except Exception as exc:
+                        _log.exception("resolve: failed to close deal %s", did)
+                        skipped.append({"dealId": did, "error": str(exc)})
+                conn.commit()
+            return {"ok": True, "closed": closed, "count": len(closed), "skipped": skipped}
+        except Exception as exc:
+            _log.exception("critical-dates resolve failed")
+            return {"ok": False, "error": str(exc), "closed": [], "count": 0}
 
     @router.get("/api/admin/approvals-queue")
     def get_approvals_queue():
@@ -225,6 +301,12 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
             )
             if "digisign" in blob and ("send" in blob or "for sign" in blob):
                 is_doc = True
+            # requiredFields + the full prompt let the global ACTION NEEDED popup
+            # render the SAME interactive card (fill-in fields, Preview, Approve)
+            # as the deal scorecard, without opening the deal first.
+            req_fields = prompt.get("requiredFields")
+            if not isinstance(req_fields, list):
+                req_fields = []
             item = {
                 "runId": r["id"],
                 "dealId": deal_id,
@@ -235,6 +317,9 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
                 "hasPreview": has_preview,
                 "outbound": is_doc,
                 "createdAt": str(r["created_at"] or "")[:16],
+                "requiredFields": req_fields,
+                "skill": (r["reg_name"] or ""),
+                "humanPrompt": prompt,
             }
             (documents if is_doc else gates).append(item)
 

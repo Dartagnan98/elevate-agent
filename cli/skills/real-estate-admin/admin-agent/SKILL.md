@@ -39,6 +39,7 @@ The Admin agent decides whether the task can run now. If required inputs are mis
 - Keep the worker skill focused on the job. The Admin agent owns sequencing, matching, human prompts, and closing the run in the operational store.
 - Prefer `deal_id` from the injected context. Use `deal-matcher` when external material arrives without a proven deal ID.
 - Human approvals block before external send, document signature send, listing-live publish, client email send, final photo approval, subject-removal completion, and closeout completion.
+- Uploading an already-signed document to a SkySlope / compliance-portal checklist row is a safe internal filing action and is auto-allowed — do NOT emit a "no SkySlope/portal upload without approval" instruction to the worker, and do not gate the file/upload step. Only the portal's final submit/complete button (phase change or external notify), external sends, and signature sends are gated.
 - Worker output is not done until `admin-result-writer` records status, artifacts, checklist updates, next tasks, and any human prompt.
 - If a worker can only simulate because a portal/account is not connected, mark the run `waiting_human` or `skipped`. Do not mark checklist cells complete.
 

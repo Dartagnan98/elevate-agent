@@ -7,7 +7,7 @@ import shutil
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, cast
 
 from elevate_constants import get_elevate_home
 from fastapi import APIRouter, HTTPException
@@ -15,6 +15,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from elevate_cli.data.deals import DealPhaseGateBlocked
+
+_module_log = logging.getLogger(__name__)
 
 
 RequireReady = Callable[[], None]
@@ -93,6 +95,32 @@ class _GenerateFormBody(BaseModel):
 
 class _OnboardingDocBody(BaseModel):
     form: str            # agency | dorts | pnc
+
+
+class _OnboardingSignBody(BaseModel):
+    # Optional: restrict onboarding docs to specific buyer(s) by name -- e.g. a
+    # newly-added co-buyer who needs their own DORTS/PNC when the other buyer
+    # already onboarded. Omitted / empty => fill for all buyers on the deal.
+    buyers: Optional[List[str]] = None
+
+
+# Canonical map of wizard-fillable SIGNABLE forms: form key -> (offer-prep-forms.py
+# arg, human label). The filing engine and the prepare-signables endpoint agree on
+# these keys. Only forms that fill deterministically from deal data belong here.
+_SIGNABLE_FORMS: Dict[str, Dict[str, str]] = {
+    # formArg -> offer-prep-forms.py fill arg; specForm -> digisign_engine block-spec
+    # name (blank-forms/specs/<specForm>.json) so blocks land per form.
+    "dorts": {"formArg": "dorts", "specForm": "dorts", "label": "Disclosure of Representation in Trading Services (DORTS)"},
+    "pnc": {"formArg": "pnc", "specForm": "pnc", "label": "Privacy Notice & Consent (PNC)"},
+    "disclosure-rem": {"formArg": "disclosure-rem", "specForm": "disclosure-of-remuneration", "label": "Disclosure of Remuneration"},
+}
+
+
+class _PrepareSignablesBody(BaseModel):
+    # Which wizard-fillable signable forms to prepare + stage as ONE DigiSign draft.
+    forms: List[str] = []
+    buyers: Optional[List[str]] = None
+    purpose: Optional[str] = None
 
 
 class _CmaRunBody(BaseModel):
@@ -241,7 +269,10 @@ _LISTING_EXTRA_RE = re.compile(
     re.I,
 )
 _BUYER_EXTRA_RE = re.compile(
-    r"(property|listing|address|mls|legal|pid|strata|offer|accepted|deposit|subject|completion|possession|adjustment)",
+    # Also clear the OTHER-side (listing/cooperating) agent + brokerage: a
+    # collapsed buyer deal reused for a new property has a different listing
+    # side, and stale cooperating info bled into the Oakdale remuneration form.
+    r"(property|listing|address|mls|legal|pid|strata|offer|accepted|deposit|subject|completion|possession|adjustment|cooperat|coop)",
     re.I,
 )
 _BUYER_ROLE_RE = re.compile(r"(buyer|purchaser|tenant)", re.I)
@@ -260,9 +291,12 @@ _DOCUMENT_ASSET_DEFAULTS = {
     "buyerAgency": "scripts/buyer-agency-fill.py",
     "cmaRunner": "scripts/cma-phase-runner.py",
     "cmaCaptureProspecting": "scripts/capture-prospecting.sh",
+    "digisignEngine": "scripts/digisign_engine.py",
 }
 _DOCUMENT_TEMPLATE_DEFAULTS = {
     "cps-residential": "knowledge/deals/forms/cps-residential-fillable-template.pdf",
+    "cps-mobile": "knowledge/deals/forms/cps-mobile-fillable-template.pdf",
+    "cps-mobile-addendum": "knowledge/deals/forms/cps-mobile-addendum-template.pdf",
     "cps-addendum": "knowledge/deals/forms/cps-addendum-template.pdf",
     "disclosure-remuneration": "knowledge/deals/forms/disclosure-remuneration-template.pdf",
     "privacy-notice": "knowledge/deals/forms/privacy-notice-template.pdf",
@@ -659,7 +693,10 @@ def _scrub_extra_toggles(conn: Any, deal_id: str, pattern: re.Pattern[str]) -> D
     extra = _decode_json(row["extra_toggles_json"]) if row and row["extra_toggles_json"] else {}
     if not isinstance(extra, dict):
         extra = {}
-    removed = {key: extra[key] for key in list(extra.keys()) if pattern.search(str(key))}
+    # Never scrub the collapse archive itself (collapsedOfferHistory / collapsedAt
+    # / collapseReason) -- its key contains "offer" and would match the buyer regex.
+    removed = {key: extra[key] for key in list(extra.keys())
+               if pattern.search(str(key)) and not str(key).lower().startswith("collapse")}
     if removed:
         for key in removed:
             extra.pop(key, None)
@@ -720,6 +757,173 @@ def _maybe_rename_buyer_card(conn: Any, deal_id: str) -> str | None:
     return new_title
 
 
+_CLIENT_DOC_ROLE_RE = {
+    "buyer": re.compile(r"(buyer|purchaser|tenant|client|primary)", re.I),
+    "listing": re.compile(r"(seller|vendor|landlord|client|primary)", re.I),
+}
+
+
+def _client_docs_dir(contact_id: str) -> Path:
+    return _profile_artifact_dir("client-docs", _artifact_slug(contact_id, "contact"))
+
+
+def _promote_client_documents(conn: Any, deal_id: str, side: str) -> Dict[str, Any]:
+    """Safety net: before a collapse clears a deal, lift any client-level
+    compliance docs (DORTS/PNC/FINTRAC/LOTR/BAEC) off the deal and onto the
+    person, so they survive and can be reused on the client's next deal.
+
+    Conservative on purpose:
+      * only promotes when the deal has exactly ONE contact in the relevant
+        role (avoids attaching one client's doc to another -- contamination);
+      * marks promoted docs signed_status='unknown' (a collapse cannot visually
+        verify signatures), so nothing auto-reuses an unverified doc later;
+      * property/deal-level docs are left exactly where they are.
+
+    Never raises to the caller -- returns a report of what happened.
+    """
+    from elevate_cli.data import (
+        client_doc_type_for,
+        list_deal_attachments,
+        list_deal_contacts,
+        upsert_contact_document,
+    )
+
+    promoted: List[Dict[str, Any]] = []
+    unpromotable: List[Dict[str, Any]] = []
+
+    role_re = _CLIENT_DOC_ROLE_RE.get(side, _CLIENT_DOC_ROLE_RE["buyer"])
+    contacts = [
+        c for c in list_deal_contacts(conn, deal_id)
+        if role_re.search(str(c.get("role") or ""))
+    ]
+    # De-dupe contacts by id.
+    seen_ids: set = set()
+    role_contacts: List[Dict[str, Any]] = []
+    for c in contacts:
+        cid = c.get("contactId") or c.get("contact_id")
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            role_contacts.append(c)
+
+    attachments = list_deal_attachments(conn, deal_id, limit=500)
+    for att in attachments:
+        doc_type = client_doc_type_for(att.get("kind"), att.get("filePath"), att.get("summary"))
+        if not doc_type:
+            continue  # deal-level -- leave it on the deal
+        if len(role_contacts) != 1:
+            unpromotable.append({
+                "docType": doc_type,
+                "attachmentId": att.get("id"),
+                "reason": (
+                    "no matching-role contact on deal" if not role_contacts
+                    else f"{len(role_contacts)} contacts on deal -- needs manual attribution"
+                ),
+            })
+            continue
+        contact = role_contacts[0]
+        contact_id = contact.get("contactId") or contact.get("contact_id")
+        src = att.get("filePath")
+        dest_path = src
+        try:
+            if src and os.path.isfile(src):
+                ext = os.path.splitext(src)[1] or ".pdf"
+                dest = _client_docs_dir(contact_id) / f"{doc_type}-{att.get('id')}{ext}"
+                shutil.copy2(src, dest)
+                dest_path = str(dest)
+        except Exception:
+            _module_log.warning("client-doc copy failed for att %s", att.get("id"), exc_info=True)
+            dest_path = src  # preserve the pointer even if the copy failed
+        try:
+            row = upsert_contact_document(
+                conn,
+                contact_id=contact_id,
+                doc_type=doc_type,
+                file_path=dest_path or "",
+                signed_status="unknown",
+                source_deal_id=deal_id,
+                source_attachment_id=att.get("id"),
+                verified_by="collapse-autopromote",
+                summary=att.get("summary"),
+            )
+            promoted.append({
+                "docType": doc_type,
+                "contactId": contact_id,
+                "contactDocumentId": row.get("id"),
+            })
+        except Exception as exc:
+            unpromotable.append({
+                "docType": doc_type,
+                "attachmentId": att.get("id"),
+                "reason": f"promote failed: {exc}",
+            })
+
+    return {"promoted": promoted, "unpromotable": unpromotable}
+
+
+_CLIENT_DOC_LABELS = {
+    "dorts": "DORTS (Representation Disclosure)",
+    "pnc": "Privacy Notice & Consent",
+    "fintrac_id": "FINTRAC Individual ID",
+    "lotr": "LOTR",
+    "baec": "Buyer Agency Agreement",
+}
+
+
+def _client_document_status_tag(doc: Dict[str, Any]) -> str:
+    """A short status tag for the Documents-tab row: Reusable / Expires <date> /
+    Verified <date> / Expired / Needs re-sign."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    doc_type = doc.get("docType")
+    valid_until = doc.get("validUntil")
+    if doc.get("status") == "expired" or (valid_until and str(valid_until)[:10] < today):
+        return "Expired"
+    if doc.get("signedStatus") not in ("fully_signed", None) and doc.get("verifiedBy") == "collapse-autopromote":
+        # preserved on collapse but signatures never visually confirmed
+        return "Verify signing"
+    if doc_type in ("dorts", "pnc"):
+        return "Reusable"
+    if valid_until:
+        return f"Expires {str(valid_until)[:10]}"
+    if doc.get("fintracVerifiedAt"):
+        return f"Verified {str(doc['fintracVerifiedAt'])[:10]}"
+    return "Client doc"
+
+
+def _client_document_entries(deal_id: str) -> List[Dict[str, Any]]:
+    """Return the deal's client-level documents shaped like the Documents-panel
+    file rows, under a dedicated 'Client Documents' group. Resolved by the deal's
+    contacts, so the same docs appear on every deal that client is on."""
+    from elevate_cli.data import (
+        connect,
+        list_contact_documents_for_contacts,
+        list_deal_contacts,
+    )
+
+    with connect() as conn:
+        contacts = list_deal_contacts(conn, deal_id)
+        contact_ids = [c.get("contactId") or c.get("contact_id") for c in contacts]
+        docs = list_contact_documents_for_contacts(conn, [c for c in contact_ids if c])
+
+    entries: List[Dict[str, Any]] = []
+    for d in docs:
+        drive_id = d.get("driveFileId")
+        url = (
+            f"https://drive.google.com/file/d/{drive_id}/view"
+            if drive_id
+            else f"/api/admin/contact-documents/{d['id']}/file"
+        )
+        entries.append({
+            "name": _CLIENT_DOC_LABELS.get(d.get("docType"), d.get("docType") or "Client document"),
+            "id": f"cd:{d['id']}",
+            "url": url,
+            "mime": "application/pdf",
+            "modified": d.get("updatedAt") or d.get("createdAt") or "",
+            "group": "Client Documents",
+            "tag": _client_document_status_tag(d),
+        })
+    return entries
+
+
 def _collapse_admin_deal(conn: Any, deal_id: str, requested_side: str | None) -> Dict[str, Any]:
     from elevate_cli.data import get_deal, move_deal_stage, set_deal_fields, set_deal_toggle
     from elevate_cli.data.deals import _insert_deal_event
@@ -736,11 +940,47 @@ def _collapse_admin_deal(conn: Any, deal_id: str, requested_side: str | None) ->
     if side == "buyer" and current_stage not in {1, 2, 3}:
         raise ValueError("buyer deal collapse is only available from accepted-offer buyer stages")
 
+    # Safety net: preserve client-level compliance docs on the person BEFORE we
+    # clear/reset the deal, so a collapse never strands a reusable DORTS/PNC/
+    # FINTRAC/LOTR/BAEC. Never let this break the collapse itself.
+    try:
+        client_docs_result = _promote_client_documents(conn, deal_id, side)
+    except Exception:
+        _module_log.exception("client-doc promotion failed for deal %s (collapse continues)", deal_id)
+        client_docs_result = {"promoted": [], "unpromotable": [], "error": "promotion_failed"}
+
     target_stage = _LISTING_RESET_STAGE if side == "listing" else _BUYER_RESET_STAGE
     clear_fields = _LISTING_CLEAR_FIELDS if side == "listing" else _BUYER_CLEAR_FIELDS
     removed_contacts = _remove_listing_buyers(conn, deal_id) if side == "listing" else []
     removed_extra = _scrub_extra_toggles(conn, deal_id, _LISTING_EXTRA_RE if side == "listing" else _BUYER_EXTRA_RE)
     new_title = None
+
+    # Archive everything that belonged to the dead deal -- the offer/property
+    # columns we're about to clear AND the scrubbed extra (cooperating agent/
+    # brokerage, etc.) -- to extra.collapsedOfferHistory[] so it's preserved, not
+    # just deleted. Never let this break the collapse.
+    try:
+        from elevate_cli.data.deals import _decode_json, _encode_json
+        archived = {k: deal.get(k) for k in clear_fields if deal.get(k) not in (None, "")}
+        archived.update({k: v for k, v in (removed_extra or {}).items() if v not in (None, "")})
+        if archived:
+            erow = conn.execute("SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)).fetchone()
+            extra = _decode_json(erow["extra_toggles_json"]) if erow and erow["extra_toggles_json"] else {}
+            if not isinstance(extra, dict):
+                extra = {}
+            hist = extra.get("collapsedOfferHistory")
+            if not isinstance(hist, list):
+                hist = []
+            archived["collapsedAt"] = datetime.now(timezone.utc).isoformat()
+            archived["side"] = side
+            hist.append(archived)
+            extra["collapsedOfferHistory"] = hist
+            conn.execute(
+                "UPDATE deals SET extra_toggles_json=?, updated_at=? WHERE id=?",
+                (_encode_json(extra), datetime.now(timezone.utc).isoformat(), deal_id),
+            )
+    except Exception:
+        _module_log.warning("collapse archive to collapsedOfferHistory failed for %s", deal_id, exc_info=True)
 
     set_deal_fields(conn, deal_id, actor=_COLLAPSE_ACTOR, fields=clear_fields)
     if side == "buyer":
@@ -772,6 +1012,8 @@ def _collapse_admin_deal(conn: Any, deal_id: str, requested_side: str | None) ->
             "removedBuyerContacts": removed_contacts,
             "removedExtraKeys": sorted(removed_extra.keys()),
             "newTitle": new_title,
+            "promotedClientDocs": client_docs_result.get("promoted", []),
+            "unpromotableClientDocs": client_docs_result.get("unpromotable", []),
         },
     )
     return {
@@ -781,6 +1023,8 @@ def _collapse_admin_deal(conn: Any, deal_id: str, requested_side: str | None) ->
         "removedBuyerContacts": len(removed_contacts),
         "removedExtraKeys": sorted(removed_extra.keys()),
         "newTitle": new_title,
+        "promotedClientDocs": client_docs_result.get("promoted", []),
+        "unpromotableClientDocs": client_docs_result.get("unpromotable", []),
     }
 
 
@@ -1078,6 +1322,90 @@ def create_admin_deals_router(
             _log.exception("GET /api/admin/deals/%s/cma-pdf failed", deal_id)
             raise HTTPException(status_code=500, detail=f"CMA PDF failed: {exc}")
 
+    @router.get("/api/deals/{deal_id}/run-draft-pdf/{run_id}")
+    @router.get("/api/admin/deals/{deal_id}/run-draft-pdf/{run_id}")
+    def get_run_draft_pdf(deal_id: str, run_id: str):
+        # Serves the `previewPdf` a waiting_human run parked in its
+        # human_prompt_json, so the WAITING ON YOU / ACTION NEEDED card's
+        # "Preview PDF ↗" opens the actual drafted document. Auth via the
+        # dashboard middleware (Bearer header or ?token= for window.open new-tab
+        # loads — path whitelisted by _DRAFT_PDF_PATH_RE in web_auth). Without
+        # this route the path fell through to the SPA catch-all and the button
+        # opened a blank dashboard tab instead of the PDF.
+        try:
+            import json as _json
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT deal_id, human_prompt_json FROM admin_action_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="run not found")
+            if row["deal_id"] and deal_id and row["deal_id"] != deal_id:
+                raise HTTPException(status_code=404, detail="run does not belong to deal")
+            prompt: Dict[str, Any] = {}
+            try:
+                hp = row["human_prompt_json"]
+                prompt = _json.loads(hp) if hp and str(hp).strip() else {}
+            except Exception:
+                prompt = {}
+            file_path = prompt.get("previewPdf") or prompt.get("preview_pdf") or ""
+            if not file_path or not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail="preview PDF missing")
+            return FileResponse(
+                file_path,
+                media_type="application/pdf",
+                filename=os.path.basename(file_path),
+                content_disposition_type="inline",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("GET run-draft-pdf failed for run %s", run_id)
+            raise HTTPException(status_code=500, detail=f"preview PDF failed: {exc}")
+
+    @router.get("/api/deals/{deal_id}/seller-update-pdf")
+    @router.get("/api/admin/deals/{deal_id}/seller-update-pdf")
+    def get_admin_deal_seller_update_pdf(deal_id: str):
+        # Auth is enforced by the dashboard middleware (Bearer header or, for
+        # window.open() new-tab loads, the ?token= query param — see web_auth).
+        # Scorecards use `seller_update` for the clickable latest PDF, while
+        # run/audit history can store `seller_update_pdf`; accept both and serve
+        # the newest existing local PDF inline.
+        try:
+            from elevate_cli.data import connect, list_deal_attachments
+
+            rows = []
+            with connect() as conn:
+                for kind in ("seller_update", "seller_update_pdf"):
+                    rows.extend(list_deal_attachments(cast(Any, conn), deal_id, kind=kind, limit=5))
+            rows.sort(key=lambda row: str(row.get("createdAt") or ""), reverse=True)
+            for row in rows:
+                file_path = row.get("filePath")
+                if file_path and os.path.exists(file_path):
+                    return FileResponse(
+                        file_path,
+                        media_type="application/pdf",
+                        filename=os.path.basename(file_path),
+                        content_disposition_type="inline",
+                    )
+            if rows:
+                raise HTTPException(status_code=404, detail="weekly update PDF file missing")
+            raise HTTPException(status_code=404, detail="no weekly update PDF on file")
+        except HTTPException:
+            raise
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("GET /api/admin/deals/%s/seller-update-pdf failed", deal_id)
+            raise HTTPException(status_code=500, detail=f"Seller update PDF failed: {exc}")
+
     @router.get("/api/admin/deals/{deal_id}/kit-doc/{doc_id}")
     def get_admin_deal_kit_doc(deal_id: str, doc_id: str, download: int = 0):
         # Serve one offer-kit document PDF. download=0 → inline (quick read-only
@@ -1236,22 +1564,32 @@ def create_admin_deals_router(
             snapshot = _document_setup_snapshot()
             realtor_name, brokerage_name = _document_identity(snapshot)
             engine = _document_asset("formEngine", snapshot=snapshot)
-            if doc_id not in _DOCUMENT_TEMPLATE_DEFAULTS:
-                raise HTTPException(status_code=400, detail="no template wired for this document yet")
-            template = _document_asset("template", snapshot=snapshot, template_id=doc_id)
             with connect() as conn:
                 row = conn.execute(
-                    "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
+                    "SELECT extra_toggles_json, legal_description FROM deals WHERE id=?", (deal_id,)
                 ).fetchone()
                 if row is None:
                     raise HTTPException(status_code=404, detail="deal not found")
                 raw = row["extra_toggles_json"]
                 toggles = raw if isinstance(raw, dict) else (_json.loads(raw) if raw and str(raw).strip() else {})
+                deal_legal = row["legal_description"] or ""
                 kit = toggles.get("offerKit") or {}
                 docs = kit.get("documents") or []
                 doc = next((d for d in docs if d.get("id") == doc_id), None)
                 if not doc:
                     raise HTTPException(status_code=404, detail="kit document not found")
+            if doc_id not in _DOCUMENT_TEMPLATE_DEFAULTS:
+                raise HTTPException(status_code=400, detail="no template wired for this document yet")
+            umbrella = (toggles.get("cpsUmbrella") or "residential").strip().lower()
+            is_mobile = umbrella == "mobile"
+            # A mobile deal fills the base CPS slot on the Manufactured Home
+            # (Rental Pad) contract, not the residential form. The manufactured
+            # subjects live on a separate addendum (cps-mobile-addendum), so the
+            # base CPS Section 3 only points to it.
+            if doc_id == "cps-residential" and is_mobile:
+                template = _document_asset("template", snapshot=snapshot, template_id="cps-mobile")
+            else:
+                template = _document_asset("template", snapshot=snapshot, template_id=doc_id)
             # Canonical data lives on the CPS doc's fields; every form fills from it.
             cps = next((d for d in docs if d.get("id") == "cps-residential"), {}) or {}
             cf = cps.get("fields") or {}
@@ -1276,25 +1614,103 @@ def create_admin_deals_router(
                 "seller1": sellers[0] if len(sellers) > 0 else "",
                 "seller2": sellers[1] if len(sellers) > 1 else "",
                 "p_streetnum": pnum, "p_street": pstreet, "p_city": pcity, "p_state": pstate, "p_zip": pzip,
+                "p_unit": (cf.get("p_unit") or toggles.get("mhParkPad") or ""),
+                "legal": (cf.get("legal") or deal_legal or toggles.get("legalDescription") or ""),
+                "pid": (cf.get("pid") or toggles.get("pid") or ""),
+                "otherPids": (cf.get("otherPids") or toggles.get("otherPids") or ""),
+                "possessionTime": (cf.get("possessionTime") or toggles.get("acceptedOffer.possessionTime") or ""),
                 "mls": str(toggles.get("mlsNumber") or toggles.get("mls") or ""),
                 "agentName": realtor_name, "officeName": brokerage_name,
                 "price": cf.get("price", ""), "priceWords": cf.get("priceWords", ""),
                 "deposit": cf.get("deposit", ""), "depositHolder": cf.get("depositHolder", ""),
+                "depositDue": cf.get("depositDue", ""),
                 "completionDate": cf.get("completionDate", ""), "possessionDate": cf.get("possessionDate", ""),
                 "adjustmentDate": cf.get("adjustmentDate", ""),
                 "included": cf.get("included", ""), "excluded": cf.get("excluded", ""), "conditions": cf.get("conditions", ""),
                 "today": today, "contractDate": cf.get("contractDate", "") or today,
+                # Manufactured-home specs — fill the addendum's mobile fields
+                # (Registration #, Serial #, CSA/electrical, make/model/year).
+                "mhRegistration": (cf.get("mhRegistration") or toggles.get("mhRegistration") or ""),
+                "mhSerial": (cf.get("mhSerial") or toggles.get("mhSerial") or ""),
+                "mhCsaLabel": (cf.get("mhCsaLabel") or toggles.get("mhCsaLabel") or ""),
+                "mhMake": (cf.get("mhMake") or toggles.get("mhMake") or ""),
+                "mhModel": (cf.get("mhModel") or toggles.get("mhModel") or ""),
+                "mhYear": (cf.get("mhYear") or toggles.get("mhYear") or ""),
             }
             # Assemble the wizard's selected subjects/clauses into the CPS Section-3
             # terms text (numbered, sole-benefit line). Overrides the free-text
             # conditions so the contract reflects the Subjects step.
             cps_clauses = toggles.get("cpsClauses") or []
-            if cps_clauses:
+            cps_custom = toggles.get("cpsCustomClauses") or []
+            asm_warnings: list = []
+            def _split_addendum_schedule(text):
+                # Distribute the assembled subjects across the Manufactured Home
+                # Addendum's 3 equal schedule boxes (9.5pt) so each page reads
+                # spaced, not crammed. Build atomic units (intro line, each
+                # numbered subject, each trailing clause), give every unit a
+                # blank-line separator, then choose the 2 page-breaks that
+                # minimize the tallest page (balanced partition), breaking only
+                # between whole units so no subject is cut mid-sentence.
+                # ~95 chars/line approximates the ~548pt-wide box at 9.5pt.
+                import re as _re
+                CPL = 95
+                def _ulines(u):
+                    n = 0
+                    for para in u.split("\n"):
+                        n += 1 if not para else max(1, -(-len(para) // CPL))
+                    return n
+                units, cur = [], []
+                def _flush():
+                    if cur:
+                        units.append("\n".join(cur)); cur.clear()
+                for ln in text.split("\n"):
+                    if _re.match(r"^\d+\)\s", ln):
+                        _flush(); cur.append(ln)
+                    elif ln == "":
+                        _flush()
+                    elif cur and not _re.match(r"^\d+\)\s", cur[0]):
+                        cur.append(ln)
+                    else:
+                        _flush(); cur.append(ln)
+                _flush()
+                if len(units) <= 3:
+                    padded = units + [""] * (3 - len(units))
+                    return padded[0], padded[1], padded[2]
+                w = [_ulines(u) + 1 for u in units]  # +1 blank separator/unit
+                N = len(units)
+                best = None
+                for i in range(1, N - 1):
+                    for j in range(i + 1, N):
+                        m = max(sum(w[0:i]), sum(w[i:j]), sum(w[j:N]))
+                        if best is None or m < best[0]:
+                            best = (m, i, j)
+                _, i, j = best
+                groups = [units[0:i], units[i:j], units[j:N]]
+                return tuple("\n\n".join(g).strip() for g in groups)
+
+            if is_mobile:
+                if doc_id == "cps-mobile-addendum":
+                    # The Manufactured Home Addendum carries the wizard's selected
+                    # subjects (assembled below, split across its 3 schedule pages).
+                    # With NOTHING selected, keep the template's standard boilerplate.
+                    if not (cps_clauses or cps_custom):
+                        context["preserveSchedule"] = True
+                        context["conditions"] = ""
+                else:
+                    # Base Manufactured Home CPS Section 3 just points to the addendum.
+                    context["conditions"] = "see attached addendum"
+            # Assemble the selected subjects for any non-mobile CPS OR the mobile
+            # addendum (the base mobile CPS never assembles — it points to the
+            # addendum). A custom-only deal must still get its terms.
+            assemble_here = bool(cps_clauses or cps_custom) and (
+                (not is_mobile) or doc_id == "cps-mobile-addendum"
+            )
+            if assemble_here:
                 asm_input = {
                     "umbrella": toggles.get("cpsUmbrella") or "residential",
                     "selections": cps_clauses,
                     "vars": {**(toggles.get("cpsVars") or {}), "subject_removal_date": toggles.get("subjectRemovalDate") or ""},
-                    "custom": toggles.get("cpsCustomClauses") or [],
+                    "custom": cps_custom,
                 }
                 assembler = _document_asset("cpsAssembler", snapshot=snapshot)
                 with _document_payload(asm_input, "cps-terms") as asm_path:
@@ -1308,7 +1724,20 @@ def create_admin_deals_router(
                         status_code=500,
                         detail=f"clause assembly failed: {(asm.stderr or '')[:300]}",
                     )
-                context["conditions"] = asm.stdout.strip()
+                assembled = asm.stdout.strip()
+                if doc_id == "cps-mobile-addendum":
+                    # Flow the assembled subjects across the addendum's 3 pages.
+                    c1, c2, c3 = _split_addendum_schedule(assembled)
+                    context["conditions"] = c1
+                    context["conditions2"] = c2
+                    context["conditions3"] = c3
+                else:
+                    context["conditions"] = assembled
+                # Surface any "unknown clause id" warnings the assembler emitted
+                # (frontend/library drift) so a dropped subject is visible, not silent.
+                for ln in (asm.stderr or "").splitlines():
+                    if "unknown clause id" in ln:
+                        asm_warnings.append(ln.split("WARNING:", 1)[-1].strip())
             out_path = _offer_kit_path(deal_id, doc_id)
             with tempfile.NamedTemporaryFile(
                 prefix=f".{out_path.stem}-",
@@ -1323,6 +1752,7 @@ def create_admin_deals_router(
                 pass
             # Clean env: the app sets PYTHON* vars that can point the configured
             # app runtime (no pypdf). HOME must be set so it finds user-site pypdf.
+            filled = None
             try:
                 with _document_payload(context, "form-context") as ctx_path:
                     proc = subprocess.run(
@@ -1345,12 +1775,35 @@ def create_admin_deals_router(
                         status_code=500,
                         detail="fill engine exited successfully but did not produce a valid new PDF",
                     )
+                # Post-fill verification: the filler prints "filled X/Y fields" to
+                # stdout. A truthy PDF that filled 0 fields is a silent failure —
+                # treat it as one.
+                import re as _re
+                m = _re.search(r"filled\s+(\d+)\s*/\s*(\d+)", proc.stdout or "")
+                if m:
+                    filled = int(m.group(1))
+                if filled == 0:
+                    raise HTTPException(status_code=500, detail="fill wrote 0 fields — check the template + field mapping")
                 os.replace(staged_path, out_path)
             finally:
                 try:
                     staged_path.unlink()
                 except OSError:
                     pass
+            # Surface blank required fields so the card can prompt instead of
+            # shipping a hollow contract that looked "done".
+            warnings = []
+            if doc_id == "cps-residential":
+                required = {
+                    "buyer": context.get("buyer1", ""),
+                    "property": context.get("p_street", "") or context.get("property", ""),
+                    "price": context.get("price", ""),
+                    "completion date": context.get("completionDate", ""),
+                }
+                if cps_clauses or cps_custom:
+                    required["subjects/conditions"] = context.get("conditions", "")
+                warnings = [f"{label} is blank" for label, val in required.items() if not str(val).strip()]
+            warnings = warnings + asm_warnings
             with connect() as conn:
                 row = conn.execute(
                     "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
@@ -1363,12 +1816,14 @@ def create_admin_deals_router(
                         d["filePath"] = str(out_path)
                         d["ready"] = True
                         d["status"] = "draft"
+                        d["warnings"] = warnings
                 toggles["offerKit"] = kit
                 conn.execute(
                     "UPDATE deals SET extra_toggles_json=? WHERE id=?",
                     (_json.dumps(toggles), deal_id),
                 )
-            return {"id": doc_id, "generated": True, "filePath": str(out_path)}
+            return {"id": doc_id, "generated": True, "filePath": str(out_path),
+                    "filled": filled, "warnings": warnings}
         except HTTPException:
             raise
         except Exception as exc:
@@ -1398,61 +1853,110 @@ def create_admin_deals_router(
                 def ao(k):
                     return str(toggles.get("acceptedOffer." + k) or "")
 
+                # Terms come from the Offer Kit wizard's Step-2 fields, saved as
+                # bare toggles (cpsPurchasePrice, cpsDeposit, cpsDepositTerms,
+                # cpsInclusions, cpsExclusions, completionDate/possessionDate/
+                # adjustmentDate). At offer-prep stage the acceptedOffer.* keys do
+                # not exist yet, so seed from the wizard keys first and only fall
+                # back to acceptedOffer.* for post-acceptance re-builds. Without
+                # this the generated CPS came out blank on price/deposit/dates.
+                def term(wizard_key, ao_key):
+                    return str(toggles.get(wizard_key) or "").strip() or ao(ao_key)
+
                 bn = toggles.get("buyerNames") or ", ".join(toggles.get("skyslopeBuyerNames") or [])
                 parts = [p.strip() for p in str(bn).split(",") if p.strip()]
                 seeded = {
                     "buyer1": parts[0] if len(parts) > 0 else "",
                     "buyer2": parts[1] if len(parts) > 1 else "",
                     "property": listing,
-                    "price": ao("purchasePrice"),
+                    "price": term("cpsPurchasePrice", "purchasePrice"),
                     "priceWords": "",
-                    "deposit": ao("depositAmount"),
+                    "deposit": term("cpsDeposit", "depositAmount"),
                     "depositHolder": ao("depositHolder") or "Listing Brokerage in trust",
-                    "completionDate": ao("completionDate"),
-                    "possessionDate": ao("possessionDate"),
-                    "adjustmentDate": ao("adjustmentDate"),
-                    "included": ao("includedItems"),
-                    "excluded": ao("excludedItems"),
+                    "depositDue": term("cpsDepositTerms", "depositDue"),
+                    "completionDate": term("completionDate", "completionDate"),
+                    "possessionDate": term("possessionDate", "possessionDate"),
+                    "adjustmentDate": term("adjustmentDate", "adjustmentDate"),
+                    "included": term("cpsInclusions", "includedItems"),
+                    "excluded": term("cpsExclusions", "excludedItems"),
                     "conditions": str(toggles.get("subjectConditions") or ""),
                 }
                 existing = toggles.get("offerKit") or {}
-                existing_docs = {
-                    d.get("id"): d
-                    for d in (existing.get("documents") or [])
-                    if isinstance(d, dict) and d.get("id")
-                }
-                ex_cps = existing_docs.get("cps-residential") or {}
-                fields = dict(seeded)
-                for k, v in (ex_cps.get("fields") or {}).items():
-                    if v:
-                        fields[k] = v  # keep existing operator edits
+                ex_docs = existing.get("documents") or []
+                ex_by_id = {d.get("id"): d for d in ex_docs if d.get("id")}
 
-                def catalog_doc(doc_id: str, name: str, *, cps_fields: bool = False) -> Dict[str, Any]:
-                    previous = existing_docs.get(doc_id) or {}
-                    path = _offer_kit_path(deal_id, doc_id)
-                    item: Dict[str, Any] = {
-                        "id": doc_id,
-                        "name": name,
-                        "status": previous.get("status", "draft"),
+                # The standard forms + their default on/off (mirrors the wizard's
+                # KIT_FORM_DEFAULTS). Only forms kept ON get a slot. A mobile deal
+                # swaps the residential CPS + generic addendum for the Manufactured
+                # Home (Rental Pad) contract + its dedicated standard addendum.
+                umbrella = (toggles.get("cpsUmbrella") or "residential").strip().lower()
+                is_mobile = umbrella == "mobile"
+                if is_mobile:
+                    STD = [
+                        ("cps-residential", "CPS - Manufactured Home (Rental Pad)", True),
+                        ("cps-mobile-addendum", "CPS - Manufactured Home Addendum", True),
+                        ("disclosure-remuneration", "Disclosure of Remuneration (RECBC 5-11)", False),
+                        ("privacy-notice", "Privacy Notice and Consent", True),
+                        ("bcfsa-disclosure", "BCFSA - Disclosure of Representation", True),
+                        ("condition-waiver", "Notice of Condition Waiver / Declaration of Fulfillment", True),
+                    ]
+                else:
+                    STD = [
+                        ("cps-residential", "CPS - Residential", True),
+                        ("cps-addendum", "CPS - Addendum / Amendment", True),
+                        ("disclosure-remuneration", "Disclosure of Remuneration (RECBC 5-11)", False),
+                        ("privacy-notice", "Privacy Notice and Consent", True),
+                        ("bcfsa-disclosure", "BCFSA - Disclosure of Representation", True),
+                        ("condition-waiver", "Notice of Condition Waiver / Declaration of Fulfillment", True),
+                    ]
+                # Union of every umbrella's standard ids — decides which existing
+                # docs are truly custom (preserve) vs stale standard docs left over
+                # from a prior umbrella (drop on rebuild, e.g. the residential CPS
+                # + generic addendum when switching a deal to mobile).
+                std_ids = {
+                    "cps-residential", "cps-addendum", "cps-mobile-addendum",
+                    "disclosure-remuneration", "privacy-notice",
+                    "bcfsa-disclosure", "condition-waiver",
+                }
+                kit_forms = toggles.get("cpsKitForms") or {}
+
+                def _enabled(fid, dflt):
+                    v = kit_forms.get(fid)
+                    return bool(dflt) if v is None else bool(v)
+
+                documents = []
+                for sid, sname, dflt in STD:
+                    if not _enabled(sid, dflt):
+                        continue
+                    prev = ex_by_id.get(sid) or {}
+                    # The CPS + mobile addendum seed their fields from the deal;
+                    # keep any operator edits.
+                    fields = None
+                    if sid in ("cps-residential", "cps-mobile-addendum"):
+                        fields = dict(seeded)
+                        for k, v in (prev.get("fields") or {}).items():
+                            if v:
+                                fields[k] = v
+                    path = _offer_kit_path(deal_id, sid)
+                    doc = {
+                        "id": sid,
+                        "name": sname,
+                        "status": prev.get("status", "draft"),
                         "fillable": True,
-                        "ready": bool(previous.get("ready")) and _is_pdf(path),
+                        "ready": bool(prev.get("ready")) and _is_pdf(path),
                         "filePath": str(path),
                     }
-                    if cps_fields:
-                        item["fields"] = fields
-                    return item
+                    if fields is not None:
+                        doc["fields"] = fields
+                    documents.append(doc)
 
-                kit = {
-                    "createdAt": existing.get("createdAt") or "",
-                    "documents": [
-                        catalog_doc("cps-residential", "CPS - Residential", cps_fields=True),
-                        catalog_doc("cps-addendum", "CPS - Addendum / Amendment"),
-                        catalog_doc("disclosure-remuneration", "Disclosure of Remuneration (RECBC 5-11)"),
-                        catalog_doc("privacy-notice", "Privacy Notice and Consent"),
-                        catalog_doc("bcfsa-disclosure", "BCFSA - Disclosure of Representation"),
-                        catalog_doc("condition-waiver", "Notice of Condition Waiver / Declaration of Fulfillment"),
-                    ],
-                }
+                # Preserve any custom / uploaded documents (ids outside the six
+                # standard forms) — hitting Build must never drop them.
+                for d in ex_docs:
+                    if d.get("id") and d.get("id") not in std_ids:
+                        documents.append(d)
+
+                kit = {"createdAt": existing.get("createdAt") or "", "documents": documents}
                 toggles["offerKit"] = kit
                 conn.execute(
                     "UPDATE deals SET extra_toggles_json=? WHERE id=?",
@@ -1596,6 +2100,44 @@ def create_admin_deals_router(
         except Exception as exc:
             _log.exception("GET /api/admin/clause-library failed")
             raise HTTPException(status_code=500, detail=f"Clause library failed: {exc}")
+
+    class _PersonalClauseBody(BaseModel):
+        # Save a new reusable personal clause into the shared clause library.
+        title: Optional[str] = ""
+        wording: str
+
+    @router.post("/api/admin/clause-library/personal")
+    def add_personal_clause(body: _PersonalClauseBody):
+        # Append a personal clause to the configured clause library (the same file
+        # the GET route serves) so it shows up in the picker on every future deal.
+        try:
+            import json as _json
+            path = _document_asset("clauseLibrary")
+            wording = (body.wording or "").strip()
+            if not wording:
+                raise HTTPException(status_code=400, detail="Clause wording is required")
+            title = (body.title or "").strip() or "Personal clause"
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            folders = data.setdefault("folders", {})
+            personal = folders.setdefault("personal", [])
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "clause"
+            cid = "personal-" + slug
+            existing = {c.get("id") for c in personal}
+            base, n = cid, 2
+            while cid in existing:
+                cid = f"{base}-{n}"
+                n += 1
+            clause = {"id": cid, "title": title, "primary_wording": wording, "category": "personal"}
+            personal.append(clause)
+            data.setdefault("counts", {})["personal"] = len(personal)
+            with open(path, "w") as fh:
+                _json.dump(data, fh, indent=2, ensure_ascii=False)
+            return {"clause": clause}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("POST /api/admin/clause-library/personal failed")
+            raise HTTPException(status_code=500, detail=f"Add personal clause failed: {exc}")
 
     @router.get("/api/deals/{deal_id}/context")
     def get_deal_source_context(deal_id: str):
@@ -1922,6 +2464,9 @@ def create_admin_deals_router(
                 "possessionTime": chk.get("possessionTime"),
                 "offerDate": d.get("offerDate"),
                 "commission": commission,
+                # Section B paying party for the Disclosure of Remuneration.
+                "cooperatingBrokerage": chk.get("cooperatingBrokerage") or d.get("cooperatingBrokerage") or "",
+                "payingParty": chk.get("cooperatingBrokerage") or d.get("cooperatingBrokerage") or "",
             }
         except Exception:
             _log.warning("CPS deal facts load failed for %s", deal_id, exc_info=True)
@@ -2140,12 +2685,254 @@ def create_admin_deals_router(
             if r.returncode != 0 or not result:
                 _log.warning("deal documents failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
                 raise HTTPException(status_code=500, detail="Document listing did not complete")
+            # Append the client-level (contact-scoped) documents as their own
+            # group, so property docs and reusable client docs live in the same
+            # Documents tab, just separated. See client-doc-reuse-architecture.md.
+            try:
+                result.setdefault("files", [])
+                result["files"].extend(_client_document_entries(deal_id))
+            except Exception:
+                _log.exception("append client documents failed for deal %s", deal_id)
             return result
         except HTTPException:
             raise
         except Exception as exc:
             _log.exception("list deal documents failed")
             raise HTTPException(status_code=500, detail=f"List documents failed: {exc}")
+
+    @router.get("/api/admin/contact-documents/{doc_id}/file")
+    def get_contact_document_file(doc_id: str):
+        # Auth via dashboard middleware (Bearer header or ?token= for new-tab
+        # loads). Serves a preserved client-level compliance doc inline.
+        try:
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT file_path FROM contact_documents WHERE id=?", (doc_id,)
+                ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="client document not found")
+            file_path = row["file_path"]
+            if not file_path or not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail="client document file missing")
+            return FileResponse(
+                file_path,
+                media_type="application/pdf",
+                filename=os.path.basename(file_path),
+                content_disposition_type="inline",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("GET contact-document %s file failed", doc_id)
+            raise HTTPException(status_code=500, detail=f"Client document fetch failed: {exc}")
+
+    def _resolve_buyer_recipients(deal_id: str) -> List[Dict[str, str]]:
+        """Buyer-role signers (first/last/email) for a DigiSign envelope."""
+        from elevate_cli.data import connect
+        recips: List[Dict[str, str]] = []
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT c.display_name, c.primary_email FROM deal_contacts dc "
+                "JOIN contacts c ON c.id = dc.contact_id WHERE dc.deal_id=?",
+                (deal_id,),
+            ).fetchall()
+            for i, r in enumerate([row for row in rows if _BUYER_ROLE_RE.search(str(row["display_name"] or "")) or True]):
+                name = str(r["display_name"] or "").strip()
+                email = str(r["primary_email"] or "").strip()
+                if not name or not email:
+                    continue
+                parts = name.split()
+                first, last = (" ".join(parts[:-1]) or parts[0], parts[-1]) if len(parts) > 1 else (name, name)
+                recips.append({"role": "buyer", "first": first, "last": last, "email": email, "signerIndex": len(recips)})
+        return recips
+
+    def _build_digisign_draft(deal_id: str, prefilled: List[Dict[str, str]], address: str) -> Dict[str, Any]:
+        """Deterministically build ONE DigiSign draft envelope containing all the
+        prepared PDFs, with signature/initial/date blocks placed per each form's
+        spec. Draft only (send=False) -- Skyleigh reviews + sends. Guaranteed
+        one-envelope by code (not agent instruction). Returns {ok, envelopeId,
+        editorUrl, status} or {ok:false, error}."""
+        import json as _json
+        import subprocess as _sp
+        try:
+            engine = _document_asset("digisignEngine")
+        except HTTPException as exc:
+            return {"ok": False, "error": f"digisign engine not configured: {exc.detail}"}
+        recipients = _resolve_buyer_recipients(deal_id)
+        if not recipients:
+            return {"ok": False, "error": "no buyer recipient with name+email on deal"}
+        # Add Skyleigh as the agent/licensee signer (DORTS + Remuneration need the
+        # agent signature; the engine skips her on client-only forms like PNC).
+        recipients.append({"role": "agent", "first": "Skyleigh", "last": "McCallum",
+                           "email": "skyleigh.mccallum@gmail.com", "signerIndex": 0})
+        docs = []
+        for d in prefilled:
+            spec = _SIGNABLE_FORMS.get(d.get("form"), {})
+            spec_form = spec.get("specForm")
+            if spec_form and d.get("pdf"):
+                docs.append({"form": spec_form, "pdf": d["pdf"]})
+        if not docs:
+            return {"ok": False, "error": "no docs mapped to block specs"}
+        who = ", ".join(f"{r['first']} {r['last']}" for r in recipients)
+        manifest = {
+            "envelope_name": f"{address} - Onboarding & Disclosures - {who}",
+            "email_subject": f"Please review & sign - {address}",
+            "email_body": f"Hi, please review and sign the attached documents for {address}. Thank you, Skyleigh.",
+            "documents": docs,
+            "recipients": recipients,
+            "send": False,
+        }
+        # digisign_engine's token refresh shells out to `node`; the dashboard's
+        # launchd PATH omits /usr/local/bin, so add it explicitly.
+        eng_env = _user_site_env()
+        eng_env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + eng_env.get("PATH", "")
+        try:
+            with _document_payload(manifest, f"digisign-manifest-{deal_id}") as mf:
+                r = _sp.run([_document_runtime("python"), str(engine), "--manifest", mf],
+                            capture_output=True, text=True, timeout=240, env=eng_env)
+        except Exception as exc:
+            return {"ok": False, "error": f"engine invoke failed: {exc}"}
+        # digisign_engine prints one pretty (multi-line) JSON blob; parse whole.
+        res: Dict[str, Any] = {}
+        txt = (r.stdout or "").strip()
+        try:
+            res = _json.loads(txt)
+        except Exception:
+            a, b = txt.find("{"), txt.rfind("}")
+            if a >= 0 and b > a:
+                try:
+                    res = _json.loads(txt[a:b + 1])
+                except Exception:
+                    res = {}
+        env_id = res.get("envelope_id")
+        if not env_id:
+            return {"ok": False, "error": f"engine produced no envelope: {((r.stdout or '')[-200:] + ' | ' + (r.stderr or '')[-200:])}"}
+        return {"ok": True, "envelopeId": env_id, "editorUrl": res.get("editor_url"), "status": res.get("status"), "blocksPlaced": res.get("blocks_placed")}
+
+    def _prep_signables_draft(deal_id: str, form_keys: List[str], *, purpose: str, buyers=None) -> Dict[str, Any]:
+        """Fill a set of wizard-fillable signable forms from deal data, merge them
+        into ONE preview PDF, and park a single draft-first review card that -- on
+        approval -- sends them as ONE DigiSign envelope. Draft-first: never sends
+        here. Returns {ok, runId, previewPdf, prepared[], missing[]}. Shared by the
+        onboarding flow and the accepted-offer filing engine."""
+        import json as _json
+        import subprocess as _sp
+        from elevate_cli.data import connect
+        from elevate_cli.data.dispatch import queue_action_run
+
+        facts = _cps_deal_facts(deal_id)
+        if buyers:
+            want = {str(b).strip().lower() for b in buyers if b}
+            matched = [b for b in (facts.get("buyers") or []) if str(b).strip().lower() in want]
+            facts["buyers"] = matched or [str(b).strip() for b in buyers if b]
+        address = str(facts.get("listingAddress") or "Property").split(",")[0].strip() or "Property"
+        script = _document_asset("offerForms")
+
+        prefilled: List[Dict[str, str]] = []
+        labels: List[str] = []
+        missing: List[str] = []
+        for key in form_keys:
+            spec = _SIGNABLE_FORMS.get(key)
+            if not spec:
+                missing.append(key); continue
+            pl = {"address": address, "dealId": deal_id, "dryRun": True, "deal": facts, "form": spec["formArg"]}
+            with _document_payload(pl, f"prepare-signable-{deal_id}-{key}") as pf:
+                r = _sp.run([_document_runtime("python"), str(script), pf], capture_output=True,
+                            text=True, timeout=120, env=_user_site_env())
+            res: Dict[str, Any] = {}
+            for line in reversed((r.stdout or "").strip().splitlines()):
+                try:
+                    res = _json.loads(line); break
+                except Exception:
+                    continue
+            if res.get("ok") and res.get("pdf") and os.path.exists(res["pdf"]):
+                prefilled.append({"form": key, "pdf": res["pdf"]}); labels.append(spec["label"])
+            else:
+                missing.append(key)
+
+        if not prefilled:
+            return {"ok": False, "error": "no forms could be prepared", "missing": missing}
+
+        pv_dir = _profile_artifact_dir("uploads", "signable-previews")
+        safe_purpose = re.sub(r"[^a-z0-9._-]+", "-", (purpose or "signables").lower())
+        preview_pdf = str(pv_dir / f"{_artifact_slug(deal_id, 'deal')}-{safe_purpose}-preview.pdf")
+        merge_src = (
+            "import sys\nfrom pypdf import PdfReader, PdfWriter\nw = PdfWriter()\n"
+            "for f in sys.argv[2:]:\n    for p in PdfReader(f).pages:\n        w.add_page(p)\n"
+            "with open(sys.argv[1], 'wb') as fh:\n    w.write(fh)\n"
+        )
+        mr = _sp.run([_document_runtime("python"), "-c", merge_src, preview_pdf] + [d["pdf"] for d in prefilled],
+                     capture_output=True, text=True, timeout=60,
+                     env=_document_subprocess_env(clean_python=True))
+        if not (mr.returncode == 0 and os.path.exists(preview_pdf)):
+            preview_pdf = None
+
+        # Deterministic: build ONE DigiSign draft envelope with blocks placed
+        # (guaranteed one-envelope + blocks in code, not agent instruction).
+        draft = _build_digisign_draft(deal_id, prefilled, address)
+        if not draft.get("ok"):
+            _log.warning("digisign draft build failed for deal %s: %s", deal_id, draft.get("error"))
+
+        buyers_list = [b for b in (facts.get("buyers") or []) if b]
+        who = ", ".join(buyers_list) or "the buyer(s)"
+        doc_list = "; ".join(labels)
+        payload = {
+            "purpose": purpose,
+            "documents": labels,
+            "prefilledDocs": prefilled,
+            "previewPdf": preview_pdf or "",
+            "digisignDraft": draft if draft.get("ok") else None,
+            "note": (
+                f"These documents are ALREADY filled (paths in prefilledDocs). If digisignDraft is present, ONE "
+                f"DigiSign draft envelope is already created with blocks placed (envelopeId/editorUrl) -- do NOT "
+                f"create another; just review + send. Otherwise build ONE DigiSign envelope containing ALL of "
+                f"these PDFs for {who} (same signer + same deal = one envelope) and PLACE the signature/initial/"
+                f"date blocks per each form's spec (digisign_engine load_spec). Do not re-fill. Draft only; do not send. No BAEC."
+            ),
+        }
+        with connect() as conn:
+            run = queue_action_run(
+                conn, deal_id=deal_id, skill="real-estate-admin/signing-package",
+                name="Send document package for signatures", payload=payload,
+                create_cron_job=not bool(preview_pdf), actor="dashboard:prepare-signables")
+            rid = run.get("id") if isinstance(run, dict) else None
+            if (preview_pdf or draft.get("ok")) and rid:
+                draft_line = (
+                    f" A DigiSign draft (one envelope, blocks placed) is ready: {draft.get('editorUrl')}."
+                    if draft.get("ok") else ""
+                )
+                prompt = {
+                    "title": "Review & approve: prepared signatures",
+                    "message": f"{doc_list} drafted and filled for {who}.{draft_line} Open the Preview to review, then approve to send for signature by DigiSign.",
+                    "requiredFields": [f"Approve sending {doc_list} to {who} for signature by DigiSign? yes/no"],
+                    "previewPdf": preview_pdf,
+                    "editorUrl": draft.get("editorUrl") if draft.get("ok") else None,
+                }
+                conn.execute("UPDATE admin_action_runs SET status='waiting_human', human_prompt_json=? WHERE id=?", (_json.dumps(prompt), rid))
+        return {"ok": True, "runId": rid, "previewPdf": preview_pdf, "draftFirst": bool(preview_pdf), "digisignDraft": draft if draft.get("ok") else {"ok": False, "error": draft.get("error")}, "prepared": [d["form"] for d in prefilled], "missing": missing}
+
+    @router.post("/api/admin/deals/{deal_id}/prepare-signables")
+    def post_prepare_signables(deal_id: str, body: _PrepareSignablesBody):
+        """Prepare a set of wizard-fillable signable forms (DORTS/PNC/Disclosure of
+        Remuneration/...) from deal data and stage them as ONE draft-first DigiSign
+        envelope. Called by the filing engine when required signables are missing,
+        or directly. Never sends -- parks a review card."""
+        try:
+            require_admin_setup_ready_for_launch()
+            forms = [f for f in (body.forms or []) if f in _SIGNABLE_FORMS]
+            if not forms:
+                raise HTTPException(status_code=400, detail=f"no known signable forms in {body.forms!r}")
+            res = _prep_signables_draft(deal_id, forms, purpose=body.purpose or "prepared-signables", buyers=body.buyers)
+            if not res.get("ok"):
+                raise HTTPException(status_code=500, detail=res.get("error") or "prepare failed")
+            return res
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("prepare-signables failed for deal %s", deal_id)
+            raise HTTPException(status_code=500, detail=f"Prepare signables failed: {exc}")
 
     @router.post("/api/admin/deals/{deal_id}/onboarding-doc")
     def post_onboarding_doc(deal_id: str, body: _OnboardingDocBody):
@@ -2189,14 +2976,18 @@ def create_admin_deals_router(
             raise HTTPException(status_code=500, detail=f"Onboarding doc failed: {exc}")
 
     @router.post("/api/admin/deals/{deal_id}/onboarding-sign")
-    def post_onboarding_sign(deal_id: str):
-        """Draft-first onboarding signatures. Deterministically fills Agency +
-        DORTS + PNC, merges one preview PDF, and parks a review card carrying that
-        preview (previewPdf) so the user reviews the actual drafts BEFORE approving.
-        After approval, the signing-package skill uploads the already-filled PDFs
-        and sends via the configured provider — the agent never has to fill or
-        decide, which keeps that run small. Falls back to direct agent dispatch if
-        the deterministic prep fails (never worse than the prior behavior)."""
+    def post_onboarding_sign(deal_id: str, body: Optional[_OnboardingSignBody] = None):
+        """Draft-first onboarding signatures. Deterministically fills DORTS + PNC,
+        merges one preview PDF, and parks a review card carrying that preview
+        (previewPdf) so the user reviews the actual drafts BEFORE approving. After
+        approval, the signing-package skill uploads the already-filled PDFs and
+        sends via the configured provider — the agent never has to fill or decide,
+        which keeps that run small. Falls back to direct agent dispatch if the
+        deterministic prep fails (never worse than the prior behavior).
+
+        BAEC/Buyer's Agency is intentionally NOT part of onboarding — Skyleigh does
+        not use the BAEC. Pass ``body.buyers`` to fill only specific buyer(s) (e.g.
+        a newly-added co-buyer); omit to fill for all buyers on the deal."""
         try:
             _require_exact_beta_forms_provider_for_local_document_mutation()
             require_admin_setup_ready_for_launch()
@@ -2206,16 +2997,24 @@ def create_admin_deals_router(
             from elevate_cli.data.dispatch import queue_action_run
 
             facts = _cps_deal_facts(deal_id)
+            # Optional buyer targeting: when the caller names specific buyers,
+            # fill only those (order preserved) instead of every buyer on the deal.
+            if body and body.buyers:
+                want = {str(b).strip().lower() for b in body.buyers if b}
+                matched = [
+                    b for b in (facts.get("buyers") or [])
+                    if str(b).strip().lower() in want
+                ]
+                facts["buyers"] = matched or [str(b).strip() for b in body.buyers if b]
             address = str(facts.get("listingAddress") or "Property").split(",")[0].strip() or "Property"
 
-            # --- Deterministic draft prep: fill the 3 docs + merge one preview ---
+            # --- Deterministic draft prep: fill the docs + merge one preview ---
             prefilled: List[Dict[str, str]] = []
             preview_pdf = None
-            agency_script = _document_asset("buyerAgency")
             offer_forms_script = _document_asset("offerForms")
             try:
+                # BAEC excluded (Skyleigh does not use the Buyer's Agency); onboarding = DORTS + PNC.
                 forms_seq = [
-                    ("agency", agency_script, None),
                     ("dorts", offer_forms_script, "dorts"),
                     ("pnc", offer_forms_script, "pnc"),
                 ]
@@ -2236,7 +3035,7 @@ def create_admin_deals_router(
                     pdf = Path(str(res.get("pdf") or "")).expanduser()
                     if r.returncode == 0 and res.get("ok") and _is_pdf(pdf):
                         prefilled.append({"form": key, "pdf": str(pdf)})
-                if len(prefilled) == 3:
+                if prefilled and len(prefilled) == len(forms_seq):
                     pv_dir = _profile_artifact_dir("uploads", "onboarding-previews")
                     preview_path = pv_dir / f"{_artifact_slug(deal_id, 'deal')}-onboarding-preview.pdf"
                     merge_src = (
@@ -2264,16 +3063,16 @@ def create_admin_deals_router(
             payload = {
                 "purpose": "buyer-onboarding-signatures",
                 "documents": [
-                    "Buyer's Agency Agreement",
                     "Disclosure of Representation in Trading Services (DORTS)",
                     "Privacy Notice & Consent (PNC)",
                 ],
                 "prefilledDocs": prefilled,
                 "previewPdf": preview_pdf or "",
                 "note": (
-                    "The 3 onboarding documents are ALREADY filled (local paths in prefilledDocs). "
+                    "The onboarding documents (DORTS + PNC) are ALREADY filled (local paths in prefilledDocs). "
                     "After the user approves, upload exactly those PDFs to the configured signing "
-                    "provider and send them for signature to the buyer(s). Do not re-fill or regenerate them."
+                    "provider and send them for signature to the buyer(s). Do not re-fill or regenerate them. "
+                    "No BAEC/Buyer's Agency is part of this package."
                 ),
             }
 
@@ -2287,11 +3086,11 @@ def create_admin_deals_router(
                     prompt = {
                         "title": "Review & approve: onboarding signatures",
                         "message": (
-                            f"Buyer's Agency, DORTS, and PNC are drafted and filled for {who}. "
+                            f"DORTS and PNC are drafted and filled for {who}. "
                             "Open the Preview to review, then approve to send them for signature by DigiSign."
                         ),
                         "requiredFields": [
-                            f"Approve sending the filled Agency, DORTS & PNC to {who} for signature by DigiSign? yes/no"
+                            f"Approve sending the filled DORTS & PNC to {who} for signature by DigiSign? yes/no"
                         ],
                         "previewPdf": preview_pdf,
                     }
@@ -2313,6 +3112,119 @@ def create_admin_deals_router(
         except Exception as exc:
             _log.exception("onboarding sign dispatch failed")
             raise HTTPException(status_code=500, detail=f"Send for signatures failed: {exc}")
+
+    class _KitSignBody(BaseModel):
+        # Which offer-kit documents to draft into the DigiSign envelope.
+        docIds: List[str] = []
+
+    @router.post("/api/admin/deals/{deal_id}/offer-kit/draft-signatures")
+    def post_offer_kit_draft_signatures(deal_id: str, body: _KitSignBody):
+        """Draft-first: create a SkySlope DigiSign DRAFT envelope from the
+        selected + approved offer-kit documents. Nothing is sent to the client —
+        the signing-package skill uploads the PDFs, places signers/blocks, and
+        leaves the envelope as a DRAFT for Skyleigh to review and send from
+        DigiSign. Mirrors onboarding-sign (merge preview + park a review card)."""
+        try:
+            require_admin_setup_ready_for_launch()
+            import json as _json
+            import subprocess as _sp
+            from elevate_cli.data import connect
+            from elevate_cli.data.dispatch import queue_action_run
+
+            facts = _cps_deal_facts(deal_id)
+            address = str(facts.get("listingAddress") or "Property").split(",")[0].strip() or "Property"
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="deal not found")
+                raw = row["extra_toggles_json"]
+                toggles = raw if isinstance(raw, dict) else (_json.loads(raw) if raw and str(raw).strip() else {})
+            docs = ((toggles.get("offerKit") or {}).get("documents") or [])
+            want = set(body.docIds or [])
+            chosen = []
+            for d in docs:
+                if want and d.get("id") not in want:
+                    continue
+                fp = d.get("filePath")
+                if d.get("status") == "approved" and fp and os.path.exists(fp):
+                    chosen.append({"form": d.get("id"), "name": d.get("name") or d.get("id"), "pdf": fp})
+            if not chosen:
+                raise HTTPException(status_code=400, detail="No approved documents selected. Approve the docs first, then draft for signatures.")
+
+            preview_pdf = None
+            try:
+                pv_dir = _profile_artifact_dir("uploads", "offer-kit-sign-previews")
+                preview_path = str(pv_dir / f"{_artifact_slug(deal_id, 'deal')}-offer-kit-sign-preview.pdf")
+                merge_src = (
+                    "import sys\n"
+                    "from pypdf import PdfReader, PdfWriter\n"
+                    "w = PdfWriter()\n"
+                    "for f in sys.argv[2:]:\n"
+                    "    for p in PdfReader(f).pages:\n"
+                    "        w.add_page(p)\n"
+                    "with open(sys.argv[1], 'wb') as fh:\n"
+                    "    w.write(fh)\n"
+                )
+                mr = _sp.run([_document_runtime("python"), "-c", merge_src, preview_path] + [c["pdf"] for c in chosen],
+                             capture_output=True, text=True, timeout=60,
+                             env=_document_subprocess_env(clean_python=True))
+                if mr.returncode == 0 and os.path.exists(preview_path):
+                    preview_pdf = preview_path
+            except Exception:
+                _log.exception("offer-kit sign preview merge failed")
+                preview_pdf = None
+
+            buyers = [b for b in (facts.get("buyers") or []) if b]
+            who = ", ".join(buyers) or "the buyer(s)"
+            doc_names = [c["name"] for c in chosen]
+            payload = {
+                "purpose": "offer-kit-draft-signatures",
+                "mode": "draft",
+                "documents": doc_names,
+                "prefilledDocs": [{"form": c["form"], "pdf": c["pdf"]} for c in chosen],
+                "previewPdf": preview_pdf or "",
+                "note": (
+                    "These offer-kit documents are ALREADY filled + approved (local paths in "
+                    "prefilledDocs). After the user approves, upload EXACTLY those PDFs to SkySlope "
+                    "DigiSign, add the buyer(s) as signers and place the signature/initial blocks, "
+                    "and create the envelope as a DRAFT. DO NOT SEND — leave it as a draft in "
+                    "DigiSign for Skyleigh to review and send herself. Do not re-fill or regenerate."
+                ),
+            }
+
+            with connect() as conn:
+                run = queue_action_run(
+                    conn, deal_id=deal_id, skill="real-estate-admin/signing-package",
+                    name="Draft offer kit for signatures (DigiSign)", payload=payload,
+                    create_cron_job=False, actor="dashboard:offer-kit-sign")
+                rid = run.get("id") if isinstance(run, dict) else None
+                prompt = {
+                    "title": "Review & approve: draft for signatures",
+                    "message": (
+                        f"{len(chosen)} approved document(s) for {who} are ready to draft into a "
+                        "SkySlope DigiSign envelope. Open the Preview to review, then approve to "
+                        "create the DRAFT envelope (nothing is sent — you send it from DigiSign)."
+                    ),
+                    "requiredFields": [
+                        f"Approve creating a DRAFT DigiSign envelope ({', '.join(doc_names)}) for {who}? yes/no"
+                    ],
+                    "previewPdf": preview_pdf or "",
+                }
+                conn.execute(
+                    "UPDATE admin_action_runs SET status='waiting_human', human_prompt_json=? WHERE id=?",
+                    (_json.dumps(prompt), rid),
+                )
+            return {"ok": True, "runId": rid, "previewPdf": preview_pdf or "", "documents": doc_names, "draftFirst": True}
+        except HTTPException:
+            raise
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            _log.exception("offer-kit draft-signatures dispatch failed")
+            raise HTTPException(status_code=500, detail=f"Draft for signatures failed: {exc}")
 
     # --- CMA wizard (listing side): checkpointed phase runner + comp review ---
     def _cma_runner() -> Path:
@@ -2340,14 +3252,38 @@ def create_admin_deals_router(
         _log.warning("cma-runner no JSON (%s): %s | %s", args, (r.stdout or "")[-200:], (r.stderr or "")[-200:])
         raise HTTPException(status_code=500, detail="CMA runner returned no result")
 
+    def _cma_photos_url(deal_id):
+        """The seller's subject-photos Drive folder link saved on the deal (or "").
+        Read straight from the deal's extra_toggles_json, same as the offerKit read
+        elsewhere in this module."""
+        try:
+            from elevate_cli.data import connect
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
+                ).fetchone()
+            if not row or not row["extra_toggles_json"]:
+                return ""
+            raw = row["extra_toggles_json"]
+            t = raw if isinstance(raw, dict) else (_json.loads(raw) if str(raw).strip() else {})
+            return str(t.get("cmaPhotosDriveUrl") or t.get("driveFolderUrl") or "").strip()
+        except Exception:
+            return ""
+
     @router.get("/api/admin/deals/{deal_id}/cma/phases")
     def get_cma_phases(deal_id: str):
         try:
             require_admin_setup_ready_for_launch()
             addr = _cma_addr(deal_id)
             if not addr:
-                return {"ok": True, "done": 0, "total": 0, "phases": [], "pdfUrl": None}
-            return _cma_call(addr, ["--status"], timeout=30)
+                return {"ok": True, "done": 0, "total": 0, "phases": [], "pdfUrl": None,
+                        "photosUrl": "", "photosUrlSet": False}
+            res = _cma_call(addr, ["--status"], timeout=30)
+            url = _cma_photos_url(deal_id)
+            if isinstance(res, dict):
+                res["photosUrl"] = url
+                res["photosUrlSet"] = bool(url)
+            return res
         except HTTPException:
             raise
         except Exception as exc:
@@ -2364,6 +3300,17 @@ def create_admin_deals_router(
             if not addr:
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
             import subprocess as _sp
+            # Dep gate: the runner silently no-ops a phase whose upstream deps aren't
+            # done (detached, output discarded), so a premature 'render' click would
+            # look dead. Check deps synchronously and fail loud instead.
+            chk = _cma_call(addr, ["--phase", body.phase, "--can-run"], timeout=30)
+            if isinstance(chk, dict) and chk.get("unmet"):
+                _lbl = {"collect": "Subject", "actives": "Active competition",
+                        "photos": "Photos", "normalize": "Pricing", "finish": "Pricing",
+                        "prospecting": "buyer-demand prospecting", "render": "Render"}
+                _need = ", ".join(_lbl.get(d, d) for d in chk["unmet"])
+                raise HTTPException(status_code=409,
+                                    detail=f"Can't run {body.phase} yet — capture {_need} first.")
             runner = _cma_runner()
             _sp.Popen([_document_runtime("python"), str(runner), "--address", addr, "--phase", body.phase],
                       env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
@@ -2391,6 +3338,35 @@ def create_admin_deals_router(
         except Exception as exc:
             _log.exception("cma skip-photos failed")
             raise HTTPException(status_code=500, detail=f"CMA skip-photos failed: {exc}")
+
+    @router.post("/api/admin/deals/{deal_id}/cma/score-photos")
+    def post_cma_score_photos(deal_id: str):
+        """Run the seller's photos: materialize them from the saved Drive folder,
+        AI-score finish/condition, and mark the photos phase done. Detached — the
+        scoring takes minutes; the wizard polls /cma/phases and the photos phase
+        shows 'running' until it lands (or 'failed' with a reason). Requires a
+        saved photos Drive link (cmaPhotosDriveUrl); if there is none, the caller
+        should use skip-photos instead."""
+        try:
+            require_admin_setup_ready_for_launch()
+            addr = _cma_addr(deal_id)
+            if not addr:
+                raise HTTPException(status_code=400, detail="No listing address on this deal")
+            url = _cma_photos_url(deal_id)
+            if not url:
+                raise HTTPException(status_code=400, detail="No photos Drive link saved on this deal")
+            import subprocess as _sp
+            runner = _cma_runner()
+            _sp.Popen([_document_runtime("python"), str(runner), "--address", addr,
+                       "--score-photos", "--folder", url],
+                      env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                      start_new_session=True)
+            return {"ok": True, "started": True, "photosUrl": url}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("cma score-photos failed")
+            raise HTTPException(status_code=500, detail=f"CMA score-photos failed: {exc}")
 
     @router.post("/api/admin/deals/{deal_id}/cma/regenerate-comps")
     def post_cma_regenerate(deal_id: str, body: _CmaRegenBody):

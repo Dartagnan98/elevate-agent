@@ -302,6 +302,7 @@ def _write_source_ui_state(source_dir: Path, state: JsonRecord) -> None:
 # skip cold/closed people. Distinct from thread-level status which only
 # tracks open/done/archived.
 PROFILE_STATUS_VALUES: tuple[str, ...] = (
+    # Legacy 6 written by the AI classifier + sync pipeline. Keep as-is.
     "new_lead",
     "follow_up",
     "ghosting",
@@ -310,6 +311,10 @@ PROFILE_STATUS_VALUES: tuple[str, ...] = (
     "closed_buyer",
     # CRM redesign (migration 0035): the realtor pipeline stages.
     "attempted_contact",
+    # Skyleigh's operator-facing pipeline (8 new; New Lead reuses new_lead).
+    # Settable from the /leads status pill; never auto-promote to /admin —
+    # only closed_seller/closed_buyer keep the close_to_admin side effect.
+    "attempted",
     "prospect",
     "client",
     "pending_deal",

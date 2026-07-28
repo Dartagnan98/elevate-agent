@@ -4,6 +4,7 @@
 // (cma-phase-runner.py) so a stall in one phase never loses the rest.
 import { useEffect, useState } from "react";
 import { api } from "../../../../lib/api";
+import { useIsMobile } from "../../../../hooks/useIsMobile";
 
 const NAVY = "#182848", MUTED = "#7b869c", LINE = "#e3e7ef", BLUE = "#5E8AD0", GREEN = "#2f7a4d", TERRA = "#C46340";
 
@@ -22,6 +23,7 @@ const STEPS: { key: string; label: string; phases: string[]; blurb: string }[] =
 ];
 
 export default function CmaWizard({ dealId }: { dealId: string }) {
+  const isMobile = useIsMobile();
   const [phases, setPhases] = useState<Phase[]>([]);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [comps, setComps] = useState<{ sold: Comp[]; active: Comp[] }>({ sold: [], active: [] });
@@ -33,10 +35,21 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
   const [pricing, setPricing] = useState<Pricing>(null);
   const [take, setTake] = useState({ price: "", rationale: "" });
   const [prospectMls, setProspectMls] = useState("");
+  const [photosUrl, setPhotosUrl] = useState("");
+  const [photosSaved, setPhotosSaved] = useState(false);
+  const [photosUrlSet, setPhotosUrlSet] = useState(false); // a link is saved on the deal
+  const [noPhotos, setNoPhotos] = useState(false);         // agent chose "no photos"
+  const [scoring, setScoring] = useState(false);           // photo run dispatched, awaiting result
+  const [runErr, setRunErr] = useState("");                // last phase-dispatch error, surfaced inline
 
   const load = () => api.getCmaPhases(dealId)
     .then(async (r) => {
       setPhases(r.phases || []); setPdfUrl(r.pdfUrl || "");
+      if (r.photosUrlSet) setPhotosUrlSet(true);
+      if (r.photosUrl && !photosUrl) setPhotosUrl(r.photosUrl);
+      // Photo run finished (done or failed) -> stop treating it as in-flight.
+      const ph = (r.phases || []).find((p: Phase) => p.id === "photos");
+      if (ph && ph.status !== "running") setScoring(false);
       if ((r.phases || []).some((p: Phase) => p.id === "collect" && p.status === "done")) {
         try { setComps(await api.getCmaComps(dealId)); } catch { /* ignore */ }
       }
@@ -45,12 +58,13 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
     .finally(() => setLoading(false));
   useEffect(() => { void load(); }, [dealId]);
 
-  // Poll while a phase runs (backend runs detached).
+  // Poll while a phase runs (backend runs detached) or a photo run is in flight
+  // (the detached scorer may not have flipped 'photos' to running yet).
   useEffect(() => {
-    if (!phases.some((p) => p.status === "running")) return;
+    if (!scoring && !phases.some((p) => p.status === "running")) return;
     const t = setTimeout(() => { void load(); }, 4000);
     return () => clearTimeout(t);
-  }, [phases]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [phases, scoring]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Pull the pricing breakdown once the pricing engine (normalize) has run.
   useEffect(() => {
@@ -77,13 +91,44 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
   const nextRunnable = step.phases.map(byId).find((p) => p && p.status !== "done" && !p.manual);
   const blockingManual = step.phases.map(byId).find((p) => p && p.status !== "done" && p.manual);
 
+  // render can't run until its upstream deps are done (cma-phase-runner: render
+  // needs finish + actives + prospecting). prospecting is a manual capture the
+  // wizard offers just above, so nextRunnable happily lands on render before it's
+  // captured — the runner then silently no-ops (detached, output discarded) and
+  // the click looks dead. Gate it here so the button never dispatches a doomed run.
+  const isDone = (id: string) => byId(id)?.status === "done";
+  const renderBlocked = nextRunnable?.id === "render"
+    && !(isDone("finish") && isDone("actives") && isDone("prospecting"));
+
   const run = async (id: string) => {
-    setBusy(id);
-    try { await api.runCmaPhase(dealId, id); await load(); } finally { setBusy(""); }
+    setBusy(id); setRunErr("");
+    try { await api.runCmaPhase(dealId, id); await load(); }
+    catch (e) { setRunErr(e instanceof Error ? e.message : "Could not start that step. Try again."); }
+    finally { setBusy(""); }
   };
-  const skipPhotos = async () => {
-    setBusy("skip");
-    try { await api.skipCmaPhotos(dealId); await load(); } finally { setBusy(""); }
+  const savePhotosUrl = async () => {
+    if (!photosUrl.trim()) return;
+    setBusy("photos-url");
+    try {
+      await api.setAdminDealToggle(dealId, "cmaPhotosDriveUrl", photosUrl.trim());
+      setPhotosSaved(true); setPhotosUrlSet(true); setNoPhotos(false);
+    } finally { setBusy(""); }
+  };
+  // The Photos step is "decided" once photos are attached OR the agent picks
+  // "no photos" — either lights up Continue. Continue then does the work:
+  // score the attached photos, or skip (neutral, price-based) if none.
+  const photosAttached = photosUrlSet || photosSaved;
+  const photosDecided = photosAttached || noPhotos;
+  const advance = async () => {
+    if (step.key === "photos" && !stepDone(step)) {
+      setBusy("continue");
+      try {
+        if (photosAttached && !noPhotos) { setScoring(true); await api.scoreCmaPhotos(dealId); }
+        else { await api.skipCmaPhotos(dealId); }
+        await load();
+      } finally { setBusy(""); }
+    }
+    setViewIdx(Math.min(STEPS.length - 1, shown + 1));
   };
   const regenerate = async () => {
     setBusy("regen");
@@ -112,7 +157,7 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
       <div style={{ marginTop: 12, border: `1px solid ${LINE}`, borderRadius: 10, padding: "11px 13px", background: "#fbfcfe" }}>
         <div style={{ fontSize: 11, fontWeight: 800, color: MUTED, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 7 }}>{title} — {kept} of {list.length} kept · untick to drop a bad comp</div>
         {list.map((c) => (
-          <div key={c.mls + c.address} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 2px", borderTop: "1px solid #f0f2f7", fontSize: 12.5, opacity: c.excluded ? 0.45 : 1 }}>
+          <div key={c.mls + c.address} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 2px", borderTop: "1px solid #f0f2f7", fontSize: 12.5, opacity: c.excluded ? 0.45 : 1, flexWrap: isMobile ? "wrap" : "nowrap" }}>
             <input type="checkbox" checked={!c.excluded} onChange={() => toggleComp(c.mls, kind)} style={{ cursor: "pointer", flex: "0 0 auto" }} />
             {c.compNum != null && (
               <img src={`/api/admin/deals/${encodeURIComponent(dealId)}/cma/comp-photo/${c.compNum}`} alt=""
@@ -171,9 +216,10 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
                   <div key={s.key} style={{ display: "flex", alignItems: "center", flex: n < STEPS.length - 1 ? 1 : "0 0 auto" }}>
                     <div onClick={() => setViewIdx(n)} style={{ display: "flex", alignItems: "center", cursor: "pointer" }}>
                       <span style={{ width: 28, height: 28, borderRadius: "50%", flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12.5, fontWeight: 700, background: d.bg, color: d.fg, boxShadow: d.ring === "none" ? undefined : d.ring }}>{d.txt}</span>
-                      <span style={{ fontSize: 11.5, fontWeight: n === shown ? 700 : 600, marginLeft: 7, whiteSpace: "nowrap", color: st === "done" ? GREEN : n === shown ? NAVY : "#9aa4b8" }}>{s.label}</span>
+                      {/* Labels crowd off-screen on a phone; the panel heading already names the step. Show them on the active dot only. */}
+                      {(!isMobile || n === shown) && <span style={{ fontSize: 11.5, fontWeight: n === shown ? 700 : 600, marginLeft: 7, whiteSpace: "nowrap", color: st === "done" ? GREEN : n === shown ? NAVY : "#9aa4b8" }}>{s.label}</span>}
                     </div>
-                    {n < STEPS.length - 1 && <div style={{ flex: 1, height: 3, background: stepDone(s) ? GREEN : "#e7ebf2", margin: "0 8px", borderRadius: 2 }} />}
+                    {n < STEPS.length - 1 && <div style={{ flex: 1, height: 3, background: stepDone(s) ? GREEN : "#e7ebf2", margin: isMobile ? "0 4px" : "0 8px", borderRadius: 2 }} />}
                   </div>
                 );
               })}
@@ -227,8 +273,8 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
                   )}
                   <div style={{ border: `1.5px solid ${TERRA}`, borderRadius: 11, padding: "13px 15px", background: "#fffdfb" }}>
                     <div style={{ fontSize: 13, fontWeight: 800, color: NAVY, marginBottom: 9 }}>Your take — tell it what it's missing</div>
-                    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                      <label style={{ flex: "0 0 130px" }}><span style={lblPS}>Target list price</span>
+                    <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: 12, alignItems: isMobile ? "stretch" : "flex-start" }}>
+                      <label style={{ flex: isMobile ? "1 1 auto" : "0 0 130px" }}><span style={lblPS}>Target list price</span>
                         <input value={take.price} placeholder="$635,000" onChange={(e) => setTake((t) => ({ ...t, price: e.target.value }))} style={inPS} /></label>
                       <label style={{ flex: 1 }}><span style={lblPS}>Why (folded into the CMA + re-prices)</span>
                         <input value={take.rationale} placeholder="Suite = rental income; repainted; kept comps support it" onChange={(e) => setTake((t) => ({ ...t, rationale: e.target.value }))} style={inPS} /></label>
@@ -273,6 +319,7 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
               {step.phases.map(byId).filter((p) => p?.status === "failed").map((p) => (
                 <div key={p!.id} style={{ fontSize: 11.5, color: "#d44", marginTop: 8 }}>{p!.label}: {(p!.error || "").slice(0, 110)}</div>
               ))}
+              {runErr && <div style={{ fontSize: 11.5, color: "#d44", marginTop: 8 }}>{runErr.slice(0, 160)}</div>}
 
               {/* action row */}
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
@@ -280,6 +327,8 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
                   ? <span style={{ fontSize: 12.5, fontWeight: 700, color: TERRA }}>running… {byId(step.phases.find((id) => byId(id)?.status === "running") || "")?.browser ? "(browser)" : ""}</span>
                   : stepDone(step)
                   ? <span style={{ fontSize: 13, fontWeight: 700, color: GREEN }}>✓ {step.label} complete</span>
+                  : renderBlocked
+                  ? <span style={{ fontSize: 12.5, color: MUTED }}>Capture <b style={{ color: NAVY }}>buyer demand</b> above first — Render CMA PDF unlocks once it lands.</span>
                   : nextRunnable
                   ? <button onClick={() => run(nextRunnable.id)} disabled={!!busy}
                       style={{ fontSize: 13, fontWeight: 700, padding: "9px 18px", borderRadius: 9, border: "none", background: busy ? "#d7dce6" : NAVY, color: busy ? "#8a93a6" : "#fff", cursor: busy ? "wait" : "pointer" }}>
@@ -290,10 +339,33 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
                 {step.key === "generate" && pdfUrl && (
                   <a href={pdfUrl} target="_blank" rel="noreferrer" style={{ fontSize: 13, fontWeight: 700, color: BLUE, textDecoration: "none" }}>Open CMA PDF ↗</a>
                 )}
-                {step.key === "photos" && !stepDone(step) && stepStatus(step) !== "running" && (
-                  <button onClick={skipPhotos} disabled={!!busy} title="No usable photos — score finish neutral and continue (price-based CMA)"
-                    style={{ fontSize: 12.5, fontWeight: 700, padding: "8px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", color: NAVY, cursor: busy ? "wait" : "pointer" }}>
-                    {busy === "skip" ? "Skipping…" : "Skip — no photos"}</button>
+                {step.key === "photos" && !stepDone(step) && stepStatus(step) !== "running" && !scoring && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10, width: "100%" }}>
+                    <label style={{ fontSize: 12, fontWeight: 700, color: NAVY }}>Subject photos</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input value={photosUrl}
+                        onChange={(e) => { setPhotosUrl(e.target.value); setPhotosSaved(false); setPhotosUrlSet(false); setNoPhotos(false); }}
+                        placeholder="Paste the Google Drive folder link with the subject's photos…"
+                        disabled={noPhotos}
+                        style={{ flex: 1, fontSize: 13, padding: "8px 10px", borderRadius: 8, border: `1px solid ${photosAttached ? BLUE : LINE}`, color: NAVY, opacity: noPhotos ? 0.5 : 1 }} />
+                      <button onClick={savePhotosUrl} disabled={!!busy || !photosUrl.trim() || noPhotos}
+                        style={{ fontSize: 12.5, fontWeight: 700, padding: "8px 14px", borderRadius: 8, border: "none", background: photosAttached ? BLUE : (busy || !photosUrl.trim() || noPhotos) ? "#d7dce6" : NAVY, color: photosAttached ? "#fff" : (busy || !photosUrl.trim() || noPhotos) ? "#8a93a6" : "#fff", cursor: (busy || !photosUrl.trim() || noPhotos) ? "default" : "pointer", whiteSpace: "nowrap" }}>
+                        {busy === "photos-url" ? "Saving…" : photosAttached ? "Attached ✓" : "Attach photos"}</button>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <button onClick={() => setNoPhotos((v) => !v)} disabled={!!busy}
+                        title="No usable photos — Continue scores finish neutral (price-based CMA)"
+                        style={{ fontSize: 12, fontWeight: 700, padding: "6px 12px", borderRadius: 8, border: `1px solid ${noPhotos ? NAVY : LINE}`, background: noPhotos ? NAVY : "#fff", color: noPhotos ? "#fff" : MUTED, cursor: busy ? "wait" : "pointer" }}>
+                        {noPhotos ? "✓ No photos" : "No photos"}</button>
+                      <span style={{ fontSize: 11, color: MUTED }}>
+                        {noPhotos ? "Continue will skip scoring — price-based CMA."
+                          : photosAttached ? "Continue will pull and score these photos."
+                          : "Attach a photo folder, or choose No photos. Either lets you Continue."}</span>
+                    </div>
+                  </div>
+                )}
+                {step.key === "photos" && scoring && stepStatus(step) !== "running" && (
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: TERRA }}>scoring photos… runs in the background; Pricing unlocks when it lands.</span>
                 )}
               </div>
             </div>
@@ -302,10 +374,16 @@ export default function CmaWizard({ dealId }: { dealId: string }) {
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 14 }}>
               <button onClick={() => setViewIdx(Math.max(0, shown - 1))} disabled={shown === 0}
                 style={{ fontSize: 13, fontWeight: 600, padding: "10px 16px", borderRadius: 9, border: `1px solid ${LINE}`, background: "#fff", color: shown === 0 ? "#c7cedb" : MUTED, cursor: shown === 0 ? "default" : "pointer" }}>← Back</button>
-              <button onClick={() => setViewIdx(Math.min(STEPS.length - 1, shown + 1))} disabled={shown === STEPS.length - 1 || !stepDone(step)}
-                title={!stepDone(step) ? "Finish this step first" : ""}
-                style={{ fontSize: 13.5, fontWeight: 700, padding: "11px 20px", borderRadius: 9, border: "none", background: (shown === STEPS.length - 1 || !stepDone(step)) ? "#d7dce6" : NAVY, color: (shown === STEPS.length - 1 || !stepDone(step)) ? "#8a93a6" : "#fff", cursor: (shown === STEPS.length - 1 || !stepDone(step)) ? "default" : "pointer" }}>
-                Continue →</button>
+              {(() => {
+                const decided = step.key === "photos" ? photosDecided : stepDone(step);
+                const off = shown === STEPS.length - 1 || !decided || !!busy;
+                return (
+                  <button onClick={advance} disabled={off}
+                    title={!decided ? (step.key === "photos" ? "Attach photos or choose No photos" : "Finish this step first") : ""}
+                    style={{ fontSize: 13.5, fontWeight: 700, padding: "11px 20px", borderRadius: 9, border: "none", background: off ? "#d7dce6" : NAVY, color: off ? "#8a93a6" : "#fff", cursor: off ? "default" : "pointer" }}>
+                    {busy === "continue" ? "Working…" : "Continue →"}</button>
+                );
+              })()}
             </div>
           </>)}
         </div>

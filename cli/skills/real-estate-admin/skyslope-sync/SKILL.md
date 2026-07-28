@@ -50,6 +50,20 @@ Apply these when the configured portal is SkySlope:
 - Contacts tab: the "At least one contact is required… Buyer's/Seller's Lawyer" banner can be informational — do not stall on it when the user said there is no lawyer info.
 - Pending-transaction scrape: rows carry `data-href="/TransactionChecklist.aspx?…"` — fetch each with `credentials: 'include'` + DOMParser and read the labeled fields (CLOSE OF DEAL, SALE PRICE, BUYER, SELLER, ACCEPTANCE DATE); import with `source_key="skyslope:<transaction_id>"`.
 
+## Filing signed / completed documents to the deal's Drive folder — SEPARATE PDFs, one per document
+
+When completed/signed documents must be mirrored into the deal's Google Drive folder (the card **Documents** tab, i.e. the `cps-drive-save.py` target), file **EACH document as its own separate PDF**. Skyleigh's hard rule: never file the single merged DigiSign "Envelope completed" PDF as the deal's documents — that produces one combined file she cannot work with. The docs went to DigiSign separate and must come back separate.
+
+Use the live SkySlope session (no DigiSign API bearer token needed — scheduled runs do not have one):
+
+1. Open the active SkySlope transaction/listing checklist for the matched deal; verify the header first.
+2. Enumerate every **Completed** checklist row with an attached signed document (CPS, Buyer's Agency, DORTS, PNC, FINTRAC, Deal Sheet/TRS, PDS, MLS Sheet, remuneration disclosure, subject removal, etc.).
+3. Download **each row's** signed PDF individually via the per-row SkySlope download flow (the `__EVENTTARGET` postback on the row's `lnkFileName` → `DocumentView.aspx` → signed S3 URL; decompress if bytes start with gzip magic `1f 8b`).
+4. Verify each (`pdfinfo`/`pdftotext`).
+5. File each separately: `python3 scripts/cps-drive-save.py --address "<street>" --file "<tmp>:<DocType>"` using the real document name as `<DocType>`. One call per document — never concatenate.
+6. Record each in `documents_attached`.
+7. Fallback only: if SkySlope is unreachable, do not silently file the merged Gmail attachment as the finished docs — return `partial`/`waiting_human`, or file a merged copy clearly labelled `<Address> - COMBINED envelope (split pending)` and flag it for a later per-document replacement.
+
 ## Output Contract
 
 ```json

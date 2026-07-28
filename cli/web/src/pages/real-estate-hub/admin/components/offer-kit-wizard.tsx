@@ -7,6 +7,7 @@ import { api } from "../../../../lib/api";
 import { clauseLibrary } from "../cps/cps-libraries";
 import ClausePickerModal from "./clause-picker-modal";
 import { kitErrorMessage, requireKitResponse, runKitRequests } from "./kit-http";
+import { useIsMobile } from "../../../../hooks/useIsMobile";
 
 type AnyObj = Record<string, any>;
 
@@ -60,7 +61,9 @@ const PROPERTY_TYPES: { id: string; label: string }[] = [
 
 // The forms the kit can build (Step 4). cps-residential is always included.
 const KIT_FORMS: { id: string; label: string; required?: boolean }[] = [
-  { id: "cps-residential", label: "CPS — Contract of Purchase & Sale", required: true },
+  // CPS is on by default but NOT required — Skyleigh can skip it when she already
+  // has a CPS in hand and only wants the rest of the package built.
+  { id: "cps-residential", label: "CPS — Contract of Purchase & Sale" },
   { id: "cps-addendum", label: "CPS — Addendum / Amendment" },
   { id: "bcfsa-disclosure", label: "DORTS — Disclosure of Representation" },
   { id: "privacy-notice", label: "PNC — Privacy Notice & Consent" },
@@ -87,6 +90,10 @@ export default function OfferKitWizard({
   currentStage?: number;
   onUpdate?: () => void;
 }) {
+  const isMobile = useIsMobile();
+  // Fixed multi-column field grids collapse to a single column on a phone
+  // (CSS media queries can't reach these inline styles).
+  const cols = (n: number) => (isMobile ? "1fr" : Array(n).fill("1fr").join(" "));
   const [step, setStep] = useState(1);
   const [umbrella, setUmbrella] = useState<string>((extra.cpsUmbrella as string) || "residential");
   // Offer Prep (stage 0) shows the full wizard. Once the offer is accepted
@@ -204,14 +211,41 @@ export default function OfferKitWizard({
       return nextSel;
     });
   };
+  // Save a brand-new personal clause to the shared library so it's reusable on
+  // every future deal (persists to webforms-clauses.json server-side), then drop
+  // it into the picker's Personal folder immediately.
+  const addPersonalClause = useCallback(async (title: string, wording: string) => {
+    const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
+    const res = await fetch("/api/admin/clause-library/personal", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title, wording }),
+    });
+    const data = await res.json().catch(() => null);
+    const clause = data && data.clause;
+    if (!clause) throw new Error("save failed");
+    setWfFolders((prev) => {
+      const base = prev || [
+        { key: "personal", label: "Personal Clauses", clauses: [] as AnyObj[] },
+        { key: "office", label: "Office Clauses", clauses: [] as AnyObj[] },
+        { key: "system", label: "System Clauses", clauses: allClauses },
+      ];
+      return base.map((f) => (f.key === "personal" ? { ...f, clauses: [...f.clauses, clause] } : f));
+    });
+  }, [allClauses]);
 
   // ── build (Step 4) ──
   const [kitForms, setKitForms] = useState<Record<string, boolean>>(
     () => (extra.cpsKitForms as Record<string, boolean>) || { ...KIT_FORM_DEFAULTS },
   );
   const toggleKitForm = (id: string) => {
-    if (id === "cps-residential") return; // always included
     setKitForms((p) => { const next = { ...p, [id]: !(p[id] ?? KIT_FORM_DEFAULTS[id] ?? true) }; api.setAdminDealToggle(dealId, "cpsKitForms", next as any).catch(() => {}); return next; });
+  };
+  // "Already have a CPS? Skip to documents" — turn the CPS off and jump straight
+  // to Step 4 so the rest of the package can be built without one.
+  const skipToDocuments = () => {
+    setKitForms((p) => { const next = { ...p, "cps-residential": false }; api.setAdminDealToggle(dealId, "cpsKitForms", next as any).catch(() => {}); return next; });
+    setStep(4);
   };
   const [building, setBuilding] = useState(false);
   const [builtMsg, setBuiltMsg] = useState("");
@@ -220,9 +254,25 @@ export default function OfferKitWizard({
     setBuilding(true); setBuiltMsg(""); setKitError("");
     try {
       // Make sure the current subject selection is saved before we assemble it.
+      // Persist the umbrella here too — the property-type click also saves it, but
+      // if that write flaked the deal would build on the wrong (residential) base.
+      // Saving it at Build guarantees the umbrella matches what's on screen.
+      await api.setAdminDealToggle(dealId, "cpsUmbrella", umbrella).catch(() => {});
       await api.setAdminDealToggle(dealId, "cpsClauses", Array.from(selectedClauses) as any);
       await api.setAdminDealToggle(dealId, "cpsCustomClauses", customClauses as any);
-      const enabled = KIT_FORMS.filter((f) => f.required || (kitForms[f.id] ?? KIT_FORM_DEFAULTS[f.id] ?? true)).map((f) => f.id);
+      let enabled = KIT_FORMS.filter((f) => f.required || (kitForms[f.id] ?? KIT_FORM_DEFAULTS[f.id] ?? true)).map((f) => f.id);
+      if (umbrella === "mobile") {
+        // Mobile swaps the residential CPS + generic addendum for the Manufactured
+        // Home (Rental Site) contract (same cps-residential slot — the backend picks
+        // the manufactured template) + its dedicated addendum, which carries the
+        // subjects. Drop the generic addendum; generate the manufactured addendum.
+        enabled = enabled.filter((id) => id !== "cps-addendum");
+        if (!enabled.includes("cps-mobile-addendum")) {
+          const i = enabled.indexOf("cps-residential");
+          if (i >= 0) enabled.splice(i + 1, 0, "cps-mobile-addendum");
+          else enabled.push("cps-mobile-addendum");
+        }
+      }
       await runKitRequests([
         {
           request: () => fetch(`/api/admin/deals/${dealId}/offer-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }),
@@ -239,7 +289,7 @@ export default function OfferKitWizard({
       setBuiltMsg("");
       setKitError(kitErrorMessage(error, "The offer kit could not be built. Check the province document pack, then try again."));
     } finally { setBuilding(false); }
-  }, [dealId, kitForms, onUpdate, selectedClauses, customClauses]);
+  }, [dealId, kitForms, onUpdate, selectedClauses, customClauses, umbrella]);
 
   // ── built kit documents (Step 4, post-build) ─────────────────────────────
   // Folded in from the old standalone "Transaction Kit" card so build + open +
@@ -249,6 +299,36 @@ export default function OfferKitWizard({
   const builtDocs: KitDoc[] = ((extra as unknown as { offerKit?: { documents?: KitDoc[] } }).offerKit?.documents) || [];
   const [expandedKit, setExpandedKit] = useState<string | null>(null);
   const [generatingKit, setGeneratingKit] = useState<string | null>(null);
+  // ── "Draft for Signatures" (Step 4) — pick approved docs → SkySlope DigiSign DRAFT ──
+  const approvedDocs = builtDocs.filter((d) => d.status === "approved");
+  const [signSel, setSignSel] = useState<Set<string>>(new Set());
+  const [drafting, setDrafting] = useState(false);
+  const [draftSignMsg, setDraftSignMsg] = useState("");
+  // Default: every approved doc checked. Re-syncs when the approved set changes.
+  useEffect(() => {
+    setSignSel(new Set(approvedDocs.map((d) => d.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approvedDocs.map((d) => d.id).join(",")]);
+  const toggleSign = (id: string) => setSignSel((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const draftForSignatures = useCallback(async () => {
+    const ids = Array.from(signSel);
+    if (!ids.length) return;
+    setDrafting(true); setDraftSignMsg("");
+    try {
+      const res = await fetch(`/api/admin/deals/${dealId}/offer-kit/draft-signatures`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ docIds: ids }),
+      });
+      if (res.ok) {
+        setDraftSignMsg("✓ Drafted for signatures. Review & approve the card, then it creates a DigiSign draft in SkySlope for you to send.");
+        onUpdate?.();
+      } else {
+        const e = await res.json().catch(() => null);
+        setDraftSignMsg(`Couldn't draft for signatures: ${(e && e.detail) || res.status}`);
+      }
+    } finally { setDrafting(false); }
+  }, [dealId, signSel, onUpdate]);
   const tok = () => (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
   const openKitDoc = useCallback((docId: string, download = false) => {
     const origin = window.location.origin;
@@ -422,10 +502,11 @@ export default function OfferKitWizard({
               <div style={{ width: 30, height: 30, borderRadius: 999, background: circleBg, color: circleColor, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, boxShadow: active ? `0 0 0 4px ${ORANGE}22` : "none", flexShrink: 0 }}>
                 {done ? "✓" : n}
               </div>
-              <span style={{ fontWeight: 700, fontSize: 14, color: done ? GREEN : active ? INK : "#9aa0a6", whiteSpace: "nowrap" }}>{label}</span>
+              {/* Step names crowd off a phone; show the label on the active step only. */}
+              {(!isMobile || active) && <span style={{ fontWeight: 700, fontSize: 14, color: done ? GREEN : active ? INK : "#9aa0a6", whiteSpace: "nowrap" }}>{label}</span>}
             </div>
             {i < STEPS.length - 1 && (
-              <div style={{ flex: 1, height: 2, background: n < step ? GREEN : "#e7eaef", margin: "0 12px" }} />
+              <div style={{ flex: 1, height: 2, background: n < step ? GREEN : "#e7eaef", margin: isMobile ? "0 5px" : "0 12px" }} />
             )}
           </div>
         );
@@ -481,7 +562,7 @@ export default function OfferKitWizard({
             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4 }}>PROPERTY ADDRESS</span><FromTag t="FROM MLS" /></div>
             <div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{address || "—"}</div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 10 }}>
             <div style={factBox}>
               <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4 }}>PID</span><FromTag t="TITLE / LISTING" /></div>
               <div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{pid || "—"}</div>
@@ -519,22 +600,44 @@ export default function OfferKitWizard({
       <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 16px" }}>
         Buyer &amp; seller names pull from the card; PID and legal from the title. Just the offer numbers here — everything saves as you type.
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
         {cell("PURCHASE PRICE", "cpsPurchasePrice", "$630,000")}
         {cell("DEPOSIT", "cpsDeposit", "$10,000")}
         {cell("DEPOSIT DUE", "cpsDepositTerms", "on subject removal")}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: cols(4), gap: 14, marginBottom: 14 }}>
         {cell("SUBJECT REMOVAL", "subjectRemovalDate", "Jul 14")}
         {cell("COMPLETION", "completionDate", "Aug 12")}
         {cell("POSSESSION", "possessionDate", "Aug 14")}
         {cell("ADJUSTMENT", "adjustmentDate", "Aug 12")}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
         {cell("INCLUDED ITEMS", "cpsInclusions", "all appliances, window coverings…")}
         {cell("EXCLUDED ITEMS", "cpsExclusions", "staging furniture…")}
         {cell("DESIGNATED AGENCY", "designatedAgency", "Skyleigh McCallum")}
       </div>
+      {umbrella === "mobile" && (
+        <div style={{ marginTop: 4, borderTop: `1px solid ${BORDER}`, paddingTop: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: INK, marginBottom: 4 }}>Manufactured home specs</div>
+          <div style={{ fontSize: 12, color: MUTED, marginBottom: 12 }}>
+            Auto-filled from the MLS + Mobile Home Registry when you pull the listing. The CSA / Silver Label number often isn&rsquo;t on the MLS &mdash; add it here from the registry (the mobile&rsquo;s title) if needed. Fills the CPS + addendum.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
+            {cell("REGISTRATION #", "mhRegistration", "008438")}
+            {cell("SERIAL #", "mhSerial", "5300")}
+            {cell("CSA / SILVER LABEL", "mhCsaLabel", "009173")}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
+            {cell("YEAR", "mhYear", "1974")}
+            {cell("MAKE", "mhMake", "Bendix")}
+            {cell("MODEL", "mhModel", "Leader")}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: cols(2), gap: 14 }}>
+            {cell("PARK NAME", "mhParkName", "Oakdale MHP")}
+            {cell("PAD RENT", "mhPadRent", "$765")}
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -729,6 +832,29 @@ export default function OfferKitWizard({
         </div>
       )}
       {builtMsg && <div style={{ marginTop: 12, color: GREEN, fontWeight: 700, fontSize: 14 }}>{builtMsg}</div>}
+
+      {/* Draft for Signatures — pick approved docs, create a SkySlope DigiSign DRAFT */}
+      {approvedDocs.length > 0 && (
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
+          <div style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 2 }}>SEND FOR SIGNATURES</div>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 10 }}>
+            Check the approved documents to include, then draft them into a SkySlope DigiSign envelope. Nothing is sent — it lands as a <b style={{ color: INK }}>draft</b> for you to review and send from DigiSign.
+          </div>
+          {approvedDocs.map((d) => {
+            const on = signSel.has(d.id);
+            return (
+              <div key={d.id} onClick={() => toggleSign(d.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderTop: "1px solid #eef0f3", cursor: "pointer" }}>
+                <div style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0, background: on ? GREEN : "#fff", border: `1px solid ${on ? GREEN : "#c9ced6"}`, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13 }}>{on ? "✓" : ""}</div>
+                <span style={{ fontWeight: 600, color: INK, fontSize: 13.5 }}>{d.name}</span>
+              </div>
+            );
+          })}
+          <button type="button" onClick={draftForSignatures} disabled={drafting || signSel.size === 0} style={{ marginTop: 14, padding: "11px 20px", borderRadius: 9, fontWeight: 700, fontSize: 15, border: "none", background: signSel.size === 0 ? "#9aa6bd" : NAVY, color: "#fff", cursor: drafting || signSel.size === 0 ? "default" : "pointer", opacity: drafting ? 0.7 : 1 }}>
+            {drafting ? "Drafting…" : `Draft for Signatures → (${signSel.size})`}
+          </button>
+          {draftSignMsg && <div style={{ marginTop: 10, color: draftSignMsg.startsWith("✓") ? GREEN : ORANGE, fontWeight: 700, fontSize: 13.5 }}>{draftSignMsg}</div>}
+        </div>
+      )}
     </div>
   );
 
@@ -771,33 +897,41 @@ export default function OfferKitWizard({
           </div>
         )}
         {step === 1 ? Step1 : step === 2 ? Step2 : step === 3 ? Step3 : step === 4 ? Step4 : Placeholder}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18, gap: 12 }}>
           {step > 1 ? (
             <button type="button" onClick={() => setStep((s) => s - 1)} style={{ ...navBtn, background: "#fff", color: INK, border: `1px solid ${BORDER}` }}>← Back</button>
           ) : <span />}
-          {step < 4 ? (
-            <button type="button" onClick={() => setStep((s) => Math.min(4, s + 1))} style={{ ...navBtn, background: NAVY, color: "#fff" }}>
-              {step === 1
-                ? "Continue to Terms →"
-                : step === 2
-                  ? "Continue to Subjects →"
-                  : offerKitPolicy === "stable"
-                    ? "Continue to Build →"
-                    : "Continue to Provider Handoff →"}
-            </button>
-          ) : offerKitPolicy === "stable" ? (
-            <button type="button" disabled={building} onClick={buildKit} style={{ ...navBtn, background: GREEN, color: "#fff", opacity: building ? 0.7 : 1 }}>
-              {building ? "Building…" : "Build Transaction Kit"}
-            </button>
-          ) : (
-            <span role="status" style={{ color: GREEN, fontWeight: 700, fontSize: 13 }}>Deal details saved · provider PDF required</span>
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            {step < 4 && (
+              <button type="button" onClick={skipToDocuments} title="Skip the CPS and jump to the rest of the documents" style={{ background: "none", border: "none", color: MUTED, fontWeight: 600, fontSize: 13.5, cursor: "pointer", textDecoration: "underline", padding: 0, whiteSpace: "nowrap" }}>
+                Already have a CPS? Skip to documents →
+              </button>
+            )}
+            {step < 4 ? (
+              <button type="button" onClick={() => setStep((s) => Math.min(4, s + 1))} style={{ ...navBtn, background: NAVY, color: "#fff" }}>
+                {step === 1
+                  ? "Continue to Terms →"
+                  : step === 2
+                    ? "Continue to Subjects →"
+                    : offerKitPolicy === "stable"
+                      ? "Continue to Build →"
+                      : "Continue to Provider Handoff →"}
+              </button>
+            ) : offerKitPolicy === "stable" ? (
+              <button type="button" disabled={building} onClick={buildKit} style={{ ...navBtn, background: GREEN, color: "#fff", opacity: building ? 0.7 : 1 }}>
+                {building ? "Building…" : "Build Transaction Kit"}
+              </button>
+            ) : (
+              <span role="status" style={{ color: GREEN, fontWeight: 700, fontSize: 13 }}>Deal details saved · provider PDF required</span>
+            )}
+          </div>
         </div>
       </div>
       <ClausePickerModal
         open={clausePickerOpen}
         onClose={() => setClausePickerOpen(false)}
         onInsert={insertClauses}
+        onAddPersonalClause={addPersonalClause}
         folders={clauseFolders as unknown as { key: string; label: string; clauses: { id: string }[] }[]}
         preselected={selectedClauses}
       />

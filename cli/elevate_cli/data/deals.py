@@ -180,21 +180,21 @@ _FIELD_API_NAMES = {
     "sale_of_buyers_property": "saleOfBuyersProperty",
 }
 _WORKFLOW_STAGE_COMPLETE_RE = re.compile(r"^workflow_stage_(\d+)_complete$")
-# Checklist-driven auto-advance, keyed by the completed stage. Stage 5 (Listing
-# Live) is intentionally absent: a live listing only moves to Accepted Offer (6)
-# on the accepted-offer signal, never just because its marketing tasks are done.
-# Stage 8 (Closed) is terminal.
-_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {
-    1: 2,
-    2: 3,
-    3: 4,
-    4: 5,
-    6: 7,
-    7: 8,
-}
+# Checklist-driven auto-advance. These are the shipped (default) maps; both are
+# gated at call time by the ``admin.auto_advance_enabled`` config switch.
+#
+# Why the switch exists: advancing a card to the next stage auto-fires that
+# stage's workflows/skills. Skyleigh asked (2026-07-02) for that to stop on her
+# install — she moves every card between phases manually and wants to decide
+# when the next stage's automations run. That is a per-install preference, not
+# a bug, so it is configurable rather than hardcoded: set
+# ``admin.auto_advance_enabled: false`` in ~/.elevate/config.yaml and both maps
+# below behave as empty.
+#
+# Unaffected either way: manual stage moves (move_deal_stage) and the
+# accepted-offer auto-move (_advance_on_accepted_offer, stage 5 -> 6).
+_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {1: 2, 2: 3, 3: 4, 4: 5, 6: 7, 7: 8}
 _WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
-# Stages whose resolved phase gate may auto-advance the deal when clear. 5 is
-# excluded (offer-driven, handled by _advance_on_accepted_offer); 8 is terminal.
 _AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7}
 _CHECKLIST_TRUE_VALUES = {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
 _CHECKLIST_FALSE_VALUES = {"0", "false", "no", "n", "unchecked", "todo", "incomplete", "not done", ""}
@@ -1248,6 +1248,18 @@ def move_deal_stage(
     existing = get_deal(conn, deal_id)
     if existing is None:
         raise LookupError(f"deal {deal_id!r} not found")
+    # Side-aware upper bound: a buyer flow has fewer stages than a listing flow.
+    # This applies even with force=True -- force bypasses the phase gate, not the
+    # validity of the stage index. An out-of-range stage would otherwise clamp
+    # into the wrong kanban column (e.g. a buyer stage 5 rendered as "Closed").
+    from elevate_cli.admin_deal_flow import last_stage_for, package_key_from_deal
+
+    _deal_side = str(existing.get("side") or "listing")
+    _max_stage = last_stage_for(package_key_from_deal(existing), _deal_side)
+    if to_stage > _max_stage:
+        raise ValueError(
+            f"stage must be between 0 and {_max_stage} for {_deal_side} deals"
+        )
     from_stage = existing["currentStage"]
     if from_stage == to_stage:
         return existing
@@ -1412,6 +1424,30 @@ def _is_completion_value(value: Any) -> bool:
     return False
 
 
+def _auto_advance_enabled() -> bool:
+    """Resolve ``admin.auto_advance_enabled`` on every call.
+
+    Deliberately not captured at import time: a realtor flipping the switch in
+    config.yaml should see the change on the next deal write, without a
+    gateway/app restart. Falls back to the shipped default (enabled) if the
+    config cannot be read at all.
+    """
+    try:
+        from elevate_cli.config import admin_auto_advance_enabled
+
+        return admin_auto_advance_enabled()
+    except Exception:
+        return True
+
+
+def _workflow_stage_complete_advances_to() -> dict[int, int]:
+    return _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO if _auto_advance_enabled() else {}
+
+
+def _auto_advance_gate_stages() -> set[int]:
+    return _AUTO_ADVANCE_GATE_STAGES if _auto_advance_enabled() else set()
+
+
 def _maybe_advance_from_workflow_signal(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -1428,7 +1464,7 @@ def _maybe_advance_from_workflow_signal(
     completed_stage = _workflow_stage_complete_stage(field)
     if completed_stage is None or not _is_completion_value(value):
         return None
-    next_stage = _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO.get(completed_stage)
+    next_stage = _workflow_stage_complete_advances_to().get(completed_stage)
     if next_stage is None:
         return None
     try:
@@ -1517,7 +1553,7 @@ def _maybe_auto_advance_from_gate(
     current_stage = int(deal.get("currentStage") or 0)
     if expected_stage is not None and current_stage != expected_stage:
         return None
-    if current_stage not in _AUTO_ADVANCE_GATE_STAGES:
+    if current_stage not in _auto_advance_gate_stages():
         return None
     gate = ((context.get("dealFlow") or {}).get("gate") or {})
     if not gate.get("canAdvance"):
@@ -1640,7 +1676,7 @@ _MONEY_FIELDS = {
     "team_revenue",
     "agent_revenue",
 }
-_PROPERTY_FIELDS = {"mls_number", "legal_description", "lot_size_sqft", "year_built"}
+_PROPERTY_FIELDS = {"mls_number", "legal_description", "lot_size_sqft", "year_built", "listing_address"}
 _STATUS_TS_FIELDS = {
     "deposit_in_trust_at", "listing_published_at", "offer_accepted_at",
     "subjects_removed_at", "completed_at",
@@ -1664,6 +1700,7 @@ _API_TO_DB_DETAIL_FIELDS = {
     "agentRevenue": "agent_revenue",
     "expectedCloseDate": "expected_close_date",
     "mlsNumber": "mls_number",
+    "listingAddress": "listing_address",
     "legalDescription": "legal_description",
     "lotSizeSqft": "lot_size_sqft",
     "yearBuilt": "year_built",
@@ -2600,7 +2637,16 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
         key=lambda run: status_rank.get(str(run.get("status") or ""), 9),
         default={},
     )
-    waiting_human = sum(1 for run in blocking_runs if run.get("status") == "waiting_human")
+    # Count ALL open waiting_human runs on the deal, not just those whose frozen
+    # payload stage matches the current stage (blocking_runs). A run parked at an
+    # earlier stage would otherwise go invisible after the card advances -- which
+    # is exactly how an "Info needed" card became silent.
+    waiting_runs = [
+        run
+        for run in prior_runs
+        if isinstance(run, Mapping) and run.get("status") == "waiting_human"
+    ]
+    waiting_human = len(waiting_runs)
     running = sum(1 for run in blocking_runs if run.get("status") in {"queued", "running"})
     return {
         "progress": f"{completed}/{total}" if total else None,
@@ -2614,8 +2660,10 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
         "activeRunCount": len(blocking_runs),
         "runningRunCount": running,
         "waitingHumanCount": waiting_human,
-        "activeRunLabel": active_run.get("label"),
-        "activeRunStatus": active_run.get("status"),
+        "activeRunLabel": active_run.get("label")
+        or (waiting_runs[0].get("registryName") if waiting_runs else None),
+        "activeRunStatus": active_run.get("status")
+        or ("waiting_human" if waiting_runs else None),
     }
 
 
@@ -3092,6 +3140,18 @@ def record_run_result(
         raise ValueError("action run result has already been recorded")
     if prior_result and row["status"] in {"succeeded", "completed", "failed", "skipped", "cancelled"}:
         raise ValueError("action run result has already been recorded")
+    # Fence an externally-aborted / zombie run. If a human or self-heal marked
+    # this run terminal (failed/cancelled) while its process was still alive, a
+    # late write here would let the runaway re-open cards, wipe fields, or record
+    # a stale result. Reject it. (Idempotent re-reports of an existing result are
+    # allowed by the guards above; this only blocks a NEW write onto a run that
+    # was aborted before it ever recorded a result — see the 125 Corry zombie,
+    # 2026-07-23.) Re-dispatch clears status back to queued/running, so a
+    # legitimately retried run is not affected.
+    if row["status"] in {"failed", "cancelled"} and not prior_key:
+        raise PermissionError(
+            f"action run {run_id} was aborted (status={row['status']}); result write rejected"
+        )
     if (
         row["status"] == "waiting_human"
         and normalized_status in {"succeeded", "skipped"}
@@ -3358,6 +3418,26 @@ def record_run_result(
         },
         created_at=now,
     )
+    if normalized_status == "waiting_human" and human_prompt:
+        # A skill reported it needs a human decision. This callback path (unlike
+        # cron delivery) never alerted anyone, so the card sat silently. Fire a
+        # best-effort Telegram ping. Reached only when NOT superseded (the dedup
+        # branch above returns early), so no double-ping for deferred cards.
+        try:
+            from elevate_cli.notify_admin import notify_waiting_human
+
+            _run_name = None
+            try:
+                _reg = conn.execute(
+                    "SELECT name FROM admin_action_registry WHERE id=?",
+                    (row["registry_id"],),
+                ).fetchone()
+                _run_name = _reg["name"] if _reg else None
+            except Exception:
+                _run_name = None
+            notify_waiting_human(get_deal(conn, deal_id), run_id, _run_name, human_prompt)
+        except Exception:
+            pass
     if normalized_status in {"succeeded", "completed"}:
         _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=_run_payload_stage(payload))
     updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()

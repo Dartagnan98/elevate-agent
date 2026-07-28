@@ -20,6 +20,7 @@ import ListingKitWizard from "./listing-kit-wizard";
 import DocumentsPanel from "./documents-panel";
 import OnboardingPanel from "./onboarding-panel";
 import CmaWizard from "./cma-wizard";
+import WaitingCard from "./waiting-card";
 import OzzieChatPanel from "./ozzie-chat-panel";
 import DepositCard, { deriveDeposit } from "./deposit-card";
 import "./stage-rail.css";
@@ -115,13 +116,33 @@ const SELLER_INFORMATION_FIELDS: InfoFieldDef[] = [
   { key: "seller.signingLocationProvince", label: "Signing location/province" },
   { key: "seller.signingAuthority", label: "Signing authority", kind: "select", options: ["individual", "POA", "estate", "corporation", "trust"] },
   { key: "seller.preferredSigningEmail", label: "Preferred signing email" },
-  { key: "seller.lawyerChosen", label: "Lawyer/notary chosen ?", kind: "select", options: ["yes", "no", "unknown"] },
-  { key: "seller.lawyerName", label: "Seller lawyer/notary name" },
-  { key: "seller.lawyerFirm", label: "Firm" },
-  { key: "seller.lawyerEmail", label: "Email" },
-  { key: "seller.lawyerPhone", label: "Phone" },
-  { key: "seller.lawyerCityProvince", label: "City/province" },
 ];
+
+// Lawyer / conveyancer, tracked per SIDE (seller's lawyer + buyer's lawyer),
+// independent of which side we represent. Shown on both buyer and seller cards
+// via LAWYER_SECTION below. Field values are written by the lawyer-info workflow
+// (seller.lawyer* / buyer.lawyer* toggle keys); the getter reads extra[key] first
+// so these render whatever the workflow stored. See knowledge/deals/lawyer-info-workflow.md.
+const LAWYER_FIELDS: InfoFieldDef[] = [
+  { key: "seller.lawyerChosen", label: "Lawyer/notary chosen ?", kind: "select", options: ["yes", "no", "unknown"] },
+  { key: "seller.lawyerName", label: "Seller's lawyer / notary" },
+  { key: "seller.lawyerFirm", label: "Seller's lawyer firm" },
+  { key: "seller.lawyerEmail", label: "Seller's lawyer email" },
+  { key: "seller.lawyerPhone", label: "Seller's lawyer phone" },
+  { key: "seller.lawyerCityProvince", label: "Seller's lawyer city/province" },
+  { key: "buyer.lawyerName", label: "Buyer's lawyer / notary" },
+  { key: "buyer.lawyerFirm", label: "Buyer's lawyer firm" },
+  { key: "buyer.lawyerEmail", label: "Buyer's lawyer email" },
+  { key: "buyer.lawyerPhone", label: "Buyer's lawyer phone" },
+  { key: "buyer.lawyerCityProvince", label: "Buyer's lawyer city/province" },
+];
+
+const LAWYER_SECTION: InfoSectionDef = {
+  id: "lawyer",
+  title: "Lawyer / Conveyancer",
+  subtitle: "Seller-side and buyer-side lawyer/notary + firm. Used for subject removal, conveyancing, and closing.",
+  fields: LAWYER_FIELDS,
+};
 
 
 
@@ -227,6 +248,19 @@ const SELLER_PROSPECT_FIELDS: InfoFieldDef[] = [
   { key: "prospect.notes", label: "Notes" },
 ];
 
+// SkySlope compliance punch list. Populated by the Mon/Wed skyslope-audit
+// (extra.skyslopeMissing + extra.skyslopeCheckedAt) and refreshed on demand by a
+// skyslope-sync run. Shown on every card type — buyer purchases and seller
+// prospects both get SkySlope transactions, so the section must live in all
+// three section arrays, not just the full listing card.
+const SKYSLOPE_SECTION: InfoSectionDef = {
+  id: "skyslope",
+  title: "SkySlope — Missing Documents",
+  subtitle: "Required/incomplete checklist items from the SkySlope compliance file. Audited Mon/Wed, or refreshed by a skyslope-sync run.",
+  fields: [],
+  readonly: true,
+};
+
 const SELLER_PROSPECT_SECTIONS: InfoSectionDef[] = [
   {
     id: "prospect",
@@ -234,13 +268,14 @@ const SELLER_PROSPECT_SECTIONS: InfoSectionDef[] = [
     subtitle: "Lead-level details only. The full Core Property, Specs, Seller, and MLC sections unlock once this card moves forward into the CMA stage.",
     fields: SELLER_PROSPECT_FIELDS,
   },
+  SKYSLOPE_SECTION,
 ];
 
 
 // Client + Search live inside the Client Onboarding section; Subject Property
 // (MLS / PID / legal) lives in the Transaction Kit wizard's property step, which
 // pulls them from the title — so there is no standalone buyer info section.
-const BUYER_INFO_SECTIONS: InfoSectionDef[] = [];
+const BUYER_INFO_SECTIONS: InfoSectionDef[] = [LAWYER_SECTION, SKYSLOPE_SECTION];
 
 const INFO_SECTIONS: InfoSectionDef[] = [
   {
@@ -279,9 +314,10 @@ const INFO_SECTIONS: InfoSectionDef[] = [
   {
     id: "seller",
     title: "Seller Information Section",
-    subtitle: "Listing-side seller identity, signing, and lawyer/notary details.",
+    subtitle: "Listing-side seller identity and signing details.",
     fields: SELLER_INFORMATION_FIELDS,
   },
+  LAWYER_SECTION,
   {
     id: "mlc",
     title: "Listing Contract / MLC Section",
@@ -289,13 +325,7 @@ const INFO_SECTIONS: InfoSectionDef[] = [
     fields: LISTING_CONTRACT_FIELDS,
     minListingPhase: "intake",
   },
-  {
-    id: "skyslope",
-    title: "SkySlope — Missing Documents",
-    subtitle: "Required/incomplete checklist items from the SkySlope compliance file. Audited Mon/Wed, or refreshed by a skyslope-sync run.",
-    fields: [],
-    readonly: true,
-  },
+  SKYSLOPE_SECTION,
 ];
 
 // Read SkySlope missing items off extraToggles, tolerating bad shapes.
@@ -509,7 +539,9 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   // setAdminDealToggle. Auto-checked items are derived separately from deal data.
   const [manualChecks, setManualChecks] = useState<Set<string>>(new Set());
   const [openInfoSections, setOpenInfoSections] = useState<Set<string>>(
-    () => new Set(isBuyer ? [] : isSellerProspect ? ["prospect"] : ["core", "seller", "mlc"])
+    // "mlc" = the Listing Contract / Listing Intake section. Open it ONLY when the card is
+    // actually at the Listing Intake stage (Skyleigh 2026-07-06); otherwise keep it collapsed.
+    () => new Set(isBuyer ? ["lawyer"] : isSellerProspect ? ["prospect"] : deal.phase === "intake" ? ["core", "seller", "mlc"] : ["core", "seller"])
   );
   const [infoValues, setInfoValues] = useState<Record<string, string>>({});
   const [savingInfoKey, setSavingInfoKey] = useState<string | null>(null);
@@ -518,7 +550,6 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   // documents, conditional docs). Falls back to seed data when a deal has no
   // saved file yet (demo/placeholder cards), so this never regresses.
   const [ctx, setCtx] = useState<DealContext | null>(null);
-  const [answeringRun, setAnsweringRun] = useState<string | null>(null);
   const reloadCtx = useCallback(() => {
     if (!deal.id) return;
     api
@@ -541,61 +572,10 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       active = false;
     };
   }, [deal.id]);
-  const answerRun = useCallback(
-    async (runId: string, approved: boolean) => {
-      setAnsweringRun(runId);
-      try {
-        await api.approveAdminActionRun(runId, { approved, runNow: approved });
-        // Best-effort side-effect: when a WAITING ON YOU item is approved on
-        // this deal's scorecard, resolve any matching surface-approval (its
-        // description carries `Deal: <deal_id>`) so it stops showing in the
-        // separate approvals queue. Never block or throw into the main flow.
-        if (approved && deal.id) {
-          try {
-            const { approvals } = await api.getSurfaceApprovals("pending");
-            const matches = (approvals || []).filter((a) =>
-              (a.description || "").includes(deal.id),
-            );
-            for (const a of matches) {
-              await api.resolveSurfaceApproval(a.id, "approve", "Cleared via scorecard approval");
-            }
-            if (matches.length) reloadCtx();
-          } catch {
-            /* surface-approvals API absent/404/empty — silently continue */
-          }
-        }
-        reloadCtx();
-      } finally {
-        setAnsweringRun(null);
-      }
-    },
-    [reloadCtx, deal.id],
-  );
-  // Fillable "Waiting on you" card: the operator types answers to the run's
-  // requiredFields and submits them; the skill re-runs with the answers filled
-  // in (no chat round-trip). Keyed by runId -> { field -> typed value }.
-  const [fieldAnswers, setFieldAnswers] = useState<Record<string, Record<string, string>>>({});
-  const [submittingAnswers, setSubmittingAnswers] = useState<string | null>(null);
-  const submitAnswers = useCallback(
-    async (runId: string, fields: string[]) => {
-      const entered = fieldAnswers[runId] || {};
-      const answers: Record<string, string> = {};
-      for (const f of fields) {
-        const v = (entered[f] || "").trim();
-        if (v) answers[f] = v;
-      }
-      if (Object.keys(answers).length === 0) return;
-      setSubmittingAnswers(runId);
-      try {
-        await api.answerAdminActionRun(runId, { answers, runNow: true });
-        setFieldAnswers((prev) => ({ ...prev, [runId]: {} }));
-        reloadCtx();
-      } finally {
-        setSubmittingAnswers(null);
-      }
-    },
-    [fieldAnswers, reloadCtx],
-  );
+  // The WAITING ON YOU cards (approve / fill-in / preview) render through the
+  // shared <WaitingCard> component, which owns the approve/answer/preview API
+  // calls and the approval-acknowledgement robustness fix. The same component
+  // powers the global ACTION NEEDED popup, so the two never drift.
   // Open the approved CMA PDF in the user's real browser (renders PDFs inline).
   // Same desktop-shell constraints as openRunPdf below: no blob windows, no PDF
   // plugin in app windows, http(s) URLs off the backend origin go to the OS
@@ -621,10 +601,11 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       "noopener,noreferrer",
     );
   }, [deal.id]);
-  // Offer-kit: open one editable kit document in a new tab (same loopback +
-  // ?token= trick as openCmaPdf), and approve/un-approve a kit document.
   // Same shell constraints as openCmaPdf above. Opens the listing's latest
-  // weekly seller-update PDF. Active only when a seller_update attachment exists.
+  // weekly seller-update PDF. Active when a scorecard-facing seller update
+  // attachment exists. Use the /api/admin path because the old /api/deals path
+  // is not where admin download routes are registered and can show Unauthorized
+  // in the external browser tab.
   const openSellerUpdatePdf = useCallback(() => {
     const token =
       (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
@@ -633,34 +614,11 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       ? origin.replace("127.0.0.1", "localhost")
       : origin.replace("localhost", "127.0.0.1");
     window.open(
-      `${externalOrigin}/api/deals/${deal.id}/seller-update-pdf?token=${encodeURIComponent(token)}`,
+      `${externalOrigin}/api/admin/deals/${deal.id}/seller-update-pdf?token=${encodeURIComponent(token)}&v=${Date.now()}`,
       "_blank",
       "noopener,noreferrer",
     );
   }, [deal.id]);
-  // Open the PDF a skill drafted and parked on a waiting run (e.g. a
-  // General/Trust Release awaiting approval) in the user's real browser, which
-  // renders PDFs inline. The desktop shell can't: its windows have no PDF
-  // plugin (grey box), and its window-open handler denies blob: URLs. The
-  // handler routes http(s) URLs that DON'T match the backend origin to the OS
-  // browser via shell.openExternal — so we hit the SAME local server through
-  // its alternate loopback host (127.0.0.1 <-> localhost). Auth rides on the
-  // ?token= query param since a new tab can't send an auth header, and the
-  // backend whitelists ?token= for this read-only download path.
-  const openRunPdf = useCallback(
-    (runId: string) => {
-      const token =
-        (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ ||
-        "";
-      const origin = window.location.origin;
-      const externalOrigin = origin.includes("127.0.0.1")
-        ? origin.replace("127.0.0.1", "localhost")
-        : origin.replace("localhost", "127.0.0.1");
-      const url = `${externalOrigin}/api/deals/${deal.id}/run-draft-pdf/${runId}?token=${encodeURIComponent(token)}`;
-      window.open(url, "_blank", "noopener,noreferrer");
-    },
-    [deal.id],
-  );
   // Approve & Send the weekly seller-update Gmail draft (PDF attached) the
   // seller-updates workflow already created. External send => gated behind a
   // confirm dialog; never fires on a single click. On success we stamp the
@@ -881,13 +839,16 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const saveInfoField = async (key: string, value: string) => {
     setSavingInfoKey(key);
     try {
-      // Field keys are namespaced (e.g. "core.pid"), but the getters read the
-      // bare suffix off `extra` (extra.pid). The backend stores the key
-      // verbatim, so we must save under the bare key — otherwise the edit lands
-      // in extra["core.pid"] and the card can't read it back (it vanishes on
-      // reload). Strip the namespace prefix to match what the getters read.
-      const storageKey = key.includes(".") ? key.slice(key.indexOf(".") + 1) : key;
-      await api.setAdminDealToggle(deal.id, storageKey, value.trim() || null);
+      // Save under the FULL namespaced key. autoInfoValue reads extra[key] (the
+      // full key) back FIRST, before any fallback, so a manual edit round-trips
+      // for every namespace. The backend strips only core./extra. down to the
+      // bare key (deals.py set_deal_toggle) — which is exactly what the core.*
+      // switch cases read (extra.pid) — while seller./buyer./prospect./mlc./offer.
+      // stay full and are read back by extra[key]. Stripping here was the bug:
+      // it turned seller.emails / buyer.emails / prospect.emails all into a bare
+      // "emails" that collided and matched no getter, so contact email/phone
+      // edits vanished on reload.
+      await api.setAdminDealToggle(deal.id, key, value.trim() || null);
     } finally {
       setSavingInfoKey(null);
     }
@@ -1162,7 +1123,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
               )}
               {(() => {
                 const sellerUpdateReady = (ctx?.attachments ?? []).some(
-                  (a) => a.kind === "seller_update",
+                  (a) => a.kind === "seller_update" || a.kind === "seller_update_pdf",
                 );
                 const draftId = stringValue(extra.sellerUpdateDraftId);
                 const sellerEmail = stringValue(extra.sellerUpdateSellerEmail);
@@ -1275,166 +1236,19 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
             return (
               <div className="abm-waiting">
                 <div className="abm-waiting-head mono">WAITING ON YOU &middot; {waiting.length}</div>
-                {waiting.map((r) => {
-                  const hp = (r.humanPrompt ?? {}) as Record<string, unknown>;
-                  const title = String(hp.title ?? r.registryName ?? "Needs your input");
-                  const message = hp.message ? String(hp.message) : "";
-                  // requiredFields entries can be plain strings (free-text) or
-                  // objects { label, help, type:"select", options:[...] } so a
-                  // decision renders as a dropdown with real choices + context.
-                  const fields = (Array.isArray(hp.requiredFields)
-                    ? (hp.requiredFields as unknown[]).map((f) => {
-                        if (f && typeof f === "object") {
-                          const o = f as Record<string, unknown>;
-                          return {
-                            label: String(o.label ?? o.name ?? o.key ?? ""),
-                            help: o.help ? String(o.help) : "",
-                            type: o.type === "select" ? "select" : o.type === "textarea" ? "textarea" : "text",
-                            options: Array.isArray(o.options)
-                              ? (o.options as unknown[]).map(String)
-                              : [],
-                          };
-                        }
-                        return { label: String(f), help: "", type: "text", options: [] as string[] };
-                      })
-                    : []
-                  ).filter((f) => f.label);
-                  // Hardcoded guarantee: Pre-CMA / CMA / listing / marketing cards
-                  // always offer a spot to drop a property-photos Google Drive link,
-                  // even if the skill did not ask for it. Optional — never required
-                  // to submit. Deduped so a skill that already added a photo/drive
-                  // field is not doubled. Scoped by skill/card context so unrelated
-                  // cards (offers, closing, subject removal) do not get the field.
-                  const PHOTOS_FIELD_LABEL = "Property photos (Google Drive link)";
-                  const photoCtxId = (
-                    String(r.skill ?? "") + " " + String(r.registryName ?? "")
-                  ).toLowerCase();
-                  const photoRelevant = /cma|seller-package|listing|marketing|photo/.test(photoCtxId);
-                  const formFields =
-                    fields.length > 0 &&
-                    photoRelevant &&
-                    !fields.some((f) => /photo/i.test(f.label) || /drive/i.test(f.label))
-                      ? [
-                          ...fields,
-                          {
-                            label: PHOTOS_FIELD_LABEL,
-                            help: "Paste a Google Drive or Dropbox link to the property photos so the CMA can pull from them. Optional.",
-                            type: "text",
-                            options: [] as string[],
-                          },
-                        ]
-                      : fields;
-                  const hasDraftPdf =
-                    (typeof hp.previewPdf === "string" && hp.previewPdf.trim() !== "") ||
-                    (typeof (hp as Record<string, unknown>).preview_pdf === "string" &&
-                      String((hp as Record<string, unknown>).preview_pdf).trim() !== "");
-                  return (
-                    <div className="abm-waiting-item" key={r.id}>
-                      <div className="abm-waiting-title">{title}</div>
-                      {message && <div className="abm-waiting-msg">{message}</div>}
-                      {fields.length > 0 && (
-                        <div className="abm-waiting-form">
-                          <div className="abm-waiting-needs mono">FILL IN TO CONTINUE</div>
-                          {formFields.map((f, i) => {
-                            const setVal = (v: string) =>
-                              setFieldAnswers((prev) => ({
-                                ...prev,
-                                [r.id]: { ...(prev[r.id] || {}), [f.label]: v },
-                              }));
-                            return (
-                              <label className="abm-waiting-field" key={i}>
-                                <span className="abm-waiting-field-label">{f.label}</span>
-                                {f.help && <span className="abm-waiting-field-help">{f.help}</span>}
-                                {f.type === "select" && f.options.length > 0 ? (
-                                  <select
-                                    className="abm-waiting-input"
-                                    value={fieldAnswers[r.id]?.[f.label] ?? ""}
-                                    disabled={submittingAnswers === r.id}
-                                    onChange={(e) => setVal(e.target.value)}
-                                  >
-                                    <option value="" disabled>
-                                      Choose…
-                                    </option>
-                                    {f.options.map((opt, j) => (
-                                      <option key={j} value={opt}>
-                                        {opt}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : f.type === "textarea" ? (
-                                  <textarea
-                                    className="abm-waiting-input abm-waiting-textarea"
-                                    rows={3}
-                                    value={fieldAnswers[r.id]?.[f.label] ?? ""}
-                                    placeholder={`Type ${f.label}…`}
-                                    disabled={submittingAnswers === r.id}
-                                    onChange={(e) => setVal(e.target.value)}
-                                  />
-                                ) : (
-                                  <input
-                                    type="text"
-                                    className="abm-waiting-input"
-                                    value={fieldAnswers[r.id]?.[f.label] ?? ""}
-                                    placeholder={`Type ${f.label}…`}
-                                    disabled={submittingAnswers === r.id}
-                                    onChange={(e) => setVal(e.target.value)}
-                                  />
-                                )}
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
-                      <div className="abm-waiting-actions">
-                        {hasDraftPdf && (
-                          <button
-                            type="button"
-                            className="abm-waiting-btn preview"
-                            onClick={() => openRunPdf(r.id)}
-                            title="Open the drafted PDF before you approve"
-                          >
-                            Preview PDF ↗
-                          </button>
-                        )}
-                        {fields.length > 0 && (
-                          <button
-                            type="button"
-                            className="abm-waiting-btn submit"
-                            disabled={
-                              submittingAnswers === r.id ||
-                              !Object.values(fieldAnswers[r.id] || {}).some((v) => v.trim())
-                            }
-                            onClick={() => submitAnswers(r.id, formFields.map((f) => f.label))}
-                            title="Send your answers and continue the skill"
-                          >
-                            {submittingAnswers === r.id ? "Sending…" : "Submit & run"}
-                          </button>
-                        )}
-                        {/* Approve & re-run IGNORES typed fields — only show it on
-                            no-field approval cards, never alongside a fillable form
-                            (where it would silently drop the user's answers). */}
-                        {fields.length === 0 && (
-                          <button
-                            type="button"
-                            className="abm-waiting-btn approve"
-                            disabled={answeringRun === r.id}
-                            onClick={() => answerRun(r.id, true)}
-                          >
-                            {answeringRun === r.id ? "Working…" : "Approve & re-run"}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="abm-waiting-btn dismiss"
-                          disabled={answeringRun === r.id}
-                          onClick={() => answerRun(r.id, false)}
-                        >
-                          Dismiss
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
+                {waiting.map((r) => (
+                  <WaitingCard
+                    key={r.id}
+                    run={{
+                      runId: r.id,
+                      dealId: deal.id,
+                      humanPrompt: (r.humanPrompt ?? {}) as Record<string, unknown>,
+                      skill: r.skill ?? undefined,
+                      registryName: r.registryName ?? undefined,
+                    }}
+                    onResolved={reloadCtx}
+                  />
+                ))}
               </div>
             );
           })()}

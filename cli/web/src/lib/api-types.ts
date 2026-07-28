@@ -1544,6 +1544,73 @@ export interface ThreadContextResponse {
   activity: ThreadContextActivity[];
 }
 
+// ── CRM contact card ───────────────────────────────────────────────────
+// Payload for GET /api/admin/contacts/{id} (the redesigned contact card).
+// Mirrors the _row_to_contact serializer plus the top25 side-table flag.
+export interface AdminContactDetail {
+  id: string;
+  displayName: string | null;
+  primaryEmail: string | null;
+  primaryPhone: string | null;
+  address: string | null;
+  birthday: string | null;
+  type: string | null;
+  stage: string | null;
+  ownerNotes: string | null;
+  lastActivityAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  pipelineStatus: string | null;
+  pipelineStatusSetBy: string | null;
+  leadSource: string | null;
+  assignedAgent: string | null;
+  tagsJson: string | null;
+  segmentsJson: string | null;
+  buyingTimeFrame: string | null;
+  sellingTimeFrame: string | null;
+  preQualStatus: string | null;
+  cannotText: boolean;
+  cannotCall: boolean;
+  cannotEmail: boolean;
+  unsubscribed: boolean;
+  top25: boolean;
+  // Manual lead-temperature override; null when using the derived temperature.
+  temperature?: string | null;
+}
+
+// Note row from GET/POST /api/admin/contacts/{id}/notes (mirrors _row_to_note).
+export interface AdminContactNote {
+  id: string;
+  contactId: string;
+  body: string;
+  authorKind: string;
+  authorName: string | null;
+  pinned: boolean;
+  deleted: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface AdminContactNotesResponse {
+  items: AdminContactNote[];
+  count: number;
+}
+
+// Contact item (Tasks / Appointments / Family) from the .../items endpoints.
+export interface AdminContactItem {
+  id: string;
+  kind: "task" | "appointment" | "family";
+  title: string | null;
+  subtitle: string | null;
+  whenAt: string | null;
+  done: boolean;
+  createdAt: string | null;
+}
+
+export interface AdminContactItemsResponse {
+  items: AdminContactItem[];
+}
+
 export interface BuyerWatchlistEntry {
   id: string;
   contactId?: string | null;
@@ -3397,4 +3464,76 @@ export interface SurfaceApproval {
   resolvedAt?: string | null;
   resolvedBy?: string | null;
   resolutionNote?: string | null;
+}
+
+// ── Reporting page ──────────────────────────────────────────────────────
+export interface ReportingKpi {
+  value: number;
+  delta: number | null;
+  thin?: boolean;
+}
+
+export interface ReportingKpis {
+  newLeads: ReportingKpi;
+  calls: ReportingKpi;
+  texts: ReportingKpi;
+  emails: ReportingKpi;
+  apptsBooked: ReportingKpi;
+  leadToClient: ReportingKpi;
+}
+
+export interface ReportingSourceCount {
+  source: string;
+  count: number;
+}
+
+export interface ReportingStageCount {
+  stage: string;
+  count: number;
+}
+
+export interface ReportingTemperatureCount {
+  label: string;
+  count: number;
+}
+
+export interface ReportingFunnelStep {
+  stage: string;
+  label: string;
+  count: number;
+}
+
+export interface ReportingMonthlyPoint {
+  month: string;
+  leads: number;
+  sales: number;
+}
+
+export interface ReportingYearPoint {
+  year: string;
+  leads: number;
+  sales: number;
+  ytd: boolean;
+}
+
+export interface ReportingGoals {
+  leadsGoal: number | null;
+  apptsGoal: number | null;
+  closingsGoal: number | null;
+  gciGoal: number | null;
+}
+
+export interface ReportingSummary {
+  window: number;
+  generatedAt: string;
+  kpis: ReportingKpis;
+  leadsBySource: ReportingSourceCount[];
+  leadsByStage: ReportingStageCount[];
+  leadsByTemperature: ReportingTemperatureCount[];
+  funnel: ReportingFunnelStep[];
+  closedBySource: ReportingSourceCount[];
+  gci: number;
+  trend: { monthly: ReportingMonthlyPoint[]; yoy: ReportingYearPoint[] };
+  marketingSpend: null;
+  goals: ReportingGoals;
 }

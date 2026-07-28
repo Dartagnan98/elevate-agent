@@ -85,6 +85,7 @@ import { LoginCard } from "@/components/LoginCard";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { BugReporter } from "@/components/BugReporter";
+import ActionNeededPopup from "@/components/ActionNeededPopup";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { Toast } from "@/components/Toast";
@@ -934,6 +935,7 @@ export default function App() {
       <OnboardingGate />
       <Backdrop />
       {!isConfigRoute && accessChecked && <BugReporter />}
+      {!isConfigRoute && accessChecked && <ActionNeededPopup />}
       <PluginSlot name="backdrop" />
 
       <header

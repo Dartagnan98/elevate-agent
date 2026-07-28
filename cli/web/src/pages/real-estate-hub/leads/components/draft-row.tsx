@@ -51,6 +51,26 @@ export function DraftRow({
     ? editState.value
     : draft.body;
   const setEditText = (value: string) => setEditState({ draftId: draft.id, sourceBody: draft.body, value });
+  // Channel switch (email<->text) state: error surfaces inline when the target
+  // has no usable recipient (backend guard returns 400).
+  const [switchErr, setSwitchErr] = useState<string | null>(null);
+
+  const chanLc = (draft.channel || "").toLowerCase();
+  const isText = ["sms", "text", "imessage"].includes(chanLc);
+  const isEmail = ["email", "gmail"].includes(chanLc);
+  const channelSwitchable = isText || isEmail;
+  const currentChannel: "text" | "email" | null = isText ? "text" : isEmail ? "email" : null;
+
+  const switchChannel = async (target: "sms" | "email") => {
+    if (!onAction) return;
+    setSwitchErr(null);
+    try {
+      // draft.channel carries the TARGET the backend switches to.
+      await Promise.resolve(onAction("channel", { ...draft, channel: target }));
+    } catch (e) {
+      setSwitchErr((e as Error)?.message || "Couldn't switch channel.");
+    }
+  };
 
   const dirty = editText.trim() !== draft.body.trim();
   const exactIdentityReady = Boolean(draft.sourceId && draft.threadId && draft.taskId);
@@ -99,6 +119,30 @@ export function DraftRow({
         {expanded ? (
           <div className="lb-draft-expand">
             <div className="lb-draft-recipient mono">To · {draft.name} · {draft.source}</div>
+            {channelSwitchable && (
+              <div className="lb-chan-toggle" onClick={(e) => e.stopPropagation()}>
+                <span className="lb-chan-label">Send via</span>
+                <div className="lb-chan-seg">
+                  <button
+                    type="button"
+                    className={"lb-chan-opt" + (currentChannel === "text" ? " on" : "")}
+                    disabled={busy || !onAction || currentChannel === "text"}
+                    onClick={() => switchChannel("sms")}
+                  >
+                    Text
+                  </button>
+                  <button
+                    type="button"
+                    className={"lb-chan-opt" + (currentChannel === "email" ? " on" : "")}
+                    disabled={busy || !onAction || currentChannel === "email"}
+                    onClick={() => switchChannel("email")}
+                  >
+                    Email
+                  </button>
+                </div>
+                {switchErr && <span className="lb-chan-err">{switchErr}</span>}
+              </div>
+            )}
             <textarea
               className="lb-draft-edit"
               value={editText}

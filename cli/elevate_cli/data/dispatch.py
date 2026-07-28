@@ -2245,6 +2245,15 @@ def evaluate(
             status=initial_status,
             human_prompt=human_prompt,
         )
+        if initial_status == "waiting_human":
+            # Runs that park at dispatch time (approval_required) get no cron
+            # delivery, so nobody is told. Best-effort Telegram ping (never raises).
+            try:
+                from elevate_cli.notify_admin import notify_waiting_human
+
+                notify_waiting_human(deal, run["id"], action["name"], human_prompt)
+            except Exception:
+                pass
         if create_cron_jobs and initial_status == "queued":
             run = dispatch_action_run_to_cron(conn, run["id"], actor=actor)
         runs.append(run)

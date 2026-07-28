@@ -54,6 +54,9 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
     async def get_source_inbox_not_sent(limit: int = 100):
         """send_queue rows that did not reach dispatcher acceptance.
 
+        Powers the /leads 'Didn't Send' tab so silently-dropped approvals don't
+        vanish off the board.
+
         Explicitly skipped approval drafts remain in the approval work queue,
         where Undo restores them for review; they must never become a direct
         send path through the /leads 'Didn't Send' tab.

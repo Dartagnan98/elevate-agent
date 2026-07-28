@@ -78,6 +78,12 @@ export interface LeadsBoardProps {
   onProfileTagsChange?: (profile: LeadsProfile, tags: string[]) => void | Promise<void>;
   onProfileListsChange?: (profile: LeadsProfile, lists: string[]) => void | Promise<void>;
   onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
+  onBulkUpdate?: (
+    profiles: LeadsProfile[],
+    action: "tags" | "segments" | "pipeline",
+    value: unknown,
+    mode?: "add" | "replace" | "remove",
+  ) => Promise<{ updated: number; failed: Array<{ contactId: string; error: string }> }>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
   templatesState?: { loading: boolean; error: string | null };
@@ -85,6 +91,25 @@ export interface LeadsBoardProps {
   sentState?: { loading: boolean; error: string | null; partial: boolean; limit: number };
   appleMessages?: { inbound: boolean; outbound: boolean; blocked?: boolean; note?: string };
   onToggleDirection?: (dir: "inbound" | "outbound", value: boolean) => void | Promise<void>;
+}
+
+function MlSection({ title, items, empty }: { title: string; items: any[]; empty: string }) {
+  const list = items || [];
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        {title} <span style={{ opacity: 0.6 }}>({list.length})</span>
+      </div>
+      {list.length === 0 && <div style={{ opacity: 0.6, fontSize: 13 }}>{empty}</div>}
+      {list.map((e: any, i: number) => (
+        <div key={i} style={{ padding: "6px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 13 }}>
+          <span style={{ fontWeight: 600 }}>{e.name}</span>{" "}
+          <span style={{ opacity: 0.78 }}>&ldquo;{e.last_text}&rdquo;</span>{" "}
+          <span style={{ opacity: 0.5 }}>· {e.last_at}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function LeadsBoard(props: LeadsBoardProps) {
@@ -119,6 +144,20 @@ export function LeadsBoard(props: LeadsBoardProps) {
   // Custom pipeline stages: fetched once per page load (shared module cache,
   // same store the status pills read), primed here after every PUT.
   const customStages = useCustomStages();
+  const [loopOpen, setLoopOpen] = useState(false);
+  const [loop, setLoop] = useState<any>(null);
+  const [loopLoading, setLoopLoading] = useState(false);
+  const openLoop = () => {
+    setLoopOpen(true);
+    setLoopLoading(true);
+    fetch("/api/leads/message-loop?days=2")
+      .then((r) => r.json())
+      .then((d) => setLoop(d))
+      .catch(() =>
+        setLoop({ ok: false, waiting_on_you: [], waiting_on_them: [], full_circle: [], counts: {} })
+      )
+      .finally(() => setLoopLoading(false));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -397,6 +436,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
           <button className="ab-btn ghost" type="button" onClick={props.onReRunOnboarding} disabled={!props.onReRunOnboarding}>
             <Sparkles /><span>Source setup</span>
           </button>
+          <button className="ab-btn ghost" type="button" onClick={openLoop}><Refresh /><span>Message Loop</span></button>
           <Link className="ab-btn ghost" to="/config#connectors"><span>Connect source</span></Link>
           <div className="crm-addwrap">
             <button
@@ -832,6 +872,33 @@ export function LeadsBoard(props: LeadsBoardProps) {
           draftSendNotices={draftSendNotices}
           onEditTemplate={() => { setActiveProfile(null); setTab("templates"); }}
         />
+      )}
+      {loopOpen && (
+        <div
+          onClick={() => setLoopOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 16px" }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "var(--surface, #1b1b1f)", color: "var(--text, #e8e8ea)", maxWidth: 640, width: "100%", maxHeight: "80vh", overflowY: "auto", borderRadius: 12, padding: "20px 22px", boxShadow: "0 12px 48px rgba(0,0,0,0.5)" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <strong style={{ fontSize: 16 }}>📬 Message Loop</strong>
+              <button className="ab-btn ghost" type="button" onClick={() => setLoopOpen(false)}>Close</button>
+            </div>
+            {loopLoading && <div style={{ opacity: 0.7 }}>Checking your messages…</div>}
+            {!loopLoading && loop && (
+              <>
+                <div style={{ opacity: 0.8, marginBottom: 14, fontSize: 13 }}>
+                  🔴 {loop.counts?.waiting_on_you ?? 0} waiting on you · 🟡 {loop.counts?.waiting_on_them ?? 0} hanging · ✅ {loop.counts?.full_circle ?? 0} closed
+                </div>
+                <MlSection title="🔴 Waiting on you" items={loop.waiting_on_you} empty="You're all caught up." />
+                <MlSection title="🟡 Left hanging (you sent, no reply yet)" items={loop.waiting_on_them} empty="Nothing hanging." />
+                <MlSection title="✅ Full circle" items={loop.full_circle} empty="—" />
+              </>
+            )}
+          </div>
+        </div>
       )}
     </main>
   );

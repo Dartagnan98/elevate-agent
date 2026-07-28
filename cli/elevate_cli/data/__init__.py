@@ -136,6 +136,14 @@ from elevate_cli.data.templates import (
     template_stats,
     template_stats_with_ambiguous,
 )
+from elevate_cli.data.contact_documents import (
+    client_doc_type_for,
+    CLIENT_DOC_TYPES,
+    get_current_contact_document,
+    list_contact_documents,
+    list_contact_documents_for_contacts,
+    upsert_contact_document,
+)
 from elevate_cli.data.deals import (
     add_deal_attachment,
     add_deal_contact,
@@ -338,6 +346,9 @@ __all__ = [
     "retire_template", "template_leaderboard", "template_stats",
     "template_stats_with_ambiguous",
     # deals
+    "client_doc_type_for", "CLIENT_DOC_TYPES", "get_current_contact_document",
+    "list_contact_documents", "list_contact_documents_for_contacts",
+    "upsert_contact_document",
     "add_deal_attachment", "add_deal_contact",
     "complete_run_with_reviewed_manual_pdf", "create_deal",
     "deals_overview", "DealPhaseGateBlocked",

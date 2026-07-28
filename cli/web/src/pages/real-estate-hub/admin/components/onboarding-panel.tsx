@@ -42,7 +42,6 @@ export default function OnboardingPanel({
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [documentPolicy, setDocumentPolicy] = useState<"checking" | "beta" | "stable" | "unavailable">("checking");
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen !== null ? manualOpen : (currentStage ?? 0) === 0;
   const [subOpen, setSubOpen] = useState<Record<string, boolean>>({ client: true, search: true, docs: true });
   const toggleSub = (k: string) => setSubOpen((s) => ({ ...s, [k]: !s[k] }));
 
@@ -72,26 +71,35 @@ export default function OnboardingPanel({
       ? raw.map((b: AnyObj) => ({ name: b.name || "", email: b.email || "", phone: b.phone || "" }))
       : [{ name: "", email: "", phone: "" }];
   });
+  // Seed buyer rows ONLY from saved onboardingBuyers, never from the lossy
+  // fallback getters (buyer.clientNames falls back to the deal title, buyer.emails
+  // to every contact email on the deal incl. the lender). Seeding from those and
+  // then persisting on blur is what wiped real client email/phone. Seed once when
+  // the saved value arrives; until then leave the blank row and never auto-persist.
   const seeded = useRef(false);
+  const dirty = useRef(false);
   useEffect(() => {
     if (seeded.current) return;
     const raw = (extra as AnyObj).onboardingBuyers;
-    if (Array.isArray(raw) && raw.length) { seeded.current = true; return; }
-    const nm = fieldValue?.(PER_BUYER.name) || "";
-    if (nm) {
-      setBuyers([{ name: nm, email: fieldValue?.(PER_BUYER.email) || "", phone: fieldValue?.(PER_BUYER.phone) || "" }]);
+    if (Array.isArray(raw) && raw.length) {
+      setBuyers(raw.map((b: AnyObj) => ({ name: b.name || "", email: b.email || "", phone: b.phone || "" })));
       seeded.current = true;
     }
-  }, [extra, fieldValue]);
+  }, [extra]);
 
   const persistBuyers = (rows: BuyerRow[]) => {
     void api.setAdminDealToggle(dealId, "onboardingBuyers", rows as any);
     void api.setAdminDealToggle(dealId, "buyerClientNames", rows.map((r) => r.name.trim()).filter(Boolean) as any);
   };
-  const setBuyerField = (i: number, k: keyof BuyerRow, v: string) =>
+  // Only persist rows the user actually touched — a bare blur with no edit must
+  // never overwrite saved data.
+  const persistIfDirty = () => { if (dirty.current) persistBuyers(buyers); };
+  const setBuyerField = (i: number, k: keyof BuyerRow, v: string) => {
+    dirty.current = true;
     setBuyers((rows) => rows.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
-  const addBuyer = () => setBuyers((rows) => { const n = [...rows, { name: "", email: "", phone: "" }]; persistBuyers(n); return n; });
-  const removeBuyer = (i: number) => setBuyers((rows) => { const n = rows.filter((_, j) => j !== i); persistBuyers(n.length ? n : [{ name: "", email: "", phone: "" }]); return n.length ? n : [{ name: "", email: "", phone: "" }]; });
+  };
+  const addBuyer = () => { dirty.current = true; setBuyers((rows) => { const n = [...rows, { name: "", email: "", phone: "" }]; persistBuyers(n); return n; }); };
+  const removeBuyer = (i: number) => { dirty.current = true; setBuyers((rows) => { const n = rows.filter((_, j) => j !== i); persistBuyers(n.length ? n : [{ name: "", email: "", phone: "" }]); return n.length ? n : [{ name: "", email: "", phone: "" }]; }); };
 
   const setDocStatus = (key: string, val: string) => {
     setStatus((s) => ({ ...s, [key]: val }));
@@ -128,6 +136,16 @@ export default function OnboardingPanel({
   const clientTotal = 1 + clientFields.filter((f) => !PER_BUYER_KEYS.has(f.key)).length;
   const searchFilled = searchFields.filter((f) => (fval(f.key) || "").trim()).length;
   const dealClientFields = clientFields.filter((f) => !PER_BUYER_KEYS.has(f.key));
+  // Onboarding is "done enough" to hand off to Offer Prep once the buyer is
+  // identified (name + a way to reach them) and the search / subject is captured.
+  // The signing docs (Agency/DORTS/PNC) are tracked below but do NOT gate the
+  // handoff — they get signed alongside offer prep. When this is true the panel
+  // defaults COLLAPSED so Offer Prep is the focus; clicking the header reopens it
+  // (manualOpen always wins).
+  const hasBuyerContact = buyers.some((b) => b.email.trim() || b.phone.trim());
+  const infoComplete = namedBuyers > 0 && hasBuyerContact
+    && searchFields.length > 0 && searchFilled >= Math.ceil(searchFields.length / 2);
+  const open = manualOpen !== null ? manualOpen : ((currentStage ?? 0) === 0 && !infoComplete);
 
   const STATE: Record<string, [string, string, string]> = {
     signed: ["done", "Signed", "signed"], verified: ["done", "Verified", "signed"],
@@ -215,9 +233,9 @@ export default function OnboardingPanel({
                       {buyers.length > 1 && <span onClick={() => removeBuyer(i)} style={{ fontSize: 12, color: "#b7c0d0", cursor: "pointer" }}>✕ remove</span>}
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1.3fr 1fr", gap: 9 }}>
-                      <label><span style={lblS}>Name</span><input value={b.name} placeholder="Full legal name" onChange={(e) => setBuyerField(i, "name", e.target.value)} onBlur={() => persistBuyers(buyers)} style={inS} /></label>
-                      <label><span style={lblS}>Email</span><input value={b.email} placeholder="email" onChange={(e) => setBuyerField(i, "email", e.target.value)} onBlur={() => persistBuyers(buyers)} style={inS} /></label>
-                      <label><span style={lblS}>Phone</span><input value={b.phone} placeholder="phone" onChange={(e) => setBuyerField(i, "phone", e.target.value)} onBlur={() => persistBuyers(buyers)} style={inS} /></label>
+                      <label><span style={lblS}>Name</span><input value={b.name} placeholder="Full legal name" onChange={(e) => setBuyerField(i, "name", e.target.value)} onBlur={persistIfDirty} style={inS} /></label>
+                      <label><span style={lblS}>Email</span><input value={b.email} placeholder="email" onChange={(e) => setBuyerField(i, "email", e.target.value)} onBlur={persistIfDirty} style={inS} /></label>
+                      <label><span style={lblS}>Phone</span><input value={b.phone} placeholder="phone" onChange={(e) => setBuyerField(i, "phone", e.target.value)} onBlur={persistIfDirty} style={inS} /></label>
                     </div>
                   </div>
                 ))}

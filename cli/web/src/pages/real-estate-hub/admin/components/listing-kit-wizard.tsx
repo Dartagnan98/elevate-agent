@@ -6,6 +6,7 @@
 // must never advertise success through routes that do not exist.
 import { useState, useCallback } from "react";
 import { api } from "../../../../lib/api";
+import { useIsMobile } from "../../../../hooks/useIsMobile";
 
 type AnyObj = Record<string, any>;
 
@@ -69,6 +70,10 @@ export default function ListingKitWizard({
   dealId: string; extra: AnyObj; address?: string; sellerName?: string;
   currentStage?: number; onUpdate?: () => void;
 }) {
+  const isMobile = useIsMobile();
+  // Fixed multi-column field grids collapse to one column on a phone (CSS media
+  // queries can't reach these inline styles).
+  const cols = (n: number) => (isMobile ? "1fr" : Array(n).fill("1fr").join(" "));
   const [step, setStep] = useState(1);
   const [umbrella, setUmbrella] = useState<string>((extra.listingUmbrella as string) || "residential");
   const accepted = (currentStage ?? 0) >= 5; // listing live / accepted offer -> minimize
@@ -168,9 +173,10 @@ export default function ListingKitWizard({
           <div key={label} style={{ display: "flex", alignItems: "center", flex: i < STEPS.length - 1 ? 1 : "0 0 auto" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
               <div style={{ width: 30, height: 30, borderRadius: 999, background: done ? GREEN : active ? ORANGE : "#e7eaef", color: done || active ? "#fff" : "#9aa0a6", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, boxShadow: active ? `0 0 0 4px ${ORANGE}22` : "none", flexShrink: 0 }}>{done ? "✓" : n}</div>
-              <span style={{ fontWeight: 700, fontSize: 14, color: done ? GREEN : active ? INK : "#9aa0a6", whiteSpace: "nowrap" }}>{label}</span>
+              {/* Step names crowd off a phone; show the label on the active step only. */}
+              {(!isMobile || active) && <span style={{ fontWeight: 700, fontSize: 14, color: done ? GREEN : active ? INK : "#9aa0a6", whiteSpace: "nowrap" }}>{label}</span>}
             </div>
-            {i < STEPS.length - 1 && <div style={{ flex: 1, height: 2, background: n < step ? GREEN : "#e7eaef", margin: "0 12px" }} />}
+            {i < STEPS.length - 1 && <div style={{ flex: 1, height: 2, background: n < step ? GREEN : "#e7eaef", margin: isMobile ? "0 5px" : "0 12px" }} />}
           </div>
         );
       })}
@@ -199,13 +205,13 @@ export default function ListingKitWizard({
           {recordsPulled ? "✓ Property records are on the deal" : "Property records need manual entry"}
         </div>
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 10 }}>
             <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>PID</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("pid") || "—"}</div></div>
             <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>LOT SIZE</span><FromTag t="BC ASSESSMENT" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("lotSize") || "—"}</div></div>
             <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>ASSESSMENT</span><FromTag t="BC ASSESSMENT" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("assessmentValue") || "—"}</div></div>
           </div>
           <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>LEGAL DESCRIPTION</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("legalDescription") || fv("legal") || "—"}</div></div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: cols(2), gap: 10 }}>
             <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>ZONING</span><FromTag t="CITYMAP" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("zoning") || "—"}</div></div>
             <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>REGISTERED OWNER</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("registeredOwner") || sellerName || "—"}</div></div>
           </div>
@@ -220,12 +226,12 @@ export default function ListingKitWizard({
       <div style={panel}>
         <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Listing terms</div>
         <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 16px" }}>Seller names pull from the card; PID &amp; legal from the title. Just the listing numbers here — everything saves as you type.</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
           {cell("LIST PRICE", "listPrice", "$539,900")}
           {cell("LISTING COMMISSION", "listingCommission", "3.5% / 1.5%")}
           {cell("BUYER AGENCY COMP", "buyerAgencyComp", "3.255% / 1.1625%")}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14 }}>
           {cell("LISTING DATE", "listingDate", "Jul 2")}
           {cell("EXPIRY DATE", "expiryDate", "Oct 2")}
           {cell("DESIGNATED AGENCY", "designatedAgency", "Skyleigh McCallum")}

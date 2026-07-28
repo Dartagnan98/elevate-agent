@@ -45,6 +45,12 @@ Result shape:
 
 **`previewPdf` (approval-gated documents):** when the human prompt asks the user to approve a PDF you drafted (release form, MLC, CPS, amendment — anything that goes to DigiSign on approval), set `human_prompt.previewPdf` to the absolute local path of the **clean** PDF (the one that would actually be sent, not a placement-only overlay). The dashboard renders a "Preview PDF ↗" button on the waiting card from this field so the user can read the exact document before Approve & re-run. Must be a local `.pdf` that exists (not a `gdrive://` URI). Still attach the same file under `artifacts` for the record.
 
+**A pure approval is NOT a required field (hard rule).** When the ask is just "approve / confirm / send this? yes-no", leave `requiredFields` EMPTY and rely on `previewPdf` + `message`. The card then renders a one-click **Approve & re-run** (Dismiss = no). NEVER put an acknowledgement like `"approve DigiSign send"` or `"Approve sending X for signature? yes/no"` into `requiredFields` — that turns the card into a text box with a disabled Submit and NO Approve button, so Skyleigh gets stranded (this stranded the 125 Corry price amendment on 2026-07-23). Use `requiredFields` ONLY for data that must be TYPED: a price, an email, a date, a General-vs-Trust choice, etc.
+
+**Deal `extra` / toggle writes are per-field MERGES only.** Never write `extra_toggles_json` wholesale and never read-modify-write the whole object (it races concurrent writers). Set/clear one key at a time via `set_fields` / the toggle endpoint; delete a key by nulling that one key. A skill that "cleans up" by reconstructing `extra` from scratch will wipe every other key (this dropped a deal card from ~150 keys to 4 on 2026-07-23).
+
+**Liveness before irreversible side effects (long/retryable runs).** A run whose `admin_action_runs` row has been marked terminal (`failed`/`cancelled`/`superseded`) by a human or by selfheal MUST NOT keep sending/writing. Before any external send, envelope create/send, or card write, re-read your own row; if it is not `running`, stop with no result. Marking a row terminal is how a human aborts a wedged run — a zombie that ignores it double-sends.
+
 For unsafe or incomplete work, use `waiting_human`; do not mark checklist cells complete. For external sends, signatures, document approvals, price/listing copy approvals, and final photo approval, create a human prompt first.
 
 ## Write mechanics — payload and callback rules

@@ -9,6 +9,7 @@ the dashboard and skills can consume.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from copy import deepcopy
 from typing import Any, Mapping
 
@@ -35,6 +36,37 @@ CANADIAN_PROVINCE_LABELS = {
 
 
 _WORKFLOW_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+# Buyer "Client Onboarding" checklist item for the written Buyer's Agency
+# Agreement (BAEC). Shipped on by default; installs that do not use a written
+# buyer's agency agreement drop it with
+# ``admin.buyer_agency_agreement_required: false`` in ~/.elevate/config.yaml.
+# Kept as a named constant because data.dispatch also maps this id to the BAEC
+# form.
+BUYER_AGENCY_CHECKLIST_ID = "buyer-agency"
+
+
+def _buyer_agency_agreement_required() -> bool:
+    """Resolve ``admin.buyer_agency_agreement_required`` on every call.
+
+    Read at call time rather than at import so flipping the key in
+    config.yaml takes effect without reloading the process (the package
+    tables below are built once, at import). Falls back to the shipped
+    default (required) if config cannot be read.
+    """
+    try:
+        from elevate_cli.config import admin_buyer_agency_agreement_required
+
+        return admin_buyer_agency_agreement_required()
+    except Exception:
+        return True
+
+
+def _optional_checklist_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop package checklist items this install has switched off."""
+    if _buyer_agency_agreement_required():
+        return list(items)
+    return [item for item in items if item.get("id") != BUYER_AGENCY_CHECKLIST_ID]
 
 
 def _workflow_key(label: str) -> str:
@@ -293,7 +325,7 @@ _BC: dict[str, Any] = {
     },
     "buyer": {
         "stages": [
-            _stage("Client Onboarding", "Agency, disclosures + pre-approval", [("buyer-agency", "Buyer's Agency Agreement signed (BAEC)"), ("dorts-pnc", "DORTS + PNC signed"), ("fintrac-id", "FINTRAC ID collected"), ("pre-approval", "Pre-approval confirmed")], fields=[("preApprovalAmount", "Pre-approval amount")]),
+            _stage("Client Onboarding", "Agency, disclosures + pre-approval", [(BUYER_AGENCY_CHECKLIST_ID, "Buyer's Agency Agreement signed (BAEC)"), ("dorts-pnc", "DORTS + PNC signed"), ("fintrac-id", "FINTRAC ID collected"), ("pre-approval", "Pre-approval confirmed")], fields=[("preApprovalAmount", "Pre-approval amount")]),
             _stage("Offer Prep", "Decided to write - comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("doc-list", "Doc list built"), ("cps-drafted", "CPS drafted")], docs=[("cps_draft", "CPS draft")]),
             _stage("Accepted Offer", "Accepted - subjects pending", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked"), ("deposit-due", "Deposit due date tracked")], fields=[("subjectRemovalDate", "Subject removal date"), ("depositDueDate", "Deposit due date")], docs=[("cps_signed", "Fully-signed CPS")]),
             _stage("Condition Removal", "Subjects off + firm", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("lawyer-info", "Lawyer / conveyancer info captured"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")], docs=[("subject_removal_form", "Fully-signed condition removal")]),
@@ -436,6 +468,30 @@ def package_key_from_deal(deal: Mapping[str, Any]) -> str:
     )
 
 
+# Global stage ceiling, mirroring data.deals._validate_stage (0-10).
+_GLOBAL_MAX_STAGE = 10
+
+
+def last_stage_for(package_key: Any, side: str) -> int:
+    """Highest valid stage index for a side within a package.
+
+    Side-aware upper bound so callers can reject out-of-range stage moves
+    (a buyer flow has fewer stages than a listing flow). Falls back to the
+    listing side for any unexpected side value.
+    """
+    package = _package_for_key(_slug(package_key) or DEFAULT_PACKAGE_KEY)
+    side_key = side if side in {"listing", "buyer"} else "listing"
+    stages = (package.get(side_key) or {}).get("stages") or []
+    if not stages:
+        # An unavailable / not-yet-configured province package declares no
+        # stages at all (see _unavailable_package). That means "no side-specific
+        # bound is known", NOT "only stage 0 is legal" — treating it as 0 would
+        # reject every stage move on a deal that has no workflow pack yet.
+        # Fall back to the global 0-10 range _validate_stage already enforces.
+        return _GLOBAL_MAX_STAGE
+    return max(len(stages) - 1, 0)
+
+
 def resolve_admin_deal_flow(
     *,
     package_key: str,
@@ -476,7 +532,7 @@ def resolve_admin_deal_flow(
         stage_index,
         condition_docs=condition_docs,
     )
-    checklist = [*current["checklist"], *additions]
+    checklist = [*_optional_checklist_items(current["checklist"]), *additions]
     next_stage = stage_index + 1 if stage_index < last_stage else None
     next_stage_name = stages[next_stage]["title"] if next_stage is not None else None
     return {
@@ -504,6 +560,36 @@ def resolve_admin_deal_flow(
         "backgroundAutomations": package.get("backgroundAutomations", []),
         "localOverrides": package["localOverrides"],
     }
+
+
+# A stage-entry run that dies mid-flight (e.g. the LLM gateway is out of quota)
+# stays "queued"/"running" forever and would otherwise block the phase gate
+# permanently. Age those machine-state runs out after this many seconds so a dead
+# automation never wedges the pipeline. Human/external waits are intentional gates
+# and are never aged out.
+_STALE_RUN_SECONDS = 30 * 60
+
+
+def _run_is_stale(run: Mapping[str, Any]) -> bool:
+    ts = run.get("updatedAt") or run.get("createdAt")
+    if not ts:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() > _STALE_RUN_SECONDS
+
+
+def _run_is_blocking(run: Mapping[str, Any]) -> bool:
+    status = run.get("status")
+    if status in {"waiting_human", "waiting_external"}:
+        return True
+    if status in {"queued", "running"}:
+        return not _run_is_stale(run)
+    return False
 
 
 def resolve_deal_phase(
@@ -556,8 +642,8 @@ def resolve_deal_phase(
     ]
     blocking_runs = [
         _run_brief(run) for run in (prior_runs or [])
-        if run.get("status") in {"queued", "running", "waiting_human", "waiting_external"}
-        and _run_stage(run) == flow["stage"]
+        if _run_stage(run) == flow["stage"]
+        and _run_is_blocking(run)
     ]
     can_advance = (
         flow["nextStage"] is not None

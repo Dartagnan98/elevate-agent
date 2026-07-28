@@ -265,7 +265,7 @@ function ThreadDrawer({
         type="button"
         aria-label="Close thread"
         onClick={requestClose}
-        className="absolute inset-0 z-0 bg-background/80"
+        className="absolute inset-0 z-0 bg-black/60"
       />
       <div
         role="dialog"

@@ -67,6 +67,7 @@ export default function DocumentsPanel({ dealId, missing }: { dealId: string; ad
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: folderUrl ? GREEN : "#cdd5e2" }} />
           {folderUrl ? "Synced to Drive" : "No Drive folder yet"}
           {folderUrl && <a href={folderUrl} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: BLUE, fontWeight: 700, textDecoration: "none", marginLeft: 6 }}>Open folder ↗</a>}
+          <span aria-hidden="true" style={{ marginLeft: 4, fontSize: 12, color: "#9aa4b8", transform: open ? "none" : "rotate(-90deg)", transition: "transform 0.15s" }}>▾</span>
         </div>
       </header>
 

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Clock, AlertTriangle } from "../icons";
 import { DeskBar } from "./desk-bar";
 
@@ -39,6 +40,8 @@ export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: str
   const [data, setData] = useState<CDResp | null>(null);
   const [open, setOpen] = useState(false);
   const [touched, setTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [confirmResolve, setConfirmResolve] = useState(false);
 
   const load = useCallback(() => {
     fetchJSON<CDResp>("/api/admin/critical-dates")
@@ -61,45 +64,104 @@ export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: str
       ? "All clear — no upcoming deadlines"
       : `${c.overdue} overdue · ${c.today} due today · ${c.thisWeek} this week`;
 
-  const items = data?.items ?? [];
+  const items = useMemo(() => data?.items ?? [], [data]);
+
+  // Resolve-all-overdue: completion/possession/expiry have no per-date "done"
+  // flag, so the only way they leave this section is the deal leaving
+  // status='active'. For fully-closed properties that's the correct action —
+  // mark each overdue deal CLOSED and all its date rows drop off at once.
+  // Destructive + irreversible from this bar, so it goes through the shared
+  // <ConfirmDialog> rather than a blocking browser dialog.
+  const overdueItems = useMemo(() => items.filter((i) => i.bucket === "overdue"), [items]);
+  const overdueAddrs = useMemo(
+    () => Array.from(new Set(overdueItems.map((i) => i.address))),
+    [overdueItems],
+  );
+
+  const askResolveAllOverdue = useCallback(() => {
+    if (!overdueAddrs.length || busy) return;
+    setConfirmResolve(true);
+  }, [overdueAddrs, busy]);
+
+  const resolveAllOverdue = useCallback(async () => {
+    if (!overdueAddrs.length || busy) return;
+    setBusy(true);
+    try {
+      await fetchJSON("/api/admin/critical-dates/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bucket: "overdue" }),
+      });
+    } catch {
+      /* reload reflects the real state either way */
+    }
+    setBusy(false);
+    setConfirmResolve(false);
+    load();
+  }, [overdueAddrs, busy, load]);
 
   return (
-    <DeskBar
-      tone={alert ? "alert" : "neutral"}
-      leftIcon={alert ? <AlertTriangle /> : <Clock />}
-      label="Critical dates"
-      summary={summary}
-      expanded={open}
-      onToggle={() => { setTouched(true); setOpen((o) => !o); }}
-    >
-      {total === 0 ? (
-        <div className="dsk-empty">No deadlines in the next 14 days.</div>
-      ) : (
-        BUCKETS.map(([key, title]) => {
-          const rows = items.filter((i) => i.bucket === key);
-          if (!rows.length) return null;
-          return (
-            <div key={key} className="dsk-group">
-              <div className="dsk-group-head">
-                {title} <span className="dsk-group-n">{rows.length}</span>
-              </div>
-              {rows.map((i, idx) => (
-                <div key={`${i.dealId}-${i.kind}-${idx}`} className="dsk-row">
-                  <span className="dsk-date">{fmtDate(i.date)}</span>
-                  <span className={`dsk-relpill ${i.bucket}`}>{i.rel}</span>
-                  <span className="dsk-row-main">
-                    <span className="dsk-row-addr" title={i.address}>{i.address}</span>
-                    <span className="dsk-row-sub">{i.side} · {i.label}</span>
-                  </span>
-                  <button type="button" className="dsk-row-btn" onClick={() => onOpenDeal(i.dealId)}>
-                    {i.bucket === "overdue" || i.bucket === "today" ? "Resolve" : "View"}
-                  </button>
+    <>
+      <DeskBar
+        tone={alert ? "alert" : "neutral"}
+        leftIcon={alert ? <AlertTriangle /> : <Clock />}
+        label="Critical dates"
+        summary={summary}
+        expanded={open}
+        onToggle={() => { setTouched(true); setOpen((o) => !o); }}
+      >
+        {total === 0 ? (
+          <div className="dsk-empty">No deadlines in the next 14 days.</div>
+        ) : (
+          BUCKETS.map(([key, title]) => {
+            const rows = items.filter((i) => i.bucket === key);
+            if (!rows.length) return null;
+            return (
+              <div key={key} className="dsk-group">
+                <div className="dsk-group-head">
+                  {title} <span className="dsk-group-n">{rows.length}</span>
+                  {key === "overdue" && (
+                    <button
+                      type="button"
+                      className="dsk-resolve-all"
+                      disabled={busy}
+                      onClick={askResolveAllOverdue}
+                    >
+                      {busy ? "Resolving…" : "Resolve all overdue"}
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
-          );
-        })
-      )}
-    </DeskBar>
+                {rows.map((i, idx) => (
+                  <div key={`${i.dealId}-${i.kind}-${idx}`} className="dsk-row">
+                    <span className="dsk-date">{fmtDate(i.date)}</span>
+                    <span className={`dsk-relpill ${i.bucket}`}>{i.rel}</span>
+                    <span className="dsk-row-main">
+                      <span className="dsk-row-addr" title={i.address}>{i.address}</span>
+                      <span className="dsk-row-sub">{i.side} · {i.label}</span>
+                    </span>
+                    <button type="button" className="dsk-row-btn" onClick={() => onOpenDeal(i.dealId)}>
+                      {i.bucket === "overdue" || i.bucket === "today" ? "Resolve" : "View"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            );
+          })
+        )}
+      </DeskBar>
+      <ConfirmDialog
+        open={confirmResolve}
+        title={`Resolve all ${overdueItems.length} overdue item${overdueItems.length > 1 ? "s" : ""}?`}
+        description={
+          `This marks ${overdueAddrs.length} deal${overdueAddrs.length > 1 ? "s" : ""} CLOSED and clears all their dates: ` +
+          `${overdueAddrs.join(", ")}. They come off the active board.`
+        }
+        confirmLabel="Resolve all"
+        destructive
+        loading={busy}
+        onCancel={() => setConfirmResolve(false)}
+        onConfirm={() => { void resolveAllOverdue(); }}
+      />
+    </>
   );
 }
