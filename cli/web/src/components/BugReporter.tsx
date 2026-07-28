@@ -206,7 +206,11 @@ export function BugReporter() {
         title="Report a bug"
         aria-label="Report a bug"
         className={cn(
-          "fixed right-3 top-2 z-[45] hidden items-center gap-2 rounded-full sm:flex",
+          // Anchored bottom-right ABOVE the admin "Ask the coach" FAB (fixed
+          // bottom-6 right-6, ~58px tall band). Must not sit in the top band:
+          // the shared page header's action slot (Refresh / clear-search) and
+          // the leads masthead (Add New / Connect source) live at y 8-52.
+          "fixed bottom-20 right-4 z-[45] hidden items-center gap-2 rounded-full sm:flex",
           "border border-[#5E8AD0]/50 bg-[#5E8AD0]/10 px-3 py-1.5 backdrop-blur-sm",
           "text-xs font-medium text-[#5E8AD0] shadow-sm transition-colors",
           "hover:border-[#5E8AD0] hover:bg-[#5E8AD0]/20",
@@ -227,7 +231,7 @@ export function BugReporter() {
         onClick={openReporter}
         title="Report a bug"
         aria-label="Report a bug"
-        className="fixed right-2 top-2.5 z-[45] flex h-9 w-9 items-center justify-center rounded-full border border-[#5E8AD0]/50 bg-[#5E8AD0]/10 text-[#5E8AD0] backdrop-blur-sm shadow-sm sm:hidden"
+        className="fixed bottom-20 right-3 z-[45] flex h-9 w-9 items-center justify-center rounded-full border border-[#5E8AD0]/50 bg-[#5E8AD0]/10 text-[#5E8AD0] backdrop-blur-sm shadow-sm sm:hidden"
       >
         {capturing ? (
           <Loader2 className="h-5 w-5 animate-spin" />
