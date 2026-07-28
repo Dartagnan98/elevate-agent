@@ -39,9 +39,10 @@ import {
   SourcesHealthPill,
   type LeadsTab,
 } from "./lead-shell";
-import { ProfileDrawer } from "./profile-drawer";
-import { ProfilesList } from "./profiles-list";
+import { CrmContactCard } from "./crm-contact-card";
+import { LeadsTable } from "./leads-table";
 import { SentView } from "./sent-view";
+import { NotSentView } from "./not-sent-view";
 import { TemplatesView, type TemplateMutations } from "./templates-view";
 
 export type { TemplateMutations } from "./templates-view";
@@ -78,6 +79,12 @@ export interface LeadsBoardProps {
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
+  onBulkUpdate?: (
+    profiles: LeadsProfile[],
+    action: "tags" | "segments" | "pipeline",
+    value: unknown,
+    mode?: "add" | "replace" | "remove",
+  ) => Promise<{ updated: number; failed: Array<{ contactId: string; error: string }> }>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
   onSentRefresh?: (includePending: boolean) => Promise<void>;
@@ -85,12 +92,45 @@ export interface LeadsBoardProps {
   onToggleDirection?: (dir: "inbound" | "outbound", value: boolean) => void | Promise<void>;
 }
 
+function MlSection({ title, items, empty }: { title: string; items: any[]; empty: string }) {
+  const list = items || [];
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        {title} <span style={{ opacity: 0.6 }}>({list.length})</span>
+      </div>
+      {list.length === 0 && <div style={{ opacity: 0.6, fontSize: 13 }}>{empty}</div>}
+      {list.map((e: any, i: number) => (
+        <div key={i} style={{ padding: "6px 0", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: 13 }}>
+          <span style={{ fontWeight: 600 }}>{e.name}</span>{" "}
+          <span style={{ opacity: 0.78 }}>&ldquo;{e.last_text}&rdquo;</span>{" "}
+          <span style={{ opacity: 0.5 }}>· {e.last_at}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function LeadsBoard(props: LeadsBoardProps) {
-  const [tab, setTab] = useState<LeadsTab>("action");
+  const [tab, setTab] = useState<LeadsTab>("leads");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [activeProfile, setActiveProfile] = useState<LeadsProfile | null>(null);
   const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
   const [profileStatusError, setProfileStatusError] = useState<string | null>(null);
+  const [loopOpen, setLoopOpen] = useState(false);
+  const [loop, setLoop] = useState<any>(null);
+  const [loopLoading, setLoopLoading] = useState(false);
+  const openLoop = () => {
+    setLoopOpen(true);
+    setLoopLoading(true);
+    fetch("/api/leads/message-loop?days=2")
+      .then((r) => r.json())
+      .then((d) => setLoop(d))
+      .catch(() =>
+        setLoop({ ok: false, waiting_on_you: [], waiting_on_them: [], full_circle: [], counts: {} })
+      )
+      .finally(() => setLoopLoading(false));
+  };
 
   const handleStatusChange = async (profile: LeadsProfile, value: string) => {
     setProfileStatusError(null);
@@ -117,7 +157,9 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const pipeline = props.pipeline ?? DEFAULT_PIPELINE;
   const activity = props.activity ?? DEFAULT_ACTIVITY;
   const profiles = props.profiles ?? DEFAULT_PROFILES;
-  const profilesWithFavoriteOverrides = profiles;
+  const profilesWithOverrides = profiles.map((p) =>
+    statusOverrides[p.id] ? { ...p, status: statusOverrides[p.id] } : p,
+  );
 
   // Open the profile drawer for a hot-lead queue entry. Prefer a real profile
   // match (carries full thread context); otherwise synthesize a minimal one
@@ -182,6 +224,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
           <SourcesHealthPill channels={channels} schedules={schedules} available={available} />
           <button className="ab-btn ghost" type="button" onClick={props.onRefresh}><Refresh /><span>Refresh</span></button>
           <button className="ab-btn ghost" type="button" onClick={props.onReRunOnboarding}><Sparkles /><span>Re-run onboarding</span></button>
+          <button className="ab-btn ghost" type="button" onClick={openLoop}><Refresh /><span>Message Loop</span></button>
           <Link className="ab-btn primary" to="/config#connectors"><Plus /><span>New lead</span></Link>
         </div>
       </header>
@@ -190,19 +233,21 @@ export function LeadsBoard(props: LeadsBoardProps) {
         <div className="lb-tabs-wrap">
           <LeadsTabs tab={tab} onChange={setTab} />
           <ActivityTicker activity={activity} />
-          <div className="lb-source-filters">
-            {sources.map(s => (
-              <button
-                key={s.id}
-                type="button"
-                className={"lb-source-chip" + (sourceFilter === s.id ? " active" : "")}
-                onClick={() => setSourceFilter(s.id)}
-              >
-                <span>{s.label}</span>
-                <span className="lb-source-chip-count mono">{s.count}</span>
-              </button>
-            ))}
-          </div>
+          {tab !== "leads" && (
+            <div className="lb-source-filters">
+              {sources.map(s => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={"lb-source-chip" + (sourceFilter === s.id ? " active" : "")}
+                  onClick={() => setSourceFilter(s.id)}
+                >
+                  <span>{s.label}</span>
+                  <span className="lb-source-chip-count mono">{s.count}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {profileStatusError && (
@@ -255,14 +300,22 @@ export function LeadsBoard(props: LeadsBoardProps) {
           </>
         )}
 
-        {tab === "profiles" && (
-          <ProfilesList
-            profiles={profilesWithFavoriteOverrides}
-            sourceFilter={sourceFilter}
+        {tab === "leads" && (
+          <LeadsTable
+            profiles={profilesWithOverrides}
+            drafts={drafts}
+            kpis={{
+              drafts: k.drafts,
+              hot: k.hot,
+              avgFirstTouch: k.avgFirstTouch,
+              replyRate: k.replyRate,
+              newLeads7d: k.newLeads7d,
+            }}
             onOpen={setActiveProfile}
-            statusOverrides={statusOverrides}
-            onStatusChange={handleStatusChange}
+            onDraftAction={props.onDraftAction}
+            onDraftActionComplete={props.onDraftActionComplete}
             onFavoriteChange={props.onProfileFavoriteChange}
+            onBulkUpdate={props.onBulkUpdate}
           />
         )}
 
@@ -273,14 +326,43 @@ export function LeadsBoard(props: LeadsBoardProps) {
         {tab === "sent" && (
           <SentView messages={sent} onRefresh={props.onSentRefresh} />
         )}
+        {tab === "didnt-send" && <NotSentView />}
       </div>
 
       {activeProfile && (
-        <ProfileDrawer
+        <CrmContactCard
           profile={{ ...activeProfile, status: activeProfileStatus ?? activeProfile.status }}
           onClose={() => setActiveProfile(null)}
+          onDeleted={() => { setActiveProfile(null); props.onRefresh?.(); }}
           onStatusChange={handleStatusChange}
         />
+      )}
+      {loopOpen && (
+        <div
+          onClick={() => setLoopOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 16px" }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "var(--surface, #1b1b1f)", color: "var(--text, #e8e8ea)", maxWidth: 640, width: "100%", maxHeight: "80vh", overflowY: "auto", borderRadius: 12, padding: "20px 22px", boxShadow: "0 12px 48px rgba(0,0,0,0.5)" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <strong style={{ fontSize: 16 }}>📬 Message Loop</strong>
+              <button className="ab-btn ghost" type="button" onClick={() => setLoopOpen(false)}>Close</button>
+            </div>
+            {loopLoading && <div style={{ opacity: 0.7 }}>Checking your messages…</div>}
+            {!loopLoading && loop && (
+              <>
+                <div style={{ opacity: 0.8, marginBottom: 14, fontSize: 13 }}>
+                  🔴 {loop.counts?.waiting_on_you ?? 0} waiting on you · 🟡 {loop.counts?.waiting_on_them ?? 0} hanging · ✅ {loop.counts?.full_circle ?? 0} closed
+                </div>
+                <MlSection title="🔴 Waiting on you" items={loop.waiting_on_you} empty="You're all caught up." />
+                <MlSection title="🟡 Left hanging (you sent, no reply yet)" items={loop.waiting_on_them} empty="Nothing hanging." />
+                <MlSection title="✅ Full circle" items={loop.full_circle} empty="—" />
+              </>
+            )}
+          </div>
+        </div>
       )}
     </main>
   );

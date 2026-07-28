@@ -503,7 +503,7 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert {
         "real-estate-admin/pre-cma-dashboard-setup",
         "real-estate-admin/lofty-crm-client-contacts",
-        "real-estate-admin/cma-generator",
+        "real-estate-admin/cma",
         "real-estate-admin/mlc",
         "real-estate-admin/deal-matcher",
         "real-estate-admin/skyslope-sync",
@@ -522,6 +522,8 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert created_names["Pre-CMA: Verify CRM contact"]["toStage"] == 0
     # CMA generates at stage 1, MLC intake/documents land at Listing Intake (stage 2).
     assert created_names["CMA: Generate evaluation"]["toStage"] == 1
+    assert created_names["CMA: Generate evaluation"]["skill"] == "real-estate-admin/cma"
+    assert created_names["CMA: Generate evaluation"]["skillArgs"] == {"mode": "seller_evaluation"}
     assert created_names["Listing Intake: Collect MLC info"]["skillArgs"] == {"mode": "intake"}
     assert created_names["Listing Intake: Collect MLC info"]["toStage"] == 2
     assert created_names["Listing Intake: Prepare MLC documents"]["skillArgs"] == {"mode": "documents"}
@@ -635,7 +637,7 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
     done = json.loads(_admin_deal_handler({
         "action": "complete_run",
         "deal_id": did,
-        "skill": "cma-generator",
+        "skill": "real-estate-admin/cma",
         "checklist_updates": [
             {"id": "cma_pdf_ready", "completed": True},
             {"id": "pricing_story_approved", "completed": True},
@@ -650,7 +652,7 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
 
     with connect() as conn:
         runs = list_action_runs(conn, deal_id=did)
-    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma-generator")
+    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma")
     assert cma["status"] in {"succeeded", "completed"}
 
 

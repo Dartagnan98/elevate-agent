@@ -1,0 +1,347 @@
+/* CRM contact card — redesigned single-contact board.
+   Every selector is scoped under `.crmcard` so nothing collides with the
+   existing app CSS. Brand tokens live on the `.crmcard` root; light is the
+   default, dark applies under the app's [data-app-theme="dark"|"medium"]
+   root attribute (and as a prefers-color-scheme fallback). */
+
+.crmcard {
+  --navy:#182848; --navy-2:#22355c; --navy-3:#33477a;
+  --terracotta:#C46340; --terracotta-2:#b3542f;
+  --blue:#5E8AD0; --blue-2:#4a76bc; --blue-soft:rgba(94,138,208,.12);
+  --ink:#1c2438; --sub:#5c6479; --faint:#8a90a3;
+  --paper:#eef1f6; --card:#ffffff; --line:#e3e6ee; --line-2:#eef0f5;
+  --ok:#4f7fc4; --ok-bg:rgba(94,138,208,.14);
+  --warn:#c98a2e; --warn-bg:rgba(201,138,46,.14);
+  --shadow:0 1px 2px rgba(24,40,72,.05), 0 6px 20px rgba(24,40,72,.06);
+  --shadow-lg:0 10px 40px rgba(24,40,72,.16);
+  --cc-font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --cc-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --cc-r:12px;
+  color:var(--ink);
+  font-family:var(--cc-font);
+  line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* Dark tokens: app dark/medium surfaces + OS fallback. */
+:root[data-app-theme="dark"] .crmcard,
+html[data-app-theme="dark"] .crmcard {
+  --navy:#cdd8ef; --navy-2:#b3c2e0; --navy-3:#93a6cf;
+  --terracotta:#e08a63; --terracotta-2:#c46340; --blue:#7ba4e2; --blue-2:#5E8AD0; --blue-soft:rgba(123,164,226,.15);
+  --ink:#e7eaf2; --sub:#a2a9bc; --faint:#767d92;
+  --paper:#0e121b; --card:#161c29; --line:#28303f; --line-2:rgba(40,48,63,0);
+  --ok:#7ba4e2; --ok-bg:rgba(123,164,226,.16); --warn:#e0a94e; --warn-bg:rgba(224,169,78,.15);
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);
+  --shadow-lg:0 14px 48px rgba(0,0,0,.5);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-app-theme]) .crmcard {
+    --navy:#cdd8ef; --navy-2:#b3c2e0; --navy-3:#93a6cf;
+    --terracotta:#e08a63; --terracotta-2:#c46340; --blue:#7ba4e2; --blue-2:#5E8AD0; --blue-soft:rgba(123,164,226,.15);
+    --ink:#e7eaf2; --sub:#a2a9bc; --faint:#767d92;
+    --paper:#0e121b; --card:#161c29; --line:#28303f; --line-2:rgba(40,48,63,0);
+    --ok:#7ba4e2; --ok-bg:rgba(123,164,226,.16); --warn:#e0a94e; --warn-bg:rgba(224,169,78,.15);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);
+    --shadow-lg:0 14px 48px rgba(0,0,0,.5);
+  }
+}
+
+.crmcard *{box-sizing:border-box;}
+.crmcard .mono{font-family:var(--cc-mono);}
+
+/* overlay shell */
+.crmcard-backdrop{position:fixed;inset:0;background:rgba(24,40,72,.42);z-index:1000;display:flex;justify-content:center;align-items:flex-start;overflow-y:auto;padding:24px 16px;}
+/* Light framed panel so the masthead logo + exterior buttons read against it. */
+.crmcard-shellwrap{position:relative;width:100%;max-width:1240px;margin:0 auto;background:var(--paper);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow-lg);padding:22px 22px 24px;}
+.crmcard-close-x{position:absolute;top:14px;right:16px;border:0;background:var(--card);color:var(--faint);font-size:20px;line-height:1;width:34px;height:34px;border-radius:9px;box-shadow:var(--shadow);cursor:pointer;z-index:2;}
+.crmcard-close-x:hover{color:var(--terracotta);}
+
+.crmcard .masthead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px;padding-right:150px;min-height:34px;}
+.crmcard .brandmark{width:34px;height:34px;border-radius:9px;background:var(--navy);display:grid;place-items:center;color:var(--card);font-weight:800;font-size:15px;flex:none;}
+.crmcard .masthead h1{font-size:19px;margin:0;letter-spacing:-.01em;color:var(--navy);font-weight:750;}
+.crmcard .masthead .sub{font-size:12.5px;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .switch{margin-left:auto;display:inline-flex;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px;box-shadow:var(--shadow);}
+.crmcard .switch button{border:0;background:transparent;color:var(--sub);font:inherit;font-size:13px;font-weight:600;padding:7px 15px;border-radius:999px;cursor:pointer;transition:.15s;}
+.crmcard .switch button[aria-selected="true"]{background:var(--navy);color:var(--card);}
+
+.crmcard .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:0;overflow-x:auto;}
+.crmcard .tabs button{border:0;background:transparent;font:inherit;font-size:14px;font-weight:600;color:var(--faint);padding:11px 15px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:.15s;}
+.crmcard .tabs button.on{color:var(--navy);border-bottom-color:var(--terracotta);}
+.crmcard .tabs button:hover{color:var(--ink);}
+
+.crmcard .shell{display:grid;grid-template-columns:minmax(0,290px) minmax(0,1fr);gap:16px;align-items:start;}
+.crmcard .main{display:grid;gap:16px;min-width:0;}
+.crmcard .maingrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,268px);gap:16px;align-items:start;}
+.crmcard .identity-col{min-width:0;}
+.crmcard .tabpanel[hidden]{display:none;}
+.crmcard .col{display:grid;gap:16px;}
+
+.crmcard .crit{display:grid;grid-template-columns:1fr 1fr;gap:14px 20px;}
+.crmcard .crit .c-lab{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .crit .c-val{font-size:15px;font-weight:650;color:var(--ink);margin-top:3px;}
+.crmcard .areachips{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;}
+.crmcard .areachip{font-size:12px;font-weight:600;color:var(--blue-2);background:var(--blue-soft);padding:4px 10px;border-radius:999px;}
+
+.crmcard .uc-overlay{position:fixed;inset:0;background:rgba(24,40,72,.42);display:grid;place-items:center;z-index:1010;padding:20px;}
+.crmcard .uc-overlay[hidden]{display:none;}
+.crmcard .uc-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);max-width:360px;width:100%;padding:30px 26px;text-align:center;}
+.crmcard .uc-card .uc-ic{font-size:36px;line-height:1;}
+.crmcard .uc-card h3{margin:14px 0 6px;color:var(--navy);font-size:19px;font-weight:750;}
+.crmcard .uc-card p{margin:0 0 20px;color:var(--sub);font-size:13.5px;}
+.crmcard .uc-card button{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:10px 24px;border-radius:9px;cursor:pointer;}
+.crmcard .uc-card button:hover{filter:brightness(1.08);}
+
+.crmcard .tags{margin-top:14px;border-top:1px solid var(--line-2);padding-top:13px;}
+.crmcard .tags .lab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .taglist{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;}
+.crmcard .tag{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:650;color:var(--navy);background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;}
+.crmcard .tag .tx{border:0;background:transparent;color:var(--faint);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;}
+.crmcard .tag .tx:hover{color:var(--terracotta);}
+.crmcard .tagadd{border:1.5px dashed var(--line);background:transparent;color:var(--blue-2);font:inherit;font-size:12px;font-weight:650;border-radius:999px;padding:4px 12px;cursor:pointer;}
+.crmcard .tagadd:hover{border-color:var(--blue);}
+
+.crmcard .tp-overlay{position:fixed;inset:0;background:rgba(24,40,72,.42);display:grid;place-items:center;z-index:1010;padding:20px;}
+.crmcard .tp-overlay[hidden]{display:none;}
+.crmcard .tp-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);max-width:460px;width:100%;max-height:84vh;overflow:auto;padding:22px 24px;}
+.crmcard .tp-card h3{margin:0 0 3px;color:var(--navy);font-size:18px;font-weight:750;}
+.crmcard .tp-card .tp-sub{font-size:12.5px;color:var(--sub);margin-bottom:16px;}
+.crmcard .tp-group{margin-bottom:14px;}
+.crmcard .tp-group .g-lab{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-family:var(--cc-mono);margin-bottom:7px;}
+.crmcard .tp-opts{display:flex;gap:6px;flex-wrap:wrap;}
+.crmcard .tp-opt{border:1px solid var(--line);background:var(--paper);color:var(--ink);font:inherit;font-size:12.5px;font-weight:600;border-radius:999px;padding:5px 11px;cursor:pointer;transition:.13s;}
+.crmcard .tp-opt:hover{border-color:var(--blue);color:var(--blue-2);}
+.crmcard .tp-opt.added{background:var(--blue);color:#fff;border-color:transparent;}
+.crmcard .tp-custom{display:flex;gap:8px;margin-top:6px;border-top:1px solid var(--line-2);padding-top:15px;}
+.crmcard .tp-custom input{flex:1;border:1px solid var(--line);border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;color:var(--ink);background:var(--card);}
+.crmcard .tp-custom input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+.crmcard .tp-custom button{border:0;background:var(--blue);color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 16px;border-radius:9px;cursor:pointer;}
+.crmcard .tp-foot{display:flex;justify-content:flex-end;margin-top:16px;}
+.crmcard .tp-done{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:9px 24px;border-radius:9px;cursor:pointer;}
+.crmcard .tp-done:hover{filter:brightness(1.08);}
+
+.crmcard .card{background:var(--card);border:1px solid var(--line);border-radius:var(--cc-r);box-shadow:var(--shadow);}
+.crmcard .pad{padding:16px 17px;}
+
+.crmcard .id-top{display:flex;align-items:flex-start;gap:12px;}
+.crmcard .avatar{width:48px;height:48px;border-radius:50%;flex:none;background:linear-gradient(135deg,var(--navy),var(--navy-3));color:var(--card);display:grid;place-items:center;font-weight:750;font-size:18px;letter-spacing:.02em;}
+.crmcard .id-name{font-size:19px;font-weight:750;color:var(--navy);letter-spacing:-.01em;line-height:1.1;}
+.crmcard .badge{display:inline-block;margin-top:5px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--blue-2);background:var(--blue-soft);padding:3px 9px;border-radius:999px;font-family:var(--cc-mono);}
+.crmcard .kv{margin-top:14px;display:grid;gap:9px;}
+.crmcard .kv .lab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .selectish{margin-top:3px;display:flex;justify-content:space-between;align-items:center;border:1px solid var(--line);border-radius:9px;padding:0;font-size:13.5px;font-weight:600;color:var(--ink);background:var(--paper);}
+.crmcard .selectish select{appearance:none;-webkit-appearance:none;border:0;background:transparent;color:var(--ink);font:inherit;font-weight:600;font-size:13.5px;padding:8px 11px;width:100%;cursor:pointer;}
+.crmcard .selectish select:focus{outline:none;}
+/* Editable lead-temperature dropdown. Colored dot + tinted bg reflect the value,
+   matching the leads-list Hot/Warm badges. A caret hints it's selectable. */
+.crmcard .tempselect{position:relative;padding-left:12px;gap:8px;}
+.crmcard .tempselect .tdot{width:9px;height:9px;border-radius:50%;background:currentColor;flex:none;}
+.crmcard .tempselect select{color:currentColor;font-weight:700;padding-left:6px;padding-right:26px;}
+.crmcard .tempselect::after{content:"";position:absolute;right:12px;top:50%;width:7px;height:7px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:translateY(-70%) rotate(45deg);opacity:.6;pointer-events:none;}
+.crmcard .tempselect[data-temp="hot"]{color:#C46340;background:rgba(196,99,64,.13);border-color:rgba(196,99,64,.35);}
+.crmcard .tempselect[data-temp="warm"]{color:#c98a2e;background:rgba(201,138,46,.14);border-color:rgba(201,138,46,.35);}
+.crmcard .tempselect[data-temp="lukewarm"]{color:#cf9a52;background:rgba(207,154,82,.15);border-color:rgba(207,154,82,.35);}
+.crmcard .tempselect[data-temp="cool"]{color:#5E8AD0;background:rgba(94,138,208,.13);border-color:rgba(94,138,208,.35);}
+.crmcard .tempselect[data-temp="soi"]{color:#3f9d6b;background:rgba(63,157,107,.14);border-color:rgba(63,157,107,.35);}
+.crmcard .tempselect[data-temp="nurture"]{color:#7d8598;background:rgba(125,133,152,.14);border-color:rgba(125,133,152,.35);}
+/* Dropdown options render in the native menu — force readable dark text there. */
+.crmcard .tempselect select option{color:#1c2438;background:#fff;font-weight:600;}
+
+.crmcard .actions{margin-top:15px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+.crmcard .actions a,.crmcard .actions button{border:0;border-radius:10px;padding:11px 0;color:#fff;font:inherit;font-weight:650;font-size:12.5px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;transition:.15s;text-decoration:none;}
+.crmcard .actions svg{width:17px;height:17px;}
+.crmcard .a-call{background:var(--navy);} .crmcard .a-text{background:var(--blue);} .crmcard .a-email{background:var(--terracotta);}
+.crmcard .actions a:hover,.crmcard .actions button:hover{filter:brightness(1.07);}
+.crmcard .actions .disabled{opacity:.4;pointer-events:none;}
+
+.crmcard .top25btn{margin-top:12px;width:100%;border:1.5px solid var(--terracotta);background:transparent;color:var(--terracotta);font:inherit;font-weight:700;font-size:13px;padding:9px 0;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;transition:.15s;}
+.crmcard .top25btn:hover:not(.on){background:var(--paper);}
+.crmcard .top25btn.on{background:var(--terracotta);color:#fff;border-color:var(--terracotta);}
+.crmcard .top25btn.on:hover{filter:brightness(1.06);}
+.crmcard .top25-badge{display:inline-block;margin-top:5px;margin-left:6px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;background:var(--terracotta);padding:3px 9px;border-radius:999px;font-family:var(--cc-mono);}
+
+.crmcard .insight{margin-top:16px;}
+.crmcard .insight .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+.crmcard .insight .hd b{font-size:13px;color:var(--navy);}
+.crmcard .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+.crmcard .metric{border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center;}
+.crmcard .metric .n{font-size:17px;font-weight:750;color:var(--navy);font-variant-numeric:tabular-nums;}
+.crmcard .metric .l{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;margin-top:2px;}
+
+.crmcard .details{margin-top:16px;border-top:1px solid var(--line-2);padding-top:13px;display:grid;gap:8px;font-size:13px;}
+.crmcard .details .row{display:flex;gap:8px;align-items:center;color:var(--sub);}
+.crmcard .details .row b{color:var(--ink);font-weight:600;}
+.crmcard .verified{color:var(--ok);font-size:11px;font-weight:700;}
+.crmcard .consent{margin-top:14px;border-top:1px solid var(--line-2);padding-top:13px;}
+.crmcard .consent .lab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-family:var(--cc-mono);margin-bottom:8px;}
+.crmcard .consent .pills{display:flex;gap:6px;flex-wrap:wrap;}
+.crmcard .cpill{font-size:11.5px;font-weight:650;padding:4px 9px;border-radius:999px;display:inline-flex;gap:5px;align-items:center;cursor:pointer;border:0;font-family:var(--cc-font);}
+.crmcard .cpill.yes{color:var(--ok);background:var(--ok-bg);} .crmcard .cpill.no{color:var(--warn);background:var(--warn-bg);}
+
+.crmcard .compose{padding:12px 13px;}
+.crmcard .compose .modes{display:flex;gap:5px;margin-bottom:10px;}
+.crmcard .compose .modes button{border:1px solid var(--line);background:var(--paper);color:var(--sub);font:inherit;font-size:12.5px;font-weight:650;padding:6px 13px;border-radius:999px;cursor:pointer;transition:.15s;}
+.crmcard .compose .modes button.on{color:#fff;border-color:transparent;}
+.crmcard .compose .modes button.on[data-m="note"]{background:var(--navy);}
+.crmcard .compose .modes button.on[data-m="text"]{background:var(--blue);}
+.crmcard .compose .modes button.on[data-m="email"]{background:var(--terracotta);}
+.crmcard .compose textarea{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;font-size:13.5px;color:var(--ink);resize:none;background:var(--card);min-height:44px;}
+.crmcard .compose textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+.crmcard .compose .foot{display:flex;justify-content:space-between;align-items:center;margin-top:9px;}
+.crmcard .compose .hint{font-size:11.5px;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .compose .send{border:0;border-radius:9px;color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 18px;cursor:pointer;background:var(--navy);transition:.15s;}
+.crmcard .compose .send:hover{filter:brightness(1.08);}
+.crmcard .compose .send:disabled{opacity:.5;cursor:default;}
+
+.crmcard .notes-hd{display:flex;align-items:center;gap:8px;padding:13px 14px 0;}
+.crmcard .notes-hd b{font-size:14px;color:var(--navy);}
+.crmcard .ncount{font-size:11px;font-weight:750;font-family:var(--cc-mono);color:var(--faint);background:var(--paper);border-radius:999px;padding:1px 7px;}
+.crmcard .notelist{padding:11px 14px 14px;display:grid;gap:9px;}
+.crmcard .note{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--card);}
+.crmcard .note.pinned{border-color:var(--terracotta);border-left:3px solid var(--terracotta);}
+.crmcard .note-top{display:flex;align-items:center;gap:8px;margin-bottom:5px;}
+.crmcard .pin-badge{font-size:10px;font-weight:700;color:var(--terracotta);font-family:var(--cc-mono);text-transform:uppercase;letter-spacing:.04em;}
+.crmcard .note-when{font-size:11.5px;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .note-pin{margin-left:auto;border:0;background:transparent;cursor:pointer;font-size:13px;line-height:1;opacity:.4;filter:grayscale(1);transition:.14s;}
+.crmcard .note-pin.on{opacity:1;filter:none;}
+.crmcard .note-pin:hover{opacity:.85;}
+.crmcard .note-body{font-size:13px;color:var(--ink);line-height:1.5;white-space:pre-wrap;}
+.crmcard .empty-small{font-size:12.5px;color:var(--faint);padding:2px 0;}
+
+.crmcard .tally{display:flex;gap:5px;flex-wrap:wrap;padding:12px 13px;border-bottom:1px solid var(--line-2);}
+.crmcard .tchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--card);border-radius:9px;padding:6px 10px;font-size:12.5px;font-weight:600;color:var(--sub);cursor:pointer;transition:.15s;}
+.crmcard .tchip svg{width:14px;height:14px;opacity:.75;}
+.crmcard .tchip .ct{font-variant-numeric:tabular-nums;color:var(--ink);font-weight:750;}
+.crmcard .tchip.on{background:var(--navy);color:#fff;border-color:transparent;}
+.crmcard .tchip.on svg{opacity:1;} .crmcard .tchip.on .ct{color:#fff;}
+.crmcard .tchip:hover:not(.on){border-color:var(--navy-3);}
+
+.crmcard .feed{padding:6px 13px 14px;display:grid;gap:0;}
+.crmcard .event{display:grid;grid-template-columns:30px 1fr;gap:11px;padding:13px 2px;border-bottom:1px solid var(--line-2);}
+.crmcard .event:last-child{border-bottom:0;}
+.crmcard .ev-ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;flex:none;}
+.crmcard .ev-ic svg{width:15px;height:15px;color:#fff;}
+.crmcard .ic-note{background:var(--navy-3);} .crmcard .ic-text{background:var(--blue);} .crmcard .ic-call{background:var(--navy);} .crmcard .ic-email{background:var(--terracotta);} .crmcard .ic-activity{background:#8a90a3;}
+.crmcard .ev-top{display:flex;justify-content:space-between;gap:8px;align-items:baseline;}
+.crmcard .ev-top b{font-size:13.5px;color:var(--ink);font-weight:650;}
+.crmcard .ev-top .t{font-size:11.5px;color:var(--faint);font-family:var(--cc-mono);white-space:nowrap;}
+.crmcard .ev-body{font-size:13px;color:var(--sub);margin-top:2px;}
+.crmcard .feed-empty{padding:20px 4px;color:var(--faint);font-size:13px;text-align:center;}
+
+.crmcard .rhd{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px;}
+.crmcard .rhd b{font-size:14px;color:var(--navy);}
+.crmcard .rhd .rcount{font-size:11px;font-weight:750;font-family:var(--cc-mono);color:var(--faint);background:var(--paper);border-radius:999px;padding:1px 7px;}
+.crmcard .task{display:grid;grid-template-columns:18px 1fr;gap:9px;padding:9px 0;border-top:1px solid var(--line-2);}
+.crmcard .task:first-of-type{border-top:0;}
+.crmcard .cbox{width:16px;height:16px;border-radius:5px;border:1.5px solid var(--navy-3);margin-top:1px;flex:none;}
+.crmcard .cbox.done{background:var(--blue);border-color:var(--blue);position:relative;}
+.crmcard .cbox.done::after{content:"";position:absolute;left:5px;top:1.5px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);}
+.crmcard .task .tt{font-size:13px;color:var(--ink);font-weight:600;}
+.crmcard .task .tt.done{color:var(--faint);text-decoration:line-through;}
+.crmcard .task .tm{font-size:11.5px;color:var(--faint);font-family:var(--cc-mono);margin-top:1px;}
+.crmcard .side-empty{font-size:12.5px;color:var(--faint);}
+.crmcard .appt{display:grid;grid-template-columns:44px 1fr;gap:10px;align-items:center;padding-top:4px;}
+.crmcard .appt .date{background:var(--terracotta);color:#fff;border-radius:8px;text-align:center;padding:5px 0;}
+.crmcard .appt .date .d{font-size:16px;font-weight:800;line-height:1;} .crmcard .appt .date .mo{font-size:9px;text-transform:uppercase;letter-spacing:.06em;}
+.crmcard .appt .info b{font-size:13px;color:var(--ink);} .crmcard .appt .info .w{font-size:11.5px;color:var(--sub);font-family:var(--cc-mono);margin-top:1px;}
+
+/* edit-details modal */
+.crmcard .cc-modal{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);overflow:hidden;max-width:1000px;margin:0 auto;}
+.crmcard .cc-modal .mhd{display:flex;align-items:center;justify-content:space-between;padding:16px 22px;border-bottom:1px solid var(--line);}
+.crmcard .cc-modal .mhd h2{margin:0;font-size:14px;letter-spacing:.09em;text-transform:uppercase;color:var(--navy);font-family:var(--cc-mono);font-weight:700;}
+.crmcard .cc-modal .x{border:0;background:transparent;color:var(--faint);font-size:20px;cursor:pointer;line-height:1;}
+.crmcard .mbody{display:grid;grid-template-columns:1fr;}
+.crmcard .form{padding:22px 26px;display:grid;gap:16px;}
+.crmcard .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.crmcard .field label{display:block;font-size:12px;font-weight:700;color:var(--sub);margin-bottom:5px;}
+.crmcard .field label .req{color:var(--terracotta);}
+.crmcard .field input,.crmcard .field select{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px;color:var(--ink);background:var(--card);}
+.crmcard .field input:focus,.crmcard .field select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+.crmcard .consent-row{border-top:1px solid var(--line-2);padding-top:14px;}
+.crmcard .consent-row .lab{font-size:12px;font-weight:700;color:var(--sub);margin-bottom:9px;}
+.crmcard .toggles{display:flex;gap:10px;flex-wrap:wrap;}
+.crmcard .tg{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:9px;padding:8px 12px;font-size:13px;font-weight:600;color:var(--ink);}
+.crmcard .sw{width:34px;height:19px;border-radius:999px;background:var(--blue);position:relative;flex:none;cursor:pointer;border:0;padding:0;}
+.crmcard .sw.off{background:var(--line);}
+.crmcard .sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 2px rgba(0,0,0,.3);}
+.crmcard .sw:not(.off)::after{left:17px;}
+.crmcard .mfoot{display:flex;justify-content:flex-end;gap:10px;padding:14px 26px;border-top:1px solid var(--line);}
+.crmcard .btn-ghost{border:0;background:transparent;color:var(--sub);font:inherit;font-weight:650;font-size:13.5px;padding:9px 14px;cursor:pointer;}
+.crmcard .btn-save{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:9px 22px;border-radius:9px;cursor:pointer;}
+.crmcard .btn-save:disabled{opacity:.5;cursor:default;}
+
+.crmcard .cc-loading{padding:40px;text-align:center;color:var(--sub);font-size:14px;}
+.crmcard .cc-error{padding:16px;color:var(--warn);background:var(--warn-bg);border-radius:10px;font-size:13px;margin-bottom:12px;}
+
+@media (max-width:1080px){
+  .crmcard .shell{grid-template-columns:1fr;} .crmcard .maingrid{grid-template-columns:1fr;}
+  .crmcard .crit{grid-template-columns:1fr;}
+  .crmcard .grid2{grid-template-columns:1fr;}
+}
+@media (max-width:640px){
+  .crmcard-backdrop{padding:14px 10px;}
+  .crmcard-shellwrap{padding:18px 14px 20px;border-radius:14px;}
+  /* Corner buttons stay pinned top-right on the frame; toggle drops to its own row. */
+  .crmcard .masthead{padding-right:130px;}
+  .crmcard .switch{margin-left:0;flex-basis:100%;justify-content:center;}
+}
+
+/* activity feed "show all / show less" toggle */
+.crmcard .feed-more{width:100%;border:1px solid var(--line);background:var(--paper);color:var(--blue-2);font:inherit;font-size:12.5px;font-weight:650;padding:8px 0;border-radius:9px;cursor:pointer;margin-top:4px;}
+.crmcard .feed-more:hover{border-color:var(--blue);}
+
+/* addable Tasks / Appointments / Family (contact_items) */
+.crmcard .rhd .rhd-r{display:inline-flex;align-items:center;gap:7px;}
+.crmcard .rhd .add{border:1.5px dashed var(--line);background:transparent;color:var(--blue-2);font:inherit;font-size:14px;line-height:1;font-weight:700;width:24px;height:24px;border-radius:7px;cursor:pointer;display:grid;place-items:center;transition:.14s;}
+.crmcard .rhd .add:hover:not(:disabled){border-color:var(--blue);color:var(--blue);}
+.crmcard .rhd .add:disabled{opacity:.4;cursor:default;}
+
+.crmcard .item-add{display:grid;gap:7px;border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:11px;background:var(--paper);}
+.crmcard .item-add .ia-in{width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;color:var(--ink);background:var(--card);}
+.crmcard .item-add .ia-in:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+.crmcard .item-add .ia-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:1px;}
+.crmcard .item-add .ia-cancel{border:0;background:transparent;color:var(--sub);font:inherit;font-weight:650;font-size:12.5px;padding:6px 10px;cursor:pointer;}
+.crmcard .item-add .ia-save{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:12.5px;padding:6px 15px;border-radius:8px;cursor:pointer;}
+.crmcard .item-add .ia-save:disabled{opacity:.5;cursor:default;}
+
+.crmcard .task.addable{grid-template-columns:18px 1fr auto;align-items:start;}
+.crmcard button.cbox{background:transparent;padding:0;cursor:pointer;font:inherit;}
+.crmcard .item-x{border:0;background:transparent;color:var(--faint);font-size:15px;line-height:1;cursor:pointer;padding:0 2px;align-self:start;margin-top:1px;}
+.crmcard .item-x:hover{color:var(--terracotta);}
+
+.crmcard .appt-list{display:grid;gap:11px;}
+.crmcard .appt.addable{grid-template-columns:44px 1fr auto;align-items:center;padding-top:0;}
+
+.crmcard .fam-list{display:grid;gap:10px;}
+.crmcard .fam{display:grid;grid-template-columns:34px 1fr auto;gap:10px;align-items:center;}
+.crmcard .fam-av{width:34px;height:34px;border-radius:50%;flex:none;background:linear-gradient(135deg,var(--navy),var(--navy-3));color:var(--card);display:grid;place-items:center;font-weight:700;font-size:12.5px;}
+.crmcard .fam-info{display:flex;flex-direction:column;line-height:1.25;}
+.crmcard .fam-info b{font-size:13px;color:var(--ink);}
+.crmcard .fam-info span{font-size:11.5px;color:var(--sub);font-family:var(--cc-mono);}
+
+/* Delete-lead button (hard delete) — sits in the card masthead next to close. */
+.crmcard-delete-btn {
+  position: absolute;
+  top: 14px;
+  right: 52px;
+  border: 1px solid rgba(196, 99, 64, 0.5);
+  background: rgba(196, 99, 64, 0.08);
+  color: #C46340;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.crmcard-delete-btn:hover:not(:disabled) {
+  background: #C46340;
+  color: #fff;
+}
+.crmcard-delete-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* Address + birthday block on the identity rail. */
+.crmcard .cc-details{display:grid;gap:10px;padding:14px 0;border-top:1px solid var(--line-2);border-bottom:1px solid var(--line-2);margin:14px 0;}
+.crmcard .cc-drow{display:grid;gap:3px;}
+.crmcard .cc-drow .lab{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-family:var(--cc-mono);}
+.crmcard .cc-drow .val{font-size:13.5px;color:var(--ink);font-weight:600;line-height:1.35;}
+.crmcard .cc-drow .val.empty{color:var(--faint);font-weight:500;font-style:italic;}

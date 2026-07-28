@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import BoardLoader from "@/pages/real-estate-hub/admin/components/BoardLoader";
 import type {
   AdminDeal,
   AdminUpcomingEvent,
@@ -33,6 +34,10 @@ import "../leads/leads.css";
 import "./today.css";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Octopus intro gate. Module-scoped so it resets on every full page load/refresh
+// (the module re-evaluates) but stays suppressed during in-app navigation.
+let octoIntroShown = false;
 
 const STAGE_LABELS = [
   ["Pre-CMA", "Intake"],
@@ -504,6 +509,61 @@ export function TodayDesignShell() {
   const [deals, setDeals] = useState<AdminDeal[]>([]);
   const [events, setEvents] = useState<AdminUpcomingEvent[]>([]);
   const [greetingName, setGreetingName] = useState<string>("there");
+  const hasLoaded = useRef(false);
+  const [theme, setTheme] = useState<string>(() => {
+    try {
+      // The global data-app-theme attribute (set in App.tsx on mount) is the
+      // source of truth; fall back to the persisted key, then "medium".
+      return (
+        document.documentElement.getAttribute("data-app-theme") ||
+        localStorage.getItem("elevate-today-theme") ||
+        "medium"
+      );
+    } catch {
+      return "medium";
+    }
+  });
+  useEffect(() => {
+    try {
+      // Drive the GLOBAL attribute so every page re-skins live, and persist.
+      document.documentElement.setAttribute("data-app-theme", theme);
+      localStorage.setItem("elevate-today-theme", theme);
+    } catch {
+      // ignore storage failures (private mode, etc.)
+    }
+  }, [theme]);
+  const themeControl = (
+    <div className="td-theme-toggle" role="group" aria-label="Color theme">
+      {([
+        ["light", "Light"],
+        ["medium", "Medium"],
+        ["dark", "Dark"],
+      ] as const).map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          className={"td-theme-btn" + (theme === value ? " active" : "")}
+          aria-pressed={theme === value}
+          onClick={() => setTheme(value)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+  // Octopus splash on first open this session. data.loading can start false (so
+  // the loading-only condition never fires), so gate on a short timer too —
+  // mirrors the admin board's intro so the octopus reliably shows on open.
+  const [showIntro, setShowIntro] = useState(() => {
+    if (octoIntroShown) return false;
+    octoIntroShown = true;
+    return true;
+  });
+  useEffect(() => {
+    if (!showIntro) return;
+    const t = setTimeout(() => setShowIntro(false), 1900);
+    return () => clearTimeout(t);
+  }, [showIntro]);
 
   const loadToday = useCallback(async () => {
     setTodayLoading(true);
@@ -589,6 +649,10 @@ export function TodayDesignShell() {
     [drafts, data],
   );
 
+  const isLoading = todayLoading || data.loading;
+  if (!isLoading) hasLoaded.current = true;
+  const showLoader = showIntro || (!hasLoaded.current && isLoading);
+
   const rootAttrs = {
     "data-accent": "graphite" as const,
     "data-density": "compact" as const,
@@ -598,8 +662,16 @@ export function TodayDesignShell() {
     "data-artifacts": "hidden" as const,
   };
 
+  if (showLoader) {
+    return (
+      <div className="app today-design-embedded" data-today-theme={theme} {...rootAttrs}>
+        <BoardLoader label="Pulling up your day…" />
+      </div>
+    );
+  }
+
   return (
-    <div className="app today-design-embedded" {...rootAttrs}>
+    <div className="app today-design-embedded" data-today-theme={theme} {...rootAttrs}>
       <HubDataErrorBanner className="mb-3" data={data} />
       <TodayBoard
         greetingName={greetingName}
@@ -622,6 +694,7 @@ export function TodayDesignShell() {
         error={todayActionError || todayError}
         onRefresh={handleRefresh}
         onDraftAction={handleDraftAction}
+        themeControl={themeControl}
       />
     </div>
   );

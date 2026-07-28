@@ -151,11 +151,31 @@ def _record_field(record: JsonRecord, *keys: str) -> str:
     return ""
 
 
+def _has_delivered_outbound(thread: JsonRecord) -> bool:
+    """True only when Skyleigh has a genuine prior DELIVERED/sent outbound on
+    this thread.
+
+    `outboundCount` is sourced from `record.outbound_count`, which is
+    incremented ONLY when a real outbound message is ingested (Apple Messages
+    chat.db `from_me` rows and Composio `direction == "outbound"` events). A
+    staged / pending-approval draft in the send_queue never flows through those
+    counters, so a bare unsent draft can never inflate this. We still guard
+    explicitly: require a strictly positive integer count, so nothing that is
+    merely queued or half-written can flip the lane to follow-ups. The thread
+    dict carries no separate delivered/lastOutboundAt field to cross-check
+    (the list-record snapshot strips them), so the vetted counter is the signal.
+    """
+    return _safe_int(thread.get("outboundCount")) > 0
+
+
 def _outreach_lane_for_thread(thread: JsonRecord) -> str:
     label = str(thread.get("leadLabel") or thread.get("heatLabel") or "").strip().lower()
     if label == "hot":
         return "hot-leads-watcher"
-    if _safe_int(thread.get("outboundCount")) > 0:
+    # Follow-ups lane is ONLY for threads with a genuine prior delivered outbound.
+    # A never-contacted lead (no delivered send, only a staged draft) must route
+    # to new-outreach so it gets a first-touch intro, not a check-in.
+    if _has_delivered_outbound(thread):
         return "follow-ups"
     return "new-outreach"
 

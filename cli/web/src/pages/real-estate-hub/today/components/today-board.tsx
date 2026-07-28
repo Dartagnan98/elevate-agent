@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import DealDetailModal, { type Deal as AdminModalDeal } from "../../admin/components/deal-modal";
 import { ADMIN_PIPELINE, ADMIN_BUYER_PIPELINE } from "../../admin/admin-data";
@@ -161,6 +161,7 @@ export type TodayBoardProps = {
   error?: string | null;
   onRefresh?: () => void;
   onDraftAction?: (action: "approve" | "skip", draftId: string) => void | Promise<void>;
+  themeControl?: ReactNode;
 };
 
 function greetingForNow(): string {
@@ -258,7 +259,7 @@ function Sparkline({ values, tone }: { values: number[]; tone?: TodayPulseStat["
   );
 }
 
-function TodayPulse({ stats, greeting, name, sub }: { stats: TodayPulseStat[]; greeting: string; name: string; sub: string }) {
+function TodayPulse({ stats, greeting, name, sub, themeControl }: { stats: TodayPulseStat[]; greeting: string; name: string; sub: string; themeControl?: ReactNode }) {
   return (
     <section className="td-pulse" aria-label="Today pulse">
       <header className="td-pulse-head">
@@ -266,6 +267,7 @@ function TodayPulse({ stats, greeting, name, sub }: { stats: TodayPulseStat[]; g
           <h2 className="td-pulse-greet">{greeting}, {name}</h2>
           <p className="td-pulse-sub">{sub}</p>
         </div>
+        {themeControl}
       </header>
       <div className="td-pulse-grid">
         {stats.map((s) => (
@@ -390,9 +392,9 @@ function HourlyChart({ buckets }: { buckets: TodayHourBucket[] }) {
         <svg className="td-hourly-svg" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
           {[0.25, 0.5, 0.75].map((p) => (
             <line key={p} x1={pad.l} x2={pad.l + innerW} y1={pad.t + innerH * p} y2={pad.t + innerH * p}
-              stroke="rgba(255,255,255,0.04)" strokeDasharray="2 4" />
+              stroke="color-mix(in srgb, var(--fg) 6%, transparent)" strokeDasharray="2 4" />
           ))}
-          <line x1={pad.l} x2={pad.l + innerW} y1={pad.t + innerH} y2={pad.t + innerH} stroke="rgba(255,255,255,0.08)" />
+          <line x1={pad.l} x2={pad.l + innerW} y1={pad.t + innerH} y2={pad.t + innerH} stroke="color-mix(in srgb, var(--fg) 12%, transparent)" />
           <polygon fill="var(--status-info)" fillOpacity="0.14" points={areaStr(inPts)} />
           <polyline fill="none" stroke="var(--status-info)" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" points={polyStr(inPts)} />
           <polygon fill="var(--fg-muted)" fillOpacity="0.08" points={areaStr(outPts)} />
@@ -408,7 +410,7 @@ function HourlyChart({ buckets }: { buckets: TodayHourBucket[] }) {
           {hourLabels.map((hr) => {
             const x = pad.l + hr * stepX;
             return (
-              <text key={hr} x={x} y={200 - 8} fontSize="9" fontFamily="Geist Mono, monospace" fill="rgba(255,255,255,0.34)" textAnchor="middle" letterSpacing="0.06em">
+              <text key={hr} x={x} y={200 - 8} fontSize="9" fontFamily="Geist Mono, monospace" fill="var(--fg-faint)" textAnchor="middle" letterSpacing="0.06em">
                 {hr === 0 ? "12A" : hr === 12 ? "12P" : hr === 23 ? "11P" : hr < 12 ? hr + "A" : hr - 12 + "P"}
               </text>
             );
@@ -963,7 +965,7 @@ export function TodayBoard(props: TodayBoardProps) {
             <span>{props.error}</span>
           </div>
         ) : null}
-        <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} />
+        <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} themeControl={props.themeControl} />
         <PipelineVelocity stages={props.pipeline} />
         <ActiveDeals deals={props.deals} adminDealsById={props.adminDealsById} />
         <div className="td-two">

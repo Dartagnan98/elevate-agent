@@ -1,6 +1,13 @@
 const BASE = "";
 
 import type {
+  AdminContactDetail,
+  AdminContactNote,
+  AdminContactNotesResponse,
+  AdminContactItem,
+  AdminContactItemsResponse,
+  ReportingSummary,
+  ReportingGoals,
   LicenseStatusResponse,
   LicenseActivateResponse,
   LicenseSyncSkillsResponse,
@@ -56,7 +63,6 @@ import type {
   SourceInboxResponse,
   SourceInboxSentResponse,
   TodayDashboardResponse,
-  SourceInboxProfileStatus,
   CrmIntegrationForm,
   IntegrationSettingsResponse,
   IntegrationTestResponse,
@@ -1059,6 +1065,11 @@ export const api = {
       `/api/surface-approvals${q ? `?${q}` : ""}`,
     );
   },
+  // Convenience: same endpoint as listSurfaceApprovals, optional status filter.
+  getSurfaceApprovals: (status?: string) =>
+    fetchJSON<{ approvals: import("./api-types").SurfaceApproval[] }>(
+      `/api/surface-approvals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
   resolveSurfaceApproval: (id: string, decision: "approve" | "reject", note?: string) =>
     fetchJSON<{ ok: boolean; approval: import("./api-types").SurfaceApproval }>(
       `/api/surface-approvals/${encodeURIComponent(id)}`,
@@ -1869,6 +1880,106 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ field, value }),
     }),
+  // Documents panel — list/upload a deal's Drive folder files.
+  listDealDocuments: (dealId: string) =>
+    fetchJSON<{ ok: boolean; folderId: string | null; folderUrl: string | null; files: { name: string; id: string; url: string; mime: string; modified: string; group: string; tag: string }[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/documents`),
+  uploadDealDocument: (dealId: string, file: File, address?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (address) fd.append("address", address);
+    return fetchJSON<{ ok: boolean; url?: string | null }>(`/api/admin/deals/${encodeURIComponent(dealId)}/documents`, { method: "POST", body: fd });
+  },
+  // Client Onboarding — generate one onboarding doc (agency / dorts / pnc).
+  sendOnboardingDoc: (dealId: string, form: string) =>
+    fetchJSON<{ ok: boolean; url?: string | null }>(`/api/admin/deals/${encodeURIComponent(dealId)}/onboarding-doc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ form }),
+    }),
+  // Dispatch the provider-neutral signing run for the onboarding package.
+  sendForSignatures: (dealId: string) =>
+    fetchJSON<{ ok: boolean; runId?: string | null }>(`/api/admin/deals/${encodeURIComponent(dealId)}/onboarding-sign`, {
+      method: "POST",
+    }),
+  // CMA wizard — checkpointed phase pipeline + comp review.
+  getCmaPhases: (dealId: string) =>
+    fetchJSON<{ ok: boolean; done: number; total: number; pdfUrl?: string | null; photosUrl?: string; photosUrlSet?: boolean; phases: { id: string; label: string; browser: boolean; manual: boolean; status: string; attempts: number; error?: string | null }[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/phases`),
+  runCmaPhase: (dealId: string, phase: string) =>
+    fetchJSON<{ ok: boolean; phase?: string; status?: string; error?: string | null }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phase }),
+    }),
+  skipCmaPhotos: (dealId: string) =>
+    fetchJSON<{ ok: boolean; skipped?: boolean; note?: string; error?: string | null }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/skip-photos`,
+      { method: "POST" },
+    ),
+  scoreCmaPhotos: (dealId: string) =>
+    fetchJSON<{ ok: boolean; started?: boolean; photosUrl?: string; error?: string | null }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/score-photos`,
+      { method: "POST" },
+    ),
+  regenerateCmaComps: (dealId: string, instructions: string) =>
+    fetchJSON<{ ok: boolean; started?: boolean; areas?: string | null; anchor?: string | null }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/regenerate-comps`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instructions }) },
+    ),
+  getCmaPricing: (dealId: string) =>
+    fetchJSON<{ ok: boolean; recommendedPrice?: string | null; range?: string | null; strategy?: string | null;
+      valueDrivers?: unknown;
+      better?: Array<{ address: string; price: string | number; suite?: unknown }>;
+      comparable?: Array<{ address: string; price: string | number; suite?: unknown }>;
+      worse?: Array<{ address: string; price: string | number; suite?: unknown }> }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/pricing`),
+  repriceCma: (dealId: string, price: string, rationale: string) =>
+    fetchJSON<{ ok: boolean; started?: boolean; price?: string }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/reprice`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ price, rationale }) },
+    ),
+  captureCmaProspecting: (dealId: string, mls: string) =>
+    fetchJSON<{ ok: boolean; started?: boolean; mls?: string }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/capture-prospecting`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mls }) },
+    ),
+  getCmaComps: (dealId: string) =>
+    fetchJSON<{ ok: boolean; sold: any[]; active: any[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/comps`),
+  toggleCmaComp: (dealId: string, mls: string, kind: "sold" | "active") =>
+    fetchJSON<{ ok: boolean; mls: string; kind: string; excluded: boolean }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/comp-toggle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mls, kind }),
+    }),
+  gatherCpsPackage: (mls: string, dealId?: string, dryRun?: boolean) =>
+    fetchJSON<{ ok: boolean; started: boolean; mls: string; dryRun: boolean }>(`/api/admin/offer-prep/gather`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mls, deal_id: dealId ?? null, dry_run: !!dryRun }),
+    }),
+  generateCpsDraft: (payload: { umbrella: string; clauses: string[]; customClauses: { wording: string }[]; vars: Record<string, any>; address?: string; dealId?: string }) =>
+    fetchJSON<{ ok: boolean; address: string; saved: boolean; url?: string | null }>(`/api/admin/offer-prep/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ umbrella: payload.umbrella, clauses: payload.clauses, customClauses: payload.customClauses, vars: payload.vars, address: payload.address ?? null, deal_id: payload.dealId ?? null, dry_run: false }),
+    }),
+  generateOfferForm: (form: "pnc" | "dorts" | "disclosure-rem", dealId?: string, address?: string) =>
+    fetchJSON<{ ok: boolean; form: string; address: string; saved: boolean; url?: string | null }>(`/api/admin/offer-prep/form`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ form, deal_id: dealId ?? null, address: address ?? null, dry_run: false }),
+    }),
+  buildOfferPackage: (payload: { umbrella: string; clauses: string[]; customClauses: { wording: string }[]; vars: Record<string, any>; address?: string; dealId?: string; forms?: string[] }) =>
+    fetchJSON<{ ok: boolean; address: string; count: number; url?: string | null }>(`/api/admin/offer-prep/package`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ umbrella: payload.umbrella, clauses: payload.clauses, customClauses: payload.customClauses, vars: payload.vars, address: payload.address ?? null, deal_id: payload.dealId ?? null, dry_run: false, forms: payload.forms ?? null }),
+    }),
+  setAdminDealStatus: (dealId: string, status: "active" | "closed" | "archived") =>
+    fetchJSON<AdminDeal>(`/api/admin/deals/${encodeURIComponent(dealId)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    }),
   getDealContext: (dealId: string) =>
     fetchJSON<DealContext>(`/api/deals/${encodeURIComponent(dealId)}/context`),
   advanceDeal: (dealId: string, force = false) =>
@@ -1889,6 +2000,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  sendDealSellerUpdate: (dealId: string) =>
+    fetchJSON<{ ok: boolean; sentAt: string }>(
+      `/api/deals/${encodeURIComponent(dealId)}/send-seller-update`,
+      { method: "POST" },
+    ),
   addDealAttachment: (dealId: string, body: DealAttachmentCreateRequest) =>
     fetchJSON<DealAttachment>(`/api/deals/${encodeURIComponent(dealId)}/attachments`, {
       method: "POST",
@@ -1903,6 +2019,15 @@ export const api = {
     }),
   approveAdminActionRun: (runId: string, body: { approved?: boolean; runNow?: boolean } = {}) =>
     fetchJSON<AdminActionRun>(`/api/admin/action-runs/${encodeURIComponent(runId)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  answerAdminActionRun: (
+    runId: string,
+    body: { answers: Record<string, string>; runNow?: boolean },
+  ) =>
+    fetchJSON<AdminActionRun>(`/api/admin/action-runs/${encodeURIComponent(runId)}/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1979,6 +2104,173 @@ export const api = {
     fetchJSON<ThreadContextResponse>(
       `/api/source-inbox/thread/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}?limit=${limit}`,
     ),
+
+  // ── CRM contact card ─────────────────────────────────────────────────
+  getAdminContact: (contactId: string) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}`,
+    ),
+  getAdminContactNotes: (contactId: string, limit = 50) =>
+    fetchJSON<AdminContactNotesResponse>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/notes?limit=${limit}`,
+    ),
+  deleteContact: (contactId: string) =>
+    fetchJSON<{ ok: boolean; deletedContactId: string; name: string; deleted: Record<string, number> }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}`,
+      { method: "DELETE" },
+    ),
+  saveAdminContactTags: (contactId: string, tags: string[]) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/tags`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
+      },
+    ),
+  saveAdminContactSegments: (contactId: string, segments: string[]) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/segments`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segments }),
+      },
+    ),
+  setAdminContactPipeline: (contactId: string, status: string | null) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/pipeline`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      },
+    ),
+  setAdminContactConsent: (
+    contactId: string,
+    consent: { call: boolean; text: boolean; email: boolean },
+  ) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/consent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(consent),
+      },
+    ),
+  addAdminContactNote: (contactId: string, body: string, pinned = false) =>
+    fetchJSON<AdminContactNote>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/notes`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body, pinned }),
+      },
+    ),
+  pinAdminContactNote: (contactId: string, noteId: string, pinned: boolean) =>
+    fetchJSON<{ id: string; pinned: boolean }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/notes/${encodeURIComponent(noteId)}/pin`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned }),
+      },
+    ),
+  setAdminContactTop25: (contactId: string, on: boolean) =>
+    fetchJSON<{ contactId: string; top25: boolean }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/top25`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on }),
+      },
+    ),
+  // All manual temperature overrides, keyed by contact id (for the leads list).
+  getAdminContactTemperatures: () =>
+    fetchJSON<{ overrides: Record<string, string> }>(
+      `/api/admin/contact-temperatures`,
+    ),
+  // Persist a manual lead-temperature override (empty string clears it, so the
+  // contact falls back to the derived recency/tag temperature).
+  setAdminContactTemperature: (contactId: string, temperature: string) =>
+    fetchJSON<{ contactId: string; temperature: string | null }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/temperature`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ temperature }),
+      },
+    ),
+  patchAdminContact: (
+    contactId: string,
+    fields: Partial<{
+      displayName: string;
+      primaryEmail: string;
+      primaryPhone: string;
+      buyingTimeFrame: string;
+      preQualStatus: string;
+      address: string;
+      birthday: string;
+    }>,
+  ) =>
+    fetchJSON<AdminContactDetail>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      },
+    ),
+  // Contact items: Tasks / Appointments / Family on the card's right rail.
+  getContactItems: (
+    contactId: string,
+    kind?: "task" | "appointment" | "family",
+  ) =>
+    fetchJSON<AdminContactItemsResponse>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items${
+        kind ? `?kind=${encodeURIComponent(kind)}` : ""
+      }`,
+    ),
+  addContactItem: (
+    contactId: string,
+    body: {
+      kind: "task" | "appointment" | "family";
+      title: string;
+      subtitle?: string;
+      whenAt?: string;
+    },
+  ) =>
+    fetchJSON<AdminContactItem>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  updateContactItem: (
+    contactId: string,
+    itemId: string,
+    body: Partial<{
+      title: string;
+      subtitle: string;
+      whenAt: string;
+      done: boolean;
+    }>,
+  ) =>
+    fetchJSON<AdminContactItem>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items/${encodeURIComponent(itemId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteContactItem: (contactId: string, itemId: string) =>
+    fetchJSON<{ deleted: boolean; id: string }>(
+      `/api/admin/contacts/${encodeURIComponent(contactId)}/items/${encodeURIComponent(itemId)}`,
+      { method: "DELETE" },
+    ),
   // Manual trigger for the composio inbound puller — used by the hub Refresh
   // button so a click pulls new DMs/replies in addition to re-reading state.
   pullComposioInbound: () =>
@@ -2009,14 +2301,22 @@ export const api = {
   updateSourceInboxDraft: (
     sourceId: string,
     taskId: string,
-    action: "approve" | "edit" | "skip" | "restore" | "open",
+    action: "approve" | "edit" | "skip" | "restore" | "open" | "channel",
     draftText = "",
-    options?: { returnInbox?: boolean },
+    options?: { returnInbox?: boolean; scheduledAt?: string; channel?: string },
   ) =>
     fetchJSON<SourceInboxResponse>("/api/source-inbox/draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceId, taskId, action, draftText, returnInbox: options?.returnInbox ?? true }),
+      body: JSON.stringify({
+        sourceId,
+        taskId,
+        action,
+        draftText,
+        channel: options?.channel ?? null,
+        scheduledAt: options?.scheduledAt ?? null,
+        returnInbox: options?.returnInbox ?? true,
+      }),
     }),
   getAppleMessagesDirections: () =>
     fetchJSON<{ inbound: boolean; outbound: boolean }>(
@@ -2033,7 +2333,9 @@ export const api = {
     ),
   updateSourceInboxProfile: (
     profileId: string,
-    status: SourceInboxProfileStatus | null,
+    // Accepts the AI's 6 legacy slugs, Skyleigh's 9 operator slugs, or null to
+    // clear. Widened from SourceInboxProfileStatus so operator picks persist.
+    status: string | null,
     options?: { returnInbox?: boolean },
   ) =>
     fetchJSON<SourceInboxResponse>("/api/source-inbox/profile", {
@@ -2056,12 +2358,36 @@ export const api = {
         returnInbox: options?.returnInbox ?? true,
       }),
     }),
+  // Bulk update many contacts at once from the /leads redesigned table
+  // selection bar. action picks the dimension; mode is the set-op for
+  // tags/segments (ignored for pipeline). Returns {updated, failed[]}.
+  bulkUpdateContacts: (
+    contactIds: string[],
+    action: "tags" | "segments" | "pipeline",
+    value: unknown,
+    mode?: "add" | "replace" | "remove",
+  ) =>
+    fetchJSON<{ updated: number; failed: Array<{ contactId: string; error: string }> }>(
+      "/api/admin/contacts/bulk",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactIds, action, value, mode: mode ?? "add" }),
+      },
+    ),
   // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
   // (status=sent by default). Set includePending=true to also see queued /
   // sending / retrying / failed for debugging mid-flight rows.
   getSourceInboxSent: (limit = 100, includePending = false) =>
     fetchJSON<SourceInboxSentResponse>(
       `/api/source-inbox/sent?limit=${limit}&include_pending=${includePending ? "true" : "false"}`,
+    ),
+  getSourceInboxNotSent: (limit = 100) =>
+    fetchJSON<SourceInboxSentResponse>(`/api/source-inbox/not-sent?limit=${limit}`),
+  retrySourceInboxSend: (queueId: string) =>
+    fetchJSON<{ requeued: boolean; phone?: string | null }>(
+      `/api/source-inbox/retry-send/${encodeURIComponent(queueId)}`,
+      { method: "POST" },
     ),
   scaffoldSourceConnector: (sourceId: string) =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {
@@ -2114,6 +2440,20 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...crm, action: "test" }),
+    }),
+
+  // ── Reporting page ───────────────────────────────────────────────────
+  getReportingSummary: (window = 30) =>
+    fetchJSON<ReportingSummary>(
+      `/api/admin/reporting/summary?window=${encodeURIComponent(window)}`,
+    ),
+  getReportingGoals: () =>
+    fetchJSON<ReportingGoals>("/api/admin/reporting/goals"),
+  saveReportingGoals: (body: Partial<ReportingGoals>) =>
+    fetchJSON<ReportingGoals>("/api/admin/reporting/goals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
 };
 

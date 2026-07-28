@@ -52,6 +52,7 @@ export function LeadsDesignShell() {
           onDraftActionComplete={boardData.handleDraftActionComplete}
           onProfileFavoriteChange={boardData.handleProfileFavoriteChange}
           onProfileStatusChange={boardData.handleProfileStatusChange}
+          onBulkUpdate={boardData.handleBulkUpdate}
           onReRunOnboarding={() => setForceOnboarding(true)}
           onRefresh={() => void data.refresh({ force: true })}
           templateMutations={boardData.templateMutations}

@@ -21,6 +21,7 @@ export function useAdminDeals(): UseAdminDealsResult {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async (signal?: { cancelled: boolean }, options?: { keepData?: boolean }) => {
+    const started = Date.now();
     try {
       const response = await api.getAdminDeals({ status: null, limit: 200 });
       if (signal?.cancelled) return;
@@ -31,6 +32,13 @@ export function useAdminDeals(): UseAdminDealsResult {
       setError(errMsg(e, "Admin deals failed"));
       if (!options?.keepData) setDeals([]);
     } finally {
+      // Keep the (cute octopus) loader on screen for a minimum beat so it
+      // bounces instead of flashing by when the data comes back instantly.
+      if (!signal?.cancelled && !options?.keepData) {
+        const elapsed = Date.now() - started;
+        const minMs = 1100;
+        if (elapsed < minMs) await new Promise((r) => setTimeout(r, minMs - elapsed));
+      }
       if (!signal?.cancelled) setLoading(false);
     }
   }, []);

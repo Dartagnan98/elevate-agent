@@ -1,31 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ChevronDown } from "../../admin/icons";
+import { PIPELINE_PILL_OPTIONS, resolvePipelineStage } from "../pipeline-stages";
 
-const PROFILE_STATUS_OPTIONS = [
-  "No status",
-  "New Lead",
-  "Follow Up",
-  "Ghosting",
-  "Dead",
-  "Closed Buyer",
-  "Closed Seller",
-];
-
-const PROFILE_STATUS_CLASS: Record<string, string> = {
-  "New Lead": "new",
-  "Follow Up": "buyer",
-  Ghosting: "potential",
-  Dead: "",
-  "Closed Buyer": "active",
-  "Closed Seller": "seller",
-  "Closed Sell…": "active",
-  "Active lead": "active",
-  "New leads": "new",
-  "Buyer track": "buyer",
-  "Seller CMA": "seller",
-  Potential: "potential",
-};
+// Skyleigh's 9 stages (+ "No status"). Legacy AI values (follow_up, ghosting,
+// dead, closed_*) render mapped into her vocabulary via resolvePipelineStage.
+const PROFILE_STATUS_OPTIONS = PIPELINE_PILL_OPTIONS;
 
 export function StatusPill({
   status,
@@ -55,8 +35,11 @@ export function StatusPill({
     };
   }, [open]);
 
-  const display = status || "No status";
-  const cls = PROFILE_STATUS_CLASS[display] || "";
+  // Resolve the incoming value (her label, a legacy label, or a raw slug) into
+  // her canonical stage so existing/AI rows render in her vocabulary.
+  const resolved = resolvePipelineStage(status);
+  const display = status ? resolved.label : "No status";
+  const cls = status ? resolved.tone : "";
 
   return (
     <div className="lb-status-wrap" ref={ref} onClick={(e) => e.stopPropagation()}>
@@ -75,7 +58,7 @@ export function StatusPill({
       {open && (
         <div className="lb-status-menu" role="listbox">
           {PROFILE_STATUS_OPTIONS.map((s) => {
-            const sCls = PROFILE_STATUS_CLASS[s] || "";
+            const sCls = s === "No status" ? "" : resolvePipelineStage(s).tone;
             const selected = s === display;
             return (
               <button

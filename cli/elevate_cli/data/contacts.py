@@ -32,6 +32,10 @@ def _row_to_contact(row: sqlite3.Row) -> dict[str, Any]:
         "displayName": row["display_name"],
         "primaryEmail": row["primary_email"],
         "primaryPhone": row["primary_phone"],
+        # Mailing address + birthday (added 2026-07-23). _get so rows that
+        # predate the columns don't KeyError.
+        "address": _get("address"),
+        "birthday": _get("birthday"),
         "type": row["type"],
         "stage": row["stage"],
         "ownerNotes": row["owner_notes"],
@@ -107,8 +111,16 @@ _FLAG_COLUMNS: dict[str, str] = {
 _HEAT_LABELS = {"hot", "warm", "watch", "normal"}
 _VALID_SIDES_FOR_ADMIN = {"buyer", "listing"}
 _PIPELINE_STATUS_VALUES = {
+    # Legacy 6 values written by the AI classifier + sync pipeline. Do NOT
+    # remove or repurpose these — source_connector_modules/*, review.py, etc.
+    # still write them.
     "new_lead", "follow_up", "ghosting", "dead",
     "closed_seller", "closed_buyer",
+    # Skyleigh's operator-facing 9-stage pipeline (New Lead reuses new_lead).
+    # These are settable via the operator dropdown but never auto-promote to
+    # the /admin kanban — only closed_seller/closed_buyer keep that behavior.
+    "attempted", "prospect", "client", "pending_deal",
+    "closed", "referred", "realtor_contact", "trash",
 }
 _PIPELINE_STATUS_SET_BY = {"operator", "ai"}
 
@@ -316,13 +328,17 @@ def upsert_contact(
     # Patch only fields that the caller actually provided.
     sets: list[str] = []
     params: list[Any] = []
-    if display_name is not None and display_name != existing["display_name"]:
+    # Fill-only for the base fields: a blank/empty incoming value must NEVER
+    # overwrite an existing real one. The old `is not None` check let a "" phone
+    # (or name/email) wipe a good value on re-import. Only update when the
+    # incoming value is truthy (non-empty).
+    if display_name and display_name != existing["display_name"]:
         sets.append("display_name=?")
         params.append(display_name)
-    if primary_email is not None and primary_email != existing["primary_email"]:
+    if primary_email and primary_email != existing["primary_email"]:
         sets.append("primary_email=?")
         params.append(primary_email)
-    if primary_phone is not None and primary_phone != existing["primary_phone"]:
+    if primary_phone and primary_phone != existing["primary_phone"]:
         sets.append("primary_phone=?")
         params.append(primary_phone)
     if ingest_run_id is not None and ingest_run_id != existing["ingest_run_id"]:

@@ -476,14 +476,13 @@
   @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
   .ab-kpi {
     background: var(--bg-2);
-    border: 1px solid transparent;
-    border-radius: 5px;
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
     padding: 10px 12px;
     min-width: 0;
-    transition: background 200ms var(--ease-out), transform 200ms var(--ease-out);
-    box-shadow: 0 1px 0 rgba(255,255,255,0.025) inset;
+    transition: border-color 200ms var(--ease-out);
   }
-  .ab-kpi:hover { background: var(--bg-3); transform: translateY(-1px); }
+  .ab-kpi:hover { border-color: var(--border); }
   .ab-kpi-label {
     font: 500 10.5px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg-faint);
@@ -614,14 +613,14 @@
   @media (max-width: 1400px) { .ab-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
   @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
   .ab-kpi {
-    background: var(--bg-1);
+    background: var(--bg-2);
     border: 1px solid var(--border-soft);
-    border-radius: 5px;
+    border-radius: 6px;
     padding: 10px 12px;
     min-width: 0;
-    transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+    transition: border-color 140ms var(--ease-out);
   }
-  .ab-kpi:hover { border-color: var(--border); background: var(--bg-2); }
+  .ab-kpi:hover { border-color: var(--border); }
   .ab-kpi-label {
     font: 500 9.5px/1 "Geist Mono", monospace;
     color: var(--fg-faint);
@@ -799,7 +798,7 @@
     border-radius: 10px;
     box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 40px 80px -20px rgba(0,0,0,0.8);
     width: 100%;
-    max-width: 760px;
+    max-width: min(95vw, 1180px);
     max-height: calc(100vh - 64px);
     display: flex; flex-direction: column;
     position: relative;
@@ -815,13 +814,13 @@
     appearance: none; background: transparent; border: 0;
     width: 30px; height: 30px;
     border-radius: 999px;
-    color: var(--fg-muted);
+    color: rgba(255, 255, 255, 0.72);
     cursor: pointer;
     display: grid; place-items: center;
     transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
     z-index: 2;
   }
-  .ab-modal-close:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+  .ab-modal-close:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
   .ab-modal-close .x { font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 
   .ab-modal-head {
@@ -1470,7 +1469,7 @@
   .abm-toggle-unset    { font-size: 10px; }
   .abm-modal-scroll, .ab-modal-scroll { padding-top: 0; padding-bottom: 22px; }
   .ab-modal-close      { top: 10px; right: 10px; width: 26px; height: 26px; }
-  .ab-modal            { max-width: 1140px; border-radius: 8px; }
+  .ab-modal            { max-width: min(95vw, 2000px); border-radius: 8px; }
 
   /* Two-column modal layout */
   .abm-cols {
@@ -3422,6 +3421,50 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
+  /* Channel toggle (email <-> text) */
+  .lb-chan-toggle {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 2px 0 8px;
+    flex-wrap: wrap;
+  }
+  .lb-chan-label {
+    font: 500 10px/1 "Geist Mono", monospace;
+    color: var(--fg-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .lb-chan-seg {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--bg-1);
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    padding: 2px;
+  }
+  .lb-chan-opt {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--fg-muted);
+    font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+    padding: 4px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .lb-chan-opt:not(.on):not(:disabled):hover { color: var(--fg); background: var(--bg-2); }
+  .lb-chan-opt.on {
+    background: var(--accent);
+    color: var(--accent-fg);
+    cursor: default;
+  }
+  .lb-chan-opt:disabled:not(.on) { opacity: 0.5; cursor: not-allowed; }
+  .lb-chan-err {
+    font: 500 11px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
+    color: var(--status-bad, #d9534f);
+  }
   .lb-draft-edit {
     width: 100%;
     background: var(--bg);
@@ -4009,3 +4052,16 @@
   padding: 24px 32px 32px;
   background: var(--bg);
 }
+
+/* Approve & Schedule — inline date/time picker on a draft row. */
+.lb-draft-schedule { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.lb-schedule-input {
+  font: 400 13px/1.5 "Anthropic Sans Display", "Geist", sans-serif;
+  padding: 7px 10px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-soft);
+  color-scheme: light;
+}
+.lb-schedule-input:focus { outline: 1px solid var(--accent-ring); border-color: var(--border); }

@@ -688,7 +688,7 @@ function ComposioPanel() {
         )}
       {customAuthState && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
           onClick={() => !customAuthState.submitting && setCustomAuthState(null)}
         >
           <div
@@ -2616,7 +2616,7 @@ export default function ConfigPage() {
       {/* Mobile drawer scrim */}
       {mobileNavOpen && (
         <div
-          className="fixed inset-0 z-40 bg-background/80 md:hidden"
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
           onClick={() => setMobileNavOpen(false)}
           aria-hidden="true"
         />

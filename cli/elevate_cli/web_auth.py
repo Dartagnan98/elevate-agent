@@ -12,6 +12,17 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 
+# The PDF download routes accept the session token via ?token= because
+# window.open() can't attach an Authorization header. Scoped to read-only
+# download paths only.
+_CMA_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/cma-pdf/?$")
+_SELLER_UPDATE_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/seller-update-pdf/?$")
+_DRAFT_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/run-draft-pdf/[^/]+/?$")
+# Offer-kit / listing-kit document opens (window.open, so no auth header) accept
+# the same session token via ?token=. Read-only PDF serve paths only.
+_KIT_DOC_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/(?:kit-doc|listing-kit-doc)/[^/]+/?$")
+
+
 def load_session_token() -> str:
     env = os.environ.get("ELEVATE_DASHBOARD_SESSION_TOKEN")
     if env:
@@ -70,7 +81,27 @@ def has_valid_session_token(
 
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {session_token}"
-    return hmac.compare_digest(auth.encode(), expected.encode())
+    if hmac.compare_digest(auth.encode(), expected.encode()):
+        return True
+
+    # New-tab opens (window.open) of a file download can't send headers, so
+    # read-only PDF routes also accept the same session token as a ?token= query
+    # param. Scoped to those download paths only — everything else stays
+    # header/cookie-only.
+    if (
+        _CMA_PDF_PATH_RE.match(request.url.path)
+        or _SELLER_UPDATE_PDF_PATH_RE.match(request.url.path)
+        or _DRAFT_PDF_PATH_RE.match(request.url.path)
+        or _KIT_DOC_PATH_RE.match(request.url.path)
+    ):
+        query_tok = request.query_params.get("token", "")
+        if query_tok and hmac.compare_digest(
+            query_tok.encode(),
+            session_token.encode(),
+        ):
+            return True
+
+    return False
 
 
 def has_valid_run_token(
