@@ -6335,6 +6335,43 @@ class SessionDB:
         except OSError:
             pass
 
+    def _db_copy_is_complete(self, sessions_dir, session_id: str) -> bool:
+        """True when the DB holds at least as many messages as the transcript file.
+
+        The retention sweep deletes transcript files, so it must never remove a
+        file that is the ONLY complete copy of a conversation.  ``load_transcript``
+        prefers whichever source has more messages precisely because sessions
+        predating SQLite storage (or live when the DB layer landed) keep their
+        full history only in the JSONL.  Fails CLOSED — any error means "not
+        provably complete", so the file is kept.
+        """
+        if sessions_dir is None:
+            return False
+        try:
+            transcript = sessions_dir / f"{session_id}.jsonl"
+            if not transcript.exists():
+                return True  # nothing on disk to lose
+            file_messages = 0
+            with open(transcript, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.strip():
+                        file_messages += 1
+            if file_messages == 0:
+                return True
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+            db_messages = int(row[0]) if row else 0
+            return db_messages >= file_messages
+        except Exception as exc:  # noqa: BLE001 — never delete on uncertainty
+            logger.debug(
+                "completeness check failed for %s; keeping transcript: %s",
+                session_id, exc,
+            )
+            return False
+
     def delete_session(
         self,
         session_id: str,
@@ -6432,6 +6469,14 @@ class SessionDB:
                             sid, exc,
                         )
                         continue
+                if not self._db_copy_is_complete(sessions_dir, sid):
+                    # The JSONL holds history the DB does not. ``load_transcript``
+                    # deliberately prefers whichever source has MORE messages
+                    # (sessions that pre-date SQLite storage, or were live when
+                    # the DB layer landed, keep their full history only in the
+                    # file). Deleting it here would silently truncate that
+                    # session forever, so keep the file.
+                    continue
                 self._remove_session_files(sessions_dir, sid)
                 swept += 1
             return swept

@@ -1467,7 +1467,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 25,
+    "_config_version": 26,
 }
 
 # =============================================================================
@@ -3497,6 +3497,30 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 print(
                     "  ✓ Raised compression threshold 50% → 85% of the "
                     "context window (was compacting far too early)"
+                )
+
+    if current_ver < 26:
+        # The reliability release flipped the ``sessions.auto_prune`` DEFAULT
+        # to True, but that alone is inert on every existing install:
+        # ``save_config`` materializes the full merged dict, so the old
+        # ``auto_prune: false`` is already written into config.yaml, and
+        # ``_deep_merge`` gives the user file precedence over DEFAULT_CONFIG.
+        # Both prune callers hard-return on false, so the sweep (and the
+        # VACUUM that reclaims the FTS space) could never fire for anyone who
+        # had ever saved a config.  Flip the persisted value once.
+        config = read_raw_config()
+        sessions_cfg = config.get("sessions")
+        if isinstance(sessions_cfg, dict) and sessions_cfg.get("auto_prune") is False:
+            sessions_cfg["auto_prune"] = True
+            config["sessions"] = sessions_cfg
+            save_config(config)
+            results["config_added"].append(
+                "sessions.auto_prune false→true (persisted default blocked the retention sweep)"
+            )
+            if not quiet:
+                print(
+                    "  ✓ Enabled session retention (sessions.auto_prune) — "
+                    "transcript files past retention_days are now swept"
                 )
 
     if current_ver < latest_ver and not quiet:

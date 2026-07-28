@@ -216,3 +216,44 @@ def test_fts_migration_inline_to_external_preserves_search_and_rows(tmp_path, mo
         assert db2._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
     finally:
         db2.close()
+
+
+def test_sweep_keeps_transcript_when_db_copy_is_incomplete(store, tmp_path):
+    """A JSONL holding more history than the DB must never be swept.
+
+    ``load_transcript`` deliberately prefers whichever source has MORE
+    messages, because sessions that predate SQLite storage keep their full
+    history only in the file. Deleting the longer copy would silently
+    truncate that conversation forever.
+    """
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    old = time.time() - 200 * 86400
+
+    # Legacy shape: one row in the DB, but hundreds of turns on disk.
+    store.create_session("legacy-long", "test")
+    store.append_message("legacy-long", "user", content="only turn the DB kept")
+    (sessions_dir / "legacy-long.jsonl").write_text("{}\n" * 200)
+
+    # Control: DB is at least as complete as the file, so it is swept.
+    store.create_session("fully-mirrored", "test")
+    store.append_message("fully-mirrored", "user", content="mirrored")
+    (sessions_dir / "fully-mirrored.jsonl").write_text("{}\n")
+
+    for sid in ("legacy-long", "fully-mirrored"):
+        store._conn.execute(
+            "UPDATE sessions SET started_at=?, ended_at=? WHERE id=?", (old, old + 10, sid)
+        )
+    store._conn.commit()
+
+    store.prune_sessions(
+        older_than_days=90, sessions_dir=sessions_dir, files_only=True
+    )
+
+    assert (sessions_dir / "legacy-long.jsonl").exists(), (
+        "transcript with more history than the DB was deleted — silent data loss"
+    )
+    assert not (sessions_dir / "fully-mirrored.jsonl").exists()
+    # No DB rows are ever removed by the files_only sweep.
+    assert store.get_session("legacy-long") is not None
+    assert store.get_session("fully-mirrored") is not None
