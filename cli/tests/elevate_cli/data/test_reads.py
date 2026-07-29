@@ -392,6 +392,38 @@ def test_source_inbox_profiles_show_pipeline_status_and_hide_dead():
     assert response["profiles"] == []
 
 
+def test_source_inbox_lists_conversation_less_contacts_until_marked_dead():
+    """Full-CRM directory (migration 0036): a contact with no conversation
+    still gets a profile row — but marking it dead must hide it, exactly like
+    the conversation-derived path."""
+    with connect() as conn:
+        contact = upsert_contact(
+            conn,
+            display_name="Directory Only",
+            primary_email="directory@example.com",
+            source_key="lofty:directory",
+        )
+
+    response = db_source_inbox_response(limit=16)
+    assert response["threads"] == []
+    profile_ids = [p["id"] for p in response["profiles"]]
+    assert contact["id"] in profile_ids
+    profile = next(p for p in response["profiles"] if p["id"] == contact["id"])
+    assert profile["hasConversation"] is False
+    assert profile["displayName"] == "Directory Only"
+
+    with connect() as conn:
+        set_pipeline_status(
+            conn,
+            contact["id"],
+            status="dead",
+            actor="operator:test",
+        )
+
+    response = db_source_inbox_response(limit=16)
+    assert response["profiles"] == []
+
+
 def test_source_inbox_does_not_merge_name_only_profiles():
     with connect() as conn:
         first = upsert_contact(conn, display_name="Jordan Seller", source_key="lofty:c-1")

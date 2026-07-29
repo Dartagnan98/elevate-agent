@@ -447,6 +447,10 @@ def _directory_profiles_for_missing_contacts(
     one is skipped. Synthesized rows carry the contact identity only; heat
     comes from the AI-maintained contact flags, and hasConversation=False so
     the card explains that no thread is attached.
+
+    Suppression matches the conversation-derived walk: dead/closed contacts
+    live on /admin and must not reappear on /leads just because they have no
+    open conversation to hide them.
     """
     covered: set[str] = set()
     for profile in thread_profiles:
@@ -461,6 +465,10 @@ def _directory_profiles_for_missing_contacts(
             SELECT id, display_name, primary_email, primary_phone,
                    stage, heat_label, heat_score, last_activity_at, updated_at
             FROM contacts
+            WHERE stage != 'closed'
+              AND COALESCE(pipeline_status, '') NOT IN (
+                'dead', 'closed_seller', 'closed_buyer'
+              )
             ORDER BY COALESCE(last_activity_at, updated_at) DESC
             LIMIT ?
             """,

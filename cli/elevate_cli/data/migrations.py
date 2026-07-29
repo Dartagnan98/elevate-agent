@@ -43,7 +43,45 @@ _LOG = logging.getLogger(__name__)
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations_pg"
 _VERSION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
-_COMPATIBLE_PRIOR_HASHES: dict[str, set[str]] = {}
+# Prior sha256s that may legitimately occupy a version slot without the
+# on-disk file being applied. On a match ``run_pending`` re-labels the ledger
+# row (name + sha256 → the on-disk file) and CONTINUES WITHOUT APPLYING.
+#
+# The entries below are Skyleigh's fork. Her install (operational DB
+# ``elevate_op_acct_f956ca5305ff5aaf``) shipped five CRM migrations of its own
+# at 0035-0039 before the fork was merged into mainline. Mainline had
+# independently used those same five version numbers for unrelated CRM work,
+# and on merge her files were renumbered to 0041-0044 — so the schema those
+# files create is ALREADY on her box, under version numbers she has never
+# recorded.
+#
+# Without this allowlist the runner takes the version-slot-reuse branch below
+# (stored name != on-disk name), drops her ledger row and applies mainline's
+# 0035-0039 DDL on top of her fork schema. That is fatal at the first file:
+# mainline ``0035_crm_redesign.sql`` re-adds a ``pipeline_status`` CHECK whose
+# stage list has 'attempted_contact', while her live rows use the slug
+# 'attempted' — ADD CONSTRAINT fails and the backend then dies on every DB
+# call. (Mainline's own ``0037_crm_unpinned.sql`` drops that CHECK again, so
+# the constraint is transient; its only real-world effect is killing her box.)
+#
+# Recognising her hashes skips all five. ``0040_crm_fork_reconcile.sql`` then
+# carries the NET schema effect of mainline 0035-0039 forward idempotently, so
+# a fork box still catches up, and 0041-0044 are no-ops against the schema she
+# already has.
+_COMPATIBLE_PRIOR_HASHES: dict[str, set[str]] = {
+    # 0035_crm_goals.sql — renumbered to 0041_crm_goals.sql on merge.
+    "0035": {"9c59e596a8c1bc1871802ca91e9bb401c1dfd89c428ed9e9b9b880f24cd156b7"},
+    # 0036_pipeline_stages_expand.sql — no mainline counterpart. It added the
+    # widened pipeline_status CHECK (incl. 'attempted'); mainline deliberately
+    # ends with no CHECK at all, so 0040 drops it rather than renumbering it.
+    "0036": {"b66be7804294839cadad0aa3cb890b3ad886c2703a4feb1642ef3e11cf39fe2d"},
+    # 0037_contact_items.sql — renumbered to 0042_contact_items.sql.
+    "0037": {"19d23a3f88a672dc2ae4d4b98ef46bace3cdb76f91ff01b3b5da046199e8586d"},
+    # 0038_contacts_recency_segment.sql — renumbered to 0043_contacts_recency_segment.sql.
+    "0038": {"d53d22e69a31f1a566c153622a7f0d64780daddc7aee2a7813a807c8edbe2d0c"},
+    # 0039_contact_documents.sql — renumbered to 0044_contact_documents.sql.
+    "0039": {"cb4eefc5d10553eb9a72f9a3c1c679166ad5b18a5eafe0d9910d1ccd0355ceb2"},
+}
 
 
 class MigrationError(RuntimeError):
@@ -158,11 +196,14 @@ def run_pending(conn) -> list[str]:
                 # Genuine drift (same filename, edited body) still falls
                 # through to MigrationDriftError below.
                 if prior.get("name") and prior["name"] != f.name:
+                    # NOT committed here: the delete, the apply and the new
+                    # ledger row must land or roll back together. Committing
+                    # the delete on its own strands the slot permanently if
+                    # the apply then fails (old row gone, new file unrecorded).
                     conn.execute(
                         "DELETE FROM _schema_migrations WHERE version=?",
                         (f.version,),
                     )
-                    conn.commit()
                     # Fall through to the apply block.
                 else:
                     raise MigrationDriftError(
@@ -175,13 +216,14 @@ def run_pending(conn) -> list[str]:
                 continue
 
         sql = f.path.read_text(encoding="utf-8")
-        # Apply the DDL as one batched statement. Commit before recording
-        # the ledger row so a partial-apply crash leaves a recoverable
-        # state. (Postgres will roll back the implicit tx on error, but
-        # any DDL inside that tx is gone too — which is what we want.)
+        # Apply the DDL as one batched statement, then record the ledger row,
+        # then commit — one transaction. Postgres rolls DDL back with the rest
+        # of the tx, so a failure anywhere leaves the ledger exactly as it was
+        # (including any version-slot-reuse delete staged just above).
         try:
             conn.executescript(sql)
         except Exception as exc:
+            conn.rollback()
             raise MigrationError(f"migration {f.name} failed: {exc}") from exc
 
         conn.execute(

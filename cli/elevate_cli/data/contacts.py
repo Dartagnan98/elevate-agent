@@ -875,6 +875,27 @@ def set_contact_tags(
     return cleaned
 
 
+def set_contact_segments(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    segments: Iterable[str],
+) -> list[str]:
+    """Replace the contact's segment set (``contacts.segments_json``).
+
+    Same shape as :func:`set_contact_tags`; backs the contact card's segment
+    picker and the bulk segment set-ops.
+    """
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+    cleaned = sorted({str(s).strip() for s in segments if str(s).strip()})
+    conn.execute(
+        "UPDATE contacts SET segments_json = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(cleaned, ensure_ascii=False), now_iso(), contact_id),
+    )
+    return cleaned
+
+
 def set_contact_lists(
     conn: sqlite3.Connection,
     contact_id: str,
@@ -983,6 +1004,55 @@ def update_contact_details(
     args.append(now_iso())
     args.append(contact_id)
     conn.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id = ?", args)
+    return get_contact(conn, contact_id) or contact
+
+
+# Columns the contact card's inline "Edit details" PATCH may write. Order is
+# the order the SET clause is built in — keep it stable. NOTE: ``address`` and
+# ``birthday`` are on the card's form but no migration has added those columns
+# yet, so writing them still raises — same as before this moved off raw SQL.
+_CARD_EDITABLE_COLUMNS: tuple[str, ...] = (
+    "display_name",
+    "primary_email",
+    "primary_phone",
+    "buying_time_frame",
+    "pre_qual_status",
+    "address",
+    "birthday",
+)
+
+
+def update_contact_card_details(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Write the contact card's inline edit-details fields verbatim.
+
+    ``fields`` maps a column from :data:`_CARD_EDITABLE_COLUMNS` to the value
+    to store; anything outside that whitelist is dropped. Unlike
+    :func:`update_contact_details` this is a "write exactly what was sent"
+    patch — the card's PATCH sends only the keys the operator touched, and a
+    ``None`` there means "clear this field", not "don't touch". Nothing is
+    written (and ``updated_at`` is not bumped) when no whitelisted key is
+    present. Returns the refreshed contact.
+    """
+    contact = get_contact(conn, contact_id)
+    if contact is None:
+        raise ValueError(f"contact {contact_id!r} not found")
+
+    sets: list[str] = []
+    args: list[Any] = []
+    for column in _CARD_EDITABLE_COLUMNS:
+        if column in fields:
+            sets.append(f"{column}=?")
+            args.append(fields[column])
+    if not sets:
+        return contact
+    sets.append("updated_at=?")
+    args.append(now_iso())
+    args.append(contact_id)
+    conn.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(args))
     return get_contact(conn, contact_id) or contact
 
 

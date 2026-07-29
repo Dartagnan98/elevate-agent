@@ -209,19 +209,15 @@ def create_admin_contact_card_router(
     @router.post("/api/admin/contacts/{contact_id}/tags")
     def post_contact_tags(contact_id: str, body: _TagsBody):
         try:
-            from elevate_cli.data import connect, get_contact
-            from elevate_cli.data._util import now_iso
+            from elevate_cli.data import connect, get_contact, set_contact_tags
 
-            tags_json = json.dumps(sorted({t.strip() for t in body.tags if t and t.strip()}))
             with connect() as conn:
                 if get_contact(conn, contact_id) is None:
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                conn.execute(
-                    "UPDATE contacts SET tags_json=?, updated_at=? WHERE id=?",
-                    (tags_json, now_iso(), contact_id),
-                )
+                # The helper does the strip/dedupe/sort the route used to do.
+                set_contact_tags(conn, contact_id, body.tags)
                 return get_contact(conn, contact_id)
         except HTTPException:
             raise
@@ -233,20 +229,15 @@ def create_admin_contact_card_router(
     def post_contact_segments(contact_id: str, body: _SegmentsBody):
         try:
             from elevate_cli.data import connect, get_contact
-            from elevate_cli.data._util import now_iso
+            from elevate_cli.data.contacts import set_contact_segments
 
-            segments_json = json.dumps(
-                sorted({s.strip() for s in body.segments if s and s.strip()})
-            )
+            segments = sorted({s.strip() for s in body.segments if s and s.strip()})
             with connect() as conn:
                 if get_contact(conn, contact_id) is None:
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                conn.execute(
-                    "UPDATE contacts SET segments_json=?, updated_at=? WHERE id=?",
-                    (segments_json, now_iso(), contact_id),
-                )
+                set_contact_segments(conn, contact_id, segments)
                 return get_contact(conn, contact_id)
         except HTTPException:
             raise
@@ -282,22 +273,20 @@ def create_admin_contact_card_router(
     @router.post("/api/admin/contacts/{contact_id}/consent")
     def post_contact_consent(contact_id: str, body: _ConsentBody):
         try:
-            from elevate_cli.data import connect, get_contact
-            from elevate_cli.data._util import now_iso
+            from elevate_cli.data import connect, get_contact, update_contact_details
 
-            # consent=true means the channel is allowed => cannot_* = 0.
-            cannot_call = 0 if body.call else 1
-            cannot_text = 0 if body.text else 1
-            cannot_email = 0 if body.email else 1
+            # consent=true means the channel is allowed => cannot_* is False.
             with connect() as conn:
                 if get_contact(conn, contact_id) is None:
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                conn.execute(
-                    "UPDATE contacts SET cannot_call=?, cannot_text=?, cannot_email=?, "
-                    "updated_at=? WHERE id=?",
-                    (cannot_call, cannot_text, cannot_email, now_iso(), contact_id),
+                update_contact_details(
+                    conn,
+                    contact_id,
+                    cannot_call=not body.call,
+                    cannot_text=not body.text,
+                    cannot_email=not body.email,
                 )
                 return get_contact(conn, contact_id)
         except HTTPException:
@@ -532,9 +521,17 @@ def create_admin_contact_card_router(
         failed: List[Dict[str, str]] = []
 
         try:
-            from elevate_cli.data import connect, get_contact, set_pipeline_status
-            from elevate_cli.data._util import now_iso
+            from elevate_cli.data import (
+                connect,
+                get_contact,
+                set_contact_tags,
+                set_pipeline_status,
+            )
+            from elevate_cli.data.contacts import set_contact_segments
 
+            # Same pairing as ``column`` above: tags → tags_json writer,
+            # anything else (segments) → segments_json writer.
+            setter = set_contact_tags if action == "tags" else set_contact_segments
             values = _value_list()
             with connect() as conn:
                 for cid in contact_ids:
@@ -568,11 +565,7 @@ def create_admin_contact_card_router(
                                 merged = {t for t in existing if t not in set(values)}
                             else:  # add
                                 merged = set(existing) | set(values)
-                            new_json = json.dumps(sorted(t for t in merged if t))
-                            conn.execute(
-                                f"UPDATE contacts SET {column}=?, updated_at=? WHERE id=?",
-                                (new_json, now_iso(), cid),
-                            )
+                            setter(conn, cid, sorted(t for t in merged if t))
                         updated += 1
                     except Exception as exc:  # per-contact guard, never abort the batch
                         _log.warning("bulk update failed for contact %s: %s", cid, exc)
@@ -588,29 +581,20 @@ def create_admin_contact_card_router(
     def patch_contact_card(contact_id: str, body: _EditDetailsBody):
         try:
             from elevate_cli.data import connect, get_contact
-            from elevate_cli.data._util import now_iso
+            from elevate_cli.data.contacts import update_contact_card_details
 
             provided = body.model_dump(exclude_unset=True)
-            sets: List[str] = []
-            params: List[Any] = []
-            for key, column in _EDIT_COLUMNS.items():
-                if key in provided:
-                    sets.append(f"{column}=?")
-                    params.append(provided[key])
+            fields: Dict[str, Any] = {
+                column: provided[key]
+                for key, column in _EDIT_COLUMNS.items()
+                if key in provided
+            }
             with connect() as conn:
                 if get_contact(conn, contact_id) is None:
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                if sets:
-                    sets.append("updated_at=?")
-                    params.append(now_iso())
-                    params.append(contact_id)
-                    conn.execute(
-                        f"UPDATE contacts SET {', '.join(sets)} WHERE id=?",
-                        tuple(params),
-                    )
-                contact = get_contact(conn, contact_id)
+                contact = update_contact_card_details(conn, contact_id, fields)
                 contact["top25"] = _is_top25(conn, contact_id)
                 contact["temperature"] = _get_temperature(conn, contact_id)
                 return contact
