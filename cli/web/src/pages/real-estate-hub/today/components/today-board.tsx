@@ -148,6 +148,9 @@ export type TodayBoardProps = {
   priority: TodayPriorityItem[];
   /** True queue length; `priority` is only the visible slice. */
   priorityTotal?: number;
+  /** True pending-draft count; `drafts` is also a slice. Hers — the drafts
+   *  card does not render it yet, see REPORT. */
+  draftsWaitingTotal?: number;
   hourBuckets: TodayHourBucket[];
   dayBuckets: TodayDayBucket[];
   scheduled: TodayScheduledJob[];
@@ -426,7 +429,7 @@ function HourlyChart({ buckets }: { buckets: TodayHourBucket[] }) {
           {hourLabels.map((hr) => {
             const x = pad.l + hr * stepX;
             return (
-              <text key={hr} x={x} y={200 - 8} fontSize="9" fontFamily="Geist Mono, monospace" fill="var(--fg-faint)" textAnchor="middle" letterSpacing="0.06em">
+              <text key={hr} x={x} y={200 - 8} fontSize="9" fontFamily="var(--ds-font)" fill="var(--fg-faint)" textAnchor="middle" letterSpacing="0.06em">
                 {hr === 0 ? "12A" : hr === 12 ? "12P" : hr === 23 ? "11P" : hr < 12 ? hr + "A" : hr - 12 + "P"}
               </text>
             );
@@ -600,10 +603,13 @@ function QuickApprovals({
   drafts,
   draftSendNotices = [],
   onDraftAction,
+  draftsWaitingTotal,
 }: {
   drafts: TodayDraft[];
   draftSendNotices?: DraftSendLifecycleNotice[];
   onDraftAction?: TodayBoardProps["onDraftAction"];
+  // Hers: `drafts` is a slice, so the card must not print its own length.
+  draftsWaitingTotal?: number;
 }) {
   const [skipped, setSkipped] = useState<Set<string>>(() => new Set());
   const [approved, setApproved] = useState<Set<string>>(() => new Set());
@@ -636,7 +642,9 @@ function QuickApprovals({
           <p className="td-card-sub">
             {visible.length === 0
               ? "Inbox is clear — nothing else queued."
-              : visible.length + " draft" + (visible.length === 1 ? "" : "s") + " ready · auto-send paused"}
+              : draftsWaitingTotal && visible.length < draftsWaitingTotal
+                ? `Showing ${visible.length} of ${draftsWaitingTotal} drafts waiting · auto-send paused`
+                : `${visible.length} drafts waiting · auto-send paused`}
           </p>
         </div>
         <div className="td-card-link-group">
@@ -987,7 +995,7 @@ function LeadSourceBreakdown({ data }: { data: TodaySourceBreakdown }) {
               <path key={s.id} d={s.d} fill={`var(--${s.tone})`} opacity={i === 0 ? 1 : 0.78 - i * 0.14} />
             ))}
             <text x="64" y="62" textAnchor="middle" fontFamily="Anthropic Sans Display, Geist" fontSize="22" fontWeight="600" fill="var(--fg)">{data.total}</text>
-            <text x="64" y="78" textAnchor="middle" fontFamily="Geist Mono, monospace" fontSize="9" fill="var(--fg-faint)" letterSpacing="0.1em">LEADS</text>
+            <text x="64" y="78" textAnchor="middle" fontFamily="var(--ds-font)" fontSize="9" fill="var(--fg-faint)" letterSpacing="0.1em">LEADS</text>
           </svg>
         </div>
         <ul className="td-mix-legend">
@@ -1028,6 +1036,7 @@ export function TodayBoard(props: TodayBoardProps) {
             drafts={props.drafts}
             draftSendNotices={props.draftSendNotices}
             onDraftAction={props.onDraftAction}
+            draftsWaitingTotal={props.draftsWaitingTotal}
           />
         </div>
         <DayShape hourBuckets={props.hourBuckets} dayBuckets={props.dayBuckets} />

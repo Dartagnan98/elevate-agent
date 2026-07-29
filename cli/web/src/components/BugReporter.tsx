@@ -205,15 +205,17 @@ export function BugReporter() {
         onClick={openReporter}
         title="Report a bug"
         aria-label="Report a bug"
+        // Moved off the top-right rail (2026-07-27, Skyleigh — same bug found
+        // independently): `right-3 top-2` is exactly where every page puts its
+        // own toolbar, so on /leads it covered "+ New lead" and on /reporting
+        // the range picker. Kept at bottom-20 rather than her bottom-3: the
+        // admin "Ask the coach" FAB owns bottom-6 (24-58px) and her box runs
+        // stable, where that FAB does not render.
         className={cn(
-          // Anchored bottom-right ABOVE the admin "Ask the coach" FAB (fixed
-          // bottom-6 right-6, ~58px tall band). Must not sit in the top band:
-          // the shared page header's action slot (Refresh / clear-search) and
-          // the leads masthead (Add New / Connect source) live at y 8-52.
           "fixed bottom-20 right-4 z-[45] hidden items-center gap-2 rounded-full sm:flex",
-          "border border-[#5E8AD0]/50 bg-[#5E8AD0]/10 px-3 py-1.5 backdrop-blur-sm",
-          "text-xs font-medium text-[#5E8AD0] shadow-sm transition-colors",
-          "hover:border-[#5E8AD0] hover:bg-[#5E8AD0]/20",
+          "border border-[var(--ds-border)] bg-[var(--ds-card)] px-3 py-1.5 shadow-sm backdrop-blur-sm",
+          "text-xs font-semibold text-[var(--ds-muted)] transition-colors",
+          "hover:border-[var(--ds-blue)] hover:text-[var(--ds-blue)]",
         )}
       >
         {capturing ? (
@@ -231,7 +233,7 @@ export function BugReporter() {
         onClick={openReporter}
         title="Report a bug"
         aria-label="Report a bug"
-        className="fixed bottom-20 right-3 z-[45] flex h-9 w-9 items-center justify-center rounded-full border border-[#5E8AD0]/50 bg-[#5E8AD0]/10 text-[#5E8AD0] backdrop-blur-sm shadow-sm sm:hidden"
+        className="fixed bottom-20 right-3 z-[45] flex h-9 w-9 items-center justify-center rounded-full border border-[var(--ds-border)] bg-[var(--ds-card)] text-[var(--ds-muted)] backdrop-blur-sm shadow-sm sm:hidden"
       >
         {capturing ? (
           <Loader2 className="h-5 w-5 animate-spin" />

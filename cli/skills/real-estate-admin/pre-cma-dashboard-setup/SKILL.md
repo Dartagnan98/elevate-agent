@@ -1,6 +1,6 @@
 ---
 name: pre-cma-dashboard-setup
-description: "Pre-CMA intake: turn a raw seller lead into a clean, CMA-ready deal (stage 0). Use when a new seller lead lands on the listing board, the realtor says 'set up the dashboard', 'prep this lead for the CMA', or the Pre-CMA intake form needs confirming and normalizing. Confirms the intake, normalizes client/property facts, saves the CMA handoff notes. Does not price, contact the client, or make docs. Not for running the CMA itself — use cma; not for the MLC paperwork — use mlc."
+description: Pre-CMA intake. Set up the listing dashboard for a new seller lead, confirm the Pre-CMA Google Form / intake is filled, normalize client and property facts, and save the handoff notes the CMA needs. First step of the listing pipeline (stage 0).
 metadata:
   elevate:
     tags: [real-estate, listing-intake, pre-cma]
@@ -32,8 +32,6 @@ It does not price anything, does not contact the client, and does not create doc
 A raw seller lead with a name, a contact channel, and an address is enough to set up the Pre-CMA and move the file forward. Do not stall the workflow asking for lead source, CMA date, or notes — those are helpful context, not gate conditions. Convert relative dates to absolute dates when present.
 
 **Never fabricate an optional field.** "Optional, proceed anyway" means LEAVE IT BLANK when you don't have it — it does NOT mean invent a plausible value. Do not guess a lead source, a CMA date, an appointment time, or a seller note/timeline. Only write a value that came from a real cited source (the intake form, a CRM record you actually read, or the user). A blank optional field is correct; a made-up one is a defect.
-
-**Enrich before you ask.** Resolve seller name/email/phone/source from Contacts, Gmail, iMessage, and the CRM first, then prompt ONE concise card for only the genuinely missing fields. Re-dispatched runs carrying `human_prompt_json.providedAnswers` apply the answers instead of re-asking.
 
 ## Flow
 

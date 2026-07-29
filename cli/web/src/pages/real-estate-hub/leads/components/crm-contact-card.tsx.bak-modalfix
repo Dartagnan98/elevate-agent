@@ -1,0 +1,911 @@
+import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+
+import { api } from "@/lib/api";
+import type {
+  AdminContactDetail,
+  AdminContactItem,
+  AdminContactNote,
+  ThreadContextResponse,
+} from "@/lib/api-types";
+import type { LeadsProfile } from "../leads-data";
+import { PIPELINE_SELECT_OPTIONS, pipelineSelectValue } from "../pipeline-stages";
+import "./crm-contact-card.css";
+
+// ── helpers ────────────────────────────────────────────────────────────
+
+function parseJsonArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function relTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (!isFinite(t.getTime())) return "";
+  const diff = Date.now() - t.getTime();
+  if (diff < 0) return t.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return t.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (!isFinite(t.getTime())) return "";
+  return t.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+// Skyleigh's 9-stage operator pipeline (source of truth in pipeline-stages.ts).
+const PIPELINE_OPTIONS = PIPELINE_SELECT_OPTIONS;
+
+const TAG_GROUPS: Array<{ label: string; options: string[] }> = [
+  { label: "Property needs", options: ["First-time buyer", "Upsizing", "Downsizing", "Investor", "Suite / income", "Move-in ready"] },
+  { label: "Financial", options: ["Pre-approved", "Needs to sell first", "$500k max", "$750k max", "$1M+ max"] },
+  { label: "Location", options: ["Kamloops", "Kelowna", "Wants rural", "Urban core"] },
+  { label: "Relationship", options: ["SOI", "Past Client", "Referral", "Open House Lead", "PPC Lead", "Sign Call"] },
+  { label: "Buying window", options: ["Spring 2026", "Fall 2026", "Winter 2026"] },
+  { label: "Mortgage renewal", options: ["Renewal 2027", "Renewal 2030"] },
+];
+
+// Read-only lead temperature (derived from recency + tags in compute-leads-data).
+const TEMP_META: Record<string, { label: string }> = {
+  hot: { label: "Hot" },
+  warm: { label: "Warm" },
+  lukewarm: { label: "Lukewarm" },
+  cool: { label: "Cool" },
+  soi: { label: "SOI" },
+  nurture: { label: "Nurture" },
+};
+
+const UC_COPY: Record<string, { title: string; body: string }> = {
+  properties: { title: "Properties", body: "Homes this contact has engaged with -- viewed, favorited, been shown, or been sent. Ready to build next." },
+  documents: { title: "Documents", body: "Their pre-approval and signed files, attached right on the person instead of buried in Drive. On the build list." },
+  automations: { title: "Automations", body: "Where drip campaigns will live -- multi-step text + email follow-up that stops the moment they reply. Coming after the core card." },
+};
+
+type ComposeMode = "note" | "text" | "email";
+type FeedKind = "note" | "text" | "call" | "email" | "activity";
+
+interface FeedEvent {
+  id: string;
+  kind: FeedKind;
+  title: string;
+  body: string;
+  time: string;
+  ts: number;
+}
+
+// ── component ──────────────────────────────────────────────────────────
+
+export function CrmContactCard({
+  profile,
+  onClose,
+  onDeleted,
+}: {
+  profile: LeadsProfile;
+  onClose: () => void;
+  onDeleted?: () => void;
+  onStatusChange?: (profile: LeadsProfile, value: string) => void;
+}) {
+  const contactId = profile.contactIds && profile.contactIds.length > 0 ? profile.contactIds[0] : "";
+  const sourceId = profile.sourceId || "";
+  const threadId = profile.threadId || "";
+
+  const [contact, setContact] = useState<AdminContactDetail | null>(null);
+  const [notes, setNotes] = useState<AdminContactNote[]>([]);
+  const [context, setContext] = useState<ThreadContextResponse | null>(null);
+  const [items, setItems] = useState<AdminContactItem[]>([]);
+  const [addKind, setAddKind] = useState<null | "task" | "appointment" | "family">(null);
+  const [draft, setDraft] = useState({ title: "", subtitle: "", whenAt: "" });
+  const [savingItem, setSavingItem] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [tab, setTab] = useState<string>("overview");
+  const [view, setView] = useState<"board" | "edit">("board");
+  const [ucName, setUcName] = useState<string | null>(null);
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [customTag, setCustomTag] = useState("");
+  const [feedFilter, setFeedFilter] = useState<"all" | FeedKind>("all");
+  const [feedShowAll, setFeedShowAll] = useState(false);
+
+  const [composeMode, setComposeMode] = useState<ComposeMode>("note");
+  const [composeText, setComposeText] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
+
+  // Edit-details form state.
+  const [editForm, setEditForm] = useState({ first: "", last: "", email: "", phone: "", timeframe: "", preapproval: "" });
+  const [editConsent, setEditConsent] = useState({ call: true, text: true, email: true });
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // body scroll lock + escape.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (ucName) { setUcName(null); return; }
+      if (tagPickerOpen) { setTagPickerOpen(false); return; }
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, ucName, tagPickerOpen]);
+
+  // Load contact + notes.
+  useEffect(() => {
+    if (!contactId) { setContact(null); setNotes([]); return; }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    Promise.all([api.getAdminContact(contactId), api.getAdminContactNotes(contactId)])
+      .then(([c, n]) => {
+        if (cancelled) return;
+        setContact(c);
+        setNotes(n.items || []);
+      })
+      .catch((err: { message?: string }) => {
+        if (!cancelled) setError(err?.message || "Failed to load contact");
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [contactId]);
+
+  // Load thread context (activity/messages/tasks) when identifiers exist.
+  useEffect(() => {
+    if (!sourceId || !threadId) { setContext(null); return; }
+    let cancelled = false;
+    api.getThreadContext(sourceId, threadId)
+      .then((res) => { if (!cancelled) setContext(res); })
+      .catch(() => { if (!cancelled) setContext(null); });
+    return () => { cancelled = true; };
+  }, [sourceId, threadId]);
+
+  // Load addable contact items (Tasks / Appointments / Family).
+  useEffect(() => {
+    if (!contactId) { setItems([]); return; }
+    let cancelled = false;
+    api.getContactItems(contactId)
+      .then((res) => { if (!cancelled) setItems(res.items || []); })
+      .catch(() => { if (!cancelled) setItems([]); });
+    return () => { cancelled = true; };
+  }, [contactId]);
+
+  // Seed the edit form whenever the contact loads.
+  useEffect(() => {
+    const name = (contact?.displayName || profile.name || "").trim();
+    const parts = name.split(/\s+/);
+    setEditForm({
+      first: parts[0] || "",
+      last: parts.slice(1).join(" "),
+      email: contact?.primaryEmail || profile.email || "",
+      phone: contact?.primaryPhone || profile.phone || "",
+      timeframe: contact?.buyingTimeFrame || "",
+      preapproval: contact?.preQualStatus || "",
+    });
+    setEditConsent({
+      call: contact ? !contact.cannotCall : true,
+      text: contact ? !contact.cannotText : true,
+      email: contact ? !contact.cannotEmail : true,
+    });
+  }, [contact, profile.name, profile.email, profile.phone]);
+
+  // ── derived ──
+  const name = contact?.displayName || profile.name || "Contact";
+
+  const [deleting, setDeleting] = useState(false);
+  const handleDelete = async () => {
+    if (!contactId || deleting) return;
+    if (!window.confirm(
+      `Permanently delete ${name} and all their history (messages, notes, activity)?\n\nThis cannot be undone.`,
+    )) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteContact(contactId);
+      onDeleted?.();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+      setDeleting(false);
+    }
+  };
+  const tags = useMemo(() => {
+    if (contact) return parseJsonArray(contact.tagsJson);
+    return profile.tags || [];
+  }, [contact, profile.tags]);
+  const segments = useMemo(() => (contact ? parseJsonArray(contact.segmentsJson) : []), [contact]);
+  const consent = {
+    call: contact ? !contact.cannotCall : true,
+    text: contact ? !contact.cannotText : true,
+    email: contact ? !contact.cannotEmail : true,
+  };
+  const phone = contact?.primaryPhone || profile.phone || "";
+  const email = contact?.primaryEmail || profile.email || "";
+  const badgeType = (contact?.type && contact.type !== "unclassified" ? contact.type : "") || profile.tags[0] || "Lead";
+  const top25 = !!contact?.top25;
+  // Manual override wins; otherwise fall back to the derived list temperature.
+  const temp = (contact?.temperature || profile.temperature || "nurture") as string;
+
+  const feed: FeedEvent[] = useMemo(() => {
+    if (!context) return [];
+    const out: FeedEvent[] = [];
+    const toTs = (iso: string | null | undefined) => {
+      if (!iso) return 0;
+      const t = new Date(iso).getTime();
+      return isFinite(t) ? t : 0;
+    };
+    for (const m of context.messages || []) {
+      out.push({
+        id: `m-${m.id}`,
+        kind: "text",
+        title: m.direction === "outbound" ? "Text sent" : "Text received",
+        body: m.text || "",
+        time: relTime(m.timestamp),
+        ts: toTs(m.timestamp),
+      });
+    }
+    // System-sync / lifecycle rows (e.g. "Lofty lead synced ... is in New Leads
+    // via ...") are pipeline bookkeeping, not client activity -- drop them so the
+    // feed shows real texts, calls, emails, notes and searches only.
+    const SYSTEM_NOISE = /synced?|classif|lifecycle|ingest|pcs[_ ]?activity/i;
+    for (const a of context.activity || []) {
+      const raw = (a.type || "activity").toLowerCase();
+      const title = a.title || raw.replace(/_/g, " ");
+      if (SYSTEM_NOISE.test(raw) || SYSTEM_NOISE.test(title)) continue;
+      const kind: FeedKind = raw.includes("call") ? "call" : raw.includes("email") ? "email" : raw.includes("note") ? "note" : "activity";
+      out.push({
+        id: `a-${a.id}`,
+        kind,
+        title,
+        body: a.summary || "",
+        time: relTime(a.timestamp),
+        ts: toTs(a.timestamp),
+      });
+    }
+    return out.sort((x, y) => y.ts - x.ts);
+  }, [context]);
+
+  const feedCounts = useMemo(() => {
+    const c: Record<string, number> = { all: feed.length };
+    for (const e of feed) c[e.kind] = (c[e.kind] || 0) + 1;
+    return c;
+  }, [feed]);
+  const visibleFeed = feedFilter === "all" ? feed : feed.filter((e) => e.kind === feedFilter);
+  const FEED_CAP = 6;
+  const shownFeed = feedShowAll ? visibleFeed : visibleFeed.slice(0, FEED_CAP);
+
+  const tasks = context?.tasks || [];
+
+  // Addable contact items, split by kind. Read-only thread tasks (above) are
+  // merged into the Tasks card render but never live in `items`.
+  const taskItems = useMemo(
+    () =>
+      items
+        .filter((i) => i.kind === "task")
+        .slice()
+        .sort((a, b) => {
+          if (a.done !== b.done) return a.done ? 1 : -1;
+          return (a.whenAt || "").localeCompare(b.whenAt || "");
+        }),
+    [items],
+  );
+  const apptItems = useMemo(
+    () =>
+      items
+        .filter((i) => i.kind === "appointment")
+        .slice()
+        .sort((a, b) => (a.whenAt || "").localeCompare(b.whenAt || "")),
+    [items],
+  );
+  const familyItems = useMemo(() => items.filter((i) => i.kind === "family"), [items]);
+
+  // ── mutations ──
+  const openAdd = (kind: "task" | "appointment" | "family") => {
+    setAddKind(kind);
+    setDraft({ title: "", subtitle: "", whenAt: "" });
+  };
+  const cancelAdd = () => {
+    setAddKind(null);
+    setDraft({ title: "", subtitle: "", whenAt: "" });
+  };
+  const saveItem = async (kind: "task" | "appointment" | "family") => {
+    const title = draft.title.trim();
+    if (!contactId || !title) return;
+    setSavingItem(true);
+    try {
+      const created = await api.addContactItem(contactId, {
+        kind,
+        title,
+        subtitle: draft.subtitle.trim() || undefined,
+        whenAt: draft.whenAt.trim() || undefined,
+      });
+      setItems((prev) => [...prev, created]);
+      cancelAdd();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Add failed");
+    } finally {
+      setSavingItem(false);
+    }
+  };
+  const onAddKey = (kind: "task" | "appointment" | "family") =>
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") { e.preventDefault(); saveItem(kind); }
+      else if (e.key === "Escape") { cancelAdd(); }
+    };
+  const toggleItemDone = async (item: AdminContactItem) => {
+    if (!contactId) return;
+    try {
+      const updated = await api.updateContactItem(contactId, item.id, { done: !item.done });
+      setItems((prev) => prev.map((i) => (i.id === item.id ? updated : i)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
+    }
+  };
+  const deleteItem = async (item: AdminContactItem) => {
+    if (!contactId) return;
+    try {
+      await api.deleteContactItem(contactId, item.id);
+      setItems((prev) => prev.filter((i) => i.id !== item.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+    }
+  };
+  const persistTags = async (next: string[]) => {
+    if (!contactId) return;
+    try {
+      const updated = await api.saveAdminContactTags(contactId, next);
+      setContact(updated);
+    } catch (err) { setError(err instanceof Error ? err.message : "Tag save failed"); }
+  };
+  const addTag = (t: string) => { if (!tags.includes(t)) persistTags([...tags, t]); };
+  const removeTag = (t: string) => persistTags(tags.filter((x) => x !== t));
+  const addCustom = () => {
+    const v = customTag.trim();
+    if (v && !tags.includes(v)) persistTags([...tags, v]);
+    setCustomTag("");
+  };
+
+  const changePipeline = async (status: string) => {
+    if (!contactId) return;
+    try {
+      const updated = await api.setAdminContactPipeline(contactId, status || null);
+      setContact((prev) => ({ ...(updated as AdminContactDetail), top25: prev?.top25 ?? updated.top25 }));
+    } catch (err) { setError(err instanceof Error ? err.message : "Pipeline update failed"); }
+  };
+  const changeSegment = async (value: string) => {
+    if (!contactId) return;
+    try {
+      const updated = await api.saveAdminContactSegments(contactId, value ? [value] : []);
+      setContact(updated);
+    } catch (err) { setError(err instanceof Error ? err.message : "Segment update failed"); }
+  };
+  const changeTemperature = async (value: string) => {
+    if (!contactId) return;
+    try {
+      const updated = await api.setAdminContactTemperature(contactId, value);
+      setContact((prev) => (prev ? { ...prev, temperature: updated.temperature } : prev));
+    } catch (err) { setError(err instanceof Error ? err.message : "Temperature update failed"); }
+  };
+  const toggleConsent = async (channel: "call" | "text" | "email") => {
+    if (!contactId) return;
+    const next = { ...consent, [channel]: !consent[channel] };
+    try {
+      const updated = await api.setAdminContactConsent(contactId, next);
+      setContact(updated);
+    } catch (err) { setError(err instanceof Error ? err.message : "Consent update failed"); }
+  };
+  const toggleTop25 = async () => {
+    if (!contactId) return;
+    try {
+      const res = await api.setAdminContactTop25(contactId, !top25);
+      setContact((prev) => (prev ? { ...prev, top25: res.top25 } : prev));
+    } catch (err) { setError(err instanceof Error ? err.message : "Top 25 update failed"); }
+  };
+  const submitNote = async () => {
+    const body = composeText.trim();
+    if (!contactId || composeMode !== "note" || !body) { setComposeText(""); return; }
+    setSavingNote(true);
+    try {
+      const note = await api.addAdminContactNote(contactId, body, false);
+      if (note) setNotes((prev) => [note, ...prev]);
+      setComposeText("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Note save failed");
+    } finally { setSavingNote(false); }
+  };
+  const togglePin = async (note: AdminContactNote) => {
+    if (!contactId) return;
+    const nextPinned = !note.pinned;
+    try {
+      await api.pinAdminContactNote(contactId, note.id, nextPinned);
+      setNotes((prev) => {
+        const mapped = prev.map((n) =>
+          n.id === note.id ? { ...n, pinned: nextPinned } : nextPinned ? { ...n, pinned: false } : n,
+        );
+        return [...mapped].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+      });
+    } catch (err) { setError(err instanceof Error ? err.message : "Pin failed"); }
+  };
+  const saveEdit = async () => {
+    if (!contactId) { setView("board"); return; }
+    setSavingEdit(true);
+    try {
+      const displayName = `${editForm.first} ${editForm.last}`.trim();
+      const updated = await api.patchAdminContact(contactId, {
+        displayName,
+        primaryEmail: editForm.email,
+        primaryPhone: editForm.phone,
+        buyingTimeFrame: editForm.timeframe,
+        preQualStatus: editForm.preapproval,
+      });
+      await api.setAdminContactConsent(contactId, editConsent);
+      const refreshed = await api.getAdminContact(contactId);
+      setContact({ ...updated, ...refreshed });
+      setView("board");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    } finally { setSavingEdit(false); }
+  };
+
+  // ── icons (inline, brand-neutral) ──
+  const IconCall = () => (<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z" /></svg>);
+  const IconText = () => (<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16c1.1 0 2 .9 2 2v10c0 1.1-.9 2-2 2H8l-4 4V6c0-1.1.9-2 2-2z" /></svg>);
+  const IconEmail = () => (<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18c.6 0 1 .4 1 1v12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V6c0-.6.4-1 1-1zm9 7L4 7v1l8 5 8-5V7l-8 5z" /></svg>);
+  const feedIcon = (kind: FeedKind) => {
+    if (kind === "call") return <IconCall />;
+    if (kind === "email") return <IconEmail />;
+    if (kind === "text") return <IconText />;
+    if (kind === "note") return <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h13l3 3v13H4z" /></svg>;
+    return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3-3" /></svg>;
+  };
+
+  const composeCfg: Record<ComposeMode, { ph: string; btn: string }> = {
+    note: { ph: "Add a note / log...", btn: savingNote ? "Saving..." : "Log note" },
+    text: { ph: `Write a text to ${name.split(" ")[0]}...`, btn: "Send text" },
+    email: { ph: `Write an email to ${name.split(" ")[0]}...`, btn: "Send email" },
+  };
+
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
+
+  return createPortal(
+    <div className="crmcard">
+      <div className="crmcard-backdrop" onClick={onClose}>
+        <div className="crmcard-shellwrap" onClick={stop} role="dialog" aria-modal="true" aria-label={`Contact: ${name}`}>
+          <button type="button" className="crmcard-close-x" onClick={onClose} aria-label="Close">×</button>
+          {contactId && (
+            <button
+              type="button"
+              className="crmcard-delete-btn"
+              onClick={handleDelete}
+              disabled={deleting}
+              title="Permanently delete this lead"
+            >
+              {deleting ? "Deleting…" : "Delete lead"}
+            </button>
+          )}
+
+          <div className="masthead">
+            <div className="brandmark">E</div>
+            <div>
+              <h1>Elevation · Contact</h1>
+              <div className="sub">{contactId ? `id ${contactId.slice(0, 8)}` : "unlinked profile"}</div>
+            </div>
+            <div className="switch" role="tablist">
+              <button type="button" aria-selected={view === "board"} onClick={() => setView("board")}>Contact board</button>
+              <button type="button" aria-selected={view === "edit"} onClick={() => setView("edit")}>Edit details</button>
+            </div>
+          </div>
+
+          {error && <div className="cc-error">{error}</div>}
+          {loading && <div className="cc-loading">Loading contact...</div>}
+
+          {view === "board" ? (
+            <div className="shell">
+              {/* LEFT identity rail */}
+              <div className="col identity-col">
+                <div className="card pad">
+                  <div className="id-top">
+                    <div className="avatar">{initials(name)}</div>
+                    <div>
+                      <div className="id-name">{name}</div>
+                      <span className="badge">{String(badgeType)}</span>
+                      {top25 && <span className="top25-badge">★ Top 25</span>}
+                    </div>
+                  </div>
+
+                  <div className="kv">
+                    <div>
+                      <div className="lab">Pipeline</div>
+                      <div className="selectish">
+                        <select value={pipelineSelectValue(contact?.pipelineStatus)} onChange={(e) => changePipeline(e.target.value)} disabled={!contactId}>
+                          {PIPELINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="lab">Smart list</div>
+                      <div className="selectish">
+                        <select value={segments[0] || ""} onChange={(e) => changeSegment(e.target.value)} disabled={!contactId}>
+                          <option value="">-- None --</option>
+                          {segments.map((s) => <option key={s} value={s}>{s}</option>)}
+                          {["Prospective Buyers", "Active Sellers", "Past Clients", "Sphere / SOI", "Nurture"].filter((s) => !segments.includes(s)).map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="lab">Temperature</div>
+                      <div className="selectish tempselect" data-temp={temp}>
+                        <span className="tdot" />
+                        <select value={temp} onChange={(e) => changeTemperature(e.target.value)} disabled={!contactId}>
+                          {Object.entries(TEMP_META).map(([v, m]) => <option key={v} value={v}>{m.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="actions">
+                    <a className={`a-call${!phone || !consent.call ? " disabled" : ""}`} href={phone ? `tel:${phone}` : undefined}><IconCall />Call</a>
+                    <a className={`a-text${!phone || !consent.text ? " disabled" : ""}`} href={phone ? `sms:${phone}` : undefined}><IconText />Text</a>
+                    <a className={`a-email${!email || !consent.email ? " disabled" : ""}`} href={email ? `mailto:${email}` : undefined}><IconEmail />Email</a>
+                  </div>
+
+                  <button type="button" className={`top25btn${top25 ? " on" : ""}`} onClick={toggleTop25} disabled={!contactId}>
+                    {top25 ? "★ In Top 25" : "☆ Add to Top 25"}
+                  </button>
+
+                  <div className="insight">
+                    <div className="hd"><b>At a glance</b></div>
+                    <div className="metrics">
+                      <div className="metric"><div className="n">{relTime(contact?.lastActivityAt) || "--"}</div><div className="l">Last touch</div></div>
+                      <div className="metric"><div className="n">{contact?.buyingTimeFrame || contact?.sellingTimeFrame || "--"}</div><div className="l">Timeframe</div></div>
+                      <div className="metric"><div className="n">{contact?.preQualStatus || "--"}</div><div className="l">Pre-approved</div></div>
+                    </div>
+                  </div>
+
+                  <div className="details">
+                    <div className="row"><b>{phone || "No phone on file"}</b>{phone && <span className="verified">✓ on file</span>}</div>
+                    <div className="row">{email || "No email on file"}</div>
+                    <div className="row">Source: <b>{contact?.leadSource || profile.source || "--"}</b></div>
+                    <div className="row">Added: <b>{fmtDate(contact?.createdAt) || "--"}</b></div>
+                  </div>
+
+                  <div className="consent">
+                    <div className="lab">Consent to contact</div>
+                    <div className="pills">
+                      <button type="button" className={`cpill ${consent.call ? "yes" : "no"}`} onClick={() => toggleConsent("call")} disabled={!contactId}>{consent.call ? "Call ✓" : "Call held"}</button>
+                      <button type="button" className={`cpill ${consent.text ? "yes" : "no"}`} onClick={() => toggleConsent("text")} disabled={!contactId}>{consent.text ? "Text ✓" : "Text held"}</button>
+                      <button type="button" className={`cpill ${consent.email ? "yes" : "no"}`} onClick={() => toggleConsent("email")} disabled={!contactId}>{consent.email ? "Email ✓" : "Email held"}</button>
+                    </div>
+                  </div>
+
+                  <div className="tags">
+                    <div className="lab">Tags</div>
+                    <div className="taglist">
+                      {tags.map((t) => (
+                        <span key={t} className="tag">{t}<button type="button" className="tx" onClick={() => removeTag(t)} aria-label={`Remove ${t}`} disabled={!contactId}>×</button></span>
+                      ))}
+                      <button type="button" className="tagadd" onClick={() => setTagPickerOpen(true)} disabled={!contactId}>＋ Tag</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* MAIN */}
+              <div className="main">
+                <div className="tabs">
+                  <button type="button" className={tab === "overview" ? "on" : ""} onClick={() => setTab("overview")}>Overview</button>
+                  <button type="button" onClick={() => setUcName("properties")}>Properties</button>
+                  <button type="button" className={tab === "searches" ? "on" : ""} onClick={() => setTab("searches")}>Searches</button>
+                  <button type="button" onClick={() => setUcName("documents")}>Documents</button>
+                  <button type="button" onClick={() => setUcName("automations")}>Automations</button>
+                </div>
+
+                {tab === "overview" && (
+                  <div className="tabpanel">
+                    <div className="maingrid">
+                      {/* CENTER */}
+                      <div className="col">
+                        <div className="card compose">
+                          <div className="modes">
+                            {(["note", "text", "email"] as ComposeMode[]).map((m) => (
+                              <button type="button" key={m} data-m={m} className={composeMode === m ? "on" : ""} onClick={() => setComposeMode(m)}>{m[0].toUpperCase() + m.slice(1)}</button>
+                            ))}
+                          </div>
+                          <textarea value={composeText} placeholder={composeCfg[composeMode].ph} onChange={(e) => setComposeText(e.target.value)} />
+                          <div className="foot">
+                            <span className="hint">{composeMode === "note" ? "Logs to this contact" : "Drafted from the outreach lane"}</span>
+                            <button type="button" className="send" onClick={submitNote} disabled={composeMode !== "note" || !contactId || savingNote || !composeText.trim()}
+                              style={{ background: composeMode === "note" ? "var(--navy)" : composeMode === "text" ? "var(--blue)" : "var(--terracotta)" }}>
+                              {composeCfg[composeMode].btn}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="card notes-card">
+                          <div className="notes-hd"><b>Notes</b><span className="ncount">{notes.length}</span></div>
+                          <div className="notelist">
+                            {notes.length === 0 ? (
+                              <div className="empty-small">No notes yet. Add the first one above.</div>
+                            ) : notes.map((n) => (
+                              <div key={n.id} className={`note${n.pinned ? " pinned" : ""}`}>
+                                <div className="note-top">
+                                  {n.pinned && <span className="pin-badge">📌 Pinned</span>}
+                                  <span className="note-when">{relTime(n.createdAt)} · {n.authorKind === "operator" ? "you" : (n.authorName || n.authorKind)}</span>
+                                  <button type="button" className={`note-pin${n.pinned ? " on" : ""}`} title={n.pinned ? "Unpin" : "Pin"} onClick={() => togglePin(n)}>📌</button>
+                                </div>
+                                <div className="note-body">{n.body}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="card">
+                          <div className="tally">
+                            <span className={`tchip${feedFilter === "all" ? " on" : ""}`} onClick={() => setFeedFilter("all")}><span className="ct">{feedCounts.all || 0}</span> All</span>
+                            {(["note", "text", "call", "email", "activity"] as FeedKind[]).filter((k) => feedCounts[k]).map((k) => (
+                              <span key={k} className={`tchip${feedFilter === k ? " on" : ""}`} onClick={() => setFeedFilter(k)}>{feedIcon(k)}<span className="ct">{feedCounts[k]}</span></span>
+                            ))}
+                          </div>
+                          <div className="feed">
+                            {visibleFeed.length === 0 ? (
+                              <div className="feed-empty">{context ? "No activity yet on this thread." : "Connect a source thread to see call, text, and activity history."}</div>
+                            ) : shownFeed.map((e) => (
+                              <div className="event" key={e.id}>
+                                <div className={`ev-ic ic-${e.kind}`}>{feedIcon(e.kind)}</div>
+                                <div>
+                                  <div className="ev-top"><b>{e.title}</b><span className="t">{e.time}</span></div>
+                                  {e.body && <div className="ev-body">{e.body}</div>}
+                                </div>
+                              </div>
+                            ))}
+                            {visibleFeed.length > FEED_CAP && (
+                              <button type="button" className="feed-more" onClick={() => setFeedShowAll((v) => !v)}>
+                                {feedShowAll ? "Show less" : `Show all ${visibleFeed.length}`}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* RIGHT */}
+                      <div className="col">
+                        <div className="card pad">
+                          <div className="rhd">
+                            <b>Tasks</b>
+                            <div className="rhd-r">
+                              <span className="rcount">{tasks.length + taskItems.length}</span>
+                              <button type="button" className="add" onClick={() => openAdd("task")} disabled={!contactId} aria-label="Add task" title="Add task">＋</button>
+                            </div>
+                          </div>
+                          {addKind === "task" && (
+                            <div className="item-add">
+                              <input className="ia-in" autoFocus placeholder="Task title" value={draft.title} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))} onKeyDown={onAddKey("task")} />
+                              <input className="ia-in" type="date" value={draft.whenAt} onChange={(e) => setDraft((d) => ({ ...d, whenAt: e.target.value }))} onKeyDown={onAddKey("task")} />
+                              <div className="ia-foot">
+                                <button type="button" className="ia-cancel" onClick={cancelAdd}>Cancel</button>
+                                <button type="button" className="ia-save" onClick={() => saveItem("task")} disabled={savingItem || !draft.title.trim()}>{savingItem ? "Saving..." : "Save"}</button>
+                              </div>
+                            </div>
+                          )}
+                          {tasks.length === 0 && taskItems.length === 0 ? (
+                            <div className="side-empty">No open tasks.</div>
+                          ) : (
+                            <>
+                              {taskItems.map((it) => (
+                                <div className="task addable" key={it.id}>
+                                  <button type="button" className={`cbox${it.done ? " done" : ""}`} onClick={() => toggleItemDone(it)} aria-label={it.done ? "Mark not done" : "Mark done"} />
+                                  <div>
+                                    <div className={`tt${it.done ? " done" : ""}`}>{it.title}</div>
+                                    {(it.subtitle || it.whenAt) && <div className="tm">{[it.subtitle, it.whenAt ? fmtDate(it.whenAt) : ""].filter(Boolean).join(" · ")}</div>}
+                                  </div>
+                                  <button type="button" className="item-x" onClick={() => deleteItem(it)} aria-label="Delete task" title="Delete">×</button>
+                                </div>
+                              ))}
+                              {tasks.map((t) => (
+                                <div className="task" key={t.id}>
+                                  <span className={`cbox${t.status === "done" || t.status === "completed" ? " done" : ""}`} />
+                                  <div>
+                                    <div className={`tt${t.status === "done" || t.status === "completed" ? " done" : ""}`}>{t.title || "Task"}</div>
+                                    <div className="tm">{t.status}{t.dueAt ? ` · ${fmtDate(t.dueAt)}` : ""} · from thread</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </>
+                          )}
+                        </div>
+
+                        <div className="card pad">
+                          <div className="rhd">
+                            <b>Appointments</b>
+                            <div className="rhd-r">
+                              {apptItems.length > 0 && <span className="rcount">{apptItems.length}</span>}
+                              <button type="button" className="add" onClick={() => openAdd("appointment")} disabled={!contactId} aria-label="Add appointment" title="Add appointment">＋</button>
+                            </div>
+                          </div>
+                          {addKind === "appointment" && (
+                            <div className="item-add">
+                              <input className="ia-in" autoFocus placeholder="What / title" value={draft.title} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))} onKeyDown={onAddKey("appointment")} />
+                              <input className="ia-in" type="datetime-local" value={draft.whenAt} onChange={(e) => setDraft((d) => ({ ...d, whenAt: e.target.value }))} onKeyDown={onAddKey("appointment")} />
+                              <input className="ia-in" placeholder="Location (optional)" value={draft.subtitle} onChange={(e) => setDraft((d) => ({ ...d, subtitle: e.target.value }))} onKeyDown={onAddKey("appointment")} />
+                              <div className="ia-foot">
+                                <button type="button" className="ia-cancel" onClick={cancelAdd}>Cancel</button>
+                                <button type="button" className="ia-save" onClick={() => saveItem("appointment")} disabled={savingItem || !draft.title.trim()}>{savingItem ? "Saving..." : "Save"}</button>
+                              </div>
+                            </div>
+                          )}
+                          {apptItems.length === 0 ? (
+                            <div className="side-empty">No appointments scheduled.</div>
+                          ) : (
+                            <div className="appt-list">
+                              {apptItems.map((it) => {
+                                const d = it.whenAt ? new Date(it.whenAt) : null;
+                                const ok = !!d && isFinite(d.getTime());
+                                return (
+                                  <div className="appt addable" key={it.id}>
+                                    <div className="date">
+                                      <div className="d">{ok ? d!.getDate() : "–"}</div>
+                                      <div className="mo">{ok ? d!.toLocaleDateString(undefined, { month: "short" }) : ""}</div>
+                                    </div>
+                                    <div className="info">
+                                      <b>{it.title}</b>
+                                      <div className="w">{[ok ? d!.toLocaleString(undefined, { hour: "numeric", minute: "2-digit" }) : "", it.subtitle].filter(Boolean).join(" · ") || "No time set"}</div>
+                                    </div>
+                                    <button type="button" className="item-x" onClick={() => deleteItem(it)} aria-label="Delete appointment" title="Delete">×</button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="card pad">
+                          <div className="rhd">
+                            <b>Family</b>
+                            <div className="rhd-r">
+                              {familyItems.length > 0 && <span className="rcount">{familyItems.length}</span>}
+                              <button type="button" className="add" onClick={() => openAdd("family")} disabled={!contactId} aria-label="Add family member" title="Add family member">＋</button>
+                            </div>
+                          </div>
+                          {addKind === "family" && (
+                            <div className="item-add">
+                              <input className="ia-in" autoFocus placeholder="Name" value={draft.title} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))} onKeyDown={onAddKey("family")} />
+                              <input className="ia-in" placeholder="Relationship (optional)" value={draft.subtitle} onChange={(e) => setDraft((d) => ({ ...d, subtitle: e.target.value }))} onKeyDown={onAddKey("family")} />
+                              <div className="ia-foot">
+                                <button type="button" className="ia-cancel" onClick={cancelAdd}>Cancel</button>
+                                <button type="button" className="ia-save" onClick={() => saveItem("family")} disabled={savingItem || !draft.title.trim()}>{savingItem ? "Saving..." : "Save"}</button>
+                              </div>
+                            </div>
+                          )}
+                          {familyItems.length === 0 ? (
+                            <div className="side-empty">No family members added.</div>
+                          ) : (
+                            <div className="fam-list">
+                              {familyItems.map((it) => (
+                                <div className="fam" key={it.id}>
+                                  <div className="fam-av">{initials(it.title || "?")}</div>
+                                  <div className="fam-info">
+                                    <b>{it.title}</b>
+                                    {it.subtitle && <span>{it.subtitle}</span>}
+                                  </div>
+                                  <button type="button" className="item-x" onClick={() => deleteItem(it)} aria-label="Delete family member" title="Delete">×</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {tab === "searches" && (
+                  <div className="tabpanel">
+                    <div className="card pad">
+                      <div className="rhd"><b>Saved search criteria</b></div>
+                      <div className="side-empty">No saved searches synced for this contact yet. Once their portal search criteria come through, they show here.</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* EDIT DETAILS */
+            <div className="modal">
+              <div className="mhd"><h2>Edit details</h2><button type="button" className="x" onClick={() => setView("board")}>✕</button></div>
+              <div className="mbody">
+                <div className="form">
+                  <div className="grid2">
+                    <div className="field"><label>First name <span className="req">*</span></label><input value={editForm.first} onChange={(e) => setEditForm((f) => ({ ...f, first: e.target.value }))} /></div>
+                    <div className="field"><label>Last name</label><input value={editForm.last} onChange={(e) => setEditForm((f) => ({ ...f, last: e.target.value }))} /></div>
+                  </div>
+                  <div className="field"><label>Email address</label><input value={editForm.email} onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value }))} /></div>
+                  <div className="field"><label>Phone</label><input value={editForm.phone} onChange={(e) => setEditForm((f) => ({ ...f, phone: e.target.value }))} /></div>
+
+                  <div className="consent-row">
+                    <div className="lab">Consent to contact · CASL, applied to every send</div>
+                    <div className="toggles">
+                      {(["call", "text", "email"] as const).map((ch) => (
+                        <div className="tg" key={ch}><span>{ch[0].toUpperCase() + ch.slice(1)}</span>
+                          <button type="button" className={`sw${editConsent[ch] ? "" : " off"}`} aria-label={`${ch} consent`} onClick={() => setEditConsent((c) => ({ ...c, [ch]: !c[ch] }))} /></div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid2">
+                    <div className="field"><label>Buying timeframe</label><input value={editForm.timeframe} placeholder="e.g. 60-90 days" onChange={(e) => setEditForm((f) => ({ ...f, timeframe: e.target.value }))} /></div>
+                    <div className="field"><label>Pre-approval</label><input value={editForm.preapproval} placeholder="e.g. Approved · $625k" onChange={(e) => setEditForm((f) => ({ ...f, preapproval: e.target.value }))} /></div>
+                  </div>
+                </div>
+              </div>
+              <div className="mfoot">
+                <button type="button" className="btn-ghost" onClick={() => setView("board")}>Cancel</button>
+                <button type="button" className="btn-save" onClick={saveEdit} disabled={savingEdit || !contactId}>{savingEdit ? "Saving..." : "Save"}</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* under-construction popup */}
+      {ucName && (
+        <div className="uc-overlay" onClick={(e) => { if (e.target === e.currentTarget) setUcName(null); }}>
+          <div className="uc-card">
+            <div className="uc-ic">🚧</div>
+            <h3>{UC_COPY[ucName]?.title || "Coming soon"}</h3>
+            <p>{UC_COPY[ucName]?.body || "This one's on the build list."}</p>
+            <button type="button" onClick={() => setUcName(null)}>Got it</button>
+          </div>
+        </div>
+      )}
+
+      {/* tag picker */}
+      {tagPickerOpen && (
+        <div className="tp-overlay" onClick={(e) => { if (e.target === e.currentTarget) setTagPickerOpen(false); }}>
+          <div className="tp-card">
+            <h3>Add tags</h3>
+            <div className="tp-sub">Tap to add or remove. These are your go-to tags, or make your own at the bottom.</div>
+            {TAG_GROUPS.map((g) => (
+              <div className="tp-group" key={g.label}>
+                <div className="g-lab">{g.label}</div>
+                <div className="tp-opts">
+                  {g.options.map((o) => (
+                    <button type="button" key={o} className={`tp-opt${tags.includes(o) ? " added" : ""}`} onClick={() => (tags.includes(o) ? removeTag(o) : addTag(o))}>{o}</button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="tp-custom">
+              <input value={customTag} placeholder="Add your own tag..." onChange={(e) => setCustomTag(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addCustom(); }} />
+              <button type="button" onClick={addCustom}>Add</button>
+            </div>
+            <div className="tp-foot"><button type="button" className="tp-done" onClick={() => setTagPickerOpen(false)}>Done</button></div>
+          </div>
+        </div>
+      )}
+    </div>,
+    document.body,
+  );
+}

@@ -23,6 +23,17 @@ _SELLER_UPDATE_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/seller-up
 _KIT_DOC_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/(?:kit-doc|listing-kit-doc)/[^/]+/?$")
 
 
+# The PDF download routes accept the session token via ?token= because
+# window.open() can't attach an Authorization header. Scoped to read-only
+# download paths only.
+_CMA_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/cma-pdf/?$")
+_SELLER_UPDATE_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/seller-update-pdf/?$")
+_DRAFT_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/run-draft-pdf/[^/]+/?$")
+# Offer-kit / listing-kit document opens (window.open, so no auth header) accept
+# the same session token via ?token=. Read-only PDF serve paths only.
+_KIT_DOC_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/(?:kit-doc|listing-kit-doc)/[^/]+/?$")
+
+
 def load_session_token() -> str:
     env = os.environ.get("ELEVATE_DASHBOARD_SESSION_TOKEN")
     if env:

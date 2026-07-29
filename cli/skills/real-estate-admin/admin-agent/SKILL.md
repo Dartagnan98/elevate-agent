@@ -1,6 +1,6 @@
 ---
 name: admin-agent
-description: "Coordinate an Elevate Admin deal-file run end to end. Use when a cron or Admin-board action fires an Admin agent run, a deal advances a kanban stage, or the realtor says 'run the admin workflow' or 'move this deal forward'. Delegates worker skills, gates approvals, and always closes through admin-result-writer; run deal-matcher before touching external docs."
+description: Coordinate Elevate Admin deal-file workflow runs. Use when a cron/admin action run needs an Admin agent to delegate worker skills, enforce human approval, and close the operational-store run through admin-result-writer.
 metadata:
   elevate:
     tags: [real-estate, admin, orchestration]
@@ -43,11 +43,6 @@ The Admin agent decides whether the task can run now. If required inputs are mis
 - Worker output is not done until `admin-result-writer` records status, artifacts, checklist updates, next tasks, and any human prompt.
 - If a worker can only simulate because a portal/account is not connected, mark the run `waiting_human` or `skipped`. Do not mark checklist cells complete.
 
-## Verification Notes
-
-- Verify attachments by CONTENT, not filename (real incident: a file named "MLS Printout - <address>.pdf" contained a different document). Open and check before attaching, filing, or citing a document as checklist evidence.
-- Overlong-run recovery: never rerun the same broad task. Do a narrow verification pass first — proof-handles-only output (run/record IDs, artifact paths, checklist rows) — then finish only the pieces that are genuinely missing.
-
 ## Common Handoffs
 
 | Event | Worker |
@@ -66,7 +61,7 @@ The Admin agent decides whether the task can run now. If required inputs are mis
 
 ## Easy-reply to a missing-info prompt (Telegram / chat)
 
-When the user has a deal `waiting_human` for missing intake and they reply with the answers (home channel or chat) — e.g. a few lines of values, or `field: value` pairs — treat that as filling the prompt, NOT a new request. Steps:
+When Skyleigh has a deal `waiting_human` for missing intake and she replies with the answers (Telegram or chat) — e.g. a few lines of values, or `field: value` pairs — treat that as filling the prompt, NOT a new request. Steps:
 1. Identify the target `waiting_human` run (match by deal/address in context; if only one is pending, use it).
 2. Map her reply to that run's `requiredFields` (line order, or explicit `field: value`).
 3. Submit so the skill continues: POST `http://127.0.0.1:9120/api/admin/action-runs/<run_id>/answer` with `{ "answers": {<field>: <value>...}, "runNow": true }` (session token in header or `?token=`).
