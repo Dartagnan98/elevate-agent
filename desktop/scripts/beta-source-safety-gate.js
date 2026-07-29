@@ -483,7 +483,7 @@ function buildSuiteSpecs({ python = pythonPath(), npmCli = npmCliPath() } = {}) 
       command: process.execPath,
       displayCommand: "<active-node>",
       args: ["--test", "--test-reporter=tap", ...desktopTests],
-      resultContract: { kind: "node-test", minimum_tests: 516, expected_tests: 516 },
+      resultContract: { kind: "node-test", minimum_tests: 526, expected_tests: 526 },
     },
   ];
 }
