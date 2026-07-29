@@ -21,6 +21,8 @@ class SourceInboxDraftAction(BaseModel):
     sourceId: str
     taskId: str
     draftText: str = ""
+    # Target channel for the "channel" action (email<->text toggle on /leads).
+    channel: str | None = None
 
 
 class SourceInboxProfileAction(BaseModel):
@@ -163,6 +165,24 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
 
     @router.post("/api/source-inbox/draft")
     async def update_source_inbox_draft(body: SourceInboxDraftAction):
+        # Channel switch (email<->text toggle) is its own path: it flips the
+        # pending send_queue row's channel after validating the target has a
+        # usable recipient. It does NOT approve/send.
+        if str(body.action or "").strip().lower() == "channel":
+            from elevate_cli import outreach_db
+
+            try:
+                outreach_db.set_pending_send_channel(
+                    body.sourceId, body.taskId, body.channel or ""
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                log.exception("POST /api/source-inbox/draft channel switch failed")
+                raise HTTPException(status_code=500, detail=f"Channel switch failed: {exc}")
+            if not body.returnInbox:
+                return {"ok": True}
+            return _source_inbox_response()
         try:
             from elevate_cli.source_connectors import update_source_task_state
 

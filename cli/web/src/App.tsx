@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   Brain,
   BriefcaseBusiness,
+  Bug,
   Building2,
   ChevronDown,
   ChevronRight,
@@ -42,6 +43,7 @@ import {
   CheckCheck,
   FlaskConical,
   KanbanSquare,
+  LineChart,
   Folder,
   FolderOpen,
   Globe,
@@ -82,6 +84,8 @@ import type { AccessStatusResponse, LicenseStatusResponse } from "@/lib/api-type
 import { LoginCard } from "@/components/LoginCard";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
+import { BugReporter } from "@/components/BugReporter";
+import ActionNeededPopup from "@/components/ActionNeededPopup";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { Toast } from "@/components/Toast";
@@ -122,6 +126,10 @@ const loadRealEstateAdminPage = () =>
 const loadRealEstateTemplatesPage = () => import("@/pages/RealEstateTemplatesPage");
 const loadRealEstateLeadsPage = () =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage }));
+const loadRealEstateReportingPage = () =>
+  import("@/pages/real-estate-hub/reporting/reporting-page").then((m) => ({
+    default: m.RealEstateReportingPage,
+  }));
 const loadRealEstateMemoryPage = () =>
   import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage }));
 const loadRealEstateSocialMediaPage = () =>
@@ -130,6 +138,8 @@ const loadRealEstateTodayPage = () =>
   import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage }));
 const loadAgentOnboardingPage = () =>
   import("@/pages/agent-onboarding").then((m) => ({ default: m.AgentOnboardingPage }));
+const loadBugReportsPage = () =>
+  import("@/pages/BugReportsPage").then((m) => ({ default: m.BugReportsPage }));
 
 const ConfigPage = lazy(loadConfigPage);
 const DocsPage = lazy(loadDocsPage);
@@ -152,14 +162,17 @@ const ProjectPage = lazy(loadProjectPage);
 const RealEstateAdminPage = lazy(loadRealEstateAdminPage);
 const RealEstateTemplatesPage = lazy(loadRealEstateTemplatesPage);
 const RealEstateLeadsPage = lazy(loadRealEstateLeadsPage);
+const RealEstateReportingPage = lazy(loadRealEstateReportingPage);
 const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
 const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
 const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
 const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
+const BugReportsPage = lazy(loadBugReportsPage);
 
 const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/today": loadRealEstateTodayPage,
   "/leads": loadRealEstateLeadsPage,
+  "/reporting": loadRealEstateReportingPage,
   "/admin": loadRealEstateAdminPage,
   "/admin/templates": loadRealEstateTemplatesPage,
   "/social-media": loadRealEstateSocialMediaPage,
@@ -185,6 +198,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/config": loadConfigPage,
   "/env": loadEnvPage,
   "/docs": loadDocsPage,
+  "/bugs": loadBugReportsPage,
 };
 
 const PRELOADED_ROUTES = new Set<string>();
@@ -197,7 +211,7 @@ function normalizePreloadPath(path: string): string {
 }
 
 function preloadRealEstateRouteData(path: string): void {
-  if (!["/", "/today", "/leads", "/admin", "/memory", "/social-media"].includes(path)) return;
+  if (!["/", "/today", "/leads", "/reporting", "/admin", "/memory", "/social-media"].includes(path)) return;
   void import("@/pages/real-estate-hub/_shared/use-hub-data").then((module) => {
     void module.preloadRealEstateHubData(path);
   });
@@ -248,15 +262,9 @@ function scheduleRouteWarmup(paths: string[]): () => void {
 }
 
 function RootRedirect() {
-  // Start each launch on a fresh chat (mirrors the "New chat" button's
-  // ?new=&seed= params) when embedded chat is available; else fall back to /today.
-  const seed = useMemo(() => Date.now(), []);
-  return (
-    <Navigate
-      to={isDashboardEmbeddedChatEnabled() ? `/chat?new=${seed}&seed=${seed}` : "/today"}
-      replace
-    />
-  );
+  // Skyleigh's launch lands on Today, not a fresh chat (2026-06-22). She opens
+  // a new chat from the nav when she wants one.
+  return <Navigate to="/today" replace />;
 }
 
 function CoreRootRedirect() {
@@ -627,6 +635,7 @@ function buildAccessControlledBuiltinRoutes(
     "/": accessPending ? AccessLoadingPage : realEstateDashboard ? RootRedirect : CoreRootRedirect,
     "/today": realEstateDashboard ? RealEstateTodayPage : PendingOrLocked,
     "/leads": packs.realEstateSales ? RealEstateLeadsPage : PendingOrLocked,
+    "/reporting": packs.realEstateSales ? RealEstateReportingPage : PendingOrLocked,
     "/admin": packs.realEstateAdmin ? RealEstateAdminPage : PendingOrLocked,
     "/admin/templates": packs.realEstateAdmin
       ? RealEstateTemplatesPage
@@ -638,6 +647,7 @@ function buildAccessControlledBuiltinRoutes(
       : PendingOrLocked,
     "/marketing": packs.realEstateMarketing ? MarketingRedirect : PendingOrLocked,
     "/memory": RealEstateMemoryPage,
+    "/bugs": BugReportsPage,
     ...BUILTIN_ROUTES_BASE,
     ...(embeddedChat ? { "/chat": ChatPage } : {}),
   };
@@ -686,6 +696,20 @@ export default function App() {
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [licenseChecked, setLicenseChecked] = useState(false);
   const startupReportedRef = useRef(false);
+
+  // Apply the global dashboard theme on mount so EVERY page (Today, Admin,
+  // Leads, Social, etc.) is skinned from first paint, before the Today route
+  // is ever visited. The Today header toggle keeps this attribute in sync.
+  // Token blocks live in src/index.css under :root[data-app-theme="X"].
+  useEffect(() => {
+    try {
+      const appTheme =
+        window.localStorage.getItem("elevate-today-theme") || "medium";
+      document.documentElement.setAttribute("data-app-theme", appTheme);
+    } catch {
+      document.documentElement.setAttribute("data-app-theme", "medium");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -910,6 +934,8 @@ export default function App() {
       <SelectionSwitcher />
       <OnboardingGate />
       <Backdrop />
+      {!isConfigRoute && accessChecked && <BugReporter />}
+      {!isConfigRoute && accessChecked && <ActionNeededPopup />}
       <PluginSlot name="backdrop" />
 
       <header
@@ -1859,6 +1885,7 @@ function DesktopSidebar({
   }
   if (realEstatePacks.realEstateSales) {
     agentPrimaryNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
+    agentPrimaryNavItems.push({ icon: LineChart, label: "Reporting", path: "/reporting" });
   }
   if (realEstatePacks.realEstateAdmin) {
     agentPrimaryNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });
@@ -1878,6 +1905,7 @@ function DesktopSidebar({
     { icon: Activity, label: "Activity", path: "/activity" },
     { icon: Puzzle, label: "Skills", path: "/skills" },
     { icon: Brain, label: "Memory graph", path: "/memory" },
+    { icon: Bug, label: "Bug Reports", path: "/bugs" },
   ];
   const agentMoreActive = agentMoreNavItems.some((item) =>
     location.pathname === item.path || location.pathname.startsWith(`${item.path}/`),
@@ -2101,11 +2129,14 @@ function DesktopSidebar({
       )}
       <div
         className="sidebar-top"
-        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        style={{ WebkitAppRegion: "drag", marginTop: "6px", paddingTop: "10px" } as React.CSSProperties}
       >
-        {/* Logo removed per request — empty spacer keeps the row height and the
-            traffic-light clearance on the left. */}
-        <div className="h-7 w-[9.75rem] shrink-0" aria-hidden />
+        {/* Elevation Real Estate logo — global, top of every page via the sidebar.
+            Blue on light/medium themes, white on dark (swapped by data-app-theme). */}
+        <div className="flex items-center pl-[4.5rem]" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+          <img src="/elevation-logo-blue.png" alt="Elevation Real Estate" className="elev-logo elev-logo-blue h-9 w-auto" />
+          <img src="/elevation-logo-white.png" alt="Elevation Real Estate" className="elev-logo elev-logo-white h-9 w-auto" />
+        </div>
 
         <button
           type="button"
@@ -2155,15 +2186,18 @@ function DesktopSidebar({
 
       <div className="sidebar-scroll overflow-x-hidden">
         <div className="space-y-0.5">
-          <button
-            type="button"
-            onClick={startNewChat}
-            className="new-chat"
-          >
-            <Plus />
-            <span className="truncate">New chat</span>
-            <span className="kbd">⌘N</span>
-          </button>
+          <div className="flex items-center gap-2 pl-3">
+            <img src="/octo-loader.png" alt="Elevation" aria-hidden="true" className="h-11 w-11 shrink-0 object-contain" />
+            <button
+              type="button"
+              onClick={startNewChat}
+              className="new-chat"
+            >
+              <Plus />
+              <span className="truncate">New chat</span>
+              <span className="kbd">⌘N</span>
+            </button>
+          </div>
           {searchOpen && (
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />

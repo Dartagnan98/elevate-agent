@@ -9,6 +9,7 @@ the dashboard and skills can consume.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from copy import deepcopy
 from typing import Any, Mapping
 
@@ -237,11 +238,19 @@ _BC: dict[str, Any] = {
                 fields=[
                     ("offerDate", "Offer received date"),
                     ("offerAcceptedAt", "Accepted offer date"),
+                    ("offerPrice", "Accepted offer price"),
+                    _wf("Buyer name(s)", "Buyer Names"),
+                    _wf("Cooperating agent", "Cooperating Agent"),
+                    _wf("Cooperating brokerage", "Cooperating Brokerage"),
                     _wf("Title charges ordered date", "Title Charges Ordered Date"),
                     ("depositInTrustAt", "Deposit ROF received date"),
                     ("completionDate", "Completion date"),
                 ],
-                docs=[("offer_pdf", "Offer PDF")],
+                docs=[
+                    ("offer_pdf", "Offer PDF"),
+                    ("disclosure_expected_remuneration", "Disclosure to Sellers of Expected Remuneration"),
+                    ("deal_sheet", "Deal sheet"),
+                ],
                 triggers=[("offer-review", "Review accepted-offer package", "offer-review")],
             ),
             _stage(
@@ -258,7 +267,7 @@ _BC: dict[str, Any] = {
                     ("subjectRemovalDate", "Subject removal date"),
                     _wf("Order sold rider date", "Order Sold Rider Date"),
                 ],
-                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt")],
+                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt"), ("order_to_lawyer", "Order to lawyer"), ("sales_report", "Sales report")],
                 triggers=[
                     ("subject-removal", "Run condition-removal admin check", "subject-removal"),
                     ("subject-removal-docs", "Sync condition-removal signing", "signing-package"),
@@ -285,10 +294,11 @@ _BC: dict[str, Any] = {
     },
     "buyer": {
         "stages": [
-            _stage("Offer Prep", "Comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("accepted-offer-checklist", "Accepted-offer checklist run"), ("doc-list", "Doc list built")], docs=[("cps_draft", "CPS draft")]),
-            _stage("Accepted", "Lender + docs", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked")], fields=[("subjectRemovalDate", "Subject removal date")]),
-            _stage("Conditions", "Inspection + strata", [("deposit-due", "Deposit due date tracked"), ("lawyer-info", "Lawyer / conveyancer info captured")], fields=[("depositDueDate", "Deposit due date")]),
-            _stage("Subjects Off", "Deposit + dates", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")]),
+            _stage("Client Onboarding", "Agency, disclosures + pre-approval", [("dorts-pnc", "DORTS + PNC signed"), ("fintrac-id", "FINTRAC ID collected"), ("pre-approval", "Pre-approval confirmed")], fields=[("preApprovalAmount", "Pre-approval amount")]),
+            _stage("Offer Prep", "Decided to write - comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("doc-list", "Doc list built"), ("cps-drafted", "CPS drafted")], docs=[("cps_draft", "CPS draft")]),
+            _stage("Accepted Offer", "Accepted - subjects pending", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked"), ("deposit-due", "Deposit due date tracked")], fields=[("subjectRemovalDate", "Subject removal date"), ("depositDueDate", "Deposit due date")], docs=[("cps_signed", "Fully-signed CPS")]),
+            _stage("Condition Removal", "Subjects off + firm", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("lawyer-info", "Lawyer / conveyancer info captured"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")], docs=[("subject_removal_form", "Fully-signed condition removal")]),
+            _stage("Closed", "Funded + keys", [("funds-received", "Funds received"), ("keys-released", "Keys released")]),
         ],
     },
 }
@@ -468,6 +478,19 @@ def package_key_from_deal(deal: Mapping[str, Any]) -> str:
     )
 
 
+def last_stage_for(package_key: Any, side: str) -> int:
+    """Highest valid stage index for a side within a package.
+
+    Side-aware upper bound so callers can reject out-of-range stage moves
+    (a buyer flow has fewer stages than a listing flow). Falls back to the
+    listing side for any unexpected side value.
+    """
+    package = _package_for_key(_slug(package_key) or DEFAULT_PACKAGE_KEY)
+    side_key = side if side in {"listing", "buyer"} else "listing"
+    stages = (package.get(side_key) or {}).get("stages") or []
+    return max(len(stages) - 1, 0)
+
+
 def resolve_admin_deal_flow(
     *,
     package_key: str,
@@ -517,6 +540,36 @@ def resolve_admin_deal_flow(
     }
 
 
+# A stage-entry run that dies mid-flight (e.g. the LLM gateway is out of quota)
+# stays "queued"/"running" forever and would otherwise block the phase gate
+# permanently. Age those machine-state runs out after this many seconds so a dead
+# automation never wedges the pipeline. Human/external waits are intentional gates
+# and are never aged out.
+_STALE_RUN_SECONDS = 30 * 60
+
+
+def _run_is_stale(run: Mapping[str, Any]) -> bool:
+    ts = run.get("updatedAt") or run.get("createdAt")
+    if not ts:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() > _STALE_RUN_SECONDS
+
+
+def _run_is_blocking(run: Mapping[str, Any]) -> bool:
+    status = run.get("status")
+    if status in {"waiting_human", "waiting_external"}:
+        return True
+    if status in {"queued", "running"}:
+        return not _run_is_stale(run)
+    return False
+
+
 def resolve_deal_phase(
     *,
     deal: Mapping[str, Any],
@@ -551,8 +604,8 @@ def resolve_deal_phase(
     ]
     blocking_runs = [
         _run_brief(run) for run in (prior_runs or [])
-        if run.get("status") in {"queued", "running", "waiting_human", "waiting_external"}
-        and _run_stage(run) == flow["stage"]
+        if _run_stage(run) == flow["stage"]
+        and _run_is_blocking(run)
     ]
     can_advance = (
         flow["nextStage"] is not None

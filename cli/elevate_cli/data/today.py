@@ -115,6 +115,12 @@ def _tone_for_response(minutes: int | None) -> str:
 
 
 def _waiting_threads_count(conn: sqlite3.Connection) -> int:
+    # Scoped to the last 7 days: the unbounded count read 5,305, which is not a
+    # number anyone can act on. Cutoff is computed here and bound as a parameter
+    # because this runs on Postgres in production (SQLite's datetime('now', ...)
+    # does not exist there and 500s the whole Today page).
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    cutoff = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
     row = conn.execute(
         """
         SELECT COUNT(*) AS c
@@ -122,6 +128,7 @@ def _waiting_threads_count(conn: sqlite3.Connection) -> int:
         LEFT JOIN contacts ct ON ct.id = c.contact_id
         WHERE c.status = 'open'
           AND c.last_inbound_at IS NOT NULL
+          AND c.last_inbound_at >= ?
           AND (c.last_outbound_at IS NULL OR c.last_inbound_at > c.last_outbound_at)
           AND (
             ct.id IS NULL
@@ -132,7 +139,8 @@ def _waiting_threads_count(conn: sqlite3.Connection) -> int:
               )
             )
           )
-        """
+        """,
+        (cutoff,),
     ).fetchone()
     return int(row["c"] if row and row["c"] is not None else 0)
 
@@ -297,7 +305,7 @@ def build_today_activity(
             "tone": "warn" if pending_drafts_count >= 5 else ("neutral" if pending_drafts_count > 0 else "good"),
         },
         {
-            "label": "Threads waiting on you",
+            "label": "Waiting on you · 7 days",
             "value": str(waiting_threads),
             "rawValue": waiting_threads,
             "delta": None,

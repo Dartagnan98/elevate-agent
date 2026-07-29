@@ -93,22 +93,18 @@ _FIELD_API_NAMES = {
     "sale_of_buyers_property": "saleOfBuyersProperty",
 }
 _WORKFLOW_STAGE_COMPLETE_RE = re.compile(r"^workflow_stage_(\d+)_complete$")
-# Checklist-driven auto-advance, keyed by the completed stage. Stage 5 (Listing
-# Live) is intentionally absent: a live listing only moves to Accepted Offer (6)
-# on the accepted-offer signal, never just because its marketing tasks are done.
-# Stage 8 (Closed) is terminal.
-_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {
-    1: 2,
-    2: 3,
-    3: 4,
-    4: 5,
-    6: 7,
-    7: 8,
-}
+# DISABLED 2026-07-02 per Skyleigh: cards must NOT auto-advance on their own.
+# A card advancing to the next stage auto-fires that stage's workflows/skills,
+# which she wants to control. She moves every card between phases manually, so
+# both checklist-driven auto-advance mechanisms below are emptied. Manual stage
+# moves (move_deal_stage) are unaffected. The accepted-offer auto-move
+# (_advance_on_accepted_offer) is left intact and can be disabled separately if
+# she asks. To restore: repopulate these with the maps in git history.
+# Original: {1:2, 2:3, 3:4, 4:5, 6:7, 7:8}
+_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {}
 _WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
-# Stages whose resolved phase gate may auto-advance the deal when clear. 5 is
-# excluded (offer-driven, handled by _advance_on_accepted_offer); 8 is terminal.
-_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7}
+# Original: {0, 1, 2, 3, 4, 6, 7}  (emptied — see note above)
+_AUTO_ADVANCE_GATE_STAGES = set()
 _CHECKLIST_TRUE_VALUES = {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
 _CHECKLIST_FALSE_VALUES = {"0", "false", "no", "n", "unchecked", "todo", "incomplete", "not done", ""}
 
@@ -1086,6 +1082,46 @@ def record_deal_activity(
     return event
 
 
+def set_deal_status(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    status: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Set a deal's lifecycle status (active / closed / archived).
+
+    Used to take a card off the live board ("archived") or restore it
+    ("active") without deleting the record. Appends a toggle_change event so
+    the history is preserved.
+    """
+    if status not in _VALID_STATUSES:
+        raise ValueError(f"invalid status {status!r}")
+    existing = get_deal(conn, deal_id)
+    if existing is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    old_status = existing.get("status")
+    if old_status == status:
+        return existing
+    now = now_iso()
+    conn.execute(
+        "UPDATE deals SET status=?, updated_at=? WHERE id=?",
+        (status, now, deal_id),
+    )
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="toggle_change",
+        actor=actor,
+        field_name="status",
+        old_value=old_status,
+        new_value=status,
+        payload={"field": "status", "from": old_status, "to": status},
+        created_at=now,
+    )
+    return get_deal(conn, deal_id)  # type: ignore[return-value]
+
+
 def move_deal_stage(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -1100,6 +1136,18 @@ def move_deal_stage(
     existing = get_deal(conn, deal_id)
     if existing is None:
         raise LookupError(f"deal {deal_id!r} not found")
+    # Side-aware upper bound: a buyer flow has fewer stages than a listing flow.
+    # This applies even with force=True -- force bypasses the phase gate, not the
+    # validity of the stage index. An out-of-range stage would otherwise clamp
+    # into the wrong kanban column (e.g. a buyer stage 5 rendered as "Closed").
+    from elevate_cli.admin_deal_flow import last_stage_for, package_key_from_deal
+
+    _deal_side = str(existing.get("side") or "listing")
+    _max_stage = last_stage_for(package_key_from_deal(existing), _deal_side)
+    if to_stage > _max_stage:
+        raise ValueError(
+            f"stage must be between 0 and {_max_stage} for {_deal_side} deals"
+        )
     from_stage = existing["currentStage"]
     if from_stage == to_stage:
         return existing
@@ -1197,6 +1245,13 @@ def set_deal_toggle(
         extra = _decode_json(row["extra_toggles_json"]) or {}
         if not isinstance(extra, dict):
             extra = {}
+        # Strip the core. or extra. UI namespace so the value lands on the bare key the
+        # card reads (e.g. core.pid -> pid). Guards every writer (card UI, admin_deal
+        # agent, sync scripts) from re-introducing the invisible prefixed-key bug.
+        if field.startswith("core."):
+            field = field[5:]
+        elif field.startswith("extra."):
+            field = field[6:]
         old_value = extra.get(field)
         extra[field] = _normalize_extra_field_value(value)
         new_value = extra[field]
@@ -1445,7 +1500,7 @@ _MONEY_FIELDS = {
     "team_revenue",
     "agent_revenue",
 }
-_PROPERTY_FIELDS = {"mls_number", "legal_description", "lot_size_sqft", "year_built"}
+_PROPERTY_FIELDS = {"mls_number", "legal_description", "lot_size_sqft", "year_built", "listing_address"}
 _STATUS_TS_FIELDS = {
     "deposit_in_trust_at", "listing_published_at", "offer_accepted_at",
     "subjects_removed_at", "completed_at",
@@ -1469,6 +1524,7 @@ _API_TO_DB_DETAIL_FIELDS = {
     "agentRevenue": "agent_revenue",
     "expectedCloseDate": "expected_close_date",
     "mlsNumber": "mls_number",
+    "listingAddress": "listing_address",
     "legalDescription": "legal_description",
     "lotSizeSqft": "lot_size_sqft",
     "yearBuilt": "year_built",
@@ -1963,7 +2019,16 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
         key=lambda run: status_rank.get(str(run.get("status") or ""), 9),
         default={},
     )
-    waiting_human = sum(1 for run in blocking_runs if run.get("status") == "waiting_human")
+    # Count ALL open waiting_human runs on the deal, not just those whose frozen
+    # payload stage matches the current stage (blocking_runs). A run parked at an
+    # earlier stage would otherwise go invisible after the card advances -- which
+    # is exactly how an "Info needed" card became silent.
+    waiting_runs = [
+        run
+        for run in prior_runs
+        if isinstance(run, Mapping) and run.get("status") == "waiting_human"
+    ]
+    waiting_human = len(waiting_runs)
     running = sum(1 for run in blocking_runs if run.get("status") in {"queued", "running"})
     return {
         "progress": f"{completed}/{total}" if total else None,
@@ -1977,8 +2042,10 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
         "activeRunCount": len(blocking_runs),
         "runningRunCount": running,
         "waitingHumanCount": waiting_human,
-        "activeRunLabel": active_run.get("label"),
-        "activeRunStatus": active_run.get("status"),
+        "activeRunLabel": active_run.get("label")
+        or (waiting_runs[0].get("registryName") if waiting_runs else None),
+        "activeRunStatus": active_run.get("status")
+        or ("waiting_human" if waiting_runs else None),
     }
 
 
@@ -2341,6 +2408,34 @@ def _run_payload_stage(payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _is_missing_info_prompt(human_prompt: Mapping[str, Any] | None) -> bool:
+    """True for a 'fill in to continue' card (one with requiredFields).
+
+    These are the cards a skill raises when it can't proceed without info from
+    the user. Approval / preview cards (previewPdf, actionId, decision) have no
+    requiredFields and are NOT deduped here.
+    """
+    return isinstance(human_prompt, Mapping) and bool(human_prompt.get("requiredFields"))
+
+
+def _open_missing_info_sibling(
+    conn: sqlite3.Connection, deal_id: str, exclude_run_id: str
+) -> str | None:
+    """Return the id of the earliest still-open 'Info needed' run on this deal,
+    excluding ``exclude_run_id``. Used to collapse duplicate intake cards so the
+    user is asked the same thing only once."""
+    rows = conn.execute(
+        "SELECT id, human_prompt_json FROM admin_action_runs "
+        "WHERE deal_id=? AND status='waiting_human' AND id<>? "
+        "AND human_prompt_json IS NOT NULL ORDER BY created_at ASC",
+        (deal_id, exclude_run_id),
+    ).fetchall()
+    for row in rows:
+        if _is_missing_info_prompt(_decode_json(row["human_prompt_json"])):
+            return str(row["id"])
+    return None
+
+
 def record_run_result(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -2377,9 +2472,81 @@ def record_run_result(
         raise ValueError("action run result has already been recorded")
     if prior_result and row["status"] in {"succeeded", "completed", "failed", "skipped", "cancelled"}:
         raise ValueError("action run result has already been recorded")
+    # Fence an externally-aborted / zombie run. If a human or self-heal marked
+    # this run terminal (failed/cancelled) while its process was still alive, a
+    # late write here would let the runaway re-open cards, wipe fields, or record
+    # a stale result. Reject it. (Idempotent re-reports of an existing result are
+    # allowed by the guards above; this only blocks a NEW write onto a run that
+    # was aborted before it ever recorded a result — see the 125 Corry zombie,
+    # 2026-07-23.) Re-dispatch clears status back to queued/running, so a
+    # legitimately retried run is not affected.
+    if row["status"] in {"failed", "cancelled"} and not prior_key:
+        raise PermissionError(
+            f"action run {run_id} was aborted (status={row['status']}); result write rejected"
+        )
     payload = _decode_json(row["payload_json"]) or {}
     if not isinstance(payload, dict):
         payload = {"prior": payload}
+
+    # Dedup intake cards: if this run is raising an "Info needed" card while the
+    # deal already has one open, park this run instead of showing a second card.
+    # When the surviving card is answered and its skill succeeds, the parked
+    # skill is re-dispatched (see the success branch below) and runs against the
+    # now-resolved deal state. Guarded so any failure falls back to old behavior.
+    if normalized_status == "waiting_human" and _is_missing_info_prompt(human_prompt):
+        try:
+            survivor_id = _open_missing_info_sibling(conn, deal_id, run_id)
+        except Exception:
+            survivor_id = None
+        if survivor_id:
+            reg = conn.execute(
+                "SELECT skill FROM admin_action_registry WHERE id=?",
+                (row["registry_id"],),
+            ).fetchone()
+            deferred_skill = reg["skill"] if reg else None
+            payload["supersededByRunId"] = survivor_id
+            payload["deferredSkill"] = deferred_skill
+            payload["result"] = {
+                "status": "superseded",
+                "supersededByRunId": survivor_id,
+                "humanPrompt": dict(human_prompt) if human_prompt else None,
+                "recordedAt": now,
+            }
+            conn.execute(
+                """
+                UPDATE admin_action_runs
+                SET status='cancelled', error_message=?, payload_json=?,
+                    result_json=?, human_prompt_json=NULL,
+                    updated_at=?, completed_at=?
+                WHERE id=?
+                """,
+                (
+                    f"Superseded by open Info needed card {survivor_id}",
+                    _encode_json(payload),
+                    _encode_json(payload["result"]),
+                    now,
+                    now,
+                    run_id,
+                ),
+            )
+            _insert_deal_event(
+                conn,
+                deal_id=deal_id,
+                kind="run_result",
+                actor=actor,
+                payload={
+                    "runId": run_id,
+                    "status": "superseded",
+                    "supersededByRunId": survivor_id,
+                    "deferredSkill": deferred_skill,
+                },
+                created_at=now,
+            )
+            updated = conn.execute(
+                "SELECT * FROM admin_action_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            return _row_to_action_run(updated)
+
     result_payload = {
         "status": status,
         "artifacts": [dict(item) for item in (artifacts or [])],
@@ -2437,6 +2604,47 @@ def record_run_result(
                     create_cron_job=bool(task.get("runNow") or task.get("run_now")),
                     actor=actor,
                 )
+
+        # Re-run any skills parked behind THIS run's now-resolved Info needed
+        # card. They were deduped earlier so the user saw a single card; now
+        # that the deal state is resolved they run cleanly without re-asking.
+        try:
+            parked = conn.execute(
+                "SELECT id, payload_json FROM admin_action_runs "
+                "WHERE deal_id=? AND status='cancelled'",
+                (deal_id,),
+            ).fetchall()
+        except Exception:
+            parked = []
+        if parked:
+            from elevate_cli.data.dispatch import queue_action_run
+
+            for parked_row in parked:
+                parked_payload = _decode_json(parked_row["payload_json"]) or {}
+                if not isinstance(parked_payload, dict):
+                    continue
+                if (
+                    parked_payload.get("supersededByRunId") == run_id
+                    and parked_payload.get("deferredSkill")
+                    and not parked_payload.get("deferredRedispatched")
+                ):
+                    queue_action_run(
+                        conn,
+                        deal_id=deal_id,
+                        skill=str(parked_payload["deferredSkill"]),
+                        name=f"Re-run after info resolved: {parked_payload['deferredSkill']}",
+                        payload={
+                            "reranAfterRunId": run_id,
+                            "deferredFromRunId": parked_row["id"],
+                        },
+                        create_cron_job=True,
+                        actor=actor,
+                    )
+                    parked_payload["deferredRedispatched"] = True
+                    conn.execute(
+                        "UPDATE admin_action_runs SET payload_json=? WHERE id=?",
+                        (_encode_json(parked_payload), parked_row["id"]),
+                    )
     conn.execute(
         """
         UPDATE admin_action_runs
@@ -2466,6 +2674,26 @@ def record_run_result(
         payload={"runId": run_id, "status": normalized_status, "humanPrompt": human_prompt, "error": error},
         created_at=now,
     )
+    if normalized_status == "waiting_human" and human_prompt:
+        # A skill reported it needs a human decision. This callback path (unlike
+        # cron delivery) never alerted anyone, so the card sat silently. Fire a
+        # best-effort Telegram ping. Reached only when NOT superseded (the dedup
+        # branch above returns early), so no double-ping for deferred cards.
+        try:
+            from elevate_cli.notify_admin import notify_waiting_human
+
+            _run_name = None
+            try:
+                _reg = conn.execute(
+                    "SELECT name FROM admin_action_registry WHERE id=?",
+                    (row["registry_id"],),
+                ).fetchone()
+                _run_name = _reg["name"] if _reg else None
+            except Exception:
+                _run_name = None
+            notify_waiting_human(get_deal(conn, deal_id), run_id, _run_name, human_prompt)
+        except Exception:
+            pass
     if normalized_status in {"succeeded", "completed"}:
         _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=_run_payload_stage(payload))
     updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()

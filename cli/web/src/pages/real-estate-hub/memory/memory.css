@@ -13,7 +13,7 @@
 
 /* ── reset (scoped) ── */
 .mem-root, .mem-root *, .mem-root *::before, .mem-root *::after { box-sizing: border-box; }
-.mem-root .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.mem-root .mono { font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; }
 .mem-root ::selection { background: #5d5d5d; color: #fff; }
 
 /* ── design tokens (scoped to the page root so they never override the app) ── */
@@ -81,9 +81,9 @@
   display: grid; place-items: center; color: var(--fg-muted);
   background: var(--bg-2); border: 1px solid var(--border-soft);
 }
-.mem-hero-eyebrow { font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-faint); margin-bottom: 7px; }
+.mem-hero-eyebrow { font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-faint); margin-bottom: 7px; }
 .mem-hero-title { margin: 0; font: 600 32px/1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.02em; color: var(--fg); }
-.mem-hero-r { display: inline-flex; align-items: center; gap: 9px; font: 500 13px/1 "Geist Mono", monospace; }
+.mem-hero-r { display: inline-flex; align-items: center; gap: 9px; font: 700 13px/1 var(--ds-font); letter-spacing: var(--ds-label-track); }
 .mem-hero-r .ok { color: var(--color-success); display: inline-flex; align-items: center; gap: 7px; }
 .mem-hero-r .err { color: var(--color-destructive); display: inline-flex; align-items: center; gap: 7px; }
 .mem-hero-r .dim { color: var(--fg-faint); }
@@ -94,7 +94,7 @@
 .mem-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 760px) { .mem-tiles { grid-template-columns: 1fr; } }
 .mem-tile { border: 1px solid var(--border); background: var(--bg-1); border-radius: 12px; padding: 16px 18px; }
-.mem-tile-label { display: inline-flex; align-items: center; gap: 8px; font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-faint); }
+.mem-tile-label { display: inline-flex; align-items: center; gap: 8px; font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-faint); }
 .mem-tile-label svg { opacity: 0.8; }
 .mem-tile-value { margin-top: 10px; font: 600 20px/1.1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.01em; }
 .mem-tile-value.neutral { color: var(--fg); }
@@ -112,7 +112,7 @@
 .mem-card-title { display: inline-flex; align-items: center; gap: 9px; font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .mem-card-title svg { color: var(--color-primary); }
 .mem-card-body { padding: 0; }
-.mem-badge { font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.04em; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg-faint); text-transform: uppercase; }
+.mem-badge { font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.04em; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg-faint); text-transform: uppercase; }
 .mem-badge.on { color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 45%, transparent); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
 
 .mem-graph-card .mem-card-body { padding: 12px; height: 720px; }
@@ -125,7 +125,7 @@
 .mem-density-opt {
   appearance: none; cursor: pointer; border: 0; background: transparent;
   padding: 4px 9px; border-radius: 5px; text-transform: capitalize;
-  font: 500 10.5px/1 "Geist Mono", monospace; letter-spacing: 0.02em; color: var(--fg-faint);
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.02em; color: var(--fg-faint);
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .mem-density-opt:hover { color: var(--fg-muted); }
@@ -135,7 +135,7 @@
 .mem-ingest { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
 .mem-ingest-active { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
 .mem-ingest-active .dim { color: var(--fg-faint); }
-.mem-ingest-count { font: 500 13px/1 "Geist Mono", monospace; color: var(--fg); }
+.mem-ingest-count { font: 700 13px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg); }
 .mem-provider { border: 1px solid var(--border); background: var(--bg-2); border-radius: 10px; padding: 12px 14px; }
 .mem-provider-name { font: 500 12.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .mem-provider-path { margin-top: 5px; font-size: 11px; color: var(--fg-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -146,7 +146,7 @@
 .mem-session-l { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
 .mem-session-day { font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .mem-session-ago { font-size: 11.5px; color: var(--fg-dim); }
-.mem-session-total { font: 500 11px/1 "Geist Mono", monospace; color: var(--fg-faint); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+.mem-session-total { font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
 
 /* empty graph fallback */
 .mem-graph-empty {
@@ -224,11 +224,11 @@
 .memory-count-title { font: 600 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .memory-count-sub { margin-top: 5px; font-size: 11px; color: var(--fg-faint); }
 .memory-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 56%; }
-.memory-legend-chip { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); border-radius: 7px; padding: 4px 9px; font: 500 10.5px/1 "Geist Mono", monospace; letter-spacing: 0.02em; color: var(--fg-muted); text-transform: uppercase; }
+.memory-legend-chip { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); border-radius: 7px; padding: 4px 9px; font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.02em; color: var(--fg-muted); text-transform: uppercase; }
 .memory-legend-dot { width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; }
 
 .memory-signal { position: absolute; left: 16px; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; max-width: 28rem; pointer-events: none; }
-.memory-signal-tag { width: fit-content; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); border-radius: 6px; padding: 3px 9px; font: 500 10px/1 "Geist Mono", monospace; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-faint); }
+.memory-signal-tag { width: fit-content; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); border-radius: 6px; padding: 3px 9px; font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-faint); }
 .memory-signal-card { border: 1px solid color-mix(in srgb, var(--border) 90%, transparent); background: color-mix(in srgb, var(--bg) 90%, transparent); backdrop-filter: blur(8px); border-radius: 12px; padding: 13px 15px; box-shadow: 0 16px 40px -22px rgba(0,0,0,0.8); }
 .memory-signal-head { display: flex; align-items: center; gap: 9px; }
 .memory-signal-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
@@ -245,7 +245,7 @@
   padding: 7px 12px; border-radius: 8px;
   border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
   background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(6px);
-  color: var(--fg-muted); font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--fg-muted); font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: 0.04em; text-transform: uppercase;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
 .memory-replay:hover { background: color-mix(in srgb, var(--color-primary) 16%, var(--bg)); color: var(--fg); border-color: color-mix(in srgb, var(--color-primary) 50%, transparent); }

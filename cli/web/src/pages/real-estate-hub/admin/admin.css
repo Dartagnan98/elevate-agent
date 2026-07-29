@@ -6,49 +6,44 @@
 .app::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 
 /* Theme tokens */
-::selection { background: #5d5d5d; color: #fff; }
-.mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+::selection { background: var(--ds-info-bg); color: var(--ds-ink); }
+/* All-sans rule (2026-07-27): .mono keeps tabular figures for column
+   alignment but is no longer a typewriter face. */
+.mono { font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; }
 
-:root {
-  --bg:            #0F0F0F;
-  --bg-1:          #161616;
-  --bg-2:          #1A1A1A;
-  --bg-3:          #202020;
-  --bg-soft:       #181818;
-  --border:        #2A2A2A;
-  --border-soft:   #1F1F1F;
-  --border-strong: #353535;
-  --fg:            #ECECEC;
-  --fg-muted:      #B5B5B5;
-  --fg-faint:      #8A8A8A;
-  --fg-dim:        #8A8A8A;
+/* NOTE (2026-07-27): this file used to declare a full :root palette. So did
+   leads.css, with different values (--accent grey vs blue). Both shipped in
+   separate lazy chunks, so the app's accent depended on which page loaded
+   first. Both :root blocks are gone; the canonical tokens now live in
+   src/elevate-design-system.css and the aliases below map this file's
+   long-standing local names onto them. Do not reintroduce :root here.
 
-  --accent:        #B0B0B0;
-  --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
+   The [data-accent="sage|lilac|sand|platinum|graphite"] swatch palettes were
+   also removed — they were upstream chrome, not Elevation brand, and were the
+   source of the stray lilac/sage/sand tones. */
+.app,
+.hub-root {
+  --elev-navy:     var(--ds-navy);
+  --elev-orange:   var(--ds-terracotta);
+  --accent:        var(--ds-blue);
+  --accent-soft:   var(--ds-info-bg);
   --accent-ring:   color-mix(in srgb, var(--accent) 28%, transparent);
   --accent-glow:   color-mix(in srgb, var(--accent) 40%, transparent);
-  --accent-fg:     #0F0F0F;
-  --accent-vivid:  #888888;
+  --accent-fg:     #ffffff;
+  --accent-vivid:  var(--ds-blue-hover);
 
-  --status-done:   #4FC38A;
-  --status-work:   var(--accent);
-  --status-warn:   #E0B257;
-  --status-error:  #E07570;
-  --status-idle:   #4F4F4F;
-  --status-info:   #7AA9E5;
+  --status-done:   var(--ds-done);
+  --status-work:   var(--ds-terracotta);
+  --status-warn:   var(--ds-warn);
+  --status-error:  var(--ds-error);
+  --status-idle:   var(--ds-idle);
+  --status-info:   var(--ds-blue);
 
   --sidebar-w: 268px;
   --sidebar-gap: 8px;
-  --row-radius: 7px;
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --row-radius: var(--ds-r-sm);
+  --ease-out: var(--ds-ease);
 }
-
-[data-accent="slate"]    { --accent: #7B9CE5; --accent-vivid: #4769DD; }
-[data-accent="sage"]     { --accent: #7FB0A2; --accent-vivid: #3F857A; }
-[data-accent="lilac"]    { --accent: #A299D2; --accent-vivid: #6F62B7; }
-[data-accent="sand"]     { --accent: #C9A878; --accent-vivid: #A07B40; }
-[data-accent="platinum"] { --accent: #B0B0B0; --accent-vivid: #888888; }
-[data-accent="graphite"] { --accent: #8A8A8A; --accent-vivid: #6A6A6A; }
 
 [data-density="compact"]     { --row-pad: 5px 10px;  --row-gap: 0;   --nav-pad: 5px 12px;  --side-pad: 8px;  }
 [data-density="comfortable"] { --row-pad: 7px 10px;  --row-gap: 1px; --nav-pad: 6px 12px;  --side-pad: 10px; }
@@ -92,7 +87,7 @@
 
 .icon-btn {
   appearance: none; background: transparent; border: 0; color: var(--fg-muted);
-  width: 26px; height: 26px; border-radius: 3px; display: grid; place-items: center;
+  width: 28px; height: 28px; border-radius: var(--ds-r-xs); display: grid; place-items: center;
   cursor: pointer; transition: background 120ms var(--ease-out), color 120ms var(--ease-out), transform 80ms var(--ease-out);
 }
 .icon-btn:hover  { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); }
@@ -127,7 +122,7 @@
   margin: 10px 8px 6px;
   display: flex; align-items: center; gap: 8px;
   padding: 7px 11px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border-soft);
   color: var(--fg);
@@ -142,7 +137,7 @@
 }
 .new-chat .kbd {
   margin-left: auto;
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   padding: 1px 5px; border-radius: 2px;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -170,7 +165,7 @@
   display: flex; align-items: center; gap: 6px;
   padding: 12px 14px 4px;
   color: var(--fg-faint);
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.05em; text-transform: uppercase;
   cursor: pointer; user-select: none;
   white-space: nowrap;
@@ -198,7 +193,7 @@
   display: flex; align-items: center; gap: 9px;
   padding: var(--nav-pad, 6px 12px);
   margin: 0 6px;
-  border-radius: 3px;
+  border-radius: 6px;
   color: var(--fg-muted);
   font-size: 13px;
   cursor: pointer;
@@ -214,7 +209,7 @@
 }
 .nav-badge {
   margin-left: auto; flex-shrink: 0;
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   padding: 1px 5px; border-radius: 2px;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -222,7 +217,7 @@
 
 .session-group-label {
   padding: 8px 14px 3px;
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-dim);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -246,7 +241,7 @@
   font-weight: 400;
 }
 .session-row .age {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   opacity: 0;
   transition: opacity 140ms var(--ease-out);
@@ -281,13 +276,13 @@
 .user-pill {
   display: flex; align-items: center; gap: 9px;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: 7px;
   cursor: pointer;
   transition: background 120ms var(--ease-out);
 }
 .user-pill:hover, .user-pill.open { background: color-mix(in srgb, var(--fg) 5%, transparent); }
 .avatar {
-  width: 24px; height: 24px; border-radius: 3px;
+  width: 24px; height: 24px; border-radius: 6px;
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 60%, #1A1A1A), color-mix(in srgb, var(--accent) 30%, #1A1A1A));
   display: grid; place-items: center;
   font-size: 10.5px; font-weight: 600; color: var(--fg);
@@ -326,7 +321,7 @@
 .auto-row[data-status="paused"] .title { color: var(--fg-muted); }
 .auto-row .auto-trail {
   flex-shrink: 0;
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   white-space: nowrap;
 }
@@ -354,7 +349,7 @@
   display: flex; align-items: center; gap: 10px;
   padding: 7px 10px;
   border: 0; background: transparent;
-  border-radius: 3px;
+  border-radius: 6px;
   cursor: pointer;
   font: 400 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
@@ -385,21 +380,21 @@
   margin-left: auto;
   padding: 3px 5px;
   border: 1px solid var(--border-soft);
-  border-radius: 3px;
+  border-radius: 6px;
   background: color-mix(in srgb, var(--fg) 3%, transparent);
   color: var(--fg-faint);
-  font: 600 9px/1 "Geist Mono", monospace;
+  font: 700 9px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
 }
 .user-menu-tag + .user-menu-unavailable {
   margin-left: 4px;
 }
 .user-menu-tag {
   margin-left: auto;
-  font: 600 9px/1 "Geist Mono", monospace;
+  font: 700 9px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--accent-fg);
   background: var(--status-warn);
   padding: 3px 5px;
-  border-radius: 3px;
+  border-radius: 6px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -410,7 +405,7 @@
   padding: 8px 10px;
   border: 1px solid var(--border-soft);
   background: transparent;
-  border-radius: 4px;
+  border-radius: 7px;
   cursor: pointer;
   font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
@@ -426,8 +421,8 @@
   white-space: nowrap;
 }
 .user-menu-status .dim { color: var(--fg-faint); }
-.user-menu-status .ok { color: var(--status-done); font: 500 11px/1 "Geist Mono", monospace; }
-.user-menu-status .warn { color: var(--status-warn); font: 500 11px/1 "Geist Mono", monospace; }
+.user-menu-status .ok { color: var(--status-done); font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); }
+.user-menu-status .warn { color: var(--status-warn); font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); }
 
 /* ───────── Admin Board ───────── */
 .admin-board {
@@ -444,12 +439,18 @@
   gap: 14px;
 }
 .ab-top > * { -webkit-app-region: no-drag; }
-.ab-crumb { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--fg); }
+.ab-crumb { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg); }
+.ab-crumb-octo {
+  width: 26px; height: 26px;
+  object-fit: contain;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 3px rgba(24, 40, 72, 0.35));
+}
 .ab-crumb .crumb { font-weight: 600; font-size: 14px; letter-spacing: -0.005em; white-space: nowrap; }
 .ab-crumb .sep { color: var(--fg-dim); }
 .ab-live {
   display: inline-flex; align-items: center; gap: 6px;
-  font: 500 11.5px/1 "Geist Mono", monospace;
+  font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--status-done);
 }
 .ab-live-dot {
@@ -463,26 +464,26 @@
 .ab-btn {
   appearance: none;
   display: inline-flex; align-items: center; gap: 7px;
-  padding: 6px 12px;
-  border-radius: 4px;
-  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  padding: 8px 15px;
+  border-radius: var(--ds-r-sm);
+  font: var(--ds-btn-fw) 13.5px/1 var(--ds-font);
   cursor: pointer;
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), transform 80ms var(--ease-out);
 }
 .ab-btn:active { transform: translateY(1px); }
 .ab-btn svg { width: 13px; height: 13px; }
 .ab-btn.ghost {
-  background: transparent;
-  border: 1px solid var(--border-soft);
-  color: var(--fg-muted);
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
 }
 .ab-btn.ghost:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); border-color: var(--border); }
 .ab-btn.primary {
-  background: color-mix(in srgb, var(--fg) 12%, transparent);
-  border: 1px solid var(--border);
-  color: var(--fg);
+  background: var(--ds-navy-surface);
+  border: 1px solid var(--ds-navy-surface);
+  color: #fff;
 }
-.ab-btn.primary:hover { background: color-mix(in srgb, var(--fg) 18%, transparent); }
+.ab-btn.primary:hover { background: var(--ds-navy-hover); }
 
 .ab-scroll {
   flex: 1; min-height: 0; overflow-y: auto;
@@ -533,33 +534,39 @@
 @media (max-width: 1400px) { .ab-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
 .ab-kpi {
-  background: var(--bg-2);
-  border: 1px solid transparent;
-  border-radius: 5px;
-  padding: 10px 12px;
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r);
+  padding: 14px 16px;
   min-width: 0;
-  transition: background 200ms var(--ease-out), transform 200ms var(--ease-out);
-  box-shadow: 0 1px 0 rgba(255,255,255,0.025) inset;
+  transition: border-color 200ms var(--ease-out);
 }
-.ab-kpi:hover { background: var(--bg-3); transform: translateY(-1px); }
+.ab-kpi:hover { border-color: var(--border); }
 .ab-kpi-label {
-  font: 500 10.5px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
-  color: var(--fg-faint);
-  letter-spacing: 0;
+  font: 700 var(--ds-fs-label)/1.1 var(--ds-font);
+  text-transform: uppercase;
+  color: var(--ds-muted);
+  letter-spacing: var(--ds-label-track);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* One value colour. Previously each tile picked navy/blue/orange with no
+   semantic rule, so the KPI row read as random. Colour now signals status
+   only (see .ab-kpi-value.attn below), never decoration. */
 .ab-kpi-value {
-  font: 400 22px/1.05 "Anthropic Sans Display", "Geist", sans-serif;
-  color: var(--fg);
-  margin-top: 4px;
-  letter-spacing: -0.025em;
+  font: 700 26px/1.05 var(--ds-font);
+  color: var(--ds-ink);
+  margin-top: 6px;
+  letter-spacing: -0.02em;
+  font-feature-settings: "tnum" on, "lnum" on;
 }
+.ab-kpi-value.attn { color: var(--ds-terracotta); }
+.ab-kpi-value.done { color: var(--ds-done); }
 .ab-kpi-breakdown {
   margin-top: 3px;
-  font: 500 10.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
-  color: var(--fg-muted);
+  font: 500 12px/1.2 var(--ds-font);
+  color: var(--ds-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -611,7 +618,7 @@
   background: color-mix(in srgb, var(--status-error) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
   color: var(--status-error);
-  font: 500 12px/1.4 "Geist Mono", monospace;
+  font: 700 12px/1.4 var(--ds-font); letter-spacing: var(--ds-label-track);
 }
 .ab-error > span { min-width: 0; overflow-wrap: anywhere; }
 .ab-error .ab-error-retry {
@@ -633,7 +640,7 @@
   font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   padding: 4px 9px;
-  border-radius: 4px;
+  border-radius: 7px;
 }
 .ab-action-tag.review {
   color: var(--status-warn);
@@ -651,7 +658,7 @@
   font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   padding: 4px 9px;
-  border-radius: 4px;
+  border-radius: 7px;
   flex-shrink: 0;
   border: 1px solid transparent;
 }
@@ -667,7 +674,7 @@
   letter-spacing: 0;
   color: var(--fg-faint);
   padding: 4px 9px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid transparent;
 }
@@ -675,7 +682,7 @@
 .ab-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 10px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
   font-size: 11.5px;
@@ -683,42 +690,56 @@
 }
 .ab-pill.subtle { color: var(--fg-muted); }
 
-/* KPI tiles -- compact 8-up */
+/* KPI tiles -- compact 8-up, on-brand navy band with brand-colored values */
 .ab-kpis {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 6px;
-  padding: 6px 6px 14px;
+  gap: 7px;
+  margin: 0 6px 14px;
+  padding: 12px 12px;
+  /* soft band + left accent border so the KPIs read as one unit */
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid #5E8AD0;
+  border-radius: 8px;
 }
 @media (max-width: 1400px) { .ab-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
 .ab-kpi {
-  background: var(--bg-1);
-  border: 1px solid var(--border-soft);
-  border-radius: 5px;
-  padding: 10px 12px;
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r);
+  padding: 14px 16px;
   min-width: 0;
-  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+  transition: border-color 140ms var(--ease-out);
 }
-.ab-kpi:hover { border-color: var(--border); background: var(--bg-2); }
+.ab-kpi:hover {
+  border-color: var(--ds-border-strong);
+}
 .ab-kpi-label {
-  font: 500 9.5px/1 "Geist Mono", monospace;
-  color: var(--fg-faint);
+  font: 700 var(--ds-fs-label)/1.1 var(--ds-font);
+  color: var(--ds-muted);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--ds-label-track);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ab-kpi-value {
-  font: 600 22px/1.05 "Anthropic Sans Display", "Geist", sans-serif;
-  color: var(--fg);
+  font: 700 26px/1.05 var(--ds-font);
+  color: var(--ds-ink);
   margin-top: 6px;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
+  font-feature-settings: "tnum" on, "lnum" on;
 }
+/* Value colour is STATUS, never decoration, and uses the same scale as the
+   rest of the app: terracotta = needs you, green = done. (Was orange/blue,
+   which clashed with blue meaning "informational" everywhere else.) */
+.ab-kpi-value.hot  { color: var(--ds-terracotta); }
+.ab-kpi-value.done { color: var(--ds-done); }
 .ab-kpi-delta {
   margin-top: 5px;
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   display: inline-flex; align-items: center; gap: 4px;
   white-space: nowrap;
@@ -744,7 +765,7 @@
 .ab-vel-stage {
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 14px;
-  border-radius: 5px;
+  border-radius: 7px;
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
   min-width: 130px;
@@ -801,13 +822,13 @@
 }
 .ab-quick-btn {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 12px;
-  border-radius: 4px;
-  background: var(--bg-2);
-  border: 1px solid var(--border-soft);
-  color: var(--fg-muted);
+  padding: 8px 15px;
+  border-radius: var(--ds-r-sm);
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
   cursor: pointer;
-  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  font: 600 13.5px/1 var(--ds-font);
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
 .ab-quick-btn:hover { color: var(--fg); border-color: var(--border); background: var(--bg-3); }
@@ -827,7 +848,7 @@
 }
 .ab-card-title { font: 600 13px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .ab-card-tag {
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   padding: 3px 6px;
   border-radius: 2px;
@@ -837,17 +858,26 @@
 
 /* Top 25 deals strip */
 .ab-top25 {
-  margin: 8px 6px 10px;
+  margin: 8px 6px 12px;
   background: var(--bg-1);
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
-  overflow: hidden;
+  border: 1px solid rgba(24, 40, 72, 0.45);
+  border-radius: 8px;
+  /* visible (not hidden) so the "+ Add" form popover can extend below the
+     section without being clipped; the horizontal strip keeps its own
+     overflow-x scroll on .ab-top25-strip. */
+  overflow: visible;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
 }
 .ab-top25-head {
   display: flex; align-items: center; gap: 14px;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 11px 16px;
+  /* clean brand-blue tint band (matches the blue accents) instead of the
+     washed-out navy-over-grey that read as brushed silver. */
+  background: linear-gradient(180deg, rgba(94, 138, 208, 0.16), rgba(94, 138, 208, 0.03) 100%);
+  border-bottom: 1px solid rgba(94, 138, 208, 0.34);
+  border-radius: 8px 8px 0 0;
   flex-wrap: wrap;
+  position: relative;
 }
 .ab-top25-title-block {
   display: flex; align-items: baseline; gap: 10px;
@@ -859,13 +889,13 @@
   letter-spacing: -0.005em;
 }
 .ab-top25-sub {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
 }
 .ab-top25-legend {
   margin-left: auto;
   display: flex; gap: 12px;
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -881,6 +911,179 @@
 .ab-top25-legend-dot.blocked { background: var(--status-warn); }
 .ab-top25-legend-dot.primary { background: var(--status-done); }
 
+.ab-top25-add {
+  display: inline-flex; align-items: center;
+  height: 24px; padding: 0 10px;
+  border-radius: 7px;
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+.ab-top25-add:hover {
+  color: var(--accent);
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+
+.ab-top25-add-pop {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 14px;
+  z-index: 40;
+  width: 290px;
+  max-height: min(74vh, 520px);
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  overflow-y: auto;
+}
+.ab-top25-add-search {
+  flex: 0 0 auto;
+  margin: 8px;
+  height: 30px; padding: 0 9px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  color: var(--fg);
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  outline: none;
+}
+.ab-top25-add-search:focus {
+  border-color: var(--accent-ring);
+}
+.ab-top25-add-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 4px 6px;
+}
+.ab-top25-add-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0; border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background 100ms var(--ease-out);
+}
+.ab-top25-add-row:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.ab-top25-add-row:disabled { opacity: 0.5; cursor: default; }
+.ab-top25-add-row-addr {
+  font: 500 12.5px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ab-top25-add-row-badge {
+  flex: 0 0 auto;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
+  color: var(--fg-faint);
+  letter-spacing: 0.02em;
+}
+.ab-top25-add-empty {
+  padding: 14px 10px;
+  font: 500 12px/1.4 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--fg-faint);
+  text-align: center;
+}
+
+/* New hot-lead form (replaces the deal picker) */
+.ab-top25-form {
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 11px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.ab-top25-form-title {
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+}
+.ab-top25-form-field {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ab-top25-form-field > span {
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--fg-muted);
+}
+.ab-top25-form-field input,
+.ab-top25-form-field textarea {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  color: var(--fg);
+  font: 500 12.5px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
+  outline: none;
+  resize: vertical;
+}
+.ab-top25-form-field input:focus,
+.ab-top25-form-field textarea:focus {
+  border-color: var(--accent-ring);
+}
+.ab-top25-form-field textarea { min-height: 54px; }
+.ab-top25-form-side {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.ab-top25-form-side-label {
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--fg-muted);
+}
+.ab-top25-side-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.ab-top25-side-btn {
+  padding: 5px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+  transition: background 100ms var(--ease-out), color 100ms var(--ease-out);
+}
+.ab-top25-side-btn + .ab-top25-side-btn { border-left: 1px solid var(--border-soft); }
+.ab-top25-side-btn.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.ab-top25-form-error {
+  font: 500 11.5px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--status-warn);
+}
+.ab-top25-form-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  margin-top: 2px;
+}
+.ab-top25-form-cancel {
+  padding: 6px 11px;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  color: var(--fg-muted);
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+}
+.ab-top25-form-cancel:hover { border-color: var(--border); color: var(--fg); }
+.ab-top25-form-submit {
+  padding: 6px 12px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  color: var(--accent-fg);
+  font: 600 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+  transition: opacity 120ms var(--ease-out);
+}
+.ab-top25-form-submit:disabled { opacity: 0.45; cursor: default; }
+
 .ab-top25-strip {
   display: flex;
   gap: 8px;
@@ -892,7 +1095,7 @@
 .ab-top25-strip::-webkit-scrollbar { height: 8px; }
 .ab-top25-strip::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
-  border-radius: 4px; border: 2px solid transparent; background-clip: content-box;
+  border-radius: 7px; border: 2px solid transparent; background-clip: content-box;
 }
 
 .ab-top25-card {
@@ -904,7 +1107,7 @@
   padding: 10px 12px;
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
-  border-radius: 4px;
+  border-radius: 7px;
   cursor: pointer;
   text-align: left;
   color: inherit;
@@ -922,8 +1125,44 @@
 .ab-top25-card.blocked {
   border-color: color-mix(in srgb, var(--status-warn) 50%, var(--border-soft));
 }
+.ab-top25-card-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+}
+/* Remove (archive) button — small ×, top-right, fades in on card hover. */
+.ab-top25-card-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  font: 700 12px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms var(--ease-out), background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
+}
+.ab-top25-card-wrap:hover .ab-top25-card-remove,
+.ab-top25-card-remove:focus-visible {
+  opacity: 1;
+}
+.ab-top25-card-remove:hover {
+  background: color-mix(in srgb, var(--status-warn) 22%, var(--bg-3));
+  border-color: color-mix(in srgb, var(--status-warn) 55%, var(--border));
+  color: var(--fg);
+}
+.ab-top25-card-remove:disabled { cursor: default; opacity: 0.6; }
 .ab-top25-rank {
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-dim);
   letter-spacing: 0.04em;
   flex-shrink: 0;
@@ -951,7 +1190,7 @@
   flex-shrink: 0;
 }
 .ab-top25-card-badge {
-  font: 500 9.5px/1 "Geist Mono", monospace;
+  font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -964,12 +1203,12 @@
   min-width: 0;
   border: 1px solid color-mix(in srgb, var(--status-warn) 25%, transparent);
   background: color-mix(in srgb, var(--status-warn) 5%, transparent);
-  border-radius: 3px;
+  border-radius: 6px;
   padding: 5px 6px;
 }
 .ab-top25-card-note-label {
   flex-shrink: 0;
-  font: 600 8.5px/1 "Geist Mono", monospace;
+  font: 700 8.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--status-warn);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -987,21 +1226,26 @@
   margin-top: 2px;
 }
 .ab-top25-card-price {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg);
   letter-spacing: -0.01em;
 }
 .ab-top25-card-progress {
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   margin-left: auto;
 }
 .ab-top25-empty {
-  padding: 18px 14px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 22px 14px 24px;
   color: var(--fg-faint);
   font-size: 12.5px;
   text-align: center;
 }
+.ab-top25-empty .ab-empty-octo { width: 44px; }
 
 /* Tabs */
 .ab-tabs {
@@ -1030,14 +1274,19 @@
 }
 .ab-modal {
   background: var(--bg-1);
-  border-radius: 10px;
+  border-radius: var(--ds-r-sm);
   box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 40px 80px -20px rgba(0,0,0,0.8);
   width: 100%;
-  max-width: 760px;
+  max-width: min(95vw, 1180px);
   max-height: calc(100vh - 64px);
   display: flex; flex-direction: column;
   position: relative;
-  overflow: hidden;
+  /* Scroll the whole modal as one unit. The fixed header + money + action bar
+     + performance strip can exceed the viewport on shorter screens, leaving
+     nothing for the inner scroll area and clipping the card. Letting the modal
+     scroll (with a sticky header) makes everything reachable. */
+  overflow-y: auto;
+  overflow-x: hidden;
   animation: ab-modal-rise 240ms var(--ease-out) both;
 }
 @keyframes ab-modal-rise {
@@ -1049,13 +1298,16 @@
   appearance: none; background: transparent; border: 0;
   width: 30px; height: 30px;
   border-radius: 999px;
-  color: var(--fg-muted);
+  /* The .abm-head banner is always the dark-blue gradient (any theme), so the
+     close X must always be light — --fg-muted went dark on light/medium and
+     disappeared. */
+  color: rgba(255, 255, 255, 0.72);
   cursor: pointer;
   display: grid; place-items: center;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
   z-index: 2;
 }
-.ab-modal-close:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+.ab-modal-close:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
 .ab-modal-close .x { font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 
 .ab-modal-head {
@@ -1089,7 +1341,7 @@
 .ab-modal-pill {
   display: inline-flex; align-items: center;
   padding: 4px 11px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--fg) 6%, transparent);
   color: var(--fg);
   font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -1105,7 +1357,9 @@
 }
 
 .ab-modal-scroll {
-  flex: 1; min-height: 0; overflow-y: auto;
+  /* No longer the sole scroll boundary — the modal itself scrolls now, so this
+     just flows its content (waiting panel + columns) at natural height. */
+  flex: 0 0 auto; min-height: 0; overflow: visible;
   padding: 4px 0 28px;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--fg) 10%, transparent) transparent;
@@ -1136,13 +1390,13 @@
 .ab-modal-checklist {
   display: flex; flex-direction: column; gap: 1px;
   background: var(--bg-2);
-  border-radius: 5px;
+  border-radius: 7px;
   padding: 4px;
 }
 .ab-modal-check {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 12px;
-  border-radius: 4px;
+  border-radius: 7px;
   cursor: pointer;
   color: var(--fg-muted);
   font-size: 13px;
@@ -1151,7 +1405,7 @@
 .ab-modal-check:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
 .ab-modal-check-box {
   width: 18px; height: 18px;
-  border-radius: 3px;
+  border-radius: 6px;
   border: 1px solid var(--border-strong);
   display: grid; place-items: center;
   font: 600 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -1209,7 +1463,7 @@
 }
 .ab-modal-auto {
   padding: 12px 14px;
-  border-radius: 5px;
+  border-radius: 7px;
   background: var(--bg-2);
 }
 .ab-modal-auto-name { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
@@ -1219,7 +1473,7 @@
 .ab-modal-timeline {
   list-style: none; margin: 0; padding: 0;
   background: var(--bg-2);
-  border-radius: 5px;
+  border-radius: 7px;
   overflow: hidden;
 }
 .ab-modal-tl {
@@ -1260,7 +1514,7 @@
 }
 .abm-crumbs {
   display: flex; align-items: center; gap: 8px;
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.08em;
   margin-bottom: 12px;
@@ -1304,11 +1558,11 @@
 .abm-card-title svg { width: 14px; height: 14px; color: var(--status-warn); }
 .abm-card-pills { margin-left: auto; display: flex; gap: 8px; }
 .abm-pill {
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   padding: 4px 7px;
-  border-radius: 3px;
+  border-radius: 6px;
   letter-spacing: 0.04em;
 }
 
@@ -1325,7 +1579,7 @@
   margin-bottom: 10px;
 }
 .abm-section-label {
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.1em;
   color: var(--fg-faint);
   display: inline-flex; align-items: center; gap: 6px;
@@ -1348,10 +1602,10 @@
 
 .abm-tag {
   display: inline-flex; align-items: center;
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.1em;
   padding: 4px 8px;
-  border-radius: 3px;
+  border-radius: 6px;
   margin-left: auto;
 }
 .abm-tag.warn    { color: var(--status-warn); background: color-mix(in srgb, var(--status-warn) 14%, transparent); }
@@ -1378,24 +1632,24 @@
   display: flex; gap: 8px;
 }
 .abm-btn {
-  appearance: none; border: 0;
-  padding: 7px 14px;
-  border-radius: 4px;
-  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  appearance: none; border: 1px solid transparent;
+  padding: 8px 15px;
+  border-radius: var(--ds-r-sm);
+  font: var(--ds-btn-fw) 13.5px/1 var(--ds-font);
   cursor: pointer;
   display: inline-flex; align-items: center; gap: 7px;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .abm-btn svg { width: 13px; height: 13px; }
 .abm-btn.primary {
-  background: color-mix(in srgb, var(--fg) 12%, transparent);
-  color: var(--fg);
+  background: var(--ds-navy-surface);
+  color: #fff;
 }
-.abm-btn.primary:hover { background: color-mix(in srgb, var(--fg) 18%, transparent); }
+.abm-btn.primary:hover { background: var(--ds-navy-hover); }
 .abm-btn.ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--fg-muted);
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
 }
 .abm-btn.ghost:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); }
 .abm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -1407,7 +1661,7 @@
   width: 100%;
   margin-top: 6px;
   padding: 7px 10px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
   color: var(--fg);
@@ -1422,7 +1676,7 @@
 .abm-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .abm-auto-card {
   background: var(--bg-3);
-  border-radius: 5px;
+  border-radius: 7px;
   padding: 12px 14px;
 }
 .abm-auto-head {
@@ -1430,18 +1684,18 @@
   margin-bottom: 4px;
 }
 .abm-auto-name { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
-.abm-auto-id { font: 500 10.5px/1 "Geist Mono", monospace; color: var(--fg-faint); letter-spacing: 0.04em; }
+.abm-auto-id { font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); letter-spacing: 0.04em; }
 
 /* Mini cell */
 .abm-mini {
   background: var(--bg-3);
-  border-radius: 5px;
+  border-radius: 7px;
   padding: 12px 14px;
   min-width: 0;
 }
 .abm-mini-label {
   display: inline-flex; align-items: center; gap: 6px;
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.08em;
   color: var(--fg-faint);
   margin-bottom: 8px;
@@ -1452,7 +1706,7 @@
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.abm-mini-value strong { color: var(--fg); font-family: "Geist Mono", monospace; font-weight: 500; }
+.abm-mini-value strong { color: var(--fg); font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; font-weight: 500; }
 .abm-mini-extra {
   display: flex; align-items: center; gap: 8px;
   margin-top: 8px;
@@ -1549,7 +1803,7 @@
 }
 .abm-phase-motion {
   background: var(--bg-3);
-  border-radius: 5px;
+  border-radius: 7px;
   padding: 12px 14px;
   margin-bottom: 14px;
 }
@@ -1585,7 +1839,7 @@
   text-align: left;
   appearance: none; background: transparent; border: 0;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 7px;
   transition: background 120ms var(--ease-out);
 }
 .abm-checklist-item:hover:not(:disabled) {
@@ -1594,7 +1848,7 @@
 .abm-checklist-item:disabled { cursor: default; }
 .abm-check-box {
   width: 18px; height: 18px;
-  border-radius: 3px;
+  border-radius: 6px;
   border: 1px solid var(--border-strong);
   background: transparent;
   flex-shrink: 0;
@@ -1602,6 +1856,17 @@
 .abm-check-box.checked {
   background: var(--fg);
   border-color: var(--fg);
+}
+.abm-check-auto {
+  margin-left: auto;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 1px 5px;
+  flex-shrink: 0;
 }
 
 .abm-province { margin-top: 6px; }
@@ -1630,7 +1895,7 @@
   letter-spacing: -0.01em;
 }
 .abm-conditions-sub {
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.08em;
   margin: 18px 0 8px;
@@ -1646,7 +1911,7 @@
   appearance: none;
   display: inline-flex; align-items: center; gap: 8px;
   padding: 7px 12px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--bg-2);
   color: var(--fg-muted);
   border: 1px solid var(--border);
@@ -1677,7 +1942,7 @@
 .abm-toggle-row {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 14px;
-  border-radius: 4px;
+  border-radius: 7px;
 }
 .abm-toggle-row:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
 .abm-toggle-check {
@@ -1712,18 +1977,18 @@
 .abm-kv-row          { gap: 24px; font-size: 12px; margin-bottom: 6px; }
 .abm-missing         { font-size: 12px; gap: 2px; margin: 0 0 8px; }
 .abm-tag             { font-size: 9.5px; padding: 3px 6px; }
-.abm-btn             { padding: 5px 11px; font-size: 11.5px; border-radius: 3px; gap: 6px; }
+.abm-btn             { padding: var(--ds-btn-pad-sm); font-size: 12.5px; border-radius: var(--ds-r-xs); gap: 6px; }
 .abm-btn svg         { width: 12px; height: 12px; }
-.abm-auto-card       { padding: 9px 12px; border-radius: 4px; }
+.abm-auto-card       { padding: 9px 12px; border-radius: 7px; }
 .abm-auto-name       { font-size: 12.5px; }
 .abm-auto-id         { font-size: 10px; }
-.abm-mini            { padding: 10px 12px; border-radius: 4px; }
+.abm-mini            { padding: 10px 12px; border-radius: 7px; }
 .abm-mini-label      { font-size: 9.5px; margin-bottom: 6px; gap: 5px; }
 .abm-mini-value      { font-size: 12.5px; }
 .abm-mini-extra      { font-size: 11px; margin-top: 6px; gap: 7px; }
 .abm-source-actions  { padding: 10px 14px; gap: 12px; }
 .abm-grid-2, .abm-grid-3 { gap: 8px; }
-.abm-phase           { margin: 0 22px 4px; border-radius: 5px; }
+.abm-phase           { margin: 0 22px 4px; border-radius: 7px; }
 .abm-phase-head      { padding: 9px 14px; gap: 10px; grid-template-columns: 16px minmax(0,1fr) auto auto; }
 .abm-phase-radio     { width: 12px; height: 12px; }
 .abm-phase-title     { font-size: 13px; gap: 7px; }
@@ -1732,7 +1997,7 @@
 .abm-bullet          { width: 12px; height: 12px; }
 .abm-phase-count     { font-size: 11px; }
 .abm-phase-body      { padding: 0 14px 10px; }
-.abm-phase-motion    { padding: 9px 12px; margin-bottom: 8px; border-radius: 4px; }
+.abm-phase-motion    { padding: 9px 12px; margin-bottom: 8px; border-radius: 7px; }
 .abm-phase-motion-head { font-size: 11.5px; margin-bottom: 3px; gap: 6px; }
 .abm-phase-motion-line { font-size: 12px; margin-bottom: 4px; }
 .abm-phase-motion-gate { font-size: 12px; }
@@ -1746,14 +2011,14 @@
 .abm-conditions-sub  { font-size: 9.5px; margin: 14px 0 4px; }
 .abm-enum-row        { padding: 9px 0; }
 .abm-enum-label      { font-size: 12.5px; }
-.abm-enum-select     { padding: 5px 10px; font-size: 12px; min-width: 120px; border-radius: 3px; }
+.abm-enum-select     { padding: 5px 10px; font-size: 12px; min-width: 120px; border-radius: 6px; }
 .abm-toggles         { column-gap: 24px; }
-.abm-toggle-row      { padding: 7px 10px; border-radius: 3px; }
+.abm-toggle-row      { padding: 7px 10px; border-radius: 6px; }
 .abm-toggle-check    { font-size: 12.5px; gap: 9px; }
 .abm-toggle-unset    { font-size: 10px; }
 .abm-modal-scroll, .ab-modal-scroll { padding-top: 0; padding-bottom: 22px; }
 .ab-modal-close      { top: 10px; right: 10px; width: 26px; height: 26px; }
-.ab-modal            { max-width: 1140px; border-radius: 8px; }
+.ab-modal            { max-width: min(95vw, 2000px); border-radius: 8px; }
 
 /* Two-column modal layout */
 .abm-cols {
@@ -1832,7 +2097,7 @@
 }
 .ab-cycler-dot {
   width: 4px; height: 4px; border-radius: 50%;
-  background: color-mix(in srgb, var(--fg) 18%, transparent);
+  background: var(--ds-navy-hover);
   transition: background 200ms var(--ease-out);
 }
 .ab-cycler-dot.active { background: var(--fg-muted); }
@@ -1840,7 +2105,7 @@
   appearance: none; background: transparent; border: 0;
   display: inline-flex; align-items: center; gap: 7px;
   padding: 4px 10px;
-  border-radius: 3px;
+  border-radius: 6px;
   color: var(--fg-faint);
   font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
@@ -1849,7 +2114,7 @@
 .ab-tab:hover { color: var(--fg-muted); background: color-mix(in srgb, var(--fg) 4%, transparent); }
 .ab-tab.active { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 .ab-tab .count {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   padding: 2px 6px;
   border-radius: 2px;
@@ -1860,7 +2125,7 @@
 .ab-search {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 4px 9px;
-  border-radius: 3px;
+  border-radius: 6px;
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
   transition: border-color 120ms var(--ease-out);
@@ -1887,10 +2152,10 @@
   appearance: none;
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 10px;
-  border-radius: 4px;
-  background: transparent;
-  border: 1px solid var(--border-soft);
-  color: var(--fg-muted);
+  border-radius: 7px;
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
   font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
@@ -1913,7 +2178,7 @@
   font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   padding: 5px 8px;
-  border-radius: 3px;
+  border-radius: 6px;
 }
 .ab-chip-ghost:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
 
@@ -1923,7 +2188,7 @@
   border-bottom: 1px solid var(--border-soft);
 }
 .ab-active-label {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -1938,7 +2203,7 @@
   flex-wrap: wrap;
 }
 .ab-flow-label {
-  font: 500 10px/1 "Geist Mono", monospace;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-dim);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2000,7 +2265,7 @@
   border-bottom: 1px solid var(--border-soft);
 }
 .ab-col-stage {
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-dim);
   letter-spacing: 0.04em;
 }
@@ -2008,7 +2273,7 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ab-col-count {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   padding: 2px 5px;
   border-radius: 2px;
@@ -2016,7 +2281,7 @@
 }
 .ab-col-motion {
   padding: 4px 14px 0;
-  font: 500 9.5px/1.3 "Geist Mono", monospace;
+  font: 700 9.5px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -2042,22 +2307,64 @@
   border-top: 1px solid var(--border-soft);
 }
 .ab-col-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
   color: var(--fg-dim);
   text-align: center;
-  padding: 8px 0;
+  padding: 16px 0 14px;
   font-size: 11.5px;
+}
+.ab-col-empty-text { line-height: 1.3; }
+
+/* faded brand mascot shown above empty-state copy */
+.ab-empty-octo {
+  width: 40px;
+  height: auto;
+  object-fit: contain;
+  opacity: 0.5;
+  filter: drop-shadow(0 2px 4px rgba(24, 40, 72, 0.25)) saturate(0.9);
 }
 
 .ab-deal {
+  position: relative;
   background: var(--bg-3);
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 7px;
   padding: 12px 14px;
   cursor: pointer;
   transition: background 160ms var(--ease-out), transform 80ms var(--ease-out);
 }
 .ab-deal:hover { background: color-mix(in srgb, var(--fg) 6%, var(--bg-3)); }
 .ab-deal:active { transform: translateY(1px); }
+
+/* Pin-to-Top-25 control on the kanban card tile */
+.ab-deal-pin {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 28%, transparent);
+  cursor: pointer;
+  transition: color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+.ab-deal-pin svg { width: 16px; height: 16px; }
+.ab-deal-pin:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.ab-deal-pin.pinned { color: #5E8AD0; }
+.ab-deal-pin.pinned:hover { color: color-mix(in srgb, #5E8AD0 80%, #fff); }
+.ab-deal-pin:disabled { opacity: 0.5; cursor: default; }
 .ab-deal-flag {
   margin-left: auto;
   font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -2065,12 +2372,13 @@
   white-space: nowrap;
 }
 .ab-deal-flag.working { color: var(--accent); }
-.ab-deal-flag.waiting,
+.ab-deal-flag.waiting { color: #C46340; }
 .ab-deal-flag.failed { color: var(--status-warn); }
 .ab-deal-addr {
   font: 500 13.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-right: 26px;
 }
 .ab-deal-line2 {
   font-size: 11.5px;
@@ -2085,7 +2393,7 @@
 }
 .ab-deal-badge {
   display: inline-flex; align-items: center;
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.02em;
   color: var(--fg-muted);
   padding: 3px 6px;
@@ -2093,12 +2401,12 @@
   background: color-mix(in srgb, var(--fg) 5%, transparent);
 }
 .ab-deal-progress {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   flex-shrink: 0;
 }
 .ab-deal-gate {
-  font: 500 10.5px/1 "Geist Mono", monospace;
+  font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.02em;
   color: var(--fg-faint);
   flex-shrink: 0;
@@ -2115,7 +2423,7 @@
   font-size: 12px;
 }
 .ab-deal-next-label {
-  font: 500 9.5px/1 "Geist Mono", monospace;
+  font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.08em;
   color: var(--fg-dim);
   flex-shrink: 0;
@@ -2133,7 +2441,7 @@
   font-size: 11.5px;
 }
 .ab-deal-owner {
-  width: 18px; height: 18px; border-radius: 3px;
+  width: 18px; height: 18px; border-radius: 6px;
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 50%, var(--bg-3)), color-mix(in srgb, var(--accent) 25%, var(--bg-3)));
   display: grid; place-items: center;
   font: 600 9.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -2170,7 +2478,7 @@
 .ab-inbox-title-block { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; white-space: nowrap; }
 .ab-inbox-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.005em; }
 .ab-inbox-sub {
-  font: 500 11.5px/1 "Geist Mono", monospace;
+  font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   letter-spacing: 0.02em;
 }
@@ -2182,7 +2490,7 @@
   appearance: none;
   display: inline-flex; align-items: center; gap: 7px;
   padding: 5px 10px;
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   border: 0;
   color: var(--fg-faint);
@@ -2196,7 +2504,7 @@
   background: color-mix(in srgb, var(--fg) 7%, transparent);
 }
 .ab-inbox-chip .count {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
 }
 .ab-inbox-chip.active .count { color: var(--fg-muted); }
@@ -2248,7 +2556,7 @@
 }
 
 .ab-inbox-meta {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   white-space: nowrap;
   text-align: right;
@@ -2257,10 +2565,10 @@
 .ab-inbox-open {
   appearance: none;
   padding: 4px 10px;
-  border-radius: 3px;
-  background: transparent;
-  border: 1px solid var(--border-soft);
-  color: var(--fg-muted);
+  border-radius: 6px;
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
   font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
@@ -2274,7 +2582,7 @@
   gap: 14px;
 }
 .ab-inbox-range {
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   white-space: nowrap;
 }
@@ -2282,7 +2590,7 @@
   display: flex; align-items: center; gap: 4px;
 }
 .ab-inbox-page-num {
-  font: 500 11.5px/1 "Geist Mono", monospace;
+  font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-muted);
   padding: 0 6px;
   min-width: 44px;
@@ -2295,7 +2603,7 @@
   display: grid; place-items: center;
   background: transparent;
   border: 1px solid var(--border-soft);
-  border-radius: 3px;
+  border-radius: 6px;
   color: var(--fg-muted);
   font: 500 14px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
@@ -2316,7 +2624,7 @@
   padding: 4px 8px;
   margin-left: 6px;
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: 6px;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .ab-inbox-page-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
@@ -2349,7 +2657,7 @@
 .ab-action-row:last-child { border-bottom: 0; }
 .ab-action-icon {
   width: 30px; height: 30px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--bg-2);
   color: var(--fg-muted);
   display: grid; place-items: center;
@@ -2370,7 +2678,7 @@
 }
 .ab-action-tag {
   flex-shrink: 0;
-  font: 600 9.5px/1 "Geist Mono", monospace;
+  font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.1em;
   padding: 4px 7px;
   border-radius: 2px;
@@ -2397,17 +2705,17 @@
 }
 .ab-action-meta {
   display: flex; gap: 12px;
-  font: 500 11px/1 "Geist Mono", monospace;
+  font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
 }
 .ab-action-open {
   appearance: none;
   align-self: center;
   padding: 6px 12px;
-  border-radius: 3px;
-  background: transparent;
-  border: 1px solid var(--border-soft);
-  color: var(--fg-muted);
+  border-radius: 6px;
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  color: var(--ds-ink);
   cursor: pointer;
   font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   flex-shrink: 0;
@@ -2429,7 +2737,7 @@
 }
 .ab-auto-card {
   padding: 12px 14px;
-  border-radius: 5px;
+  border-radius: 7px;
   margin: 4px;
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
@@ -2442,7 +2750,7 @@
 }
 .ab-auto-name { font: 500 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
 .ab-auto-status {
-  font: 600 9px/1 "Geist Mono", monospace;
+  font: 700 9px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.1em;
   padding: 3px 6px;
   border-radius: 2px;
@@ -2453,7 +2761,7 @@
 .ab-auto-status.blocked   { color: var(--status-warn);  background: color-mix(in srgb, var(--status-warn) 14%, transparent);  border: 1px solid color-mix(in srgb, var(--status-warn) 32%, transparent); }
 .ab-auto-status.optional  { color: var(--fg-muted);     background: color-mix(in srgb, var(--fg) 5%, transparent);              border: 1px solid var(--border-soft); }
 .ab-auto-schedule { font-size: 11.5px; color: var(--fg-muted); }
-.ab-auto-next { font: 500 11px/1.3 "Geist Mono", monospace; color: var(--fg-faint); margin-top: 2px; }
+.ab-auto-next { font: 700 11px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); margin-top: 2px; }
 .ab-auto-detail {
   margin-top: 8px;
   font-size: 11.5px;
@@ -2484,17 +2792,677 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ab-work-sub {
-  font: 500 11px/1.3 "Geist Mono", monospace;
+  font: 700 11px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track);
   color: var(--fg-faint);
   margin-top: 2px;
 }
 .ab-work-tools {
   flex-shrink: 0;
-  font: 600 9.5px/1 "Geist Mono", monospace;
+  font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   letter-spacing: 0.1em;
   color: var(--fg-faint);
   padding: 4px 7px;
   border-radius: 2px;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border-soft);
+}
+
+/* ═══════════ Score-card redesign (ported from June-20 handoff) ═══════════ */
+.abm-info-stack {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.abm-info-section {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 2%, transparent);
+  overflow: hidden;
+}
+.abm-info-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.abm-info-title { font: 600 13px/1.2 "Geist", sans-serif; color: var(--fg); }
+.abm-info-sub { margin-top: 4px; font-size: 11.5px; line-height: 1.35; color: var(--fg-muted); }
+.abm-info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+.abm-info-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.abm-info-field > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.abm-info-field em { font-style: normal; color: var(--status-warn); letter-spacing: 0; text-transform: lowercase; }
+.abm-info-field input,
+.abm-info-field select {
+  width: 100%;
+  min-height: 31px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 7px 8px;
+  font: 500 12.5px/1.2 "Geist", sans-serif;
+}
+.abm-info-field input::placeholder { color: var(--fg-faint); }
+.abm-info-field input:focus,
+.abm-info-field select:focus {
+  outline: 0;
+  border-color: color-mix(in srgb, var(--status-warn) 55%, var(--border-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-warn) 12%, transparent);
+}
+.abm-info-placeholder {
+  padding: 8px 10px;
+  border: 1px dashed var(--border-soft);
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* SkySlope — Missing Documents (read-only punch list) */
+.abm-phase-count.warn { color: var(--elev-orange); }
+.abm-phase-count.ok { color: var(--status-ok, #4f9d69); }
+.abm-skyslope-body { padding: 0 12px 12px; }
+.abm-skyslope-head {
+  font: 700 10px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 8px;
+}
+.abm-skyslope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.abm-skyslope-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 500 12.5px/1.35 "Geist", sans-serif;
+  color: var(--fg);
+}
+.abm-skyslope-row::before {
+  content: "•";
+  color: var(--fg-dim);
+  flex: 0 0 auto;
+}
+.abm-skyslope-doc { flex: 1 1 auto; min-width: 0; }
+.abm-skyslope-chip {
+  flex: 0 0 auto;
+  font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--elev-orange);
+  background: color-mix(in srgb, var(--elev-orange) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--elev-orange) 30%, transparent);
+  padding: 3px 6px;
+  border-radius: 7px;
+  white-space: nowrap;
+}
+.abm-skyslope-clear {
+  font: 500 12.5px/1.35 "Geist", sans-serif;
+  color: var(--status-ok, #4f9d69);
+}
+.abm-skyslope-empty {
+  font: 500 12px/1.4 "Geist", sans-serif;
+  color: var(--fg-muted);
+}
+
+/* Elevation: new card action buttons */
+.abm-btn.collapse-sale {
+  background: transparent;
+  color: var(--elev-orange);
+  border: 1px solid color-mix(in srgb, var(--elev-orange) 45%, transparent);
+}
+.abm-btn.collapse-sale:hover { background: color-mix(in srgb, var(--elev-orange) 12%, transparent); }
+.abm-btn.price-reduction {
+  background: transparent;
+  color: var(--elev-orange);
+  border: 1px solid color-mix(in srgb, var(--elev-orange) 45%, transparent);
+}
+.abm-btn.price-reduction:hover { background: color-mix(in srgb, var(--elev-orange) 12%, transparent); }
+.abm-btn.landing {
+  background: var(--ds-navy-surface);
+  color: #fff;
+  border: 1px solid var(--ds-navy-surface);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.abm-btn.landing.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; }
+.abm-btn.cma-pdf {
+  background: var(--ds-navy-surface);
+  color: #fff;
+  border: 1px solid var(--ds-navy-surface);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.abm-btn.cma-pdf.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; cursor: default; }
+/* Weekly seller-update PDF — compact variant that lives in the Listing Performance header */
+.abm-btn.seller-pdf {
+  background: var(--ds-navy-surface);
+  color: #fff;
+  border: 1px solid var(--ds-navy-surface);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 10.5px;
+}
+.abm-btn.seller-pdf.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; cursor: default; }
+
+/* Approve & Send — filled brand-blue primary so it reads as the action; sits next to the PDF button in the perf header */
+.abm-btn.send-update {
+  background: #5E8AD0;
+  color: #ffffff;
+  border: 1px solid #5E8AD0;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 11px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.abm-btn.send-update:hover { background: color-mix(in srgb, #5E8AD0 88%, #000); }
+.abm-btn.send-update.sent {
+  background: transparent;
+  color: var(--fg-faint);
+  border-color: var(--border);
+  font-weight: 500;
+  cursor: default;
+}
+
+/* Confirm dialog for the external send (Approve & Send) */
+.abm-confirm-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 12, 22, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.abm-confirm {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--ds-r-sm);
+  padding: 18px 20px;
+  max-width: 380px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.4);
+}
+.abm-confirm-title { font-size: 14px; font-weight: 700; color: var(--fg); margin-bottom: 8px; }
+.abm-confirm-body { font-size: 12.5px; color: var(--fg-muted); line-height: 1.5; }
+.abm-confirm-error { margin-top: 10px; font-size: 11.5px; color: var(--elev-orange); }
+.abm-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* Elevation: master document tray */
+.abm-doctray-prog { color: var(--accent); font-size: 11px; }
+.abm-doctray-bar { height: 6px; background: var(--border); border-radius: 6px; overflow: hidden; margin: 8px 0 10px; }
+.abm-doctray-fill { display: block; height: 100%; background: var(--accent); }
+.abm-doctray-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; }
+.abm-doc-chip { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--fg-muted); }
+.abm-doc-chip .abm-doc-box { width: 14px; height: 14px; border-radius: 7px; flex-shrink: 0; border: 1.5px solid var(--border-strong); }
+.abm-doc-chip.have .abm-doc-box { background: var(--accent); border-color: var(--accent); position: relative; }
+.abm-doc-chip.have .abm-doc-box::after { content: "✓"; position: absolute; top: -2px; left: 2px; font-size: 10px; font-weight: 800; color: var(--accent-fg); }
+.abm-doc-chip.missing { color: var(--elev-orange); }
+.abm-doc-chip.missing .abm-doc-box { border-color: var(--elev-orange); border-style: dashed; }
+
+/* Elevation: money strip in modal header */
+.abm-money { display: flex; gap: 0; margin-top: 14px; border: 1px solid var(--border); border-radius: var(--ds-r-sm); overflow: hidden; background: color-mix(in srgb, var(--elev-navy) 30%, var(--bg)); }
+.abm-money-cell { flex: 1; padding: 9px 14px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
+.abm-money-cell:last-child { border-right: none; }
+.abm-money-cell .k { font-size: 9px; letter-spacing: .7px; text-transform: uppercase; color: var(--fg-faint); }
+.abm-money-cell .v { font-size: 17px; font-weight: 800; color: var(--fg); }
+.abm-money-cell .v.o { color: var(--elev-orange); }
+.abm-money-cell .v.b { color: var(--accent); }
+.abm-money-cell .n { font-size: 10px; color: var(--accent); }
+
+/* ── Listing Performance (listing-side only) — at-a-glance under the action bar ── */
+.abm-perf {
+  padding: 12px 28px 14px;
+  background: color-mix(in srgb, var(--elev-navy) 12%, var(--bg));
+  border-bottom: 1px solid var(--border);
+}
+.abm-perf-head { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.abm-perf-head .abm-btn.seller-pdf { margin-left: auto; }
+.abm-perf-title { font-size: 13px; font-weight: 700; letter-spacing: .2px; color: var(--fg); }
+.abm-perf-asof { font-size: 10px; color: var(--fg-faint); }
+.abm-perf-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--ds-r-sm);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--elev-navy) 22%, var(--bg));
+}
+.abm-perf-cell {
+  padding: 9px 12px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+.abm-perf-cell:last-child { border-right: none; }
+.abm-perf-num { font-size: 19px; font-weight: 800; color: #ffffff; line-height: 1.1; }
+.abm-perf-num.blue { color: #5E8AD0; }
+.abm-perf-num.orange { color: #C46340; }
+.abm-perf-label { font-size: 9px; letter-spacing: .6px; text-transform: uppercase; color: var(--fg-faint); }
+.abm-perf-empty { font-size: 12px; color: var(--fg-faint); line-height: 1.5; }
+@media (max-width: 760px) {
+  .abm-perf-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .abm-perf-cell:nth-child(3) { border-right: none; }
+}
+
+/* ── Mockup-match: gradient header + visible action bar (2026-06-20) ── */
+.abm-head {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--elev-navy) 95%, #3a5a8f) 0%,
+    color-mix(in srgb, var(--elev-navy) 72%, #3a5a8f) 55%,
+    color-mix(in srgb, var(--elev-navy) 52%, #4774b5) 100%);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  /* Pin the header (with the money strip) while the modal body scrolls. */
+  position: sticky;
+  top: 0;
+  z-index: 4;
+}
+.abm-actionbar {
+  display: flex; gap: 8px; align-items: center;
+  padding: 12px 28px;
+  background: color-mix(in srgb, var(--elev-navy) 20%, var(--bg));
+  border-bottom: 1px solid var(--border);
+}
+.abm-actionbar .abm-btn.landing { margin-left: auto; }
+.abm-actionbar .abm-btn.primary {
+  background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+}
+.abm-actionbar .abm-btn.primary:hover { background: var(--accent-vivid); }
+
+/* ── Round 2 (2026-06-20): visible gradient + orange brand on the current stage ── */
+.abm-head {
+  background: linear-gradient(118deg, #12223d 0%, #203c70 50%, #2f59a4 100%) !important;
+}
+/* ── Readability fix (2026-06-25): .abm-head is ALWAYS the dark navy gradient in
+   every theme, but .abm-title/.abm-crumbs used var(--fg) which is DARK on the
+   light/medium themes — so the deal name + "Add a card to the board" rendered as
+   dark text on a dark navy header and was unreadable. Force header text light,
+   the same way the close-X was already pinned light. ── */
+.abm-head .abm-title,
+.abm-head .abm-title * { color: rgba(255, 255, 255, 0.97) !important; }
+.abm-head .abm-crumbs,
+.abm-head .abm-crumbs * { color: rgba(255, 255, 255, 0.72) !important; }
+.abm-head .abm-crumbs .stage { color: var(--elev-orange) !important; }
+.abm-head .abm-meta,
+.abm-head .abm-meta * { color: rgba(255, 255, 255, 0.88) !important; }
+/* Money strip ("LIST"/"OFFER" labels) sits on the LIGHT money box, not the navy,
+   so its label must stay DARK — it used var(--fg-faint) and was barely legible.
+   Bump to the muted (readable) theme tone; stays theme-safe (dark on light,
+   light on dark). The value (.v) already uses var(--fg) and is fine. */
+.abm-money-cell .k { color: var(--fg-muted) !important; font-weight: 600; }
+/* current pipeline stage = orange brand (was greyed out by later rules) — applies in EVERY stage */
+.abm-tag.current {
+  color: var(--elev-orange) !important;
+  background: color-mix(in srgb, var(--elev-orange) 16%, transparent) !important;
+}
+.abm-phase.current {
+  border-color: color-mix(in srgb, var(--elev-orange) 50%, transparent) !important;
+}
+.abm-phase.current .abm-phase-sub { color: var(--elev-orange) !important; }
+.abm-phase-radio[data-state="current"] {
+  background: var(--elev-orange) !important;
+  border-color: var(--elev-orange) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--elev-orange) 22%, transparent) !important;
+}
+
+/* round 4: close button always on top + clickable; action bar wraps instead of clipping */
+.ab-modal-close { z-index: 100 !important; pointer-events: auto !important; }
+.abm-actionbar { flex-wrap: wrap; }
+
+/* ── Round 5 (2026-06-20): Electron close-button fix + Cancel/Relist button ── */
+/* Electron treats -webkit-app-region:drag areas as window-drag and eats clicks.
+   Force the whole modal to no-drag so the X (and every button) is clickable. */
+.ab-modal-backdrop, .ab-modal, .ab-modal * { -webkit-app-region: no-drag !important; }
+.abm-btn.cancel-only {
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: transparent;
+}
+.abm-btn.cancel-only:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.abm-btn.cancel-relist {
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: transparent;
+}
+.abm-btn.cancel-relist:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* ── Board card highlight: brand orange+BLUE (was orange+yellow) 2026-06-20 ── */
+/* var(--accent) resolves to grey in this build, so use explicit brand blue. */
+.ab-deal.blocked, .ab-top25-card.blocked {
+  border-color: #5E8AD0 !important;
+}
+.ab-deal.blocked {
+  box-shadow: 0 0 0 1px rgba(94,138,208,0.35) !important;
+}
+
+/* ── Add to Top 25 toggle on the deal modal (brand blue) 2026-06-20 ── */
+.abm-btn.top25-toggle {
+  color: #5E8AD0;
+  border: 1px solid #5E8AD0;
+  background: transparent;
+}
+.abm-btn.top25-toggle:hover { background: rgba(94,138,208,0.12); }
+.abm-btn.top25-toggle.active {
+  background: #5E8AD0;
+  border-color: #5E8AD0;
+  color: #fff;
+}
+.abm-btn.top25-toggle.active:hover { background: #4f7bc0; }
+
+/* ─────────────────────────────────────────────────────────────────
+   BoardLoader — cute on-brand loading state
+   Brand: navy #182848 · brand blue #5E8AD0 · brand orange #C46340
+   ───────────────────────────────────────────────────────────────── */
+
+.bl-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 260px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.bl-stage {
+  position: relative;
+  width: 108px;
+  height: 116px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.bl-octo {
+  position: relative;
+  z-index: 2;
+  width: 96px;
+  height: auto;
+  transform-origin: 50% 100%;
+  animation: bl-bounce 1s ease-in-out infinite;
+  filter: drop-shadow(0 4px 6px rgba(24, 40, 72, 0.16));
+}
+
+.bl-shadow {
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  width: 64px;
+  height: 12px;
+  margin-left: -32px;
+  border-radius: 50%;
+  background: rgba(24, 40, 72, 0.18);
+  filter: blur(1.5px);
+  transform-origin: 50% 50%;
+  animation: bl-shadow-scale 1s ease-in-out infinite;
+}
+
+.bl-caption {
+  font-size: 14px;
+  font-weight: 500;
+  color: #6b7280;
+  letter-spacing: 0.01em;
+}
+
+.bl-dots {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.bl-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.35;
+  animation: bl-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.bl-dot-1 { background: #5E8AD0; animation-delay: 0s; }
+.bl-dot-2 { background: #C46340; animation-delay: 0.18s; }
+.bl-dot-3 { background: #5E8AD0; animation-delay: 0.36s; }
+
+.bl-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes bl-bounce {
+  0%, 100% { transform: translateY(0) scaleX(1) scaleY(1); }
+  45%      { transform: translateY(-14px) scaleX(0.98) scaleY(1.02); }
+  55%      { transform: translateY(-14px) scaleX(0.98) scaleY(1.02); }
+  78%      { transform: translateY(0) scaleX(1.04) scaleY(0.96); }
+}
+
+@keyframes bl-shadow-scale {
+  0%, 100% { transform: scale(1); opacity: 0.18; }
+  50%      { transform: scale(0.6); opacity: 0.10; }
+}
+
+@keyframes bl-dot-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  40%      { opacity: 1; transform: scale(1.25); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bl-octo {
+    animation: bl-soft-pulse 1.6s ease-in-out infinite;
+  }
+  .bl-shadow { animation: none; opacity: 0.14; }
+  .bl-dot { animation: bl-soft-pulse 1.6s ease-in-out infinite; }
+}
+
+@keyframes bl-soft-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+
+/* ── "Waiting on you" detail panel in the deal modal (shows what an
+      automation is actually asking for) — 2026-06-21 ── */
+.abm-waiting {
+  margin: 4px 16px 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, #C46340 45%, transparent);
+  border-left: 3px solid #C46340;
+  border-radius: 8px;
+  background: color-mix(in srgb, #C46340 9%, var(--bg-2));
+}
+.abm-waiting-head {
+  color: #C46340;
+  font-size: 10.5px;
+  letter-spacing: 0.09em;
+  margin-bottom: 8px;
+}
+.abm-waiting-item { padding: 9px 0; border-top: 1px solid color-mix(in srgb, #C46340 22%, transparent); }
+.abm-waiting-item:first-of-type { border-top: none; padding-top: 2px; }
+.abm-waiting-title { font-weight: 650; font-size: 14px; margin-bottom: 5px; color: var(--fg, #f2f2f2); }
+.abm-waiting-msg { font-size: 13px; line-height: 1.5; color: color-mix(in srgb, var(--fg, #f2f2f2) 78%, transparent); margin-bottom: 8px; }
+.abm-waiting-needs { color: #C46340; font-size: 10px; letter-spacing: 0.08em; margin-bottom: 4px; }
+.abm-waiting-fields { margin: 0; padding-left: 18px; }
+.abm-waiting-fields li { font-size: 12.5px; line-height: 1.45; margin: 3px 0; color: color-mix(in srgb, var(--fg, #f2f2f2) 90%, transparent); }
+
+.abm-waiting-err { color: #c0392b; font-size: 12px; margin: 6px 0 2px; }
+.abm-waiting-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.abm-waiting-btn {
+  appearance: none; cursor: pointer; font-family: var(--ds-font); font-size: 13px; font-weight: var(--ds-btn-fw);
+  padding: 8px 15px; border-radius: var(--ds-r-sm); border: 1px solid transparent;
+  transition: filter 120ms ease, opacity 120ms ease;
+}
+.abm-waiting-btn:disabled { opacity: 0.55; cursor: default; }
+.abm-waiting-btn.approve { background: #C46340; color: #fff; }
+.abm-waiting-btn.approve:hover:not(:disabled) { filter: brightness(1.08); }
+.abm-waiting-btn.dismiss { background: transparent; color: color-mix(in srgb, var(--fg, #f2f2f2) 70%, transparent); border-color: var(--border-soft, #2a2d34); }
+.abm-waiting-btn.dismiss:hover:not(:disabled) { color: var(--fg, #f2f2f2); }
+.abm-waiting-btn.preview { background: transparent; color: var(--accent, #5E8AD0); border-color: color-mix(in srgb, var(--accent, #5E8AD0) 55%, transparent); }
+.abm-waiting-btn.preview:hover:not(:disabled) { background: color-mix(in srgb, var(--accent, #5E8AD0) 14%, transparent); }
+/* Fillable "Waiting on you" form — type answers to the missing-info questions. */
+.abm-waiting-form { display: flex; flex-direction: column; gap: 9px; margin: 8px 0 6px; }
+.abm-waiting-field { display: flex; flex-direction: column; gap: 3px; }
+.abm-waiting-field-label { font-size: 11.5px; color: color-mix(in srgb, var(--fg, #2b2b2b) 70%, transparent); }
+.abm-waiting-input {
+  font: inherit; font-size: 13px;
+  padding: 7px 10px; border-radius: 6px;
+  background: var(--bg, #fff); color: var(--fg, #2b2b2b);
+  border: 1px solid var(--border-soft); color-scheme: light;
+}
+.abm-waiting-input:focus { outline: 1px solid var(--accent-ring); border-color: var(--border); }
+.abm-waiting-field-help { font-size: 11px; line-height: 1.35; color: color-mix(in srgb, var(--fg, #2b2b2b) 62%, transparent); margin-bottom: 1px; }
+select.abm-waiting-input { appearance: auto; -webkit-appearance: menulist; cursor: pointer; }
+textarea.abm-waiting-textarea { resize: vertical; min-height: 64px; line-height: 1.45; font: inherit; }
+.abm-waiting-btn.submit { background: #5E8AD0; color: #fff; }
+.abm-waiting-btn.submit:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* ── Archived board view (cancelled-without-relist sellers) 2026-06-21 ── */
+.ab-archived { padding: 14px 0 4px; }
+.ab-archived-empty {
+  padding: 18px 4px;
+  color: color-mix(in srgb, #182848 35%, #9aa3b2);
+  font-size: 13px;
+}
+.ab-archived-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.ab-archived-card-wrap {
+  position: relative;
+  display: flex;
+}
+.ab-archived-restore {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid #2E4670;
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  font: 700 10px/1.4 var(--ds-font); letter-spacing: var(--ds-label-track);
+  letter-spacing: .4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease, border-color .12s ease, color .12s ease, background .12s ease;
+}
+.ab-archived-card-wrap:hover .ab-archived-restore,
+.ab-archived-restore:focus-visible { opacity: 1; }
+.ab-archived-restore:hover {
+  border-color: #5E8AD0;
+  color: var(--fg);
+  background: color-mix(in srgb, #5E8AD0 22%, var(--bg-3));
+}
+.ab-archived-restore:disabled { cursor: default; opacity: .7; }
+.ab-archived-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: var(--ds-r-sm);
+  border: 1px solid #2E4670;
+  background: color-mix(in srgb, #182848 22%, transparent);
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.ab-archived-card:hover {
+  border-color: #5E8AD0;
+  background: color-mix(in srgb, #182848 32%, transparent);
+}
+.ab-archived-tag {
+  font-size: 9px;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  color: #C46340;
+  border: 1px solid color-mix(in srgb, #C46340 45%, transparent);
+  border-radius: 7px;
+  padding: 1px 6px;
+}
+.ab-archived-addr { font-size: 13.5px; font-weight: 700; color: #E8ECF3; }
+.ab-archived-note {
+  font-size: 11.5px;
+  color: color-mix(in srgb, #E8ECF3 65%, transparent);
+  line-height: 1.35;
+}
+.ab-archived-date { font-size: 10px; color: #5E8AD0; }
+
+/* The "Waiting on you" panel now lives inside .ab-modal-scroll and scrolls with
+   the rest of the modal content, so it no longer needs its own cap/scroll. 2026-06-22 */
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Phone pass (2026-07-11): the dashboard was built desktop-first. The outer
+   shell already reflows (hamburger nav, KPI grid collapses), but the deal
+   modal + its class-based grids kept desktop padding/columns and clipped on a
+   phone. Give the modal the full viewport, tighten the chrome gutters, and
+   collapse the multi-column grids to one column. The inline-styled wizards
+   (CMA / Offer Kit / Listing Kit) reflow via the useIsMobile hook, not here —
+   CSS media queries can't override their inline styles.
+   ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Modal fills the viewport — no wasted backdrop gutter on a phone. */
+  .ab-modal-backdrop { padding: 0; }
+  .ab-modal {
+    max-width: 100vw;
+    width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+  /* Tighten header + card gutters that ate horizontal room. */
+  .abm-head       { padding: 14px 16px 10px; }
+  .abm-card       { margin: 0 12px 8px; }
+  .abm-phase      { margin: 0 12px 4px; }
+  .abm-conditions { padding: 14px 16px 24px; }
+  .abm-actionbar  { padding: 10px 16px; }
+  /* Every class-based multi-column grid collapses to a single column. */
+  .abm-toggles,
+  .abm-grid-2,
+  .abm-grid-3,
+  .abm-doctray-grid { grid-template-columns: 1fr; column-gap: 0; }
+  /* Performance stat strip: two per row reads cleaner than six squished. */
+  .abm-perf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .abm-perf-cell:nth-child(2n) { border-right: none; }
 }

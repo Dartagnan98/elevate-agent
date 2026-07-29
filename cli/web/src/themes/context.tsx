@@ -122,6 +122,18 @@ const OVERRIDE_KEY_TO_VAR: Record<keyof ThemeColorOverrides, string> = {
  *  with more. */
 const ALL_OVERRIDE_VARS = Object.values(OVERRIDE_KEY_TO_VAR);
 
+/** Colour vars that the global `[data-app-theme]` CSS in index.css owns.
+ *  applyTheme must NOT write these inline, or the single built-in dark preset
+ *  would override the light/medium/dark surface theming for chat + boards. */
+const THEME_CSS_OWNED_VARS = new Set<string>([
+  // Foundation bases that feed the shadcn @theme inline --color-* family.
+  "--background", "--background-base", "--background-alpha",
+  "--midground", "--midground-base", "--midground-alpha",
+  "--foreground", "--foreground-base", "--foreground-alpha",
+  // The shadcn --color-* overrides.
+  ...ALL_OVERRIDE_VARS,
+]);
+
 function overrideVars(
   overrides: ThemeColorOverrides | undefined,
 ): Record<string, string> {
@@ -305,8 +317,19 @@ function applyTheme(theme: DashboardTheme) {
     ...assetMap,
     ...componentMap,
   };
+  // The foundation bases (--background-base / --midground-base / etc.) and the
+  // shadcn --color-* family are owned by the global [data-app-theme] CSS blocks
+  // in index.css, which drive the light/medium/dark surface theming across every
+  // board AND the chat. If we also wrote them here as inline styles they would
+  // win over the stylesheet (inline > selector) and pin every surface to the
+  // single built-in dark preset. Skip them so the CSS cascade governs colour.
   for (const [k, v] of Object.entries(vars)) {
+    if (THEME_CSS_OWNED_VARS.has(k)) continue;
     root.style.setProperty(k, v);
+  }
+  // Also make sure any of these we set inline on a previous build are cleared.
+  for (const cssVar of THEME_CSS_OWNED_VARS) {
+    root.style.removeProperty(cssVar);
   }
 
   injectFontStylesheet(theme.typography.fontUrl);

@@ -69,7 +69,8 @@ def _emit(report: dict[str, Any], changed: bool) -> int:
     lines = [
         "Operational DB maintenance",
         f"- admin dispatched: {actions.get('queuedAdminDispatched', 0)}",
-        f"- stale admin failed: {actions.get('staleAdminFailed', 0)}",
+        f"- stale admin re-queued (self-heal): {actions.get('staleAdminRequeued', 0)}",
+        f"- stale admin failed (retries exhausted): {actions.get('staleAdminFailed', 0)}",
         f"- handoffs dispatched: {handoffs.get('queuedDispatched', 0)}",
         f"- stale handoffs failed: {handoffs.get('staleFailed', 0)}",
         f"- active deals: {deals.get('active', 0)}",
@@ -128,10 +129,17 @@ def main() -> int:
         stale_admin = _run_step(
             report,
             "mark_stale_action_runs",
-            lambda: mark_stale_action_runs(conn, max_running_minutes=180, actor="operational-maintenance"),
+            # 15 min (was 180): a run 'running' that long with no result callback
+            # means its worker session died. mark_stale_action_runs re-queues it
+            # (up to its retry cap) so drain_queued below re-dispatches a fresh
+            # session — the run self-heals instead of sitting dead for hours.
+            lambda: mark_stale_action_runs(conn, max_running_minutes=15, actor="operational-maintenance"),
         )
         if isinstance(stale_admin, list):
-            report["actions"]["staleAdminFailed"] = len(stale_admin)
+            requeued = sum(1 for r in stale_admin if isinstance(r, dict) and r.get("status") == "queued")
+            failed = sum(1 for r in stale_admin if isinstance(r, dict) and r.get("status") == "failed")
+            report["actions"]["staleAdminRequeued"] = requeued
+            report["actions"]["staleAdminFailed"] = failed
             changed = changed or bool(stale_admin)
 
         queued_admin_count = _run_step(

@@ -10,49 +10,38 @@
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
   }
-  ::selection { background: #5d5d5d; color: #fff; }
-  .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  ::selection { background: var(--ds-info-bg); color: var(--ds-ink); }
+  /* All-sans rule (2026-07-27) — see admin.css note. */
+  .mono { font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; }
 
-  :root {
-    --bg:            #0F0F0F;
-    --bg-1:          #161616;
-    --bg-2:          #1A1A1A;
-    --bg-3:          #202020;
-    --bg-soft:       #181818;
-    --border:        #2A2A2A;
-    --border-soft:   #1F1F1F;
-    --border-strong: #353535;
-    --fg:            #ECECEC;
-    --fg-muted:      #B5B5B5;
-    --fg-faint:      #8A8A8A;
-    --fg-dim:        #8A8A8A;
-
-    --accent:        #B0B0B0;
-    --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
+  /* NOTE (2026-07-27): this file's :root block is gone. It declared
+     --accent: #B0B0B0 (grey) while admin.css declared #5E8AD0 (blue), from two
+     separate lazy chunks — so the accent colour of the whole app depended on
+     which page you opened first. Canonical tokens now live in
+     src/elevate-design-system.css. Do not reintroduce :root here.
+     The [data-accent] swatch palettes (sage/lilac/sand/…) were removed too;
+     they were upstream chrome and produced off-brand tints. */
+  .app,
+  .hub-root {
+    --accent:        var(--ds-blue);
+    --accent-soft:   var(--ds-info-bg);
     --accent-ring:   color-mix(in srgb, var(--accent) 28%, transparent);
     --accent-glow:   color-mix(in srgb, var(--accent) 40%, transparent);
-    --accent-fg:     #0F0F0F;
-    --accent-vivid:  #888888;
+    --accent-fg:     #ffffff;
+    --accent-vivid:  var(--ds-blue-hover);
 
-    --status-done:   #4FC38A;
-    --status-work:   var(--accent);
-    --status-warn:   #E0B257;
-    --status-error:  #E07570;
-    --status-idle:   #4F4F4F;
-    --status-info:   #7AA9E5;
+    --status-done:   var(--ds-done);
+    --status-work:   var(--ds-terracotta);
+    --status-warn:   var(--ds-warn);
+    --status-error:  var(--ds-error);
+    --status-idle:   var(--ds-idle);
+    --status-info:   var(--ds-blue);
 
     --sidebar-w: 268px;
     --sidebar-gap: 8px;
-    --row-radius: 7px;
-    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --row-radius: var(--ds-r-sm);
+    --ease-out: var(--ds-ease);
   }
-
-  [data-accent="slate"]    { --accent: #7B9CE5; --accent-vivid: #4769DD; }
-  [data-accent="sage"]     { --accent: #7FB0A2; --accent-vivid: #3F857A; }
-  [data-accent="lilac"]    { --accent: #A299D2; --accent-vivid: #6F62B7; }
-  [data-accent="sand"]     { --accent: #C9A878; --accent-vivid: #A07B40; }
-  [data-accent="platinum"] { --accent: #B0B0B0; --accent-vivid: #888888; }
-  [data-accent="graphite"] { --accent: #8A8A8A; --accent-vivid: #6A6A6A; }
 
   [data-density="compact"]     { --row-pad: 5px 10px;  --row-gap: 0;   --nav-pad: 5px 12px;  --side-pad: 8px;  }
   [data-density="comfortable"] { --row-pad: 7px 10px;  --row-gap: 1px; --nav-pad: 6px 12px;  --side-pad: 10px; }
@@ -73,7 +62,7 @@
 
   .icon-btn {
     appearance: none; background: transparent; border: 0; color: var(--fg-muted);
-    width: 26px; height: 26px; border-radius: 3px; display: grid; place-items: center;
+    width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center;
     cursor: pointer; transition: background 120ms var(--ease-out), color 120ms var(--ease-out), transform 80ms var(--ease-out);
   }
   .icon-btn:hover  { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); }
@@ -105,7 +94,7 @@
     margin: 10px 8px 6px;
     display: flex; align-items: center; gap: 8px;
     padding: 7px 11px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: color-mix(in srgb, var(--fg) 4%, transparent);
     border: 1px solid var(--border-soft);
     color: var(--fg);
@@ -115,7 +104,7 @@
   .new-chat:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); border-color: var(--border); }
   .new-chat .kbd {
     margin-left: auto;
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 1px 5px; border-radius: 2px;
     background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -139,7 +128,7 @@
     display: flex; align-items: center; gap: 6px;
     padding: 12px 14px 4px;
     color: var(--fg-faint);
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.05em; text-transform: uppercase;
     cursor: pointer; user-select: none;
     white-space: nowrap;
@@ -167,7 +156,7 @@
     display: flex; align-items: center; gap: 9px;
     padding: var(--nav-pad, 6px 12px);
     margin: 0 6px;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-muted);
     font-size: 13px;
     cursor: pointer;
@@ -183,7 +172,7 @@
   }
   .nav-badge {
     margin-left: auto; flex-shrink: 0;
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 1px 5px; border-radius: 2px;
     background: color-mix(in srgb, var(--fg) 4%, transparent);
@@ -191,7 +180,7 @@
 
   .session-group-label {
     padding: 8px 14px 3px;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-dim);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -215,7 +204,7 @@
     font-weight: 400;
   }
   .session-row .age {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     opacity: 0;
     transition: opacity 140ms var(--ease-out);
@@ -250,13 +239,13 @@
   .user-pill {
     display: flex; align-items: center; gap: 9px;
     padding: 6px 8px;
-    border-radius: 4px;
+    border-radius: 7px;
     cursor: pointer;
     transition: background 120ms var(--ease-out);
   }
   .user-pill:hover, .user-pill.open { background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .avatar {
-    width: 24px; height: 24px; border-radius: 3px;
+    width: 24px; height: 24px; border-radius: 6px;
     background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 60%, #1A1A1A), color-mix(in srgb, var(--accent) 30%, #1A1A1A));
     display: grid; place-items: center;
     font-size: 10.5px; font-weight: 600; color: var(--fg);
@@ -295,7 +284,7 @@
   .auto-row[data-status="paused"] .title { color: var(--fg-muted); }
   .auto-row .auto-trail {
     flex-shrink: 0;
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     white-space: nowrap;
   }
@@ -323,7 +312,7 @@
     display: flex; align-items: center; gap: 10px;
     padding: 7px 10px;
     border: 0; background: transparent;
-    border-radius: 3px;
+    border-radius: 6px;
     cursor: pointer;
     font: 400 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg);
@@ -336,11 +325,11 @@
   .user-menu-row.danger:hover svg { color: var(--status-error); }
   .user-menu-tag {
     margin-left: auto;
-    font: 600 9px/1 "Geist Mono", monospace;
+    font: 700 9px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--accent-fg);
     background: var(--status-warn);
     padding: 3px 5px;
-    border-radius: 3px;
+    border-radius: 6px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
@@ -351,7 +340,7 @@
     padding: 8px 10px;
     border: 1px solid var(--border-soft);
     background: transparent;
-    border-radius: 4px;
+    border-radius: 7px;
     cursor: pointer;
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg);
@@ -367,8 +356,8 @@
     white-space: nowrap;
   }
   .user-menu-status .dim { color: var(--fg-faint); }
-  .user-menu-status .ok { color: var(--status-done); font: 500 11px/1 "Geist Mono", monospace; }
-  .user-menu-status .warn { color: var(--status-warn); font: 500 11px/1 "Geist Mono", monospace; }
+  .user-menu-status .ok { color: var(--status-done); font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); }
+  .user-menu-status .warn { color: var(--status-warn); font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track); }
 
   /* ───────── Admin Board ───────── */
   .admin-board {
@@ -390,7 +379,7 @@
   .ab-crumb .sep { color: var(--fg-dim); }
   .ab-live {
     display: inline-flex; align-items: center; gap: 6px;
-    font: 500 11.5px/1 "Geist Mono", monospace;
+    font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--status-done);
   }
   .ab-live-dot {
@@ -405,7 +394,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 7px;
     padding: 6px 12px;
-    border-radius: 4px;
+    border-radius: 7px;
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
     text-decoration: none;
@@ -476,14 +465,13 @@
   @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
   .ab-kpi {
     background: var(--bg-2);
-    border: 1px solid transparent;
-    border-radius: 5px;
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
     padding: 10px 12px;
     min-width: 0;
-    transition: background 200ms var(--ease-out), transform 200ms var(--ease-out);
-    box-shadow: 0 1px 0 rgba(255,255,255,0.025) inset;
+    transition: border-color 200ms var(--ease-out);
   }
-  .ab-kpi:hover { background: var(--bg-3); transform: translateY(-1px); }
+  .ab-kpi:hover { border-color: var(--border); }
   .ab-kpi-label {
     font: 500 10.5px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg-faint);
@@ -554,7 +542,7 @@
     font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
     letter-spacing: 0;
     padding: 4px 9px;
-    border-radius: 4px;
+    border-radius: 7px;
   }
   .ab-action-tag.review {
     color: var(--status-warn);
@@ -572,7 +560,7 @@
     font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
     letter-spacing: 0;
     padding: 4px 9px;
-    border-radius: 4px;
+    border-radius: 7px;
     flex-shrink: 0;
     border: 1px solid transparent;
   }
@@ -588,7 +576,7 @@
     letter-spacing: 0;
     color: var(--fg-faint);
     padding: 4px 9px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: color-mix(in srgb, var(--fg) 4%, transparent);
     border: 1px solid transparent;
   }
@@ -596,7 +584,7 @@
   .ab-pill {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 5px 10px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: var(--bg-2);
     border: 1px solid var(--border-soft);
     font-size: 11.5px;
@@ -614,16 +602,16 @@
   @media (max-width: 1400px) { .ab-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
   @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
   .ab-kpi {
-    background: var(--bg-1);
+    background: var(--bg-2);
     border: 1px solid var(--border-soft);
-    border-radius: 5px;
+    border-radius: 6px;
     padding: 10px 12px;
     min-width: 0;
-    transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+    transition: border-color 140ms var(--ease-out);
   }
-  .ab-kpi:hover { border-color: var(--border); background: var(--bg-2); }
+  .ab-kpi:hover { border-color: var(--border); }
   .ab-kpi-label {
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -639,7 +627,7 @@
   }
   .ab-kpi-delta {
     margin-top: 5px;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     display: inline-flex; align-items: center; gap: 4px;
     white-space: nowrap;
@@ -665,7 +653,7 @@
   .ab-vel-stage {
     display: flex; flex-direction: column; gap: 6px;
     padding: 10px 14px;
-    border-radius: 5px;
+    border-radius: 7px;
     background: var(--bg-2);
     border: 1px solid var(--border-soft);
     min-width: 130px;
@@ -723,7 +711,7 @@
   .ab-quick-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 6px 12px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: var(--bg-2);
     border: 1px solid var(--border-soft);
     color: var(--fg-muted);
@@ -748,7 +736,7 @@
   }
   .ab-card-title { font: 600 13px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
   .ab-card-tag {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 3px 6px;
     border-radius: 2px;
@@ -796,10 +784,10 @@
   }
   .ab-modal {
     background: var(--bg-1);
-    border-radius: 10px;
+    border-radius: var(--ds-r-sm);
     box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 40px 80px -20px rgba(0,0,0,0.8);
     width: 100%;
-    max-width: 760px;
+    max-width: min(95vw, 1180px);
     max-height: calc(100vh - 64px);
     display: flex; flex-direction: column;
     position: relative;
@@ -815,13 +803,13 @@
     appearance: none; background: transparent; border: 0;
     width: 30px; height: 30px;
     border-radius: 999px;
-    color: var(--fg-muted);
+    color: rgba(255, 255, 255, 0.72);
     cursor: pointer;
     display: grid; place-items: center;
     transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
     z-index: 2;
   }
-  .ab-modal-close:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+  .ab-modal-close:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
   .ab-modal-close .x { font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 
   .ab-modal-head {
@@ -855,7 +843,7 @@
   .ab-modal-pill {
     display: inline-flex; align-items: center;
     padding: 4px 11px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: color-mix(in srgb, var(--fg) 6%, transparent);
     color: var(--fg);
     font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -902,13 +890,13 @@
   .ab-modal-checklist {
     display: flex; flex-direction: column; gap: 1px;
     background: var(--bg-2);
-    border-radius: 5px;
+    border-radius: 7px;
     padding: 4px;
   }
   .ab-modal-check {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 12px;
-    border-radius: 4px;
+    border-radius: 7px;
     cursor: pointer;
     color: var(--fg-muted);
     font-size: 13px;
@@ -917,7 +905,7 @@
   .ab-modal-check:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
   .ab-modal-check-box {
     width: 18px; height: 18px;
-    border-radius: 3px;
+    border-radius: 6px;
     border: 1px solid var(--border-strong);
     display: grid; place-items: center;
     font: 600 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -975,7 +963,7 @@
   }
   .ab-modal-auto {
     padding: 12px 14px;
-    border-radius: 5px;
+    border-radius: 7px;
     background: var(--bg-2);
   }
   .ab-modal-auto-name { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
@@ -985,7 +973,7 @@
   .ab-modal-timeline {
     list-style: none; margin: 0; padding: 0;
     background: var(--bg-2);
-    border-radius: 5px;
+    border-radius: 7px;
     overflow: hidden;
   }
   .ab-modal-tl {
@@ -1026,7 +1014,7 @@
   }
   .abm-crumbs {
     display: flex; align-items: center; gap: 8px;
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     margin-bottom: 12px;
@@ -1070,11 +1058,11 @@
   .abm-card-title svg { width: 14px; height: 14px; color: var(--status-warn); }
   .abm-card-pills { margin-left: auto; display: flex; gap: 8px; }
   .abm-pill {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     background: color-mix(in srgb, var(--fg) 4%, transparent);
     padding: 4px 7px;
-    border-radius: 3px;
+    border-radius: 6px;
     letter-spacing: 0.04em;
   }
 
@@ -1091,7 +1079,7 @@
     margin-bottom: 10px;
   }
   .abm-section-label {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.1em;
     color: var(--fg-faint);
     display: inline-flex; align-items: center; gap: 6px;
@@ -1114,10 +1102,10 @@
 
   .abm-tag {
     display: inline-flex; align-items: center;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.1em;
     padding: 4px 8px;
-    border-radius: 3px;
+    border-radius: 6px;
     margin-left: auto;
   }
   .abm-tag.warn    { color: var(--status-warn); background: color-mix(in srgb, var(--status-warn) 14%, transparent); }
@@ -1146,7 +1134,7 @@
   .abm-btn {
     appearance: none; border: 0;
     padding: 7px 14px;
-    border-radius: 4px;
+    border-radius: 7px;
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
     display: inline-flex; align-items: center; gap: 7px;
@@ -1170,7 +1158,7 @@
   .abm-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
   .abm-auto-card {
     background: var(--bg-3);
-    border-radius: 5px;
+    border-radius: 7px;
     padding: 12px 14px;
   }
   .abm-auto-head {
@@ -1178,18 +1166,18 @@
     margin-bottom: 4px;
   }
   .abm-auto-name { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
-  .abm-auto-id { font: 500 10.5px/1 "Geist Mono", monospace; color: var(--fg-faint); letter-spacing: 0.04em; }
+  .abm-auto-id { font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); letter-spacing: 0.04em; }
 
   /* Mini cell */
   .abm-mini {
     background: var(--bg-3);
-    border-radius: 5px;
+    border-radius: 7px;
     padding: 12px 14px;
     min-width: 0;
   }
   .abm-mini-label {
     display: inline-flex; align-items: center; gap: 6px;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     color: var(--fg-faint);
     margin-bottom: 8px;
@@ -1200,7 +1188,7 @@
     color: var(--fg);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .abm-mini-value strong { color: var(--fg); font-family: "Geist Mono", monospace; font-weight: 500; }
+  .abm-mini-value strong { color: var(--fg); font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; font-weight: 500; }
   .abm-mini-extra {
     display: flex; align-items: center; gap: 8px;
     margin-top: 8px;
@@ -1297,7 +1285,7 @@
   }
   .abm-phase-motion {
     background: var(--bg-3);
-    border-radius: 5px;
+    border-radius: 7px;
     padding: 12px 14px;
     margin-bottom: 14px;
   }
@@ -1330,7 +1318,7 @@
   .abm-checklist li:last-child { border-bottom: 0; }
   .abm-check-box {
     width: 18px; height: 18px;
-    border-radius: 3px;
+    border-radius: 6px;
     border: 1px solid var(--border-strong);
     background: transparent;
     flex-shrink: 0;
@@ -1362,7 +1350,7 @@
     letter-spacing: -0.01em;
   }
   .abm-conditions-sub {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     margin: 18px 0 8px;
@@ -1378,7 +1366,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 8px;
     padding: 7px 12px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: var(--bg-2);
     color: var(--fg-muted);
     border: 1px solid var(--border);
@@ -1396,7 +1384,7 @@
   .abm-toggle-row {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 14px;
-    border-radius: 4px;
+    border-radius: 7px;
   }
   .abm-toggle-row:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
   .abm-toggle-check {
@@ -1429,18 +1417,18 @@
   .abm-kv-row          { gap: 24px; font-size: 12px; margin-bottom: 6px; }
   .abm-missing         { font-size: 12px; gap: 2px; margin: 0 0 8px; }
   .abm-tag             { font-size: 9.5px; padding: 3px 6px; }
-  .abm-btn             { padding: 5px 11px; font-size: 11.5px; border-radius: 3px; gap: 6px; }
+  .abm-btn             { padding: var(--ds-btn-pad-sm); font-size: 12.5px; border-radius: var(--ds-r-xs); gap: 6px; }
   .abm-btn svg         { width: 12px; height: 12px; }
-  .abm-auto-card       { padding: 9px 12px; border-radius: 4px; }
+  .abm-auto-card       { padding: 9px 12px; border-radius: 7px; }
   .abm-auto-name       { font-size: 12.5px; }
   .abm-auto-id         { font-size: 10px; }
-  .abm-mini            { padding: 10px 12px; border-radius: 4px; }
+  .abm-mini            { padding: 10px 12px; border-radius: 7px; }
   .abm-mini-label      { font-size: 9.5px; margin-bottom: 6px; gap: 5px; }
   .abm-mini-value      { font-size: 12.5px; }
   .abm-mini-extra      { font-size: 11px; margin-top: 6px; gap: 7px; }
   .abm-source-actions  { padding: 10px 14px; gap: 12px; }
   .abm-grid-2, .abm-grid-3 { gap: 8px; }
-  .abm-phase           { margin: 0 22px 4px; border-radius: 5px; }
+  .abm-phase           { margin: 0 22px 4px; border-radius: 7px; }
   .abm-phase-head      { padding: 9px 14px; gap: 10px; grid-template-columns: 16px minmax(0,1fr) auto auto; }
   .abm-phase-radio     { width: 12px; height: 12px; }
   .abm-phase-title     { font-size: 13px; gap: 7px; }
@@ -1449,7 +1437,7 @@
   .abm-bullet          { width: 12px; height: 12px; }
   .abm-phase-count     { font-size: 11px; }
   .abm-phase-body      { padding: 0 14px 10px; }
-  .abm-phase-motion    { padding: 9px 12px; margin-bottom: 8px; border-radius: 4px; }
+  .abm-phase-motion    { padding: 9px 12px; margin-bottom: 8px; border-radius: 7px; }
   .abm-phase-motion-head { font-size: 11.5px; margin-bottom: 3px; gap: 6px; }
   .abm-phase-motion-line { font-size: 12px; margin-bottom: 4px; }
   .abm-phase-motion-gate { font-size: 12px; }
@@ -1463,14 +1451,14 @@
   .abm-conditions-sub  { font-size: 9.5px; margin: 14px 0 4px; }
   .abm-enum-row        { padding: 9px 0; }
   .abm-enum-label      { font-size: 12.5px; }
-  .abm-enum-select     { padding: 5px 10px; font-size: 12px; min-width: 120px; border-radius: 3px; }
+  .abm-enum-select     { padding: 5px 10px; font-size: 12px; min-width: 120px; border-radius: 6px; }
   .abm-toggles         { column-gap: 24px; }
-  .abm-toggle-row      { padding: 7px 10px; border-radius: 3px; }
+  .abm-toggle-row      { padding: 7px 10px; border-radius: 6px; }
   .abm-toggle-check    { font-size: 12.5px; gap: 9px; }
   .abm-toggle-unset    { font-size: 10px; }
   .abm-modal-scroll, .ab-modal-scroll { padding-top: 0; padding-bottom: 22px; }
   .ab-modal-close      { top: 10px; right: 10px; width: 26px; height: 26px; }
-  .ab-modal            { max-width: 1140px; border-radius: 8px; }
+  .ab-modal            { max-width: min(95vw, 2000px); border-radius: 8px; }
 
   /* Two-column modal layout */
   .abm-cols {
@@ -1557,7 +1545,7 @@
     appearance: none; background: transparent; border: 0;
     display: inline-flex; align-items: center; gap: 7px;
     padding: 4px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -1566,7 +1554,7 @@
   .ab-tab:hover { color: var(--fg-muted); background: color-mix(in srgb, var(--fg) 4%, transparent); }
   .ab-tab.active { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
   .ab-tab .count {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 2px 6px;
     border-radius: 2px;
@@ -1577,7 +1565,7 @@
   .ab-search {
     display: inline-flex; align-items: center; gap: 7px;
     padding: 4px 9px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: var(--bg-2);
     border: 1px solid var(--border-soft);
     transition: border-color 120ms var(--ease-out);
@@ -1604,7 +1592,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 6px;
     padding: 5px 10px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: transparent;
     border: 1px solid var(--border-soft);
     color: var(--fg-muted);
@@ -1630,7 +1618,7 @@
     font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
     padding: 5px 8px;
-    border-radius: 3px;
+    border-radius: 6px;
   }
   .ab-chip-ghost:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
 
@@ -1640,7 +1628,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .ab-active-label {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -1655,7 +1643,7 @@
     flex-wrap: wrap;
   }
   .ab-flow-label {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-dim);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -1708,7 +1696,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .ab-col-stage {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-dim);
     letter-spacing: 0.04em;
   }
@@ -1716,7 +1704,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .ab-col-count {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 2px 5px;
     border-radius: 2px;
@@ -1744,7 +1732,7 @@
   .ab-deal {
     background: var(--bg-3);
     border: 1px solid transparent;
-    border-radius: 5px;
+    border-radius: 7px;
     padding: 12px 14px;
     cursor: pointer;
     transition: background 160ms var(--ease-out), transform 80ms var(--ease-out);
@@ -1774,7 +1762,7 @@
   }
   .ab-deal-badge {
     display: inline-flex; align-items: center;
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.02em;
     color: var(--fg-muted);
     padding: 3px 6px;
@@ -1782,7 +1770,7 @@
     background: color-mix(in srgb, var(--fg) 5%, transparent);
   }
   .ab-deal-progress {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     flex-shrink: 0;
   }
@@ -1794,7 +1782,7 @@
     font-size: 12px;
   }
   .ab-deal-next-label {
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     color: var(--fg-dim);
     flex-shrink: 0;
@@ -1812,7 +1800,7 @@
     font-size: 11.5px;
   }
   .ab-deal-owner {
-    width: 18px; height: 18px; border-radius: 3px;
+    width: 18px; height: 18px; border-radius: 6px;
     background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 50%, var(--bg-3)), color-mix(in srgb, var(--accent) 25%, var(--bg-3)));
     display: grid; place-items: center;
     font: 600 9.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -1849,7 +1837,7 @@
   .ab-inbox-title-block { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; white-space: nowrap; }
   .ab-inbox-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.005em; }
   .ab-inbox-sub {
-    font: 500 11.5px/1 "Geist Mono", monospace;
+    font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.02em;
   }
@@ -1861,7 +1849,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 7px;
     padding: 5px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 0;
     color: var(--fg-faint);
@@ -1875,7 +1863,7 @@
     background: color-mix(in srgb, var(--fg) 7%, transparent);
   }
   .ab-inbox-chip .count {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .ab-inbox-chip.active .count { color: var(--fg-muted); }
@@ -1927,7 +1915,7 @@
   }
 
   .ab-inbox-meta {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     white-space: nowrap;
     text-align: right;
@@ -1936,7 +1924,7 @@
   .ab-inbox-open {
     appearance: none;
     padding: 4px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 1px solid var(--border-soft);
     color: var(--fg-muted);
@@ -1953,7 +1941,7 @@
     gap: 14px;
   }
   .ab-inbox-range {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     white-space: nowrap;
   }
@@ -1961,7 +1949,7 @@
     display: flex; align-items: center; gap: 4px;
   }
   .ab-inbox-page-num {
-    font: 500 11.5px/1 "Geist Mono", monospace;
+    font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-muted);
     padding: 0 6px;
     min-width: 44px;
@@ -1974,7 +1962,7 @@
     display: grid; place-items: center;
     background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-muted);
     font: 500 14px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -1995,7 +1983,7 @@
     padding: 4px 8px;
     margin-left: 6px;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 6px;
     transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
   }
   .ab-inbox-page-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
@@ -2028,7 +2016,7 @@
   .ab-action-row:last-child { border-bottom: 0; }
   .ab-action-icon {
     width: 30px; height: 30px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: var(--bg-2);
     color: var(--fg-muted);
     display: grid; place-items: center;
@@ -2049,7 +2037,7 @@
   }
   .ab-action-tag {
     flex-shrink: 0;
-    font: 600 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.1em;
     padding: 4px 7px;
     border-radius: 2px;
@@ -2076,14 +2064,14 @@
   }
   .ab-action-meta {
     display: flex; gap: 12px;
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .ab-action-open {
     appearance: none;
     align-self: center;
     padding: 6px 12px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 1px solid var(--border-soft);
     color: var(--fg-muted);
@@ -2108,7 +2096,7 @@
   }
   .ab-auto-card {
     padding: 12px 14px;
-    border-radius: 5px;
+    border-radius: 7px;
     margin: 4px;
     background: var(--bg-2);
     border: 1px solid var(--border-soft);
@@ -2121,7 +2109,7 @@
   }
   .ab-auto-name { font: 500 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
   .ab-auto-status {
-    font: 600 9px/1 "Geist Mono", monospace;
+    font: 700 9px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.1em;
     padding: 3px 6px;
     border-radius: 2px;
@@ -2132,7 +2120,7 @@
   .ab-auto-status.blocked   { color: var(--status-warn);  background: color-mix(in srgb, var(--status-warn) 14%, transparent);  border: 1px solid color-mix(in srgb, var(--status-warn) 32%, transparent); }
   .ab-auto-status.optional  { color: var(--fg-muted);     background: color-mix(in srgb, var(--fg) 5%, transparent);              border: 1px solid var(--border-soft); }
   .ab-auto-schedule { font-size: 11.5px; color: var(--fg-muted); }
-  .ab-auto-next { font: 500 11px/1.3 "Geist Mono", monospace; color: var(--fg-faint); margin-top: 2px; }
+  .ab-auto-next { font: 700 11px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); margin-top: 2px; }
   .ab-auto-detail {
     margin-top: 8px;
     font-size: 11.5px;
@@ -2163,13 +2151,13 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .ab-work-sub {
-    font: 500 11px/1.3 "Geist Mono", monospace;
+    font: 700 11px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     margin-top: 2px;
   }
   .ab-work-tools {
     flex-shrink: 0;
-    font: 600 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.1em;
     color: var(--fg-faint);
     padding: 4px 7px;
@@ -2226,7 +2214,7 @@
     padding: 5px 10px;
     background: var(--bg-1);
     border: 1px solid var(--border-soft);
-    border-radius: 4px;
+    border-radius: 7px;
     color: var(--fg-muted);
     font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -2237,7 +2225,7 @@
   .lb-ticker:hover { background: var(--bg-2); border-color: var(--border); }
   .lb-ticker svg { width: 12px; height: 12px; color: var(--fg-faint); flex-shrink: 0; }
   .lb-ticker-label {
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -2254,7 +2242,7 @@
   }
   .lb-ticker-dot { color: var(--fg-dim); }
   .lb-ticker-age {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     flex-shrink: 0;
   }
@@ -2274,7 +2262,7 @@
     max-width: 480px;
     background: var(--bg-1);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: 7px;
     box-shadow: 0 20px 50px -16px rgba(0,0,0,0.7), 0 1px 0 rgba(255,255,255,0.03) inset;
     z-index: 20;
     overflow: hidden;
@@ -2290,7 +2278,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .lb-ticker-drawer-title { font: 600 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
-  .lb-ticker-drawer-sub { font: 500 10.5px/1 "Geist Mono", monospace; color: var(--fg-faint); }
+  .lb-ticker-drawer-sub { font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); }
   .lb-ticker-drawer-list {
     display: flex; flex-direction: column;
     max-height: 360px;
@@ -2317,12 +2305,12 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lb-ticker-drawer-row-meta {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     margin-top: 1px;
   }
   .lb-ticker-drawer-tools {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
 
@@ -2334,7 +2322,7 @@
     padding: 5px 10px;
     background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: 4px;
+    border-radius: 7px;
     color: var(--fg-muted);
     font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -2358,7 +2346,7 @@
     min-width: 360px;
     background: var(--bg-1);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: 7px;
     box-shadow: 0 20px 50px -16px rgba(0,0,0,0.7), 0 1px 0 rgba(255,255,255,0.03) inset;
     z-index: 20;
     overflow: hidden;
@@ -2368,7 +2356,7 @@
   .lb-health-section:last-of-type { border-bottom: 0; }
   .lb-health-section-label {
     padding: 9px 12px 4px;
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -2390,7 +2378,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lb-health-sched {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-health-available {
@@ -2399,7 +2387,7 @@
   }
   .lb-health-available-label {
     display: block;
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -2419,7 +2407,7 @@
   }
   .lb-tpl-overview-head > div { flex: 1; min-width: 0; }
   .lb-tpl-overview-total {
-    font: 500 11.5px/1 "Geist Mono", monospace;
+    font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     white-space: nowrap;
     flex-shrink: 0;
@@ -2481,7 +2469,7 @@
     color: var(--fg);
   }
   .lb-tpl-group-count {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 3px 7px;
     border-radius: 2px;
@@ -2512,7 +2500,7 @@
   }
   .lb-tpl-row-meta {
     margin-top: 6px;
-    font: 500 10.5px/1.4 "Geist Mono", monospace;
+    font: 700 10.5px/1.4 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     display: flex; align-items: center; gap: 6px;
     flex-wrap: wrap;
@@ -2530,7 +2518,7 @@
     display: grid; place-items: center;
     background: transparent;
     border: 0;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font: 500 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -2547,7 +2535,7 @@
     width: 100%;
     background: var(--surface-sunken, transparent);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: 7px;
     padding: 6px 8px;
     margin-bottom: 6px;
     font: 600 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
@@ -2570,7 +2558,7 @@
     flex-wrap: wrap;
   }
   .lb-sent-count {
-    font: 500 11.5px/1 "Geist Mono", monospace;
+    font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-sent-toggle {
@@ -2599,12 +2587,12 @@
     background: color-mix(in srgb, var(--fg) 3%, transparent);
   }
   .lb-sent-h {
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--fg-faint);
   }
-  .lb-sent-when { color: var(--fg-faint); font-family: "Geist Mono", monospace; font-size: 11.5px; }
+  .lb-sent-when { color: var(--fg-faint); font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; font-size: 11.5px; }
   .lb-sent-recipient { color: var(--fg); }
   .lb-sent-source { font-size: 12px; }
   .lb-sent-transport { font-size: 10.5px; color: var(--fg-faint); letter-spacing: 0.04em; text-transform: uppercase; margin-top: 2px; }
@@ -2612,7 +2600,7 @@
   .lb-sent-msg-id { font-size: 10.5px; color: var(--fg-faint); margin-top: 4px; letter-spacing: 0.02em; }
   .lb-sent-status {
     display: inline-flex; align-items: center; justify-content: center;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     padding: 3px 7px;
@@ -2653,7 +2641,7 @@
     max-height: min(900px, calc(100vh - 64px));
     background: var(--bg-1);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--ds-r-sm);
     box-shadow: 0 30px 80px -20px rgba(0,0,0,0.7), 0 8px 24px rgba(0,0,0,0.35);
     z-index: 91;
     display: flex; flex-direction: column;
@@ -2682,7 +2670,7 @@
     flex-wrap: wrap;
   }
   .lb-drawer-source, .lb-drawer-tag {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     padding: 3px 7px;
     border-radius: 2px;
@@ -2691,7 +2679,7 @@
     text-transform: uppercase;
   }
   .lb-drawer-msg-count {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-drawer-head-actions {
@@ -2702,7 +2690,7 @@
     width: 30px; height: 30px;
     background: transparent;
     border: 0;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -2738,7 +2726,7 @@
   .lb-drawer-msg {
     max-width: 80%;
     padding: 10px 14px;
-    border-radius: 5px;
+    border-radius: 7px;
     background: var(--bg-2);
   }
   .lb-drawer-msg.out {
@@ -2746,7 +2734,7 @@
     background: color-mix(in srgb, var(--fg) 10%, transparent);
   }
   .lb-drawer-msg-head {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     margin-bottom: 5px;
     letter-spacing: 0.04em;
@@ -2765,7 +2753,7 @@
   }
   .lb-drawer-section { display: flex; flex-direction: column; gap: 8px; }
   .lb-drawer-section-label {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -2784,7 +2772,7 @@
     color: var(--fg);
   }
   .lb-drawer-score-label {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -2814,7 +2802,7 @@
     margin-top: 4px;
   }
   .lb-drawer-pill {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-muted);
     padding: 4px 8px;
     border-radius: 999px;
@@ -2853,7 +2841,7 @@
 
   .lb-drawer-send {
     background: var(--bg-2);
-    border-radius: 4px;
+    border-radius: 7px;
     padding: 10px 12px;
   }
   .lb-drawer-send-head {
@@ -2861,14 +2849,14 @@
     margin-bottom: 6px;
   }
   .lb-drawer-send-transport {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg);
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
   .lb-drawer-send-status {
     margin-left: auto;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--status-warn);
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -2880,7 +2868,7 @@
   }
   .lb-drawer-send-time {
     margin-top: 6px;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -2915,7 +2903,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 7px;
     padding: 5px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 1px solid var(--border-soft);
     color: var(--fg-faint);
@@ -2925,7 +2913,7 @@
   }
   .lb-pbadge:hover { color: var(--fg); border-color: var(--border); }
   .lb-pbadge.active { background: color-mix(in srgb, var(--fg) 9%, transparent); color: var(--fg); border-color: var(--border); }
-  .lb-pbadge.favorite.active { color: #f2c94c; border-color: color-mix(in srgb, #f2c94c 45%, var(--border-soft)); }
+  .lb-pbadge.favorite.active { color: var(--ds-warn); border-color: color-mix(in srgb, var(--ds-warn) 45%, var(--ds-border)); }
   .lb-pbadge.verified.active  { color: var(--status-done);  border-color: color-mix(in srgb, var(--status-done) 38%, var(--border-soft)); }
   .lb-pbadge.potential.active { color: var(--status-warn);  border-color: color-mix(in srgb, var(--status-warn) 38%, var(--border-soft)); }
   .lb-pbadge-num { color: var(--fg); }
@@ -2937,13 +2925,13 @@
     padding: 12px 18px 4px;
   }
   .lb-profiles-section-label {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
   .lb-profiles-section-count {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-dim);
     margin-left: auto;
   }
@@ -2982,7 +2970,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .lb-profiles-colhead span {
-    font: 500 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -3021,15 +3009,15 @@
   }
   .lb-profile-star:hover { color: var(--fg); transform: translateY(-1px); }
   .lb-profile-star.active {
-    color: #f2c94c;
-    border-color: color-mix(in srgb, #f2c94c 45%, transparent);
-    background: color-mix(in srgb, #f2c94c 10%, transparent);
+    color: var(--ds-warn);
+    border-color: color-mix(in srgb, var(--ds-warn) 45%, transparent);
+    background: color-mix(in srgb, var(--ds-warn) 10%, transparent);
   }
   .lb-profile-star:disabled { opacity: 0.55; cursor: wait; transform: none; }
 
   .lb-profile-avatar {
     width: 32px; height: 32px;
-    border-radius: 4px;
+    border-radius: 7px;
     display: grid; place-items: center;
     font: 600 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg);
@@ -3067,13 +3055,13 @@
     flex-shrink: 0;
   }
   .lb-profile-email {
-    font: 500 11px/1.3 "Geist Mono", monospace;
+    font: 700 11px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     min-width: 0;
   }
   .lb-profile-phone {
-    font: 500 11px/1.3 "Geist Mono", monospace;
+    font: 700 11px/1.3 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     min-width: 0;
@@ -3084,7 +3072,7 @@
     display: inline-flex; align-items: center; gap: 5px;
     font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
     padding: 3px 7px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: color-mix(in srgb, var(--fg) 5%, transparent);
     color: var(--fg-muted);
     width: fit-content;
@@ -3094,9 +3082,9 @@
   .lb-profile-heat-cell.hot  { color: var(--status-error); background: color-mix(in srgb, var(--status-error) 12%, transparent); }
   .lb-profile-heat-cell.warm { color: var(--status-warn);  background: color-mix(in srgb, var(--status-warn) 12%, transparent); }
   .lb-profile-heat-cell.cool { color: var(--fg-muted);     background: color-mix(in srgb, var(--fg) 6%, transparent); }
-  .lb-profile-heat-num { font: 600 12px/1 "Geist Mono", monospace; letter-spacing: -0.01em; }
+  .lb-profile-heat-num { font: 700 12px/1 var(--ds-font); letter-spacing: var(--ds-label-track); letter-spacing: -0.01em; }
   .lb-profile-heat-label {
-    font: 500 9px/1 "Geist Mono", monospace;
+    font: 700 9px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     opacity: 0.85;
@@ -3111,7 +3099,7 @@
     font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg-muted);
     padding: 4px 7px 4px 8px;
-    border-radius: 3px;
+    border-radius: 6px;
     border: 1px solid transparent;
     background: color-mix(in srgb, var(--fg) 5%, transparent);
     white-space: nowrap;
@@ -3156,7 +3144,7 @@
     padding: 7px 9px;
     border: 0;
     background: transparent;
-    border-radius: 4px;
+    border-radius: 7px;
     cursor: pointer;
     font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg-muted);
@@ -3192,7 +3180,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lb-profile-source-sub {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     margin-top: 2px;
     letter-spacing: 0.02em;
@@ -3207,7 +3195,7 @@
   }
 
   .lb-profile-touch-cell {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     white-space: nowrap;
     text-align: right;
@@ -3289,7 +3277,7 @@
     margin-top: 16px;
     background: var(--bg-1);
     border: 1px dashed var(--border);
-    border-radius: 4px;
+    border-radius: 7px;
     padding: 32px 24px;
     text-align: center;
     color: var(--fg-faint);
@@ -3326,7 +3314,7 @@
     padding: 6px 12px;
     background: transparent;
     border: 0;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -3338,7 +3326,7 @@
     color: var(--fg);
   }
   .lb-queue-tab-count {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-queue-tab.active .lb-queue-tab-count { color: var(--fg-muted); }
@@ -3417,16 +3405,60 @@
     display: flex; flex-direction: column; gap: 8px;
   }
   .lb-draft-recipient {
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+  /* Channel toggle (email <-> text) */
+  .lb-chan-toggle {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 2px 0 8px;
+    flex-wrap: wrap;
+  }
+  .lb-chan-label {
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
+    color: var(--fg-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .lb-chan-seg {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--bg-1);
+    border: 1px solid var(--border-soft);
+    border-radius: 7px;
+    padding: 2px;
+  }
+  .lb-chan-opt {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--fg-muted);
+    font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+    padding: 4px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .lb-chan-opt:not(.on):not(:disabled):hover { color: var(--fg); background: var(--bg-2); }
+  .lb-chan-opt.on {
+    background: var(--accent);
+    color: var(--accent-fg);
+    cursor: default;
+  }
+  .lb-chan-opt:disabled:not(.on) { opacity: 0.5; cursor: not-allowed; }
+  .lb-chan-err {
+    font: 500 11px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
+    color: var(--status-bad, #d9534f);
   }
   .lb-draft-edit {
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--border-soft);
-    border-radius: 3px;
+    border-radius: 6px;
     padding: 9px 11px;
     color: var(--fg);
     font: 400 13px/1.5 "Anthropic Sans Display", "Geist", sans-serif;
@@ -3474,7 +3506,7 @@
     gap: 2px;
     background: var(--bg-1);
     border: 1px solid var(--border-soft);
-    border-radius: 5px;
+    border-radius: 7px;
     padding: 2px;
   }
   .lb-tab {
@@ -3482,7 +3514,7 @@
     background: transparent;
     border: 0;
     padding: 5px 11px;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -3504,7 +3536,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 7px;
     padding: 5px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 0;
     color: var(--fg-faint);
@@ -3518,7 +3550,7 @@
     background: color-mix(in srgb, var(--fg) 7%, transparent);
   }
   .lb-source-chip-count {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
 
@@ -3527,7 +3559,7 @@
     display: flex; align-items: center; gap: 10px;
     margin: 6px 8px 0;
     padding: 8px 12px;
-    border-radius: 4px;
+    border-radius: 7px;
     background: color-mix(in srgb, var(--status-warn) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-warn) 28%, transparent);
     color: var(--fg-muted);
@@ -3545,7 +3577,7 @@
     appearance: none;
     display: inline-flex; align-items: center;
     padding: 4px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg-muted);
@@ -3575,7 +3607,7 @@
   }
   .lb-replies-title-block { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; white-space: nowrap; }
   .lb-replies-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
-  .lb-replies-sub { font: 500 11.5px/1 "Geist Mono", monospace; color: var(--fg-faint); }
+  .lb-replies-sub { font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); }
   .lb-replies-actions {
     margin-left: auto;
     display: flex; align-items: center; gap: 8px;
@@ -3589,7 +3621,7 @@
     color: var(--fg-faint);
     font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 6px;
   }
   .lb-replies-selectall:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .lb-replies-hint {
@@ -3598,7 +3630,7 @@
   }
   .lb-replies-selected {
     color: var(--fg);
-    font: 500 11.5px/1 "Geist Mono", monospace;
+    font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     margin-right: 6px;
   }
   .lb-replies-list { display: flex; flex-direction: column; }
@@ -3612,7 +3644,7 @@
   /* Checkbox */
   .lb-checkbox {
     width: 16px; height: 16px;
-    border-radius: 3px;
+    border-radius: 6px;
     border: 1px solid var(--border-strong);
     display: inline-grid; place-items: center;
     background: transparent;
@@ -3663,21 +3695,21 @@
     min-width: 0;
   }
   .lb-draft-meta {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     letter-spacing: 0.04em;
     white-space: nowrap;
     flex-shrink: 0;
   }
   .lb-draft-age {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     margin-left: auto;
     white-space: nowrap;
     flex-shrink: 0;
   }
   .lb-heat {
-    font: 600 9.5px/1 "Geist Mono", monospace;
+    font: 700 9.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--status-warn);
@@ -3706,7 +3738,7 @@
     appearance: none;
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     padding: 6px 12px;
-    border-radius: 3px;
+    border-radius: 6px;
     font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
     transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
@@ -3739,7 +3771,7 @@
     padding: 5px 9px;
     background: transparent;
     border: 0;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     cursor: pointer;
@@ -3751,7 +3783,7 @@
     color: var(--fg);
   }
   .lb-pipe-tab-count {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-pipe-tab.active .lb-pipe-tab-count { color: var(--fg-muted); }
@@ -3790,7 +3822,7 @@
     max-width: 140px;
   }
   .lb-pipe-age {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-pipe-undo {
@@ -3799,7 +3831,7 @@
     display: grid; place-items: center;
     background: transparent;
     border: 0;
-    border-radius: 3px;
+    border-radius: 6px;
     color: var(--fg-faint);
     font-size: 14px;
     cursor: pointer;
@@ -3831,7 +3863,7 @@
   }
   .lb-sources-title-block { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; white-space: nowrap; }
   .lb-sources-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
-  .lb-sources-sub { font: 500 11.5px/1 "Geist Mono", monospace; color: var(--fg-faint); }
+  .lb-sources-sub { font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); }
   .lb-sources-chev {
     margin-left: auto;
     color: var(--fg-faint);
@@ -3845,7 +3877,7 @@
   .lb-sources-section:last-of-type { border-bottom: 0; }
   .lb-sources-section-label {
     padding: 10px 16px 4px;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--fg-faint);
@@ -3880,7 +3912,7 @@
     color: var(--fg);
   }
   .lb-source-schedule {
-    font: 500 10.5px/1 "Geist Mono", monospace;
+    font: 700 10.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
   .lb-source-detail {
@@ -3890,7 +3922,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     max-width: 460px;
   }
-  .lb-source-detail.mono { font-family: "Geist Mono", monospace; font-size: 11px; }
+  .lb-source-detail.mono { font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; font-size: 11px; }
   .lb-source-tag {
     font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg-faint);
@@ -3909,7 +3941,7 @@
   }
   .lb-sources-available-label {
     display: block;
-    font: 500 10px/1 "Geist Mono", monospace;
+    font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--fg-faint);
@@ -3922,7 +3954,7 @@
     appearance: none;
     display: inline-flex; align-items: center; gap: 6px;
     padding: 5px 10px;
-    border-radius: 3px;
+    border-radius: 6px;
     background: transparent;
     border: 1px solid var(--border-soft);
     color: var(--fg-muted);
@@ -3939,7 +3971,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .lb-activity-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
-  .lb-activity-sub { font: 500 11.5px/1 "Geist Mono", monospace; color: var(--fg-faint); }
+  .lb-activity-sub { font: 700 11.5px/1 var(--ds-font); letter-spacing: var(--ds-label-track); color: var(--fg-faint); }
   .lb-activity-toggle {
     appearance: none;
     margin-left: auto;
@@ -3949,7 +3981,7 @@
     font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
     padding: 4px 8px;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 6px;
   }
   .lb-activity-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .lb-activity-list { display: flex; flex-direction: column; }
@@ -3975,12 +4007,12 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lb-activity-row-meta {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
     margin-top: 1px;
   }
   .lb-activity-tools {
-    font: 500 11px/1 "Geist Mono", monospace;
+    font: 700 11px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
     color: var(--fg-faint);
   }
 
@@ -4009,3 +4041,16 @@
   padding: 24px 32px 32px;
   background: var(--bg);
 }
+
+/* Approve & Schedule — inline date/time picker on a draft row. */
+.lb-draft-schedule { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.lb-schedule-input {
+  font: 400 13px/1.5 "Anthropic Sans Display", "Geist", sans-serif;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-soft);
+  color-scheme: light;
+}
+.lb-schedule-input:focus { outline: 1px solid var(--accent-ring); border-color: var(--border); }

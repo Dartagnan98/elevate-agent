@@ -1,0 +1,334 @@
+/* =============================================================================
+   Elevate design system — single source of truth for colour, type and controls.
+
+   WHY THIS FILE EXISTS
+   Before this, the dashboard carried five competing palettes:
+     1. index.css :root                       (theme tokens)
+     2. admin.css :root                       (redefined --accent: #5E8AD0)
+     3. leads.css :root                       (redefined --accent: #B0B0B0 grey)
+     4. .leadsx / .crmcard / .reportx          (three copy-pasted navy palettes)
+     5. offer-kit-wizard.tsx                   (private JS colour constants)
+   (2) and (3) both redefined the SAME global custom properties from separate
+   lazy-loaded chunks, so the app's accent colour depended on which page you
+   happened to open first. That is fixed: page stylesheets no longer define
+   :root, and every private palette now resolves to the tokens below.
+
+   The control specs here are lifted from the Offer Kit / Transaction Kit wizard
+   (offer-kit-wizard.tsx) — the surface Skyleigh reviewed and approved on
+   2026-07-27. When something looks wrong, that wizard is the reference.
+
+   Type rule (chosen 2026-07-27): the dashboard is ALL SANS. Micro-labels are
+   bold uppercase sans with letter-spacing, not Geist Mono. Mono survives only
+   on genuine code/log surfaces (code, kbd, pre, samp).
+   ========================================================================== */
+
+:root {
+  /* -- Brand ------------------------------------------------------------- */
+  --ds-navy: #182848;          /* brand navy — headings, primary text        */
+  --ds-navy-surface: #21314f;  /* filled primary buttons, wizard header bar  */
+  --ds-navy-hover: #2b3e63;
+  --ds-terracotta: #c46340;    /* accent — CTAs, selected chips, "needs you" */
+  --ds-terracotta-hover: #b3542f;
+  --ds-blue: #5e8ad0;          /* informational / approved-and-parked        */
+  --ds-blue-hover: #4a76bc;
+
+  /* -- Status -----------------------------------------------------------
+     Skyleigh chose green-for-done over blue on 2026-07-27. The older
+     "no green on Elevation" rule applies to brand/identity surfaces only,
+     not to status states. */
+  --ds-done: #2f8a5b;
+  --ds-active: var(--ds-terracotta);
+  --ds-info: var(--ds-blue);
+  --ds-warn: #c98a2e;
+  --ds-error: #c0392b;
+  --ds-idle: #9aa0a6;
+
+  /* -- Status tints (backgrounds for banners, pills, progress) ----------- */
+  --ds-done-bg: #e7f4ec;
+  --ds-active-bg: #fdf0e9;
+  --ds-info-bg: #eef2f9;
+  --ds-warn-bg: #fbf3e3;
+  --ds-error-bg: #fbeae7;
+
+  /* -- Neutrals ---------------------------------------------------------- */
+  --ds-ink: #182848;           /* primary text                              */
+  --ds-sub: #5c6479;           /* secondary text                            */
+  --ds-muted: #6b7280;         /* helper / description text                 */
+  --ds-faint: #9aa0a6;         /* placeholder, disabled, timestamps         */
+  --ds-card: #ffffff;          /* card surface                              */
+  --ds-paper: #eef1f6;         /* page background behind cards              */
+  --ds-soft: #f7f8fa;          /* inset fact boxes, table headers           */
+  --ds-hover: #f5f7fb;         /* row hover                                 */
+  --ds-border: #e3e6eb;        /* default 1px border                        */
+  --ds-border-strong: #d4d8de; /* inputs, small buttons                     */
+  --ds-divider: #eef0f3;       /* list separators                           */
+  --ds-disabled: #9aa6bd;      /* disabled filled button background         */
+
+  /* -- Type -------------------------------------------------------------- */
+  --ds-font: "Anthropic Sans Display", "Geist", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --ds-font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  --ds-fs-title: 16px;         /* section heading inside a card             */
+  --ds-fs-body: 14px;          /* buttons, list items                       */
+  --ds-fs-sub: 13px;           /* description text under a heading          */
+  --ds-fs-label: 11px;         /* uppercase micro-label                     */
+  --ds-label-track: 0.4px;     /* micro-label letter-spacing                */
+
+  /* -- Geometry ---------------------------------------------------------- */
+  --ds-r: 12px;                /* cards, panels, modals                     */
+  --ds-r-sm: 8px;              /* buttons, inputs, chips                    */
+  --ds-r-xs: 7px;              /* dense / small buttons                     */
+  --ds-r-pill: 999px;          /* badges, toggles, avatars                  */
+
+  /* -- Controls (lifted verbatim from the wizard) ------------------------ */
+  --ds-btn-pad: 10px 18px;
+  --ds-btn-pad-sm: 6px 13px;
+  --ds-btn-fw: 700;
+  --ds-card-pad: 18px 20px;
+
+  --ds-shadow: 0 1px 2px rgba(24, 40, 72, 0.05),
+    0 6px 20px rgba(24, 40, 72, 0.06);
+  --ds-shadow-lg: 0 16px 50px rgba(24, 40, 72, 0.24);
+  --ds-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Dark theme — same roles, re-pitched so contrast holds on a dark surface.
+   Brand hues lighten (navy is unreadable on dark, per the 2026-06-19 note). */
+:root[data-app-theme="dark"],
+html[data-app-theme="dark"] {
+  --ds-navy: #cdd8ef;
+  --ds-navy-surface: #2b3e63;
+  --ds-navy-hover: #364c78;
+  --ds-terracotta: #e08a63;
+  --ds-terracotta-hover: #c46340;
+  --ds-blue: #7ba4e2;
+  --ds-blue-hover: #5e8ad0;
+
+  --ds-done: #5cc08a;
+  --ds-warn: #e0a94e;
+  --ds-error: #e07570;
+  --ds-idle: #767d92;
+
+  --ds-done-bg: rgba(92, 192, 138, 0.15);
+  --ds-active-bg: rgba(224, 138, 99, 0.15);
+  --ds-info-bg: rgba(123, 164, 226, 0.15);
+  --ds-warn-bg: rgba(224, 169, 78, 0.15);
+  --ds-error-bg: rgba(224, 117, 112, 0.15);
+
+  --ds-ink: #e7eaf2;
+  --ds-sub: #a2a9bc;
+  --ds-muted: #a2a9bc;
+  --ds-faint: #767d92;
+  --ds-card: #161c29;
+  --ds-paper: #0e121b;
+  --ds-soft: #1b2130;
+  --ds-hover: #1b2233;
+  --ds-border: #28303f;
+  --ds-border-strong: #364260;
+  --ds-divider: #1b2130;
+  --ds-disabled: #3a4560;
+
+  --ds-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --ds-shadow-lg: 0 14px 48px rgba(0, 0, 0, 0.5);
+}
+
+/* =============================================================================
+   PRIMITIVES
+   Use these on new UI. Existing page classes are normalised onto the same
+   tokens in their own stylesheets, so both routes land in the same place.
+   ========================================================================== */
+
+/* -- Buttons ---------------------------------------------------------------
+   Five variants, one geometry. Anything that looks like a button in this app
+   should be one of these.
+     .ds-btn                filled navy   — the primary action on a screen
+     .ds-btn.accent         filled clay   — "do it now" / selected
+     .ds-btn.outline        white + navy  — secondary
+     .ds-btn.outline-accent white + clay  — secondary, accent-weighted
+     .ds-btn.ghost          bare          — tertiary / inline
+   Add .sm for the dense variant. */
+.ds-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: var(--ds-btn-pad);
+  border-radius: var(--ds-r-sm);
+  border: 1px solid transparent;
+  background: var(--ds-navy-surface);
+  color: #fff;
+  font-family: var(--ds-font);
+  font-size: var(--ds-fs-body);
+  font-weight: var(--ds-btn-fw);
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms var(--ds-ease), border-color 120ms var(--ds-ease),
+    color 120ms var(--ds-ease), transform 80ms var(--ds-ease);
+}
+.ds-btn:hover:not(:disabled) { background: var(--ds-navy-hover); }
+.ds-btn:active:not(:disabled) { transform: translateY(1px); }
+.ds-btn:disabled { background: var(--ds-disabled); cursor: default; opacity: 0.75; }
+.ds-btn svg { width: 15px; height: 15px; }
+
+.ds-btn.accent { background: var(--ds-terracotta); }
+.ds-btn.accent:hover:not(:disabled) { background: var(--ds-terracotta-hover); }
+
+.ds-btn.outline {
+  background: var(--ds-card);
+  border-color: var(--ds-navy);
+  color: var(--ds-navy);
+}
+.ds-btn.outline:hover:not(:disabled) { background: var(--ds-info-bg); }
+
+.ds-btn.outline-accent {
+  background: var(--ds-card);
+  border-color: var(--ds-terracotta);
+  color: var(--ds-terracotta);
+}
+.ds-btn.outline-accent:hover:not(:disabled) { background: var(--ds-active-bg); }
+
+.ds-btn.ghost {
+  background: transparent;
+  border-color: var(--ds-border);
+  color: var(--ds-ink);
+  font-weight: 600;
+}
+.ds-btn.ghost:hover:not(:disabled) {
+  background: var(--ds-soft);
+  border-color: var(--ds-border-strong);
+}
+
+.ds-btn.sm {
+  padding: var(--ds-btn-pad-sm);
+  border-radius: var(--ds-r-xs);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.ds-btn.sm svg { width: 13px; height: 13px; }
+
+/* -- Cards ---------------------------------------------------------------- */
+.ds-card {
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r);
+  padding: var(--ds-card-pad);
+}
+.ds-card-title {
+  font-size: var(--ds-fs-title);
+  font-weight: 700;
+  color: var(--ds-ink);
+}
+.ds-card-sub {
+  font-size: var(--ds-fs-sub);
+  color: var(--ds-muted);
+  margin-top: 5px;
+}
+
+/* -- Micro-label — the wizard's "MLS #" / "PROPERTY ADDRESS" treatment ----- */
+.ds-label {
+  font-family: var(--ds-font);
+  font-size: var(--ds-fs-label);
+  font-weight: 700;
+  letter-spacing: var(--ds-label-track);
+  text-transform: uppercase;
+  color: var(--ds-muted);
+  font-feature-settings: "tnum" on, "lnum" on;
+}
+
+/* -- Stat tile — one design, replacing the four that existed --------------- */
+.ds-tile {
+  background: var(--ds-card);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r);
+  padding: 14px 16px;
+  min-width: 0;
+}
+.ds-tile-label {
+  font-size: var(--ds-fs-label);
+  font-weight: 700;
+  letter-spacing: var(--ds-label-track);
+  text-transform: uppercase;
+  color: var(--ds-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ds-tile-value {
+  margin-top: 6px;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ds-ink);
+  font-feature-settings: "tnum" on, "lnum" on;
+}
+.ds-tile-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ds-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* -- Chips / badges -------------------------------------------------------- */
+.ds-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--ds-r-pill);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  background: var(--ds-soft);
+  color: var(--ds-sub);
+  white-space: nowrap;
+}
+.ds-chip.done   { background: var(--ds-done-bg);   color: var(--ds-done); }
+.ds-chip.active { background: var(--ds-active-bg); color: var(--ds-terracotta); }
+.ds-chip.info   { background: var(--ds-info-bg);   color: var(--ds-blue); }
+.ds-chip.warn   { background: var(--ds-warn-bg);   color: var(--ds-warn); }
+.ds-chip.error  { background: var(--ds-error-bg);  color: var(--ds-error); }
+
+/* -- Status banner — the wizard's "Package prepped" strip ------------------ */
+.ds-banner {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: var(--ds-r-sm);
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--ds-info-bg);
+  color: var(--ds-navy);
+}
+.ds-banner.done   { background: var(--ds-done-bg);   color: var(--ds-done); }
+.ds-banner.active { background: var(--ds-active-bg); color: var(--ds-terracotta); }
+
+/* -- Inputs ---------------------------------------------------------------- */
+.ds-input {
+  font-family: var(--ds-font);
+  font-size: 15px;
+  padding: 9px 12px;
+  border-radius: var(--ds-r-sm);
+  border: 1px solid var(--ds-border);
+  background: var(--ds-card);
+  color: var(--ds-ink);
+}
+.ds-input::placeholder { color: var(--ds-faint); }
+.ds-input:focus {
+  outline: none;
+  border-color: var(--ds-blue);
+  box-shadow: 0 0 0 3px var(--ds-info-bg);
+}
+
+/* -- Focus ring — consistent across every interactive element -------------- */
+.ds-btn:focus-visible,
+.ds-chip:focus-visible,
+.ds-input:focus-visible {
+  outline: 2px solid var(--ds-blue);
+  outline-offset: 2px;
+}
