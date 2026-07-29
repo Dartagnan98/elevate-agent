@@ -467,6 +467,13 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 22%, transparent);
   animation: ab-pulse 1.6s ease-in-out 3;
 }
+/* Gateway stopped: muted, and no pulse — a pulsing dot reads as "alive". */
+.ab-live.ab-live-off { color: var(--fg-dim); }
+.ab-live.ab-live-off .ab-live-dot {
+  background: var(--fg-dim);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fg-dim) 18%, transparent);
+  animation: none;
+}
 .ab-top-actions { margin-left: auto; display: flex; gap: 4px; }
 
 .ab-btn {

@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import {
   Plus,
   Refresh,
@@ -1295,6 +1296,8 @@ function NewDealModal({
    ───────────────────────────────────────────────────────────────── */
 
 function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh, onOpenDeal, onMoveDeal, onReRunOnboarding }: AdminBoardProps = {}) {
+  const gatewayStatus = useSidebarStatus();
+  const gatewayOnline = Boolean(gatewayStatus?.gateway_running);
   const [tab, setTab] = useState("listing");
   const [query, setQuery] = useState("");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
@@ -1411,7 +1414,16 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           {/* octopus moved to the global sidebar brand mark (on every page) */}
           <span className="crumb">Admin desk</span>
           <span className="sep">&middot;</span>
-          <span className="ab-live"><span className="ab-live-dot"></span>Local gateway online</span>
+          {/* Was hardcoded "Local gateway online" — it claimed online forever,
+              including with the gateway stopped (verified 2026-07-29: status
+              reported gateway_state "stopped" while this read online). A health
+              indicator that cannot report ill is worse than none. The two other
+              call sites (use-hub-data.tsx, DesktopSetupPage.tsx) branch on the
+              real flag; this one now does too. */}
+          <span className={gatewayOnline ? "ab-live" : "ab-live ab-live-off"}>
+            <span className="ab-live-dot"></span>
+            {gatewayOnline ? "Local gateway online" : "Local gateway offline"}
+          </span>
         </div>
         <div className="ab-top-actions">
           <button className="ab-btn ghost" type="button" onClick={onRefresh} disabled={loading}>
