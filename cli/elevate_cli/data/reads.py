@@ -71,6 +71,17 @@ def _payload_body(payload_json: str | None) -> str:
     return ""
 
 
+def _fallback_source_label(source_id: str) -> str:
+    """Display label for a source the on-disk connector view can't describe.
+
+    Mirrors ``_composio_connector_view``'s label so a DB-backed thread reads
+    the same as a disk-backed one.
+    """
+    if source_id.startswith("composio-"):
+        return f"Composio — {source_id.removeprefix('composio-') or source_id}"
+    return source_id.replace("-", " ").replace("_", " ").strip().title() or source_id
+
+
 def _heat_label_for(score: int) -> str:
     """Mirror legacy thresholds so the wrapper can compare apples to
     apples. Source-of-truth lives in source_connectors._heat_score_for_record;
@@ -1446,6 +1457,21 @@ def db_thread_context_response(
             "category": source.get("category"),
             "ownerAgent": source.get("ownerAgent"),
             "connected": source.get("connected"),
+        }
+    elif lead_payload is not None or messages:
+        # ponytail: the connector view is disk-derived — ``_composio_connector_view``
+        # returns None once a ``composio-<toolkit>`` dir has no JSONL rows left,
+        # which is exactly what ``_walk_jsonl_into_pg`` leaves behind after it
+        # migrates records into Postgres. That 404'd every thread on a source
+        # whose data the DB can answer in full (639 composio-gmail conversations
+        # on the 1.2.98 beta box). The source block is cosmetic metadata (see the
+        # module docstring), so synthesize it rather than fail the whole thread.
+        source_block = {
+            "id": source_id,
+            "label": _fallback_source_label(source_id),
+            "category": "messages",
+            "ownerAgent": None,
+            "connected": True,
         }
     else:
         # Match the legacy 404 behavior: callers wrap this in a try/except

@@ -821,3 +821,55 @@ def test_primary_db_no_fallback_propagates_db_error(monkeypatch, shadow_off):
             endpoint="GET /x", request_args={},
             jsonl_fn=_legacy, db_fn=boom,
         )
+
+
+def test_thread_context_survives_a_composio_source_with_no_jsonl_left():
+    """Regression: composio dirs are emptied once ``_walk_jsonl_into_pg``
+    migrates their records into Postgres, so ``_composio_connector_view``
+    returns None and the thread used to 404 even though the DB held the
+    whole conversation (639 live composio-gmail threads on the 1.2.98
+    beta box). The connector view is cosmetic — the DB answer wins."""
+    with connect() as conn:
+        contact = upsert_contact(
+            conn,
+            display_name="Gmail Lead",
+            primary_email="lead@example.com",
+            source_key="composio:g-1",
+        )
+        conv = get_or_create_conversation(
+            conn,
+            contact_id=contact["id"],
+            source_id="composio-gmail",
+            channel="email",
+            thread_key="19e382b8249066ac",
+        )
+        record_inbound(
+            conn,
+            contact_id=contact["id"],
+            conversation_id=conv["id"],
+            channel="email",
+            body="is the Canada listing still available?",
+            source_id="composio-gmail",
+            thread_key="19e382b8249066ac",
+            ts="2026-07-01T09:00:00+00:00",
+        )
+
+    # No composio-gmail dir on disk at all — the harshest version of the bug.
+    assert not (_source_root() / "composio-gmail").exists()
+
+    response = db_thread_context_response(
+        "composio-gmail", "19e382b8249066ac", limit=200,
+    )
+    assert response["messageCount"] == 1
+    assert response["messages"][0]["text"] == "is the Canada listing still available?"
+    assert response["lead"]["displayName"] == "Gmail Lead"
+    assert response["source"]["id"] == "composio-gmail"
+    assert response["source"]["label"] == "Composio — gmail"
+
+
+def test_thread_context_still_404s_when_neither_disk_nor_db_knows_the_source():
+    """The fallback must not turn every typo into a blank thread."""
+    with pytest.raises(ValueError, match="Unknown source connector"):
+        db_thread_context_response(
+            "composio-nowhere", "no-such-thread", limit=200,
+        )

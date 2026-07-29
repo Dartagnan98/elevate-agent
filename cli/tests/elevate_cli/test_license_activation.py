@@ -3381,3 +3381,67 @@ def test_exact_beta_post_unlink_marker_fsync_failure_preserves_verified_account(
     assert persisted.email == "agent@example.test"
     assert persisted.entitlements == ["real_estate_admin"]
     assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None
+
+
+def test_app_update_rebinds_activation_without_a_setup_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: every beta release that touches a shipped skill moved the
+    bundle hash, which stranded the user behind "Finish required Realtor Beta
+    skill setup" until they clicked Retry. Same account + new bundle is an app
+    update, not a setup failure."""
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    lic = _beta_license(entitlements=[])
+    license_mod.save(lic)
+    bundle = SimpleNamespace(
+        skills_root=Path("/signed/app/cli/skills"),
+        sha256="d" * 64,
+        file_count=1,
+        total_bytes=64,
+        files=("skills/real-estate-admin/ROUTING.md",),
+    )
+    monkeypatch.setattr(
+        bundle_mod, "load_exact_beta_skill_bundle", lambda: bundle,
+    )
+
+    license_mod.activate_install(lic, sync_skills=False)
+    assert license_mod.beta_activation_state(lic) == license_mod.BETA_ACTIVATION_COMPLETE
+
+    # Ship a new build: same signed account, different shipped skills.
+    bundle.sha256 = "e" * 64
+    assert (
+        license_mod.beta_activation_state(lic)
+        == license_mod.BETA_ACTIVATION_STALE_BUNDLE
+    )
+
+    assert license_mod.heal_beta_activation(lic) is True
+    assert license_mod.beta_activation_complete(lic) is True
+    receipt_path = license_mod._beta_profile_root() / ".license-activation.json"
+    assert json.loads(receipt_path.read_text())["skill_bundle_sha256"] == "e" * 64
+
+
+def test_heal_never_activates_an_install_that_was_never_activated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The healer only re-binds an existing receipt — it must not stand in for
+    first-run setup, or the gate would never fire at all."""
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    lic = _beta_license(entitlements=[])
+    license_mod.save(lic)
+    bundle = SimpleNamespace(
+        skills_root=Path("/signed/app/cli/skills"),
+        sha256="f" * 64,
+        file_count=1,
+        total_bytes=64,
+        files=("skills/real-estate-admin/ROUTING.md",),
+    )
+    monkeypatch.setattr(
+        bundle_mod, "load_exact_beta_skill_bundle", lambda: bundle,
+    )
+
+    assert (
+        license_mod.beta_activation_state(lic)
+        == license_mod.BETA_ACTIVATION_INCOMPLETE
+    )
+    assert license_mod.heal_beta_activation(lic) is False
+    assert license_mod.beta_activation_complete(lic) is False

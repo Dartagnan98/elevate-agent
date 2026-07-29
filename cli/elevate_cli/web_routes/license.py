@@ -125,7 +125,13 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
                 "packs": dashboard_access_status().get("packs", {}),
             }
         activation_complete = (
-            lic_mod.beta_activation_complete(lic)
+            # ``heal_beta_activation`` is a no-op unless the receipt is bound
+            # to this same account and only the shipped skill bundle moved
+            # (i.e. the app updated) — that shouldn't surface a setup gate.
+            (
+                lic_mod.beta_activation_complete(lic)
+                or lic_mod.heal_beta_activation(lic)
+            )
             if lic_mod._exact_realtor_beta_active()
             else True
         )

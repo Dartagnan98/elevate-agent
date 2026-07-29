@@ -972,10 +972,21 @@ def _same_beta_snapshot(left: License, right: License) -> bool:
     )
 
 
-def beta_activation_complete(lic: License) -> bool:
-    """Return true only for a receipt bound to the account and shipped skills."""
+BETA_ACTIVATION_COMPLETE = "complete"
+BETA_ACTIVATION_STALE_BUNDLE = "stale_bundle"
+BETA_ACTIVATION_INCOMPLETE = "incomplete"
+
+
+def beta_activation_state(lic: License) -> str:
+    """Classify the local activation receipt.
+
+    ``stale_bundle`` means the receipt is bound to *this* signed account but to
+    a previous app build's skill bundle — i.e. the app updated and the shipped
+    skills changed. That is self-healing (see :func:`heal_beta_activation`),
+    not a setup failure, so callers should not gate the user on it.
+    """
     if not _exact_realtor_beta_active():
-        return True
+        return BETA_ACTIVATION_COMPLETE
     from elevate_cli.beta_skill_bundle import load_exact_beta_skill_bundle
     from elevate_cli import refresh_pending
 
@@ -992,20 +1003,45 @@ def beta_activation_complete(lic: License) -> bool:
             # signed account identity, not to that rotating credential pair.
             current_identity = _beta_activation_identity(current)
             if current_identity != _beta_activation_identity(lic):
-                return False
+                return BETA_ACTIVATION_INCOMPLETE
             receipt = _read_beta_activation_receipt_unlocked()
-            return bool(
-                receipt
-                and receipt.get("identity_sha256") == current_identity
-                and receipt.get("skill_bundle_sha256") == bundle.sha256
-            )
+            if not receipt or receipt.get("identity_sha256") != current_identity:
+                return BETA_ACTIVATION_INCOMPLETE
+            if receipt.get("skill_bundle_sha256") != bundle.sha256:
+                return BETA_ACTIVATION_STALE_BUNDLE
+            return BETA_ACTIVATION_COMPLETE
     except (
         LicenseError,
         refresh_pending.RefreshPendingError,
         OSError,
         RuntimeError,
     ):
+        return BETA_ACTIVATION_INCOMPLETE
+
+
+def beta_activation_complete(lic: License) -> bool:
+    """Return true only for a receipt bound to the account and shipped skills."""
+    return beta_activation_state(lic) == BETA_ACTIVATION_COMPLETE
+
+
+def heal_beta_activation(lic: License) -> bool:
+    """Silently re-bind the activation receipt after an app update.
+
+    Every beta release that touches a shipped skill changes the bundle hash,
+    which used to strand the user behind "Finish required Realtor Beta skill
+    setup" until they clicked Retry. That button runs
+    :func:`activate_install` with no extra user input, so running it here is
+    equivalent — only the initiator changes. Fires *only* when the receipt
+    already matches this signed account, so an unactivated install or one
+    bound to a different account still stops at the gate.
+    """
+    if beta_activation_state(lic) != BETA_ACTIVATION_STALE_BUNDLE:
         return False
+    try:
+        activate_install(lic, sync_skills=False)
+    except Exception:
+        return False
+    return beta_activation_complete(lic)
 
 
 def _mark_beta_activation_complete(
@@ -2474,10 +2510,13 @@ def ensure_valid() -> License:
     if lic.is_expired():
         lic = refresh(lic)
     if _exact_realtor_beta_active() and not beta_activation_complete(lic):
-        raise LicenseError(
-            "Realtor Beta must finish required skill setup before use.",
-            code="beta_activation_incomplete",
-        )
+        # An app update alone must not lock the user out — re-bind silently
+        # when only the shipped skill bundle changed.
+        if not heal_beta_activation(lic):
+            raise LicenseError(
+                "Realtor Beta must finish required skill setup before use.",
+                code="beta_activation_incomplete",
+            )
     return lic
 
 
