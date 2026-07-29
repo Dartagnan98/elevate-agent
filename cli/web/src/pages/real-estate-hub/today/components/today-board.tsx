@@ -146,6 +146,8 @@ export type TodayBoardProps = {
   greetingSub?: string;
   pulse: TodayPulseStat[];
   priority: TodayPriorityItem[];
+  /** True queue length; `priority` is only the visible slice. */
+  priorityTotal?: number;
   hourBuckets: TodayHourBucket[];
   dayBuckets: TodayDayBucket[];
   scheduled: TodayScheduledJob[];
@@ -308,13 +310,24 @@ function PulseCard({ stat }: { stat: TodayPulseStat }) {
   );
 }
 
-function PriorityQueue({ items }: { items: TodayPriorityItem[] }) {
+function PriorityQueue({ items, total }: { items: TodayPriorityItem[]; total?: number }) {
+  // `items` is only the visible slice (PRIORITY_SHOWN); `total` is the real
+  // queue length. Printing items.length here made the card say "8 waiting"
+  // whether there were 8 or 800 — it can't exceed the slice. Skyleigh's fix,
+  // 2026-07-27: a card must never print its own length as "N waiting".
+  const all = total ?? items.length;
   return (
     <section className="td-card td-priority" aria-label="Needs you now">
       <header className="td-card-head">
         <div>
           <h3 className="td-card-title">Needs you now</h3>
-          <p className="td-card-sub">{items.length === 0 ? "Inbox is clear" : items.length + " waiting"}</p>
+          <p className="td-card-sub">
+            {all === 0
+              ? "Inbox is clear"
+              : all > items.length
+                ? `Showing ${items.length} of ${all} waiting`
+                : `${all} waiting`}
+          </p>
         </div>
         <Link to="/leads" className="td-card-link mono">
           Open leads
@@ -1010,7 +1023,7 @@ export function TodayBoard(props: TodayBoardProps) {
         <PipelineVelocity stages={props.pipeline} />
         <ActiveDeals deals={props.deals} adminDealsById={props.adminDealsById} />
         <div className="td-two">
-          <PriorityQueue items={props.priority} />
+          <PriorityQueue items={props.priority} total={props.priorityTotal} />
           <QuickApprovals
             drafts={props.drafts}
             draftSendNotices={props.draftSendNotices}

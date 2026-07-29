@@ -94,7 +94,7 @@ def test_today_activity_counts_events_and_actual_response_time():
     assert pulse["Leads in today"]["rawValue"] == 2
     assert pulse["Replies out today"]["rawValue"] == 1
     assert pulse["Drafts waiting"]["rawValue"] == 2
-    assert pulse["Threads waiting on you"]["rawValue"] == 1
+    assert pulse["Waiting on you · 7 days"]["rawValue"] == 1
     assert pulse["Median response"]["value"] == "25m"
 
     current_day = activity["dayBuckets"][-1]
@@ -127,3 +127,33 @@ def test_today_endpoint_returns_page_snapshot():
         assert key in body
     assert len(body["hourBuckets"]) == 24
     assert len(body["dayBuckets"]) == 7
+
+
+def test_waiting_tile_excludes_threads_older_than_seven_days():
+    """The tile counted every unanswered inbound thread ever received — on a real
+    box that is the whole iMessage history plus every newsletter (1,617 on one
+    install, 5,305 on another). Skyleigh scoped it to 7 days on 2026-07-27; this
+    pins the boundary so the unbounded count cannot come back."""
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    with connect() as conn:
+        for name, age in (("Recent Rita", timedelta(days=6)), ("Ancient Abe", timedelta(days=8))):
+            contact = upsert_contact(
+                conn,
+                display_name=name,
+                primary_phone=f"+1555000{abs(hash(name)) % 10000:04d}",
+                source_key=f"sms:{name.split()[0].lower()}",
+            )
+            conv = get_or_create_conversation(
+                conn,
+                contact_id=contact["id"],
+                source_id="sms-provider",
+                channel="sms",
+                thread_key=f"{name}-thread",
+            )
+            _record_inbound(conn, contact, conv, body="hello?", ts=now - age)
+
+        activity = build_today_activity(conn, pending_drafts_count=0, now=now)
+
+    pulse = {item["label"]: item for item in activity["pulse"]}
+    # Rita (6d) counts, Abe (8d) does not.
+    assert pulse["Waiting on you · 7 days"]["rawValue"] == 1

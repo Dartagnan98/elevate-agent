@@ -730,6 +730,7 @@ export function TodayDesignShell() {
         greetingName={greetingName}
         pulse={pulse}
         priority={priority}
+        priorityTotal={today?.priorityTotal}
         hourBuckets={hourBuckets}
         dayBuckets={dayBuckets}
         scheduled={scheduled}

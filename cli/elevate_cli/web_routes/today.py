@@ -411,7 +411,15 @@ def _priority_items(
     items.extend(_urgent_admin_items(deal_tasks=deal_tasks, action_runs=action_runs, now=now))
     tone_order = {"danger": 0, "warn": 1, "neutral": 2}
     items.sort(key=lambda item: (tone_order.get(str(item.get("tone")), 3), -(item.get("waitedMinutes") or 0)))
-    return items[:8]
+    return items
+
+
+# Visible slice of the priority queue. The card also needs the real length:
+# it used to render `items.length` as "N waiting", which could never exceed
+# this cap, so the tile read "8 waiting" whether 8 or 800 were queued.
+# (Skyleigh caught this on her fork 2026-07-27; her fix was in the frontend
+# data module, which mainline does not use — the cap lives here.)
+PRIORITY_SHOWN = 8
 
 
 def _running_runs(action_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -455,15 +463,17 @@ def create_today_router(*, log: logging.Logger | None = None) -> APIRouter:
             except Exception:
                 _log.exception("Today scheduled-job read failed")
                 jobs = []
+            _all_priority = _priority_items(
+                source_inbox=source_inbox,
+                deal_tasks=deal_tasks,
+                action_runs=action_runs,
+                now=now,
+            )
             return {
                 **activity,
                 "generatedAt": now.isoformat(),
-                "priority": _priority_items(
-                    source_inbox=source_inbox,
-                    deal_tasks=deal_tasks,
-                    action_runs=action_runs,
-                    now=now,
-                ),
+                "priority": _all_priority[:PRIORITY_SHOWN],
+                "priorityTotal": len(_all_priority),
                 "scheduled": _scheduled_next_24h(jobs, now),
                 "live": _live_sessions(),
                 "running": _running_runs(action_runs),

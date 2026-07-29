@@ -183,6 +183,14 @@ export function computePulseStats(
   const yesterday = activityForDay(threads, yesterdayStart);
 
   const pendingDraftsCount = drafts.filter((d) => d.status === "pending").length;
+  // Open inbound threads over the last 7 days. The old tile counted only today
+  // and still read in the thousands, which is not a number anyone can act on.
+  const sevenDaysAgo = todayStart - 6 * DAY_MS;
+  const waiting7d = threads.filter((t) => {
+    if (t.direction !== "inbound" || t.status !== "open") return false;
+    const ts = parseTs(t.latestAt);
+    return ts != null && ts >= sevenDaysAgo;
+  }).length;
   const waitingDelta = fmtDelta(today.waiting, yesterday.waiting);
   const responseMinutes = medianResponseMinutes(threads, todayStart);
   const responseMinutesYesterday = medianResponseMinutes(threads, yesterdayStart);
@@ -227,13 +235,13 @@ export function computePulseStats(
       tone: pendingDraftsCount >= 5 ? "warn" : pendingDraftsCount > 0 ? "neutral" : "good",
     },
     {
-      label: "Threads waiting on you",
-      value: String(today.waiting),
-      rawValue: today.waiting,
+      label: "Waiting on you · 7 days",
+      value: String(waiting7d),
+      rawValue: waiting7d,
       delta: waitingDelta.delta,
       deltaLabel: waitingDelta.label,
       spark: dayLeadsIn,
-      tone: today.waiting >= 5 ? "danger" : today.waiting > 0 ? "warn" : "good",
+      tone: waiting7d >= 5 ? "danger" : waiting7d > 0 ? "warn" : "good",
     },
     {
       label: "Median response",
@@ -322,7 +330,7 @@ export function urgentAdminTasks(
     .slice(0, 6);
 }
 
-export function priorityQueue({
+export function priorityQueueAll({
   drafts,
   threads,
   dealTasks,
@@ -380,7 +388,19 @@ export function priorityQueue({
       if (order[a.tone] !== order[b.tone]) return order[a.tone] - order[b.tone];
       return (b.waitedMinutes ?? 0) - (a.waitedMinutes ?? 0);
     })
-    .slice(0, 8);
+    ;
+}
+
+export const PRIORITY_SHOWN = 8;
+
+/** The list the card renders. `priorityQueueAll` is the real queue; this is just
+ *  the visible slice, so a card must never print its length as "N waiting". */
+export function priorityQueue(args: Parameters<typeof priorityQueueAll>[0]): UrgentItem[] {
+  return priorityQueueAll(args).slice(0, PRIORITY_SHOWN);
+}
+
+export function priorityQueueTotal(args: Parameters<typeof priorityQueueAll>[0]): number {
+  return priorityQueueAll(args).length;
 }
 
 export function scheduledNext24h(jobs: CronJob[]): CronJob[] {
@@ -428,6 +448,13 @@ export function buildTodayData(input: {
       dealTasks: input.dealTasks,
       actionRuns: input.actionRuns,
     }),
+    priorityTotal: priorityQueueTotal({
+      drafts,
+      threads,
+      dealTasks: input.dealTasks,
+      actionRuns: input.actionRuns,
+    }),
+    draftsWaitingTotal: drafts.filter((d) => d.status === "pending").length,
     scheduled: scheduledNext24h(input.cronJobs),
     live: liveSessions(input.sessions),
     running: inFlightRuns(input.actionRuns),

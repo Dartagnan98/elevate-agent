@@ -114,7 +114,18 @@ def _tone_for_response(minutes: int | None) -> str:
     return "good"
 
 
-def _waiting_threads_count(conn: sqlite3.Connection) -> int:
+def _waiting_threads_count(conn: sqlite3.Connection, *, now: datetime) -> int:
+    # Scoped to the last 7 days: the unbounded count read 5,305 on Skyleigh's box
+    # and 1,617 on D's — which is the whole iMessage history plus every
+    # newsletter, not a number anyone can act on. Cutoff is bound as a parameter
+    # rather than expressed in SQL because this runs on Postgres in production
+    # and SQLite's datetime('now', ...) does not exist there.
+    #
+    # `now` is threaded in rather than read from the clock: every other figure in
+    # this module is computed against the caller's `now`, and reading the wall
+    # clock here made the tile disagree with the rest of the page (and made it
+    # untestable — the suite pins a fixed `now`).
+    cutoff = (now - timedelta(days=7)).isoformat()
     row = conn.execute(
         """
         SELECT COUNT(*) AS c
@@ -122,6 +133,7 @@ def _waiting_threads_count(conn: sqlite3.Connection) -> int:
         LEFT JOIN contacts ct ON ct.id = c.contact_id
         WHERE c.status = 'open'
           AND c.last_inbound_at IS NOT NULL
+          AND c.last_inbound_at >= ?
           AND (c.last_outbound_at IS NULL OR c.last_inbound_at > c.last_outbound_at)
           AND (
             ct.id IS NULL
@@ -132,7 +144,8 @@ def _waiting_threads_count(conn: sqlite3.Connection) -> int:
               )
             )
           )
-        """
+        """,
+        (cutoff,),
     ).fetchone()
     return int(row["c"] if row and row["c"] is not None else 0)
 
@@ -249,7 +262,7 @@ def build_today_activity(
         if bucket:
             bucket["dealsAdvanced"] += 1
 
-    waiting_threads = _waiting_threads_count(conn)
+    waiting_threads = _waiting_threads_count(conn, now=now)
     median_response_today = (
         int(round(median(response_samples_today))) if response_samples_today else None
     )
@@ -297,7 +310,7 @@ def build_today_activity(
             "tone": "warn" if pending_drafts_count >= 5 else ("neutral" if pending_drafts_count > 0 else "good"),
         },
         {
-            "label": "Threads waiting on you",
+            "label": "Waiting on you · 7 days",
             "value": str(waiting_threads),
             "rawValue": waiting_threads,
             "delta": None,

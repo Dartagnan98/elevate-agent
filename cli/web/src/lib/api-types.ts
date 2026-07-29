@@ -1750,6 +1750,9 @@ export interface TodayDashboardResponse {
   hourBuckets: TodayHourBucket[];
   dayBuckets: TodayDayBucket[];
   priority: TodayUrgentItem[];
+  /** Full queue length. `priority` is capped at PRIORITY_SHOWN server-side, so
+   *  a card must render this, not `priority.length`, as "N waiting". */
+  priorityTotal?: number;
   scheduled: CronJob[];
   live: SessionInfo[];
   running: AdminActionRun[];
