@@ -575,3 +575,46 @@ describe("truthful reporting snapshot", () => {
     expect(snapshot.activityMath).toBeNull();
   });
 });
+
+describe("funnel read window", () => {
+  // The funnel, lead→client, and conversion-by-source all read `inbox.profiles`,
+  // which the page fetches capped at REPORTING_SOURCE_LIMIT. On a real book
+  // (3,885 contacts) that made "Conversations 500 / Leads 500 = 100%" true by
+  // construction — both hit the same cap. Deals and sends already flagged their
+  // truncation; profiles didn't.
+  it("flags the window when profiles are a sample of the book", () => {
+    const partial = inbox(funnelProfiles());
+    partial.recordCounts = { contacts: 3885, conversations: 4395 };
+
+    const snapshot = buildReportingSnapshot(
+      { inbox: partial, sends: null, deals: [], goals: null },
+      NOW,
+    );
+
+    expect(snapshot.coverage.truncated).toBe(true);
+    expect(snapshot.coverage.totalContacts).toBe(3885);
+    expect(snapshot.coverage.profiles).toBe(funnelProfiles().length);
+  });
+
+  it("does not flag a window that holds the whole book", () => {
+    const whole = inbox(funnelProfiles());
+    whole.recordCounts = { contacts: funnelProfiles().length };
+
+    const snapshot = buildReportingSnapshot(
+      { inbox: whole, sends: null, deals: [], goals: null },
+      NOW,
+    );
+
+    expect(snapshot.coverage.truncated).toBe(false);
+  });
+
+  it("stays quiet when the response carries no record counts", () => {
+    const snapshot = buildReportingSnapshot(
+      { inbox: inbox(funnelProfiles()), sends: null, deals: [], goals: null },
+      NOW,
+    );
+
+    expect(snapshot.coverage.truncated).toBe(false);
+    expect(snapshot.coverage.totalContacts).toBeNull();
+  });
+});

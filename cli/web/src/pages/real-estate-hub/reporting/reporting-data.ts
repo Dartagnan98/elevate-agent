@@ -45,6 +45,12 @@ export interface ReportingCoverage {
   profiles: number | null;
   conversations: number | null;
   sources: number | null;
+  /** Contacts on file, from recordCounts — the denominator `profiles` is a
+   *  sample of. Null when the inbox response omits it. */
+  totalContacts: number | null;
+  /** True when the profile read hit its limit, so every funnel stage count and
+   *  kept-percentage describes the window rather than the whole book. */
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +107,18 @@ export interface ReportingFunnelStage {
   /** Percent kept from the nearest previous stage with a measured value. */
   keptPct: number | null;
   note?: string;
+}
+
+function toCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** The funnel reads `profiles`, which the page fetches capped. Compare against
+ *  recordCounts rather than against the limit constant, so this stays honest if
+ *  the fetch limit changes. */
+function profileWindowTruncated(inbox: SourceInboxResponse): boolean {
+  const total = toCount(inbox.recordCounts?.contacts);
+  return total !== null && inbox.profiles.length < total;
 }
 
 export function buildFunnelStages(profiles: SourceInboxProfile[]): ReportingFunnelStage[] {
@@ -762,8 +780,17 @@ export function buildReportingSnapshot(
           profiles: input.inbox.profiles.length,
           conversations: input.inbox.threads.length,
           sources: input.inbox.sources.length,
+          totalContacts: toCount(input.inbox.recordCounts?.contacts),
+          truncated: profileWindowTruncated(input.inbox),
         }
-      : { status: "unavailable", profiles: null, conversations: null, sources: null },
+      : {
+          status: "unavailable",
+          profiles: null,
+          conversations: null,
+          sources: null,
+          totalContacts: null,
+          truncated: false,
+        },
     goals: input.goals,
     goalProgress: buildGoalProgress(input.goals, {
       newLeads: profiles ? countMarkedNewLeads(profiles, periodStart, now) : null,

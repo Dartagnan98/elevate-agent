@@ -23,6 +23,7 @@ import type {
   ActivityMath,
   GoalProgressRow,
   ReportingBreakdownRow,
+  ReportingCoverage,
   ReportingFunnelStage,
   ReportingMetric,
   ReportingRangeDays,
@@ -259,7 +260,13 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-function FunnelPanel({ funnel }: { funnel: ReportingFunnelStage[] | null }) {
+function FunnelPanel({
+  funnel,
+  coverage,
+}: {
+  funnel: ReportingFunnelStage[] | null;
+  coverage: ReportingCoverage;
+}) {
   return (
     <ChartPanel
       id="report-funnel"
@@ -286,6 +293,13 @@ function FunnelPanel({ funnel }: { funnel: ReportingFunnelStage[] | null }) {
           padL={120}
           padR={96}
         />
+      )}
+      {coverage.truncated && (
+        <p className="report-data-note">
+          Read the most recent {coverage.profiles?.toLocaleString("en-CA")} profiles of{" "}
+          {coverage.totalContacts?.toLocaleString("en-CA")} contacts on file. Stage counts and
+          percentages describe that window, not the whole book.
+        </p>
       )}
     </ChartPanel>
   );
@@ -606,7 +620,7 @@ export function RealEstateReportingPage() {
           <ActivityMathCard math={snapshot.activityMath} onSetGoal={openGoals} />
 
           <div className="report-grid">
-            <FunnelPanel funnel={snapshot.funnel} />
+            <FunnelPanel funnel={snapshot.funnel} coverage={snapshot.coverage} />
             <ConversionBySourcePanel rows={snapshot.conversionBySource} />
             <ClosedSourcePanel
               rows={snapshot.closedDealsBySource}
