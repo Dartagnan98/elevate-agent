@@ -83,18 +83,18 @@ async function recoveryBundleFixture(t) {
   };
 }
 
-test("recovery builder is an exact 1.2.100 Beta roll-forward package", () => {
+test("recovery builder is an exact 1.2.101 Beta roll-forward package", () => {
   const build = config();
-  assert.equal(RECOVERY_VERSION, "1.2.100");
-  assert.equal(CANDIDATE_VERSION, "1.2.99");
+  assert.equal(RECOVERY_VERSION, "1.2.101");
+  assert.equal(CANDIDATE_VERSION, "1.2.100");
   assert.equal(build.appId, "com.elevationrealestate.elevate.beta");
   assert.equal(build.productName, "Elevate Beta");
   assert.equal(build.extraMetadata.name, "elevate-beta-desktop");
-  assert.equal(build.extraMetadata.version, "1.2.100");
+  assert.equal(build.extraMetadata.version, "1.2.101");
   assert.equal(build.extraMetadata.main, "src/recovery-main.js");
   assert.equal(build.extraMetadata.elevateReleaseChannel, "beta");
   assert.equal(build.extraMetadata.elevateRecoveryMode, true);
-  assert.equal(build.extraMetadata.elevateRecoveryCandidateVersion, "1.2.99");
+  assert.equal(build.extraMetadata.elevateRecoveryCandidateVersion, "1.2.100");
   assert.equal(build.extraMetadata.elevateRecoverySourceReceiptId, SOURCE_RECEIPT_ID);
   assert.deepEqual(build.protocols[0].schemes, ["elevate-beta"]);
   assert.equal(build.publish[0].channel, "beta");
@@ -141,8 +141,8 @@ test("recovery config fails closed without exact provenance or candidate version
     /64-character candidate source receipt ID/,
   );
   assert.throws(
-    () => config({ manifest: { version: "1.2.100" } }),
-    /bound to candidate 1\.2\.99/,
+    () => config({ manifest: { version: "1.2.101" } }),
+    /bound to candidate 1\.2\.100/,
   );
 });
 
@@ -162,8 +162,8 @@ test("recovery afterPack verifies exact bundle identity, updater lane, and runti
     readPlist: fixture.readPlist,
   });
   assert.equal(evidence.kind, "elevate-beta-roll-forward-recovery-pre-sign");
-  assert.equal(evidence.recovery_version, "1.2.100");
-  assert.equal(evidence.candidate_version, "1.2.99");
+  assert.equal(evidence.recovery_version, "1.2.101");
+  assert.equal(evidence.candidate_version, "1.2.100");
   assert.equal(evidence.source_receipt_id, SOURCE_RECEIPT_ID);
   assert.deepEqual(evidence.runtime_policy, {
     backend: false,
@@ -211,7 +211,7 @@ test("recovery verifier rejects forbidden top-level packaged resources", async (
   );
 });
 
-test("recovery provenance must match the exact Beta 1.2.99 source receipt", () => {
+test("recovery provenance must match the exact Beta 1.2.100 source receipt", () => {
   let inputs = null;
   const receipt = verifyRecoverySourceProvenance({
     sourceReceiptId: SOURCE_RECEIPT_ID,
@@ -223,7 +223,7 @@ test("recovery provenance must match the exact Beta 1.2.99 source receipt", () =
   });
   assert.equal(receipt.source_receipt_id, SOURCE_RECEIPT_ID);
   assert.equal(inputs.channel, "beta");
-  assert.equal(inputs.version, "1.2.99");
+  assert.equal(inputs.version, "1.2.100");
   assert.equal(inputs.receiptPath, "/fixture/candidate-source.json");
   assert.throws(
     () => verifyRecoverySourceProvenance({
