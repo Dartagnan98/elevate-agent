@@ -2966,6 +2966,9 @@ export interface CronAttention {
     last_run_at?: string;
     hours_since?: number;
   }>;
+  /** True when the release channel forbids scheduled execution. `stale_jobs` is
+   *  empty in that case — nothing can fire, so staleness carries no signal. */
+  scheduled_execution_sealed?: boolean;
   total: number;
 }
 

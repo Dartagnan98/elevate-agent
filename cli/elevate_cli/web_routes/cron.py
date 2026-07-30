@@ -388,11 +388,21 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
         Returns counts the dashboard can surface as a "needs attention" banner:
         - ``pending_drafts``: outreach drafts in `drafted` status waiting on review
         - ``errored_jobs``: cron jobs whose last run failed
-        - ``stale_jobs``: enabled jobs that haven't fired in >36h (likely auth/runtime break)
+        - ``stale_jobs``: enabled jobs that haven't fired in >36h (likely auth/runtime
+          break). Empty when the release channel seals scheduled execution — on
+          Realtor Beta nothing can fire, so every job ages past 36h and the banner
+          fills with items no operator action can clear (43 of them on D's box,
+          07-29). ``scheduled_execution_sealed`` says so once instead.
         - ``jobs``: light per-job rollup (id, name, last_status, last_error_short, last_run_at)
         """
         from cron.jobs import list_jobs
+        from cron.execution_policy import scheduled_execution_disabled_reason
         import datetime as _dt
+
+        # On a sealed channel "hasn't run in 165h" is not a fault to chase, it is
+        # the policy working. Suppress the per-job staleness noise and state the
+        # cause once.
+        sealed = scheduled_execution_disabled_reason() is not None
 
         pending_drafts = 0
         try:
@@ -437,7 +447,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
                     if parsed.tzinfo is None:
                         parsed = parsed.replace(tzinfo=_dt.timezone.utc)
                     age_h = (now - parsed).total_seconds() / 3600.0
-                    if age_h > 36 and last_status != "error":
+                    if age_h > 36 and last_status != "error" and not sealed:
                         stale.append({
                             "id": job.get("id"),
                             "name": job.get("name"),
@@ -451,6 +461,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
             "pending_drafts": pending_drafts,
             "errored_jobs": errored,
             "stale_jobs": stale,
+            "scheduled_execution_sealed": sealed,
             "total": pending_drafts + len(errored) + len(stale),
         }
 

@@ -1647,6 +1647,13 @@ export default function CronPage() {
                 {j.last_error ? <span className="text-muted-foreground"> — {j.last_error}</span> : null}
               </button>
             ))}
+            {attention.scheduled_execution_sealed && (
+              <div className="text-muted-foreground">
+                This channel does not run scheduled work, so jobs will not fire and
+                &ldquo;last run&rdquo; ages indefinitely. That is the release policy, not a fault
+                to chase.
+              </div>
+            )}
             {attention.stale_jobs.map((j) => (
               <button
                 key={`stale-${j.id}`}

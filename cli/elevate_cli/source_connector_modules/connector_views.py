@@ -48,6 +48,70 @@ def _initialize_behavior(source_id: str) -> str:
     return "agent_setup_task"
 
 
+# ── DB-backed record counts ────────────────────────────────────────────────
+# The connector view derives everything from the JSONL files on disk. That was
+# true when JSONL *was* the store, but `_walk_jsonl_into_pg` now migrates rows
+# into Postgres and leaves the directory empty (or absent). The Sources page
+# then read "NOT CONFIGURED · 0 RECORDS" for apple-messages while the DB held
+# 1,190 conversations and 787k events — and offered "Initialize this source",
+# which on populated data is worse than merely wrong.
+#
+# One grouped query per view build, memoised for the call, rather than a count
+# per connector: the Sources page renders ~15 blueprints at once.
+_DB_COUNT_CACHE: dict[str, dict[str, int]] | None = None
+
+
+def _db_source_counts() -> dict[str, dict[str, int]]:
+    """{source_id: {"conversations": n, "contacts": n}} from the central store.
+
+    Never raises: a connector view must still render if the DB is unreachable,
+    it just falls back to the on-disk numbers.
+    """
+    global _DB_COUNT_CACHE
+    if _DB_COUNT_CACHE is not None:
+        return _DB_COUNT_CACHE
+    counts: dict[str, dict[str, int]] = {}
+    try:
+        from elevate_cli.data import connect
+
+        with connect() as conn:
+            for row in conn.execute(
+                "SELECT source_id, count(*) AS n FROM conversations "
+                "WHERE source_id IS NOT NULL GROUP BY source_id"
+            ).fetchall():
+                sid = str(row["source_id"])
+                counts.setdefault(sid, {})["conversations"] = int(row["n"])
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+    _DB_COUNT_CACHE = counts
+    return counts
+
+
+def reset_db_source_count_cache() -> None:
+    """Drop the memoised counts. Called between requests by the route layer."""
+    global _DB_COUNT_CACHE
+    _DB_COUNT_CACHE = None
+
+
+def _merge_db_counts(source_id: str, record_counts: dict[str, int]) -> dict[str, int]:
+    """Reconcile on-disk counts with the central store, taking the larger.
+
+    Not "disk wins when non-zero": composio-instagram has 58 rows left in
+    conversations.jsonl and 86 in Postgres, and letting the stale directory
+    shadow the store just moves the undercount rather than fixing it. Both
+    numbers describe real records for this source, so the max is the honest
+    answer to "how much is here".
+    """
+    db = _db_source_counts().get(source_id) or {}
+    if not db:
+        return record_counts
+    merged = dict(record_counts)
+    for key, value in db.items():
+        if value:
+            merged[key] = max(int(merged.get(key) or 0), value)
+    return merged
+
+
 def connector_view(
     source_root: Path,
     source_id: str,
@@ -65,10 +129,17 @@ def connector_view(
     status = _read_json(status_path)
     source_exists = bool(source)
     state = _state_from_status(source_exists, status)
-    record_counts = {
-        file_name.removesuffix(".jsonl"): _count_jsonl(source_dir / file_name)
-        for file_name in JSONL_FILES
-    }
+    record_counts = _merge_db_counts(
+        source_id,
+        {
+            file_name.removesuffix(".jsonl"): _count_jsonl(source_dir / file_name)
+            for file_name in JSONL_FILES
+        },
+    )
+    # A source with rows in the central store is configured, whatever the disk
+    # says — do not offer "Initialize this source" over real data.
+    if state == "not_configured" and any(record_counts.values()):
+        state = "connected"
     enabled_surfaces = source.get("enabled_ui_surfaces") if isinstance(source, dict) else None
     if not isinstance(enabled_surfaces, list):
         enabled_surfaces = UI_BY_SOURCE.get(source_id, [])
@@ -227,12 +298,18 @@ def _composio_connector_view(source_root: Path, source_id: str) -> JsonRecord | 
     view those messages never reach /leads.
     """
     source_dir = _source_dir(source_root, source_id)
-    if not source_dir.exists():
+    # Do not bail on a missing directory: the store can hold this source's rows
+    # with nothing left on disk. On D's box the dir survived (one cursors.json),
+    # which is the only reason the emptied-dir case was the one that showed up.
+    if not source_dir.exists() and not _db_source_counts().get(source_id):
         return None
-    record_counts = {
-        file_name.removesuffix(".jsonl"): _count_jsonl(source_dir / file_name)
-        for file_name in JSONL_FILES
-    }
+    record_counts = _merge_db_counts(
+        source_id,
+        {
+            file_name.removesuffix(".jsonl"): _count_jsonl(source_dir / file_name)
+            for file_name in JSONL_FILES
+        },
+    )
     if not any(record_counts.values()):
         return None
     toolkit = source_id.removeprefix("composio-") or source_id
