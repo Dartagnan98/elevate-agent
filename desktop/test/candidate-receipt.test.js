@@ -1164,7 +1164,7 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   const receiptPath = path.join(root, "candidate-receipt.json");
   const candidateFeedPath = path.join(root, "desktop", "dist", "beta-mac.yml");
   fs.mkdirSync(path.dirname(candidateFeedPath), { recursive: true });
-  fs.writeFileSync(candidateFeedPath, "version: 1.2.100\n");
+  fs.writeFileSync(candidateFeedPath, "version: 1.2.101\n");
   const profile = profileSnapshot(resolveReleaseProfile("beta"));
   const sourceReceiptId = "d".repeat(64);
   const hex = (seed) => crypto.createHash("sha256").update(seed).digest("hex");
@@ -1193,8 +1193,8 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   const recoveryRoot = path.join(root, "desktop", "dist", "recovery");
   fs.mkdirSync(recoveryRoot, { recursive: true });
   const recoveryArtifactNames = ["x64", "arm64"].flatMap((arch) => [
-    `Elevate-Beta-Recovery-1.2.101-mac-${arch}.zip`,
-    `Elevate-Beta-Recovery-1.2.101-mac-${arch}.dmg`,
+    `Elevate-Beta-Recovery-1.2.102-mac-${arch}.zip`,
+    `Elevate-Beta-Recovery-1.2.102-mac-${arch}.dmg`,
   ]);
   const recoveryApps = {};
   const recoveryDmgs = {};
@@ -1207,11 +1207,11 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
       info_plist: {
         CFBundleIdentifier: profile.appId,
         CFBundleName: profile.productName,
-        CFBundleShortVersionString: "1.2.101",
+        CFBundleShortVersionString: "1.2.102",
       },
       packaged_metadata: {
         name: profile.packageName,
-        version: "1.2.101",
+        version: "1.2.102",
         main: "src/recovery-main.js",
         elevateReleaseChannel: "beta",
         elevateRecoveryMode: true,
@@ -1235,7 +1235,7 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
       trust: trustFor(appSigning),
     };
     recoveryDmgs[arch] = {
-      artifact: `Elevate-Beta-Recovery-1.2.101-mac-${arch}.dmg`,
+      artifact: `Elevate-Beta-Recovery-1.2.102-mac-${arch}.dmg`,
       evidence: dmgSigning,
       trust: trustFor(dmgSigning),
     };
@@ -1256,10 +1256,10 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
       container_trust: format === "dmg" ? recoveryDmgs[architecture].trust : null,
     };
   }
-  const primaryRecoveryZip = "Elevate-Beta-Recovery-1.2.101-mac-x64.zip";
+  const primaryRecoveryZip = "Elevate-Beta-Recovery-1.2.102-mac-x64.zip";
   const recoveryFeedPath = path.join(recoveryRoot, "beta-mac.yml");
   fs.writeFileSync(recoveryFeedPath, yaml.dump({
-    version: "1.2.101",
+    version: "1.2.102",
     files: recoveryArtifactNames.map((name) => ({
       url: name,
       sha512: recoveryArtifacts[name].sha512,
@@ -1283,8 +1283,8 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
       package_name: profile.packageName,
       protocol_scheme: profile.protocolScheme,
       release_channel: "beta",
-      candidate_version: "1.2.100",
-      recovery_version: "1.2.101",
+      candidate_version: "1.2.101",
+      recovery_version: "1.2.102",
       source_receipt_id: sourceReceiptId,
       app_asar_sha256: recoveryApps[arch].packaged_metadata.asar_sha256,
       updater_config_sha256: recoveryApps[arch].app_update.sha256,
@@ -1305,10 +1305,10 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
   const recovery = {
     schema_version: 1,
     kind: "elevate-beta-recovery-package",
-    candidate_version: "1.2.100",
-    version: "1.2.101",
-    reserved_version: "1.2.101",
-    next_full_beta_minimum_exclusive: "1.2.101",
+    candidate_version: "1.2.101",
+    version: "1.2.102",
+    reserved_version: "1.2.102",
+    next_full_beta_minimum_exclusive: "1.2.102",
     source_receipt_id: sourceReceiptId,
     channel: "beta",
     public_feed_name: "beta-mac.yml",
@@ -1327,7 +1327,7 @@ test("ship requires static dual-arch and host live-AI evidence bound to the exac
     kind: "elevate-final-candidate",
     source_receipt_id: sourceReceiptId,
     release: {
-      version: "1.2.100",
+      version: "1.2.101",
       channel: "beta",
       feed_name: "beta-mac.yml",
       profile,
@@ -1630,11 +1630,11 @@ test("later Betas require explicit evidence that the pinned recovery contract is
   const root = temporaryDirectory(t);
   const receiptPath = path.join(root, "candidate-receipt.json");
   const receipt = {
-    candidate_id: "candidate-1.2.100",
-    source_receipt_id: "source-1.2.100",
+    candidate_id: "candidate-1.2.101",
+    source_receipt_id: "source-1.2.101",
     production_feed_untouched: true,
     release: {
-      version: "1.2.100",
+      version: "1.2.101",
       channel: "beta",
       feed_name: "beta-mac.yml",
       profile: {
@@ -1703,8 +1703,8 @@ test("later Betas require explicit evidence that the pinned recovery contract is
     },
     recovery: {
       mode: "not-applicable",
-      candidate_version: "1.2.100",
-      source_receipt_id: "source-1.2.100",
+      candidate_version: "1.2.101",
+      source_receipt_id: "source-1.2.101",
       reason: "candidate-has-no-recovery-contract",
       remote_mutation: false,
       production_mutated: false,
@@ -1736,8 +1736,8 @@ test("later Betas require explicit evidence that the pinned recovery contract is
 
 test("recoveryStaticProvenance emits a pinned static-provenance key and shape contract", () => {
   const artifactNames = ["x64", "arm64"].flatMap((arch) => [
-    `Elevate-Beta-Recovery-1.2.101-mac-${arch}.zip`,
-    `Elevate-Beta-Recovery-1.2.101-mac-${arch}.dmg`,
+    `Elevate-Beta-Recovery-1.2.102-mac-${arch}.zip`,
+    `Elevate-Beta-Recovery-1.2.102-mac-${arch}.dmg`,
   ]);
   const runtimePolicy = {
     backend: false,
@@ -1749,8 +1749,8 @@ test("recoveryStaticProvenance emits a pinned static-provenance key and shape co
   };
   const recovery = {
     source_receipt_id: "d".repeat(64),
-    candidate_version: "1.2.100",
-    version: "1.2.101",
+    candidate_version: "1.2.101",
+    version: "1.2.102",
     profile: { productName: "Elevate Beta", appId: "com.elevationrealestate.elevate.beta" },
     local_feed: { sha256: "a".repeat(64), sha512: "ZmVlZC1zaGE1MTI=" },
     artifact_names: artifactNames,
@@ -1803,8 +1803,8 @@ test("recoveryStaticProvenance emits a pinned static-provenance key and shape co
   assert.equal(provenance.schema_version, 1);
   assert.equal(provenance.kind, "elevate-beta-recovery-static-provenance");
   assert.equal(provenance.source_receipt_id, recovery.source_receipt_id);
-  assert.equal(provenance.candidate_version, "1.2.100");
-  assert.equal(provenance.recovery_version, "1.2.101");
+  assert.equal(provenance.candidate_version, "1.2.101");
+  assert.equal(provenance.recovery_version, "1.2.102");
   assert.equal(provenance.feed_sha256, recovery.local_feed.sha256);
   assert.equal(provenance.feed_sha512, recovery.local_feed.sha512);
   assert.match(provenance.profile_sha256, /^[a-f0-9]{64}$/);
