@@ -25,7 +25,7 @@ const DEFAULT_REMOTE_ROOT = "/var/www/elevate-updates/";
 const DEFAULT_PUBLIC_URL = "https://api.elevationrealestatehq.com/updates";
 const GLOBAL_LOCK = "/var/lock/elevate-release-publish.lock";
 const EXPECTED_ROLLBACK_VERSION = "1.2.65";
-const EXPECTED_RECOVERY_VERSION = "1.2.102";
+const EXPECTED_RECOVERY_VERSION = "1.2.103";
 const BETA_FEED = "beta-mac.yml";
 const STABLE_FEED = "latest-mac.yml";
 const EXPECTED_ALIASES = [
@@ -1528,7 +1528,7 @@ function writeEvidenceArchive({
 // Roll-forward recovery activation (procedure realtor-beta-recovery-roll-forward-v1)
 //
 // The second Beta recovery lane: advance the public Beta feed and all four
-// Beta download aliases onto the retained 1.2.102 recovery package. Every
+// Beta download aliases onto the retained 1.2.103 recovery package. Every
 // expectation is bound to receipt.recovery; the payload bytes are exactly what
 // the upload-first publish retention already committed on the update host
 // (four versioned recovery artifacts plus the retained dot-feed), so
@@ -2906,7 +2906,7 @@ function usage() {
     "rollback lane only:",
     "  --retained-feed /absolute/path/retained-beta-mac.yml",
     "  --expected-failed-feed-sha256 <sha256>",
-    "recover lane (roll-forward 1.2.102 activation) takes no other inputs: every",
+    "recover lane (roll-forward 1.2.103 activation) takes no other inputs: every",
     "expectation is bound to receipt.recovery and the payload bytes are the",
     "retention already committed on the update host.",
   ].join("\n");
