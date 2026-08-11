@@ -935,8 +935,8 @@ def _collapse_admin_deal(conn: Any, deal_id: str, requested_side: str | None) ->
     if side not in {"listing", "buyer"}:
         raise ValueError(f"unsupported deal side {side!r}")
     current_stage = int(deal.get("currentStage") or 0)
-    if side == "listing" and current_stage not in {6, 7}:
-        raise ValueError("listing deal collapse is only available from Accepted Offer or Condition Removal")
+    if side == "listing" and current_stage not in {7, 8}:
+        raise ValueError("listing deal collapse is only available from Accepted or Condition Removal")
     if side == "buyer" and current_stage not in {1, 2, 3}:
         raise ValueError("buyer deal collapse is only available from accepted-offer buyer stages")
 

@@ -192,10 +192,21 @@ _WORKFLOW_STAGE_COMPLETE_RE = re.compile(r"^workflow_stage_(\d+)_complete$")
 # below behave as empty.
 #
 # Unaffected either way: manual stage moves (move_deal_stage) and the
-# accepted-offer auto-move (_advance_on_accepted_offer, stage 5 -> 6).
-_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {1: 2, 2: 3, 3: 4, 4: 5, 6: 7, 7: 8}
+# accepted-offer auto-move (_advance_on_accepted_offer, stage 5 -> 7).
+#
+# Keys are the Lofty workflow label number in ``workflow_stage_<N>_complete``,
+# which is NOT the internal stage index past the offer boundary: inserting
+# Offer Prep at internal stage 6 (2026-08-11) pushed Accepted to 7 and Condition
+# Removal to 8, while Lofty still calls them Stage 6 and Stage 7. The value is
+# (internal stage the label lives on, internal stage to advance to).
+_WORKFLOW_STAGE_COMPLETE_ADVANCES_TO = {1: (1, 2), 2: (2, 3), 3: (3, 4), 4: (4, 5), 6: (7, 8), 7: (8, 9)}
 _WORKFLOW_ACCEPTED_OFFER_FIELDS = {"workflow_accepted_offer_date"}
-_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 6, 7}
+# Internal listing stage index of "Accepted" (admin_deal_flow._BC listing stages).
+_LISTING_ACCEPTED_STAGE = 7
+# Internal stage indices. Listing Live (5) and Offer Prep (6) are excluded on
+# purpose: neither "listing is live" nor "offer paperwork is done" means the
+# deal has moved on, that is the accepted-offer signal's job.
+_AUTO_ADVANCE_GATE_STAGES = {0, 1, 2, 3, 4, 7, 8}
 _CHECKLIST_TRUE_VALUES = {"1", "true", "yes", "y", "checked", "done", "complete", "completed"}
 _CHECKLIST_FALSE_VALUES = {"0", "false", "no", "n", "unchecked", "todo", "incomplete", "not done", ""}
 
@@ -1440,7 +1451,7 @@ def _auto_advance_enabled() -> bool:
         return True
 
 
-def _workflow_stage_complete_advances_to() -> dict[int, int]:
+def _workflow_stage_complete_advances_to() -> dict[int, tuple[int, int]]:
     return _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO if _auto_advance_enabled() else {}
 
 
@@ -1461,14 +1472,15 @@ def _maybe_advance_from_workflow_signal(
             return _advance_on_accepted_offer(conn, deal_id, actor=actor)
     except DealPhaseGateBlocked:
         return None
-    completed_stage = _workflow_stage_complete_stage(field)
-    if completed_stage is None or not _is_completion_value(value):
+    completed_label = _workflow_stage_complete_stage(field)
+    if completed_label is None or not _is_completion_value(value):
         return None
-    next_stage = _workflow_stage_complete_advances_to().get(completed_stage)
-    if next_stage is None:
+    move = _workflow_stage_complete_advances_to().get(completed_label)
+    if move is None:
         return None
+    from_stage, next_stage = move
     try:
-        return _move_if_current_stage(conn, deal_id, current_stage=completed_stage, to_stage=next_stage, actor=actor)
+        return _move_if_current_stage(conn, deal_id, current_stage=from_stage, to_stage=next_stage, actor=actor)
     except DealPhaseGateBlocked:
         return None
 
@@ -1479,21 +1491,23 @@ def _advance_on_accepted_offer(
     *,
     actor: str,
 ) -> dict[str, Any] | None:
-    """Move a live listing (stage 5) into Accepted Offer (6) on an accepted-offer
-    signal, but only once the listing-live phase gate is otherwise clear."""
+    """Move a listing into Accepted (7) on an accepted-offer signal.
+
+    Fires from Listing Live (5) or Offer Prep (6) — an accepted offer makes
+    offer prep moot, so 5 jumps the Offer Prep column rather than landing in it.
+    Only fires once the current stage's phase gate is otherwise clear."""
     try:
         context = get_deal_context(conn, deal_id)
     except Exception:
         return None
     deal = context.get("deal") or {}
-    if int(deal.get("currentStage") or 0) != 5:
+    if int(deal.get("currentStage") or 0) not in (5, 6):
         return None
     gate = ((context.get("dealFlow") or {}).get("gate") or {})
-    next_stage = gate.get("nextStage")
-    if not gate.get("canAdvance") or next_stage is None:
+    if not gate.get("canAdvance") or gate.get("nextStage") is None:
         return None
     try:
-        return move_deal_stage(conn, deal_id, to_stage=int(next_stage), actor=actor, gate_checked=True)
+        return move_deal_stage(conn, deal_id, to_stage=_LISTING_ACCEPTED_STAGE, actor=actor, gate_checked=True)
     except Exception:
         return None
 

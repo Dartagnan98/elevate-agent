@@ -86,7 +86,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
     {
         "province": "BC",
         "side": "listing",
-        "stage": 6,
+        "stage": 7,
         "field_key": "property_subtype",
         "field_value": "strata",
         "doc_code": "strata_docs",
@@ -106,7 +106,7 @@ _DEFAULT_CONDITIONAL_DOCS = [
     {
         "province": "BC",
         "side": None,
-        "stage": 6,
+        "stage": 7,
         "field_key": "multiple_offers",
         "field_value": "true",
         "doc_code": "offer_matrix",

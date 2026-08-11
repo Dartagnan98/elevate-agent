@@ -311,11 +311,22 @@ def _normalize_source_row(
     }
 
 
+# Lofty's "Current Stage" numbering matched our internal stage index 1:1 until
+# Offer Prep was inserted at internal stage 6 (2026-08-11). From Lofty's Stage 6
+# (accepted offer) on, internal is one higher; the top of our listing flow is 9
+# (Subjects Off), so Lofty's 8/9 both land there.
+_LISTING_OFFER_PREP_STAGE = 6
+_LISTING_LAST_STAGE = 9
+
+
 def _parse_stage(value: str | None) -> int:
     match = _STAGE_RE.search(str(value or ""))
     if not match:
         return 0
-    return _validate_stage(int(match.group(1)))
+    lofty_stage = int(match.group(1))
+    if lofty_stage >= _LISTING_OFFER_PREP_STAGE:
+        lofty_stage = min(lofty_stage + 1, _LISTING_LAST_STAGE)
+    return _validate_stage(lofty_stage)
 
 
 def _slug(value: str) -> str:

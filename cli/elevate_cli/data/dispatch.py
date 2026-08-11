@@ -168,7 +168,8 @@ _ADMIN_WORKER_SKILL_REFS = {
 
 # Canonical listing flow (stage index == deal currentStage == registry to_stage):
 #   0 Pre-CMA · 1 CMA / Evaluation · 2 Listing Intake · 3 SkySlope & Matrix Prep
-#   4 Marketing Go · 5 Listing Live · 6 Accepted Offer · 7 Condition Removal · 8 Closed
+#   4 Marketing Go · 5 Listing Live · 6 Offer Prep · 7 Accepted
+#   8 Condition Removal · 9 Subjects Off
 # Buyer flow: 0 Client Onboarding · 1 Offer Prep · 2 Accepted · 3 Conditions ·
 # 4 Subjects Off / closing admin.
 # Only skills that exist under cli/skills/real-estate-admin are wired. Stage 0
@@ -318,7 +319,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/offer-review",
         "side": "listing",
-        "to_stage": 6,
+        "to_stage": 7,
         "priority": 90,
     },
     {
@@ -326,7 +327,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/subject-removal",
         "side": "listing",
-        "to_stage": 7,
+        "to_stage": 8,
         "priority": 90,
     },
     {
@@ -340,7 +341,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
             "sendPolicy": "approval_required",
         },
         "side": "listing",
-        "to_stage": 7,
+        "to_stage": 8,
         "priority": 70,
     },
     {
@@ -348,7 +349,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/closing-admin",
         "side": "listing",
-        "to_stage": 8,
+        "to_stage": 9,
         "priority": 90,
     },
     {
@@ -356,7 +357,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/skyslope-sync",
         "side": "listing",
-        "to_stage": 8,
+        "to_stage": 9,
         "priority": 80,
     },
     {
@@ -364,7 +365,7 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
         "trigger": "stage_entry",
         "skill": "real-estate-admin/marketing",
         "side": "listing",
-        "to_stage": 8,
+        "to_stage": 9,
         "priority": 70,
     },
     {

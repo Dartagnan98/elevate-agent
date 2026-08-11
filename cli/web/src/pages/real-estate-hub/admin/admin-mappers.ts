@@ -1,6 +1,9 @@
 import type { AdminDeal } from "@/lib/api-types";
 import type { Deal, BuyerDeal } from "./admin-data";
 
+// Stage 6 is Offer Prep (inserted 2026-08-11 to mirror the buyer board); the
+// old 6/7/8 shifted to 7/8/9. Keep in step with ADMIN_PIPELINE in admin-data.ts
+// and the listing stages in cli/elevate_cli/admin_deal_flow.py.
 const LISTING_STAGE_TO_PHASE: Record<number, string> = {
   0: "pre-cma",
   1: "cma",
@@ -8,9 +11,9 @@ const LISTING_STAGE_TO_PHASE: Record<number, string> = {
   3: "skyslope",
   4: "go",
   5: "live",
-  6: "offer",
-  7: "conditions",
-  8: "closed",
+  6: "offer-prep",
+  7: "offer",
+  8: "conditions",
   9: "closed",
   10: "closed",
 };
@@ -22,11 +25,11 @@ const LISTING_STAGE_BADGE: Record<number, string> = {
   3: "SkySlope & Matrix Prep",
   4: "Marketing Go",
   5: "Listing Live / Marketing",
-  6: "Accepted Offer",
-  7: "Condition Removal",
-  8: "Closed",
-  9: "Closed",
-  10: "Closed",
+  6: "Offer Prep",
+  7: "Accepted",
+  8: "Condition Removal",
+  9: "Subjects Off",
+  10: "Subjects Off",
 };
 
 const BUYER_STAGE_TO_PHASE: Record<number, string> = {
@@ -64,9 +67,9 @@ const LISTING_STAGE_NEXT: Record<number, string> = {
   3: "SkySlope/Matrix prep complete",
   4: "Marketing Go package ready",
   5: "Just listed blast sent",
-  6: "Accepted-offer dates verified",
-  7: "Condition removal / waiver sent",
-  8: "File closed + nurture queued",
+  6: "Offer package ready",
+  7: "Accepted-offer dates verified",
+  8: "Condition removal / waiver sent",
   9: "File closed + nurture queued",
   10: "File closed + nurture queued",
 };

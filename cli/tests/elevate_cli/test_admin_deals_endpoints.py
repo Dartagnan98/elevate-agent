@@ -964,12 +964,12 @@ def test_accepted_offer_signal_advances_live_listing_when_gate_is_clear(client):
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["currentStage"] == 6
+    assert resp.json()["currentStage"] == 7
     with connect() as conn:
         events = list_deal_events(conn, deal["id"])
     transition = next(event for event in events if event["kind"] == "stage_transition")
     assert transition["fromStage"] == 5
-    assert transition["toStage"] == 6
+    assert transition["toStage"] == 7
 
 
 def test_accepted_offer_detail_field_advances_live_listing_when_gate_is_clear(client):
@@ -982,7 +982,7 @@ def test_accepted_offer_detail_field_advances_live_listing_when_gate_is_clear(cl
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["currentStage"] == 6
+    assert resp.json()["currentStage"] == 7
     assert resp.json()["offerAcceptedAt"] == "2026-05-06"
 
 
@@ -1678,7 +1678,7 @@ def test_province_guide_import_feeds_deal_context_and_conditional_docs(client, t
             side="listing",
             actor="human:test",
             province="BC",
-            current_stage=6,
+            current_stage=7,
             fields={"property_subtype": "strata"},
         )
 

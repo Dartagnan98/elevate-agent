@@ -171,7 +171,7 @@ def test_import_listing_workflow_csv_reimport_updates_same_source_row():
     assert result["created"] == 0
     assert result["updated"] == 1
     assert len(deals) == 1
-    assert deals[0]["currentStage"] == 7
+    assert deals[0]["currentStage"] == 8
     assert deals[0]["offerAcceptedAt"] == "2026-04-08"
     assert deals[0]["subjectRemovalDate"] == "2026-04-26"
     assert deals[0]["extraToggles"]["workflow_stage_7_complete"] is True

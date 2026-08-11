@@ -139,9 +139,13 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
   { id: "skyslope",   stage: "S3",  name: "SkySlope & Matrix Prep",   next: "signed docs saved + SkySlope/Matrix prep complete",         note: "automated + background · approval" },
   { id: "go",         stage: "S4",  name: "Marketing Go",             next: "photos cleaned/saved + Marketing Go package ready",         note: "automated + background · approval" },
   { id: "live",       stage: "S5",  name: "Listing Live / Marketing", next: "Flodesk mailout sent",                                     note: "automated + background · approval" },
-  { id: "offer",      stage: "S6",  name: "Accepted Offer",           next: "accepted-offer dates verified",                            note: "automated + background · approval" },
-  { id: "conditions", stage: "S7",  name: "Condition Removal",        next: "conditions removed + deposit verified",                    note: "automated + background · approval" },
-  { id: "closed",     stage: "S8",  name: "Closed",                   next: "file closed + nurture queued",                             note: "automated + background" },
+  // Tail mirrors the buyer board (Skyleigh 2026-08-11): Offer Prep -> Accepted
+  // -> Condition Removal -> Subjects Off. Offer Prep is a real backend stage
+  // inserted at 6, so everything below it shifted +1.
+  { id: "offer-prep", stage: "S6",  name: "Offer Prep",               motion: "manual", next: "Moves on offer package ready",     hint: "Comps + offer paperwork" },
+  { id: "offer",      stage: "S7",  name: "Accepted",                 motion: "manual", next: "Moves on accepted-offer checked",  hint: "Lender + docs" },
+  { id: "conditions", stage: "S8",  name: "Condition Removal",        motion: "manual", next: "Moves on conditions removed",      hint: "Inspection + property review + deposit" },
+  { id: "closed",     stage: "S9",  name: "Subjects Off",             motion: "manual", next: "Moves on file archived",           hint: "Deposit + dates" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -287,6 +291,13 @@ export const ADMIN_PHASE_DETAILS: Record<string, PhaseDetail> = {
     gate: "approve outgoing drafts",
     checklist: ["Just listed blast sent", "Social posts published", "Flodesk mailout sent", "Lofty text blast sent", "Live marketing checklist complete"],
     documents: [["general-release", "General Release & Authorization to Pay Deposit Funds"], ["CPS-addendum", "CPS - Addendum/Amendment"], ["CPS-res", "Contract of Purchase and Sale (CPS) - Residential"]],
+  },
+  "offer-prep": {
+    motion: "manual",
+    movesOn: "offer package ready",
+    gate: "review the offer with the seller before accepting",
+    checklist: ["Offer received and logged", "Comps refreshed for seller review", "Offer reviewed with seller"],
+    documents: [["CPS-res", "Contract of Purchase and Sale (CPS) - Residential"], ["CPS-addendum", "CPS - Addendum/Amendment"]],
   },
   "offer": {
     motion: "automated + background · approval",

@@ -46,17 +46,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // (the module re-evaluates) but stays suppressed during in-app navigation.
 let octoIntroShown = false;
 
+// [listing, buyer] label per currentStage index. The listing column tracks
+// admin_deal_flow._BC listing stages; it had drifted a stage behind the shipped
+// flow from index 5 down, and Offer Prep landing at 6 (2026-08-11) moved it
+// again. The buyer flow only has stages 0-4 — the rest of that column is unused.
 const STAGE_LABELS = [
-  ["Pre-CMA", "Intake"],
-  ["CMA", "Search Setup"],
-  ["Listing Intake", "Tours"],
-  ["SkySlope Prep", "Follow-Up"],
-  ["Marketing Go", "Offer Prep"],
-  ["MLS Entry", "Accepted"],
-  ["Live", "Conditions"],
-  ["Accepted Offer", "Conditions Removed"],
-  ["Conditions", "Closing"],
-  ["Closing", "Possession"],
+  ["Pre-CMA", "Client Onboarding"],
+  ["CMA", "Offer Prep"],
+  ["Listing Intake", "Accepted"],
+  ["SkySlope Prep", "Condition Removal"],
+  ["Marketing Go", "Subjects Off"],
+  ["Listing Live", "Subjects Off"],
+  ["Offer Prep", "Subjects Off"],
+  ["Accepted", "Subjects Off"],
+  ["Condition Removal", "Subjects Off"],
+  ["Subjects Off", "Subjects Off"],
 ];
 
 const STAGE_TOTAL = 10;

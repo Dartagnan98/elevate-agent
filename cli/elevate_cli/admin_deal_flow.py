@@ -98,7 +98,7 @@ _BACKGROUND_AUTOMATIONS: list[dict[str, Any]] = [
         "name": "Gmail Doc Router",
         "skill": "gmail-doc-router",
         "kind": "cron",
-        "affectsStages": [2, 6, 7, 8],
+        "affectsStages": [2, 7, 8, 9],
         "description": "Routes inbound Gmail attachments to the right deal and Drive folder.",
     },
     {
@@ -106,7 +106,7 @@ _BACKGROUND_AUTOMATIONS: list[dict[str, Any]] = [
         "name": "Seller Update",
         "skill": "seller-update",
         "kind": "cron",
-        "affectsStages": [6],
+        "affectsStages": [7],
         "description": "Pulls ShowingTime feedback and creates Gmail seller-update drafts.",
     },
 ]
@@ -255,8 +255,22 @@ _BC: dict[str, Any] = {
                 ],
                 triggers=[("marketing-live", "Run listing-live marketing", "marketing")],
             ),
+            # Listing stage 6. Inserted 2026-08-11 so the listing board's tail
+            # mirrors the buyer board (Offer Prep -> Accepted -> Condition
+            # Removal -> Subjects Off). Everything from the old stage 6 down
+            # shifted +1; see migration 0045 for the data move.
             _stage(
-                "Accepted Offer",
+                "Offer Prep",
+                "Offers in + seller review",
+                [
+                    ("offer-received", "Offer received and logged"),
+                    ("comps-refreshed", "Comps refreshed for seller review"),
+                    ("offer-reviewed-with-seller", "Offer reviewed with seller"),
+                ],
+                fields=[("offerDate", "Offer received date")],
+            ),
+            _stage(
+                "Accepted",
                 "Contract review + dates",
                 [
                     _wf("Within-24hrs contract reviewed", "Within-24hrs Contract Reviewed ✓"),
@@ -305,7 +319,7 @@ _BC: dict[str, Any] = {
                 ],
             ),
             _stage(
-                "Closed",
+                "Subjects Off",
                 "Archive + nurture",
                 [
                     _wf("Commission submitted", "Commission Submitted"),
@@ -401,19 +415,19 @@ def _package_for_key(package_key: str) -> dict[str, Any]:
 
 _CONDITION_ADDITIONS: dict[str, list[dict[str, Any]]] = {
     "propertySubtype:strata": [
-        {"stage": 7, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
+        {"stage": 8, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
     ],
     "property_subtype:strata": [
-        {"stage": 7, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
+        {"stage": 8, "id": "strata-docs-review", "label": "Strata documents reviewed", "docKind": "strata_docs"}
     ],
     "tenanted:true": [
         {"stage": 2, "id": "tenancy-docs", "label": "Tenancy docs / notice requirements checked", "docKind": "tenancy_docs"}
     ],
     "multipleOffers:true": [
-        {"stage": 7, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
+        {"stage": 8, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
     ],
     "multiple_offers:true": [
-        {"stage": 7, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
+        {"stage": 8, "id": "offer-matrix", "label": "Multiple-offer comparison matrix prepared", "docKind": "offer_matrix"}
     ],
     "poaSigning:true": [
         {"stage": 2, "id": "poa-review", "label": "POA authority reviewed", "docKind": "poa_authority"}
