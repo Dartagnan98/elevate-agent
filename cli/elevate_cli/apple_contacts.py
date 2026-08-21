@@ -191,6 +191,26 @@ class AddressBookIndex:
             return None
         return self.by_handle.get(key)
 
+    def lookup_by_name(self, name: str) -> AddressBookRecord | None:
+        """Resolve a person's NAME to a Contacts.app record.
+
+        Exact, case/whitespace-insensitive match on the rendered display
+        name. Returns None when nothing matches OR when more than one
+        person matches -- two people called "Dave Smith" must never be
+        collapsed into one, so ambiguity is a miss, not a guess.
+
+        Used by deal intake to fill in a client's email/phone from her own
+        Contacts when only a name was typed.
+        """
+        wanted = " ".join((name or "").split()).strip().lower()
+        if not wanted:
+            return None
+        hits = [
+            r for r in self.records.values()
+            if " ".join(r.display_name.split()).strip().lower() == wanted
+        ]
+        return hits[0] if len(hits) == 1 else None
+
     def add(self, record: AddressBookRecord) -> None:
         existing = self.records.get(record.unique_id)
         if existing is None:

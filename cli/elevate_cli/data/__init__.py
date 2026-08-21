@@ -27,6 +27,10 @@ from elevate_cli.data.paths import (
 from elevate_cli.data.contacts import (
     add_contact_note,
     classify_contact,
+    lock_contact_fields,
+    match_contact_for_intake,
+    locked_contact_fields,
+    unlock_contact_fields,
     close_to_admin,
     find_contacts,
     get_contact,
@@ -131,6 +135,14 @@ from elevate_cli.data.templates import (
     template_stats,
     template_stats_with_ambiguous,
 )
+from elevate_cli.data.contact_documents import (
+    client_doc_type_for,
+    CLIENT_DOC_TYPES,
+    get_current_contact_document,
+    list_contact_documents,
+    list_contact_documents_for_contacts,
+    upsert_contact_document,
+)
 from elevate_cli.data.deals import (
     add_deal_attachment,
     add_deal_contact,
@@ -152,6 +164,7 @@ from elevate_cli.data.deals import (
     set_deal_dates,
     set_deal_fields,
     set_deal_money,
+    set_deal_status,
     set_deal_toggle,
 )
 from elevate_cli.data.admin_calendar import (
@@ -279,6 +292,8 @@ __all__ = [
     "backups_root", "parity_root",
     # contacts
     "add_contact_note", "classify_contact", "close_to_admin", "find_contacts",
+    "lock_contact_fields", "locked_contact_fields", "unlock_contact_fields",
+    "match_contact_for_intake",
     "leads_worked_recently",
     "get_contact", "park_contact", "set_lead_profile_favorite",
     "set_pipeline_status", "unpark_contact",
@@ -321,6 +336,9 @@ __all__ = [
     "retire_template", "template_leaderboard", "template_stats",
     "template_stats_with_ambiguous",
     # deals
+    "client_doc_type_for", "CLIENT_DOC_TYPES", "get_current_contact_document",
+    "list_contact_documents", "list_contact_documents_for_contacts",
+    "upsert_contact_document",
     "add_deal_attachment", "add_deal_contact", "create_deal",
     "deals_overview", "DealPhaseGateBlocked",
     "get_deal", "get_deal_context", "list_deal_action_runs",
@@ -328,7 +346,7 @@ __all__ = [
     "list_deal_tasks", "list_deals", "move_deal_stage", "record_run_result",
     "record_deal_activity",
     "promote_profile_to_admin_deal", "set_deal_dates",
-    "set_deal_fields", "set_deal_money", "set_deal_toggle",
+    "set_deal_fields", "set_deal_money", "set_deal_status", "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)
     "approve_action_run", "create_action", "delete_action",
     "dispatch_action_run_to_cron", "drain_queued_action_runs",
