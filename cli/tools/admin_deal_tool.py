@@ -161,29 +161,27 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 )
 
             if action == "advance":
+                # BLOCKED BY DESIGN. Skyleigh moves every card between stages
+                # herself -- advancing auto-fires the next stage's automations,
+                # so the decision is hers, not an agent's. The code-level
+                # auto-advance was disabled in data/deals.py on 2026-07-02
+                # (_AUTO_ADVANCE_GATE_STAGES / _WORKFLOW_STAGE_COMPLETE_ADVANCES_TO
+                # emptied), but THIS TOOL was still a way around it: on
+                # 2026-08-21 an agent advanced 426 Gleneagles from Pre-CMA to
+                # CMA on its own, which is exactly what she had ruled out.
+                # Report the gate and stop. Do not offer force -- there is no
+                # force that makes this her decision.
                 ctx = get_deal_context(conn, deal_id)
-                gate = ((ctx.get("dealFlow") or {}).get("gate") or {})
-                next_stage = gate.get("nextStage")
-                force = _parse_bool(args.get("force"))
-                if next_stage is None:
-                    return tool_result(
-                        success=False,
-                        message="deal is already at the final stage",
-                        gate=_gate_brief(ctx),
-                    )
-                if not force and not gate.get("canAdvance"):
-                    return tool_result(
-                        success=False,
-                        message="phase gate is blocked — resolve the missing items first, or pass force=true",
-                        gate=_gate_brief(ctx),
-                    )
-                move_deal_stage(
-                    conn, deal_id,
-                    to_stage=int(next_stage), actor=_ACTOR,
-                    force=force, gate_checked=not force,
+                return tool_result(
+                    success=False,
+                    message=(
+                        "advancing a card is Skyleigh's decision, not an agent's — "
+                        "she moves it when she has done the walkthrough and gathered "
+                        "what she needs. Report the gate state and leave the card where "
+                        "it is. If the gate is clear, say so and let her press it."
+                    ),
+                    gate=_gate_brief(ctx),
                 )
-                ctx = get_deal_context(conn, deal_id)
-                return tool_result(success=True, advanced=True, gate=_gate_brief(ctx))
 
             if action == "complete_run":
                 # Finalize the stage's pending run the way the cron callback does:
@@ -230,6 +228,23 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 if to_stage is None:
                     return tool_error("move requires 'to_stage'")
                 force = _parse_bool(args.get("force"))
+                # Same rule as `advance`: an agent may never move a card FORWARD.
+                # Backward moves stay allowed — those are corrections and
+                # collapses (a fallen-through sale going back to Listing Live),
+                # which are recoveries, not decisions about her pipeline.
+                _cur = int((get_deal_context(conn, deal_id).get("deal") or {}).get("currentStage") or 0)
+                if int(to_stage) > _cur:
+                    ctx = get_deal_context(conn, deal_id)
+                    return tool_result(
+                        success=False,
+                        message=(
+                            f"refusing to move this card forward ({_cur} -> {int(to_stage)}). "
+                            "Skyleigh advances cards herself; advancing fires the next "
+                            "stage's automations. Backward moves (corrections, collapses) "
+                            "are still allowed."
+                        ),
+                        gate=_gate_brief(ctx),
+                    )
                 move_deal_stage(
                     conn, deal_id,
                     to_stage=int(to_stage), actor=_ACTOR,
