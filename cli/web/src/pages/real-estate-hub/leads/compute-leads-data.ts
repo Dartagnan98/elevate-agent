@@ -21,6 +21,7 @@ import type {
   LeadsTemplateItem,
   LeadsTemplateLane,
 } from "./leads-data";
+import { pipelineStageLabel } from "./pipeline-stages";
 
 function ageLabel(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -99,18 +100,48 @@ export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
 }
 
 function statusLabel(profile: SourceInboxProfile): string {
-  if (profile.status === "new_lead") return "New Lead";
-  if (profile.status === "follow_up") return "Follow Up";
-  if (profile.status === "ghosting") return "Ghosting";
-  if (profile.status === "dead") return "Dead";
-  if (profile.status === "closed_seller") return "Closed Seller";
-  if (profile.status === "closed_buyer") return "Closed Buyer";
+  // Render the raw pipeline_status slug (AI's 6 legacy values or Skyleigh's own
+  // slugs) in her operator vocabulary. Falls through to CRM stage / heat when
+  // no pipeline_status is set.
+  if (profile.status) return pipelineStageLabel(profile.status);
   if (profile.crmStage) return profile.crmStage;
   return profile.heatLabel === "hot" ? "Hot" : "Open";
 }
 
-export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[] {
+// Days between now and an ISO timestamp; null when unparseable.
+function daysSince(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!isFinite(t) || t <= 0) return null;
+  const d = (Date.now() - t) / (24 * 60 * 60 * 1000);
+  return d < 0 ? 0 : d;
+}
+
+// Her follow-up segments. Prefer an explicit tag (SOI / Nurture / Past Client),
+// otherwise derive from days since last touch: Hot 0-30, Warm 30-90,
+// Lukewarm 90-180, Cool 180+. Falls back to Nurture when there is no signal.
+function deriveTemperature(p: SourceInboxProfile): LeadsProfile["temperature"] {
+  const tags = (p.tags || []).map((t) => t.toLowerCase());
+  if (tags.some((t) => t === "soi" || t.includes("sphere") || t.includes("past client"))) return "soi";
+  if (tags.some((t) => t.includes("nurture"))) return "nurture";
+  const d = daysSince(p.statusUpdatedAt || p.latestAt);
+  if (d === null) return "nurture";
+  if (d <= 30) return "hot";
+  if (d <= 90) return "warm";
+  if (d <= 180) return "lukewarm";
+  return "cool";
+}
+
+export function mapLeadsProfiles(
+  profiles: SourceInboxProfile[],
+  tempOverrides?: Record<string, string> | null,
+): LeadsProfile[] {
   return profiles.map((p) => {
+    // A manual override on any of the profile's contacts wins over the derived
+    // temperature so the list badge matches the contact card.
+    const tempOverride = (p.contactIds ?? [])
+      .map((id) => tempOverrides?.[id])
+      .find((v): v is string => Boolean(v));
     const verified = p.verifiers.length > 0 || p.hasCrm;
     const heatLabel = p.heatLabel === "hot" ? "hot" : p.heatLabel === "warm" ? "warm" : "watch";
     const group: LeadsProfile["group"] = heatLabel === "hot" ? "active" : verified ? "verified" : "unverified";
@@ -134,7 +165,7 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       group,
       verified,
       status: statusLabel(p),
-      source: (p.sources && p.sources[0]) || (p.sourceIds && p.sourceIds[0]) || "—",
+      source: p.leadSource || (p.sources && p.sources[0]) || (p.sourceIds && p.sourceIds[0]) || "—",
       email: p.emails[0] || "",
       phone: p.phones[0] || "",
       contact: p.emails[0] || p.phones[0] || "",
@@ -149,6 +180,9 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       contactIds: p.contactIds || [],
       favorite: Boolean(p.favorite),
       favoritedAt: p.favoritedAt ?? null,
+      pipelineStage: p.crmStage || statusLabel(p),
+      temperature: (tempOverride as LeadsProfile["temperature"]) || deriveTemperature(p),
+      latestAtIso: p.statusUpdatedAt || p.latestAt || null,
     };
   });
 }

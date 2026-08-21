@@ -1773,12 +1773,20 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         skills = [skills]
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    # Only the job's explicitly-requested skills get their full content inlined
+    # below. The agent's full baseline roster used to be inlined too, which bolted
+    # ~108k tokens of skill manuals (closing, offers, DigiSign, WEBForms, ...) onto
+    # the front of EVERY admin run even when the task (e.g. a CMA) needed none of
+    # them. Now the baseline extras are emitted as a one-line on-demand index the
+    # agent can expand with skill_view() only when a task actually requires one.
+    run_specific = list(skill_names)
+    baseline_extra: list[str] = []
     agent_id = _job_agent_id(job)
     if agent_id:
         try:
             from elevate_cli.agent_hub import agent_effective_skills, agent_run_context
 
-            skill_names = agent_effective_skills(agent_id, skill_names)
+            effective = agent_effective_skills(agent_id, skill_names)
             agent_context = agent_run_context(agent_id)
         except Exception:
             logger.debug(
@@ -1787,11 +1795,25 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 agent_id,
                 exc_info=True,
             )
+            effective = skill_names
             agent_context = ""
         if agent_context:
             prompt = f"{agent_context}\n\n{prompt}"
+        if run_specific:
+            # Full-load only the run-specific worker chain; index the rest.
+            # Match on basename so namespaced dupes (real-estate-admin/cma vs cma)
+            # are not double-counted.
+            _run_base = {s.strip().lower().rsplit("/", 1)[-1] for s in run_specific}
+            baseline_extra = [
+                s for s in effective
+                if s.strip().lower().rsplit("/", 1)[-1] not in _run_base
+            ]
+            skill_names = run_specific
+        else:
+            # Generic agent run with no explicit job skills: keep prior behavior.
+            skill_names = effective
 
-    if not skill_names:
+    if not skill_names and not baseline_extra:
         return _scan_assembled_cron_prompt(prompt, job)
 
     from tools.skills_tool import skill_view
@@ -1848,6 +1870,45 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             f"'⚠️ Skill(s) not found and skipped: {', '.join(skipped)}']"
         )
         parts.insert(0, notice)
+
+    if baseline_extra:
+        # One-line on-demand index for the agent's baseline skills that were NOT
+        # inlined in full. Descriptions come from a cheap frontmatter-only scan.
+        try:
+            from tools.skills_tool import _find_all_skills
+
+            desc_by_name = {}
+            for entry in _find_all_skills():
+                ename = str(entry.get("name") or "").strip().lower()
+                if ename:
+                    desc_by_name[ename] = str(entry.get("description") or "").strip()
+        except Exception:
+            logger.debug("Cron job: failed to build skill index descriptions", exc_info=True)
+            desc_by_name = {}
+
+        seen_idx: set[str] = set()
+        index_lines: list[str] = []
+        for name in baseline_extra:
+            base = name.strip().lower().rsplit("/", 1)[-1]
+            if not base or base in seen_idx:
+                continue
+            seen_idx.add(base)
+            desc = desc_by_name.get(base) or desc_by_name.get(name.strip().lower()) or ""
+            desc = " ".join(desc.split())
+            if len(desc) > 180:
+                desc = desc[:177] + "..."
+            index_lines.append(f"- {base}: {desc}" if desc else f"- {base}")
+
+        if index_lines:
+            if parts:
+                parts.append("")
+            parts.append(
+                "[ADDITIONAL SKILLS AVAILABLE ON DEMAND] The skills below are NOT loaded in "
+                "full here. If this task genuinely requires one, call skill_view(\"<name>\") to "
+                "load its full instructions before using it. Do not load them speculatively."
+            )
+            parts.append("")
+            parts.extend(index_lines)
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])

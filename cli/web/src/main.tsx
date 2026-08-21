@@ -2,6 +2,9 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { markStartup } from "./lib/startup-performance";
 import "./index.css";
+// Canonical colour/type/control tokens. Must load after index.css so its :root
+// wins, and before any page stylesheet consumes the --ds-* tokens.
+import "./elevate-design-system.css";
 import App from "./App";
 import { SystemActionsProvider } from "./contexts/SystemActions";
 import { I18nProvider } from "./i18n";

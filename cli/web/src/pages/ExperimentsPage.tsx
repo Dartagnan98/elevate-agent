@@ -403,7 +403,7 @@ function Modal({
   }, [onClose]);
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
       onMouseDown={onClose}
     >
       <div

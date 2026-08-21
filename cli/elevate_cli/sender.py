@@ -167,6 +167,40 @@ def _format_phone(value: Any) -> str:
     return f"+{digits}"
 
 
+def _resolve_missing_phone(recipient):
+    """Recover a phone the enqueue step failed to attach, by matching the
+    recipient to a contact (exact email, else a uniquely-phoned same name)
+    that has one. Fixes 'recipient missing phone' when a draft was built
+    against a phoneless duplicate contact card."""
+    email = str((recipient or {}).get("email") or "").strip().lower()
+    name = str((recipient or {}).get("person_name") or "").strip()
+    if not email and not name:
+        return ""
+    try:
+        from elevate_cli.data import connect as _connect
+        with _connect() as _conn:
+            if email:
+                r = _conn.execute(
+                    "SELECT primary_phone FROM contacts "
+                    "WHERE lower(primary_email)=? AND coalesce(primary_phone,'')<>'' LIMIT 1",
+                    (email,),
+                ).fetchone()
+                if r and r["primary_phone"]:
+                    return str(r["primary_phone"])
+            if name:
+                rows = _conn.execute(
+                    "SELECT DISTINCT primary_phone FROM contacts "
+                    "WHERE lower(trim(display_name))=lower(?) AND coalesce(primary_phone,'')<>''",
+                    (name,),
+                ).fetchall()
+                phones = [str(x["primary_phone"]) for x in rows if x["primary_phone"]]
+                if len(phones) == 1:
+                    return phones[0]
+    except Exception as _exc:
+        _log.warning("sender._resolve_missing_phone failed: %s", _exc)
+    return ""
+
+
 def _haiku_recipient_descriptor(payload: dict[str, Any], channel: str) -> str:
     recipient = payload.get("recipient") or {}
     phone = _format_phone(recipient.get("phone"))
@@ -639,6 +673,8 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
     recipient = payload.get("recipient") or {}
     phone = _format_phone(recipient.get("phone"))
     if not phone:
+        phone = _format_phone(_resolve_missing_phone(recipient))
+    if not phone:
         raise SenderPermanentError("messages-native: recipient missing phone")
 
     force_sms = os.getenv("ELEVATE_FORCE_SMS", "").lower() in ("1", "true", "yes")
@@ -711,12 +747,152 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
 _imessage_native_dispatch = _messages_native_dispatch
 
 
+# Gmail send identity for outbound lead email. Skyleigh wants lead emails to go
+# from her own Gmail (2026-07-17 decision), reusing the gws CLI's OAuth so we
+# don't stand up a second Gmail credential. Override with ELEVATE_GMAIL_FROM.
+_GMAIL_FROM = os.getenv("ELEVATE_GMAIL_FROM", "skyleigh.mccallum@gmail.com")
+_GWS_BIN = os.getenv("ELEVATE_GWS_BIN", "/usr/local/bin/gws")
+
+
+def _gmail_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Send an approved lead email through Skyleigh's Gmail via the gws CLI.
+
+    Returns (gmail_message_id, info). The message id is the provider id stored
+    on the send_queue row, so a crash after send short-circuits to `sent`.
+    """
+    import base64
+    from email.message import EmailMessage
+
+    payload = row.get("payload") or {}
+    recipient = payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {}
+    to = str(payload.get("email") or recipient.get("email") or "").strip()
+    subject = str(payload.get("subject") or "").strip() or "Following up"
+    body = str(
+        payload.get("draft_text") or payload.get("text") or payload.get("body") or ""
+    ).strip()
+    if not to or "@" not in to:
+        raise SenderPermanentError(
+            f"gmail dispatch: no recipient email (payload keys={sorted(payload)})"
+        )
+    if not body:
+        raise SenderPermanentError("gmail dispatch: empty draft body")
+    if not os.path.exists(_GWS_BIN):
+        raise SenderPermanentError(f"gmail dispatch: gws CLI not found at {_GWS_BIN}")
+
+    msg = EmailMessage()
+    msg["From"] = _GMAIL_FROM
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+    env = dict(os.environ)
+    env["PATH"] = "/usr/local/bin:" + env.get("PATH", "")
+    try:
+        res = subprocess.run(
+            [
+                _GWS_BIN, "gmail", "users", "messages", "send",
+                "--params", json.dumps({"userId": "me"}),
+                "--json", json.dumps({"raw": raw}),
+            ],
+            capture_output=True, text=True, timeout=90, env=env, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SenderTransientError("gmail send timed out after 90s") from exc
+
+    out = (res.stdout or "").strip()
+    try:
+        data = json.loads(out) if out else {}
+    except Exception:
+        data = {}
+    mid = data.get("id")
+    if mid:
+        _log.info("sender.gmail_dispatch sent to=%s id=%s", to, mid)
+        return (str(mid), {"channel": "email", "to": to, "from": _GMAIL_FROM})
+
+    err_obj = data.get("error") if isinstance(data.get("error"), dict) else None
+    err_msg = (err_obj or {}).get("message") if err_obj else ((res.stderr or out).strip()[-280:] or "unknown error")
+    err_code = (err_obj or {}).get("code")
+    # 4xx (bad recipient / malformed) is permanent; anything else may be transient.
+    if isinstance(err_code, int) and 400 <= err_code < 500:
+        raise SenderPermanentError(f"gmail send rejected ({err_code}): {err_msg}")
+    raise SenderTransientError(f"gmail send failed: {err_msg}")
+
+
+def _log_outbound_to_crm(row: dict[str, Any], pmid: str, channel: str) -> None:
+    """Sync every client-facing send (email + text) to the CRM: writes a note on
+    the contact and bumps recency. Best-effort -- never breaks a send.
+    Skyleigh 2026-07-17: any email/text that goes out must show on the CRM."""
+    payload = row.get("payload") or {}
+    recipient = payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {}
+    contact_id = payload.get("contact_id") or recipient.get("contact_id")
+    to_email = str(payload.get("email") or recipient.get("email") or "").strip().lower()
+    if not contact_id and not to_email:
+        return
+    body = str(
+        payload.get("draft_text") or payload.get("text") or payload.get("body") or ""
+    ).strip()
+    preview = (body[:400] + "…") if len(body) > 400 else body
+    label = {"email": "Email", "sms": "Text", "social_dm": "DM"}.get(channel, channel)
+    subject = str(payload.get("subject") or "").strip()
+    header = f"[Sent {label}]"
+    if channel == "email" and subject:
+        header += f' "{subject}"'
+    note_body = f"{header}\n{preview}" if preview else header
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data.notes import write_note
+
+        with connect() as conn:
+            # The draft's contact_id can be stale (older-format id re-keyed by a
+            # later CRM import). Verify it exists; if not, resolve the live
+            # contact by recipient email. Skip quietly if neither resolves --
+            # notes.contact_id has an FK, so a bad id would raise.
+            resolved = None
+            if contact_id:
+                r = conn.execute("SELECT id FROM contacts WHERE id=?", (str(contact_id),)).fetchone()
+                if r:
+                    resolved = str(contact_id)
+            if resolved is None and to_email:
+                r = conn.execute(
+                    "SELECT id FROM contacts WHERE lower(primary_email)=? "
+                    "AND coalesce(primary_email,'')<>'' LIMIT 1",
+                    (to_email,),
+                ).fetchone()
+                if r:
+                    resolved = r["id"]
+            if resolved is None:
+                return
+            contact_id = resolved
+            # source_event_id has an FK to events(id); we have no event row for
+            # a raw send, so leave it null. Each queue row is dispatched once,
+            # so there is no duplicate-note risk from omitting it.
+            write_note(
+                conn,
+                contact_id=str(contact_id),
+                body=note_body,
+                author_kind="system",
+                author_name=f"outbound-{channel}",
+                push_to_crm=False,
+                daily_cap=False,
+            )
+            now = _now()
+            conn.execute(
+                "UPDATE contacts SET last_activity_at=?, updated_at=? WHERE id=?",
+                (now, now, str(contact_id)),
+            )
+            conn.commit()
+    except Exception:
+        _log.exception("sender: outbound CRM sync failed for contact %s", contact_id)
+
+
 def _wire_default_dispatchers() -> None:
     """Register dispatchers for outbound channels.
 
     - sms: native osascript (set ELEVATE_SMS_DISPATCHER=agent to use the agent).
-    - email / social_dm: low-tier-GPT agent dispatcher.
-    Disable both with `ELEVATE_SENDER_DISABLE_AGENT` so harnesses keep the stub.
+    - email: native Gmail via gws (set ELEVATE_EMAIL_DISPATCHER=agent to revert).
+    - social_dm: low-tier-GPT agent dispatcher.
+    Disable all with `ELEVATE_SENDER_DISABLE_AGENT` so harnesses keep the stub.
     """
     if os.getenv("ELEVATE_SENDER_DISABLE_AGENT"):
         return
@@ -725,8 +901,12 @@ def _wire_default_dispatchers() -> None:
         register_dispatcher("sms", _send_agent_dispatch)
     else:
         register_dispatcher("sms", _messages_native_dispatch)
-    for channel in ("email", "social_dm"):
-        register_dispatcher(channel, _send_agent_dispatch)
+    email_mode = (os.getenv("ELEVATE_EMAIL_DISPATCHER") or "gmail").lower()
+    if email_mode == "gmail":
+        register_dispatcher("email", _gmail_native_dispatch)
+    else:
+        register_dispatcher("email", _send_agent_dispatch)
+    register_dispatcher("social_dm", _send_agent_dispatch)
 
 
 _wire_default_dispatchers()
@@ -787,7 +967,14 @@ def dispatch_one(row: dict[str, Any]) -> dict[str, Any]:
             next_retry_at=_next_retry_at(attempts),
         )
 
-    return outreach_db.mark_sent(queue_id, pmid)
+    result = outreach_db.mark_sent(queue_id, pmid)
+    # Sync the send to the CRM (note + recency). Best-effort: a logging failure
+    # must never turn a real, delivered send into a retry/failure.
+    try:
+        _log_outbound_to_crm(row, pmid, channel)
+    except Exception:
+        _log.exception("sender: outbound CRM sync raised for queue %s", queue_id)
+    return result
 
 
 def tick(*, batch: int = 10, skip_channels: "set[str] | None" = None) -> dict[str, Any]:

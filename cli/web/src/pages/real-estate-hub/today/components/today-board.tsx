@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import DealDetailModal, { type Deal as AdminModalDeal } from "../../admin/components/deal-modal";
 import { ADMIN_PIPELINE, ADMIN_BUYER_PIPELINE } from "../../admin/admin-data";
@@ -144,6 +144,8 @@ export type TodayBoardProps = {
   greetingSub?: string;
   pulse: TodayPulseStat[];
   priority: TodayPriorityItem[];
+  priorityTotal?: number;
+  draftsWaitingTotal?: number;
   hourBuckets: TodayHourBucket[];
   dayBuckets: TodayDayBucket[];
   scheduled: TodayScheduledJob[];
@@ -161,6 +163,7 @@ export type TodayBoardProps = {
   error?: string | null;
   onRefresh?: () => void;
   onDraftAction?: (action: "approve" | "skip", draftId: string) => void | Promise<void>;
+  themeControl?: ReactNode;
 };
 
 function greetingForNow(): string {
@@ -258,7 +261,7 @@ function Sparkline({ values, tone }: { values: number[]; tone?: TodayPulseStat["
   );
 }
 
-function TodayPulse({ stats, greeting, name, sub }: { stats: TodayPulseStat[]; greeting: string; name: string; sub: string }) {
+function TodayPulse({ stats, greeting, name, sub, themeControl }: { stats: TodayPulseStat[]; greeting: string; name: string; sub: string; themeControl?: ReactNode }) {
   return (
     <section className="td-pulse" aria-label="Today pulse">
       <header className="td-pulse-head">
@@ -266,6 +269,7 @@ function TodayPulse({ stats, greeting, name, sub }: { stats: TodayPulseStat[]; g
           <h2 className="td-pulse-greet">{greeting}, {name}</h2>
           <p className="td-pulse-sub">{sub}</p>
         </div>
+        {themeControl}
       </header>
       <div className="td-pulse-grid">
         {stats.map((s) => (
@@ -303,13 +307,20 @@ function PulseCard({ stat }: { stat: TodayPulseStat }) {
   );
 }
 
-function PriorityQueue({ items }: { items: TodayPriorityItem[] }) {
+function PriorityQueue({ items, total }: { items: TodayPriorityItem[]; total?: number }) {
+  const all = total ?? items.length;
   return (
     <section className="td-card td-priority" aria-label="Needs you now">
       <header className="td-card-head">
         <div>
           <h3 className="td-card-title">Needs you now</h3>
-          <p className="td-card-sub">{items.length === 0 ? "Inbox is clear" : items.length + " waiting"}</p>
+          <p className="td-card-sub">
+            {all === 0
+              ? "Inbox is clear"
+              : items.length < all
+                ? `Showing ${items.length} of ${all} drafts waiting`
+                : `${all} drafts waiting`}
+          </p>
         </div>
         <Link to="/leads" className="td-card-link mono">
           Open leads
@@ -390,9 +401,9 @@ function HourlyChart({ buckets }: { buckets: TodayHourBucket[] }) {
         <svg className="td-hourly-svg" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
           {[0.25, 0.5, 0.75].map((p) => (
             <line key={p} x1={pad.l} x2={pad.l + innerW} y1={pad.t + innerH * p} y2={pad.t + innerH * p}
-              stroke="rgba(255,255,255,0.04)" strokeDasharray="2 4" />
+              stroke="color-mix(in srgb, var(--fg) 6%, transparent)" strokeDasharray="2 4" />
           ))}
-          <line x1={pad.l} x2={pad.l + innerW} y1={pad.t + innerH} y2={pad.t + innerH} stroke="rgba(255,255,255,0.08)" />
+          <line x1={pad.l} x2={pad.l + innerW} y1={pad.t + innerH} y2={pad.t + innerH} stroke="color-mix(in srgb, var(--fg) 12%, transparent)" />
           <polygon fill="var(--status-info)" fillOpacity="0.14" points={areaStr(inPts)} />
           <polyline fill="none" stroke="var(--status-info)" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" points={polyStr(inPts)} />
           <polygon fill="var(--fg-muted)" fillOpacity="0.08" points={areaStr(outPts)} />
@@ -408,7 +419,7 @@ function HourlyChart({ buckets }: { buckets: TodayHourBucket[] }) {
           {hourLabels.map((hr) => {
             const x = pad.l + hr * stepX;
             return (
-              <text key={hr} x={x} y={200 - 8} fontSize="9" fontFamily="Geist Mono, monospace" fill="rgba(255,255,255,0.34)" textAnchor="middle" letterSpacing="0.06em">
+              <text key={hr} x={x} y={200 - 8} fontSize="9" fontFamily="var(--ds-font)" fill="var(--fg-faint)" textAnchor="middle" letterSpacing="0.06em">
                 {hr === 0 ? "12A" : hr === 12 ? "12P" : hr === 23 ? "11P" : hr < 12 ? hr + "A" : hr - 12 + "P"}
               </text>
             );
@@ -578,7 +589,7 @@ function PipelineVelocity({ stages }: { stages: TodayPipelineStage[] }) {
   );
 }
 
-function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDraftAction?: TodayBoardProps["onDraftAction"] }) {
+function QuickApprovals({ drafts, onDraftAction, draftsWaitingTotal }: { drafts: TodayDraft[]; onDraftAction?: TodayBoardProps["onDraftAction"]; draftsWaitingTotal?: number }) {
   const [skipped, setSkipped] = useState<Set<string>>(() => new Set());
   const [approved, setApproved] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
@@ -609,7 +620,9 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
           <p className="td-card-sub">
             {visible.length === 0
               ? "Inbox is clear — nothing else queued."
-              : visible.length + " draft" + (visible.length === 1 ? "" : "s") + " ready · auto-send paused"}
+              : draftsWaitingTotal && visible.length < draftsWaitingTotal
+                ? `Showing ${visible.length} of ${draftsWaitingTotal} drafts waiting · auto-send paused`
+                : `${visible.length} drafts waiting · auto-send paused`}
           </p>
         </div>
         <div className="td-card-link-group">
@@ -931,7 +944,7 @@ function LeadSourceBreakdown({ data }: { data: TodaySourceBreakdown }) {
               <path key={s.id} d={s.d} fill={`var(--${s.tone})`} opacity={i === 0 ? 1 : 0.78 - i * 0.14} />
             ))}
             <text x="64" y="62" textAnchor="middle" fontFamily="Anthropic Sans Display, Geist" fontSize="22" fontWeight="600" fill="var(--fg)">{data.total}</text>
-            <text x="64" y="78" textAnchor="middle" fontFamily="Geist Mono, monospace" fontSize="9" fill="var(--fg-faint)" letterSpacing="0.1em">LEADS</text>
+            <text x="64" y="78" textAnchor="middle" fontFamily="var(--ds-font)" fontSize="9" fill="var(--fg-faint)" letterSpacing="0.1em">LEADS</text>
           </svg>
         </div>
         <ul className="td-mix-legend">
@@ -963,12 +976,12 @@ export function TodayBoard(props: TodayBoardProps) {
             <span>{props.error}</span>
           </div>
         ) : null}
-        <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} />
+        <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} themeControl={props.themeControl} />
         <PipelineVelocity stages={props.pipeline} />
         <ActiveDeals deals={props.deals} adminDealsById={props.adminDealsById} />
         <div className="td-two">
-          <PriorityQueue items={props.priority} />
-          <QuickApprovals drafts={props.drafts} onDraftAction={props.onDraftAction} />
+          <PriorityQueue items={props.priority} total={props.priorityTotal} />
+          <QuickApprovals drafts={props.drafts} onDraftAction={props.onDraftAction} draftsWaitingTotal={props.draftsWaitingTotal} />
         </div>
         <DayShape hourBuckets={props.hourBuckets} dayBuckets={props.dayBuckets} />
         <div className="td-two">

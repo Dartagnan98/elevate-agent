@@ -104,13 +104,16 @@
   --fg-muted: #B5B5B5;
   --fg-faint: #A0A0A0;
   --fg-dim: #8A8A8A;
-  --accent: #8A8A8A;
+  /* Brand accent (2026-07-27). Was neutral grey #8A8A8A — with the page-level
+     :root overrides removed this is now the app-wide default, so it must be a
+     brand colour, not chrome grey. */
+  --accent: #5E8AD0;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --accent-ring: color-mix(in srgb, var(--accent) 28%, transparent);
   --accent-glow: color-mix(in srgb, var(--accent) 40%, transparent);
-  --accent-fg: #0F0F0F;
-  --accent-vivid: #6A6A6A;
-  --status-done: #4FC38A;
+  --accent-fg: #FFFFFF;
+  --accent-vivid: #4A76BC;
+  --status-done: #2f8a5b;   /* brand green (2026-07-27), was mint #4FC38A */
   --status-work: var(--accent);
   --status-warn: #E0B257;
   --status-neon-orange: #ff7a18;
@@ -166,6 +169,131 @@
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* ─────────────────────────────────────────────────────────────
+   GLOBAL THEME OVERRIDES — re-skin the WHOLE dashboard (every page,
+   from first paint) by redefining the design tokens scoped to the
+   document root. App.tsx sets data-app-theme={light|medium|dark} on
+   <html> on mount from localStorage (key "elevate-today-theme");
+   the Today header toggle rewrites it live. Default is "medium".
+   Canvas = --bg / --bg-1 (page background), card = --bg-2 (elevated).
+   Brand accents (terracotta + blue) are identical in all 3 themes.
+   These must live in index.css (always loaded), not today.css (only
+   loaded on the Today route), so non-Today pages theme correctly.
+───────────────────────────────────────────────────────────── */
+
+/* Light — "Warm Paper" */
+:root[data-app-theme="light"],
+html[data-app-theme="light"] {
+  --bg:            #F7F3EC;
+  --bg-1:          #F7F3EC;
+  --bg-2:          #FFFDF9;
+  --fg:            #182848;
+  --fg-muted:      #7A6F60;
+  --fg-faint:      #A99C88;
+  --fg-dim:        #A99C88;
+  --border:        #ECE3D4;
+  --border-soft:   #ECE3D4;
+  --bg-3:          #F2EFE9;
+  --bg-soft:       #EFEAE0;
+  --border-strong: #D8CEBC;
+  --status-error:  #C46340;
+  --status-warn:   #C46340;
+  --status-done:   #5E8AD0;
+  --status-info:   #5E8AD0;
+
+  /* Foundation bases that feed the shadcn @theme inline --color-* family
+     (chat + Social/Automations/Sessions/Skills surfaces). Overriding the
+     bases re-themes every color-mix()-derived --color-* token at runtime. */
+  --background-base: #F7F3EC;
+  /* Keep --background (used by bg-background utility) tracking the themed base,
+     or every solid input/textarea/select renders near-black in light themes. */
+  --background:      var(--background-base);
+  --midground-base:  #182848;
+  --midground:       #182848;
+  /* Hardcoded --color-* tokens that don't derive from the bases — remap them. */
+  --color-border:           var(--border);
+  --color-input:            var(--border);
+  --color-primary:          #5E8AD0;
+  --color-ring:             #5E8AD0;
+  --color-destructive:      #C46340;
+  --color-muted-foreground: #7A6F60;
+}
+
+/* Medium — "Light Grey" (default) */
+:root[data-app-theme="medium"],
+html[data-app-theme="medium"] {
+  --bg:            #E8E9EC;
+  --bg-1:          #E8E9EC;
+  --bg-2:          #FFFFFF;
+  --fg:            #182848;
+  --fg-muted:      #697079;
+  --fg-faint:      #99A0A9;
+  --fg-dim:        #99A0A9;
+  --border:        #DBDEE3;
+  --border-soft:   #DBDEE3;
+  --bg-3:          #F1F3F6;
+  --bg-soft:       #DFE2E6;
+  --border-strong: #C7CCD3;
+  --status-error:  #C46340;
+  --status-warn:   #C46340;
+  --status-done:   #5E8AD0;
+  --status-info:   #5E8AD0;
+
+  /* Foundation bases feeding shadcn @theme inline --color-* (see light block). */
+  --background-base: #E8E9EC;
+  --background:      var(--background-base);
+  --midground-base:  #182848;
+  --midground:       #182848;
+  --color-border:           var(--border);
+  --color-input:            var(--border);
+  --color-primary:          #5E8AD0;
+  --color-ring:             #5E8AD0;
+  --color-destructive:      #C46340;
+  --color-muted-foreground: #697079;
+}
+
+/* Dark — "Charcoal" */
+:root[data-app-theme="dark"],
+html[data-app-theme="dark"] {
+  --bg:            #1E1E22;
+  --bg-1:          #1E1E22;
+  --bg-2:          #1B2236;
+  --fg:            #ECF0FA;
+  --fg-muted:      #94A0BC;
+  --fg-faint:      #65718E;
+  --fg-dim:        #65718E;
+  --border:        #2A3450;
+  --border-soft:   #2A3450;
+  --bg-3:          #232C44;
+  --bg-soft:       #161620;
+  --border-strong: #364260;
+  --status-error:  #C46340;
+  --status-warn:   #C46340;
+  --status-done:   #5E8AD0;
+  --status-info:   #5E8AD0;
+
+  /* Foundation bases feeding shadcn @theme inline --color-* (see light block).
+     Dark stays close to the original near-black defaults. */
+  --background-base: #1E1E22;
+  --background:      var(--background-base);
+  --midground-base:  #ECF0FA;
+  --midground:       color-mix(in srgb, #ECF0FA 100%, transparent);
+  --color-border:           var(--border);
+  --color-input:            var(--border);
+  --color-primary:          #5E8AD0;
+  --color-ring:             #5E8AD0;
+  --color-destructive:      #C46340;
+  --color-muted-foreground: var(--fg-muted);
+}
+
+/* Elevation Real Estate logo: blue on light/medium themes, white on dark. */
+.elev-logo-white { display: none; }
+.elev-logo-blue { display: block; }
+:root[data-app-theme="dark"] .elev-logo-blue,
+html[data-app-theme="dark"] .elev-logo-blue { display: none; }
+:root[data-app-theme="dark"] .elev-logo-white,
+html[data-app-theme="dark"] .elev-logo-white { display: block; }
+
 /* Theme tokens cascade into the document root so every descendant inherits
    the font stack, base size, and letter spacing without explicit calls. */
 html {
@@ -191,7 +319,9 @@ body {
   user-select: text;
 }
 
-code, kbd, pre, samp, .font-mono, .font-mono-ui {
+/* Genuine code/log surfaces keep the mono face. .font-mono-ui does NOT —
+   see the all-sans rule (2026-07-27) below. */
+code, kbd, pre, samp, .font-mono {
   font-family: var(--theme-font-mono);
 }
 
@@ -1604,6 +1734,62 @@ html .font-courier {
   color: var(--fg);
 }
 
+/* Ozzie greeting — friendly mascot that replaces the usage card on a new chat. */
+.ozzie-greeting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  padding-top: 18px;
+}
+.ozzie-bubble {
+  position: relative;
+  max-width: 430px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  padding: 16px 24px;
+  box-shadow: 0 8px 26px rgba(24, 40, 72, 0.12);
+  color: var(--fg);
+}
+.ozzie-bubble p { margin: 0; font-size: 15px; line-height: 1.55; }
+.ozzie-bubble-lead { font-weight: 650; margin-bottom: 4px !important; }
+.ozzie-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  transform: translateX(-50%) rotate(45deg);
+  width: 15px;
+  height: 15px;
+  background: var(--bg);
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  border-bottom-right-radius: 3px;
+}
+.ozzie-img {
+  width: 172px;
+  height: auto;
+  margin-top: 8px;
+  filter: drop-shadow(0 10px 18px rgba(24, 40, 72, 0.20));
+  animation: ozzie-float 4s ease-in-out infinite;
+}
+.ozzie-img.thinking {
+  animation: ozzie-bob 1s ease-in-out infinite;
+}
+@keyframes ozzie-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+@keyframes ozzie-bob {
+  0%, 100% { transform: translateY(0) rotate(-2.5deg); }
+  50% { transform: translateY(-5px) rotate(2.5deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ozzie-img, .ozzie-img.thinking { animation: none; }
+}
+
 .chat-start-title {
   display: flex;
   align-items: center;
@@ -2643,10 +2829,13 @@ html .font-courier {
 }
 
 /* Structural labels — column headers, timestamps, key shortcuts, status
-   codes. Claude Code dashboard aesthetic: micro-text in mono, full-width sans
-   above. Numbers stay tabular for column alignment. */
+   codes. All-sans rule (2026-07-27): Skyleigh chose the Transaction Kit
+   wizard's treatment — bold uppercase SANS micro-labels, not a typewriter
+   face. Numbers stay tabular for column alignment. */
 .font-mono-ui {
-  font-family: var(--theme-font-mono);
+  font-family: var(--ds-font);
+  font-weight: 700;
+  letter-spacing: var(--ds-label-track);
   font-feature-settings: "tnum" on, "lnum" on;
 }
 
@@ -2754,11 +2943,11 @@ code { font-size: 0.875rem; }
   --color-accent-foreground: var(--midground);
   --color-destructive: #E07570;
   --color-destructive-foreground: var(--background-base);
-  --color-success: #4FC38A;
+  --color-success: #2f8a5b;
   --color-warning: #E0B257;
   --color-border: #2A2A2A;
   --color-input: #2A2A2A;
-  --color-ring: #B0B0B0;
+  --color-ring: #5E8AD0;   /* brand focus ring (2026-07-27), was grey */
   --color-popover: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
   --color-popover-foreground: var(--midground);
 
@@ -2967,9 +3156,11 @@ code { font-size: 0.875rem; }
   mix-blend-mode: plus-lighter;
 }
 
-/* Monospace stack for dense data readouts, code, and terminal-adjacent UI. */
+/* Dense data readouts. Sans per the all-sans rule (2026-07-27); tabular
+   figures preserved so columns still align. */
 .font-mono-ui {
-  font-family: var(--theme-font-mono);
+  font-family: var(--ds-font);
+  font-feature-settings: "tnum" on, "lnum" on;
 }
 
 /* Subtle grain overlay for badges. */

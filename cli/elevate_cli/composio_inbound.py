@@ -897,6 +897,21 @@ def pull_toolkit(toolkit: str, *, page_size: int = 50, max_pages: int = 5) -> di
         )
         if not account_id:
             continue
+
+        # Skip connections that the provider has marked dead. A REVOKED/EXPIRED
+        # gmail account (OAuth pulled or lapsed) returns HTTP 4xx on every
+        # execute_tool call, so polling it each cycle just spams the logs with
+        # "execute_tool failed: HTTP 422" forever. The user must reconnect the
+        # account (Config → Composio) to resume inbound polling.
+        status = str(account.get("status") or account.get("connection_status") or "").strip().upper()
+        if status in ("REVOKED", "EXPIRED", "FAILED", "INACTIVE", "DELETED", "DISABLED"):
+            _warn_repeating(
+                ("dead_connection", toolkit, account_id, status),
+                "composio_inbound[%s/%s]: skipping inbound — connection status %s (reconnect to resume)",
+                toolkit, account_id, status,
+            )
+            continue
+
         account_user_id = account.get("user_id") or account.get("entity_id") or None
 
         if kind == "single":

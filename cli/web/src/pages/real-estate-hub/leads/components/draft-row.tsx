@@ -17,15 +17,48 @@ export function DraftRow({
   expanded: boolean;
   onToggle: () => void;
   onExpand: () => void;
-  onAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void;
+  onAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void;
   busy?: boolean;
   onEditTemplate?: () => void;
 }) {
   const [editText, setEditText] = useState(draft.body);
+  // Approve & Schedule: when open, show a date/time picker; on confirm the
+  // chosen local time is sent to the backend as UTC so the send is held.
+  const [scheduling, setScheduling] = useState(false);
+  const [whenLocal, setWhenLocal] = useState("");
+  // Channel switch (email<->text) state: error surfaces inline when the target
+  // has no usable recipient (backend guard returns 400).
+  const [switchErr, setSwitchErr] = useState<string | null>(null);
+
+  const chanLc = (draft.channel || "").toLowerCase();
+  const isText = ["sms", "text", "imessage"].includes(chanLc);
+  const isEmail = ["email", "gmail"].includes(chanLc);
+  const channelSwitchable = isText || isEmail;
+  const currentChannel: "text" | "email" | null = isText ? "text" : isEmail ? "email" : null;
+
+  const switchChannel = async (target: "sms" | "email") => {
+    if (!onAction) return;
+    setSwitchErr(null);
+    try {
+      // draft.channel carries the TARGET the backend switches to.
+      await Promise.resolve(onAction("channel", { ...draft, channel: target }));
+    } catch (e) {
+      setSwitchErr((e as Error)?.message || "Couldn't switch channel.");
+    }
+  };
 
   useEffect(() => {
     setEditText(draft.body);
   }, [draft.id, draft.body]);
+
+  // datetime-local default: tomorrow 9:00 AM local.
+  const defaultWhen = () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
 
   const dirty = editText.trim() !== draft.body.trim();
   // Always act on the CURRENT edited text — approving with the original body was
@@ -52,6 +85,30 @@ export function DraftRow({
         {expanded ? (
           <div className="lb-draft-expand">
             <div className="lb-draft-recipient mono">To · {draft.name} · {draft.source}</div>
+            {channelSwitchable && (
+              <div className="lb-chan-toggle" onClick={(e) => e.stopPropagation()}>
+                <span className="lb-chan-label">Send via</span>
+                <div className="lb-chan-seg">
+                  <button
+                    type="button"
+                    className={"lb-chan-opt" + (currentChannel === "text" ? " on" : "")}
+                    disabled={busy || !onAction || currentChannel === "text"}
+                    onClick={() => switchChannel("sms")}
+                  >
+                    Text
+                  </button>
+                  <button
+                    type="button"
+                    className={"lb-chan-opt" + (currentChannel === "email" ? " on" : "")}
+                    disabled={busy || !onAction || currentChannel === "email"}
+                    onClick={() => switchChannel("email")}
+                  >
+                    Email
+                  </button>
+                </div>
+                {switchErr && <span className="lb-chan-err">{switchErr}</span>}
+              </div>
+            )}
             <textarea
               className="lb-draft-edit"
               value={editText}
@@ -94,30 +151,81 @@ export function DraftRow({
           </div>
         ) : null}
       </div>
-      <div className="lb-draft-actions">
-        <button
-          type="button"
-          className="lb-btn ghost sm"
-          disabled={busy || !onAction}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAction?.("skip", draft);
-          }}
-        >
-          {busy ? "…" : "Skip"}
-        </button>
-        <button
-          type="button"
-          className="lb-btn primary sm"
-          disabled={busy || !onAction}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAction?.("approve", editedDraft);
-          }}
-        >
-          {busy ? "…" : "Approve"}
-        </button>
-      </div>
+      {scheduling ? (
+        <div className="lb-draft-actions lb-draft-schedule" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="datetime-local"
+            className="lb-schedule-input"
+            value={whenLocal}
+            min={defaultWhen().slice(0, 10) + "T00:00"}
+            onChange={(e) => setWhenLocal(e.target.value)}
+          />
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy}
+            onClick={(e) => { e.stopPropagation(); setScheduling(false); }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="lb-btn primary sm"
+            disabled={busy || !onAction || !whenLocal}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!whenLocal) return;
+              const when = new Date(whenLocal);
+              if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
+                window.alert("Pick a date and time in the future.");
+                return;
+              }
+              onAction?.("approve", editedDraft, when.toISOString());
+              setScheduling(false);
+            }}
+          >
+            {busy ? "…" : "Schedule"}
+          </button>
+        </div>
+      ) : (
+        <div className="lb-draft-actions">
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy || !onAction}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAction?.("skip", draft);
+            }}
+          >
+            {busy ? "…" : "Skip"}
+          </button>
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy || !onAction}
+            onClick={(e) => {
+              e.stopPropagation();
+              setWhenLocal(defaultWhen());
+              setScheduling(true);
+            }}
+            title="Approve now but hold the send until a time you pick"
+          >
+            Approve &amp; Schedule
+          </button>
+          <button
+            type="button"
+            className="lb-btn primary sm"
+            disabled={busy || !onAction}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAction?.("approve", editedDraft);
+            }}
+          >
+            {busy ? "…" : "Approve"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -23,6 +23,16 @@ class _ActionRunApproveBody(BaseModel):
     runNow: bool = True
 
 
+class _ActionRunAnswerBody(BaseModel):
+    # Fillable "Waiting on you" cards submit the operator's typed field answers
+    # here (keyed by field label) plus runNow. Restored 2026-06-26 — the route
+    # was wiped by the 1.2.59 update and was missing from the source clone, so
+    # every fillable card 405'd on submit. Re-applied/protected by
+    # ~/skyleigh-tools/scripts/elevate-reapply-after-update.sh.
+    answers: Dict[str, str] = {}
+    runNow: bool = True
+
+
 class _AdminActionCreateBody(BaseModel):
     name: str
     trigger: str
@@ -255,6 +265,62 @@ def create_admin_actions_router(
         except Exception as exc:
             _log.exception("POST /api/admin/action-runs/%s/approve failed", run_id)
             raise HTTPException(status_code=500, detail=f"Approve action run failed: {exc}")
+
+    @router.post("/api/admin/action-runs/{run_id}/answer")
+    def post_admin_action_run_answer(run_id: str, body: _ActionRunAnswerBody):
+        """Submit a fillable card's typed field answers, then resume the run.
+
+        The frontend posts {answers: {<field label>: <value>}, runNow} for any
+        "Waiting on you" card that has requiredFields. We record the answers onto
+        the run's human_prompt_json.providedAnswers (where the re-dispatched skill
+        reads them) and then take the normal approval/re-dispatch path. Without
+        this route fillable cards 405 on submit and stay stuck forever.
+        """
+        try:
+            require_admin_setup_ready_for_launch()
+            import json as _json
+            from elevate_cli.data import approve_action_run, connect
+
+            with connect() as conn:
+                row = conn.execute(
+                    "SELECT human_prompt_json FROM admin_action_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise LookupError(f"action run {run_id!r} not found")
+                raw = row["human_prompt_json"]
+                if isinstance(raw, dict):
+                    prompt = dict(raw)
+                elif isinstance(raw, str) and raw.strip():
+                    try:
+                        prompt = _json.loads(raw)
+                    except Exception:
+                        prompt = {}
+                else:
+                    prompt = {}
+                if not isinstance(prompt, dict):
+                    prompt = {}
+                prompt["providedAnswers"] = dict(body.answers or {})
+                conn.execute(
+                    "UPDATE admin_action_runs SET human_prompt_json=? WHERE id=?",
+                    (_json.dumps(prompt), run_id),
+                )
+                # Re-use the approval path: stamps the decision + re-dispatches a
+                # fresh worker, which reads providedAnswers off the prompt.
+                return approve_action_run(
+                    conn,
+                    run_id,
+                    approved=True,
+                    actor=web_actor,
+                    create_cron_job=body.runNow,
+                )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("POST /api/admin/action-runs/%s/answer failed", run_id)
+            raise HTTPException(status_code=500, detail=f"Answer action run failed: {exc}")
 
     @router.get("/api/admin/tasks")
     def get_admin_tasks(

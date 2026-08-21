@@ -13,7 +13,7 @@
 
 /* ── reset (scoped) ── */
 .hub-root, .hub-root *, .hub-root *::before, .hub-root *::after { box-sizing: border-box; }
-.hub-root .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.hub-root .mono { font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; }
 .hub-root ::selection { background: #5d5d5d; color: #ffffff; }
 
 /* ── design tokens (scoped to the page root so they never override the app) ── */
@@ -30,17 +30,19 @@
   --fg-faint:      #8A8A8A;
   --fg-dim:        #8A8A8A;
 
-  --accent:        #8A8A8A;
-  --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
-  --accent-fg:     #0F0F0F;
+  /* Brand tokens (2026-07-27) — was a neutral grey accent + mint --status-done,
+     neither of which is Elevation. See src/elevate-design-system.css. */
+  --accent:        var(--ds-blue);
+  --accent-soft:   var(--ds-info-bg);
+  --accent-fg:     #ffffff;
 
-  --status-done:   #4FC38A;
-  --status-warn:   #E0B257;
-  --status-error:  #E07570;
-  --status-idle:   #6E6E6E;
-  --status-info:   #7AA9E5;
+  --status-done:   var(--ds-done);
+  --status-warn:   var(--ds-warn);
+  --status-error:  var(--ds-error);
+  --status-idle:   var(--ds-idle);
+  --status-info:   var(--ds-blue);
 
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: var(--ds-ease);
 
   /* density defaults (the design exposed [data-density] presets via a tweaks
      tool we stripped; bake in the "comfortable" preset as the page default) */
@@ -48,15 +50,12 @@
   --hub-card-pad: 18px;
 
   color: var(--fg);
-  font: 13.5px/1.55 "Anthropic Sans Display", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font: 13.5px/1.55 var(--ds-font);
   -webkit-font-smoothing: antialiased;
 }
-.hub-root[data-accent="slate"]    { --accent: #7B9CE5; }
-.hub-root[data-accent="sage"]     { --accent: #7FB0A2; }
-.hub-root[data-accent="lilac"]    { --accent: #A299D2; }
-.hub-root[data-accent="sand"]     { --accent: #C9A878; }
-.hub-root[data-accent="platinum"] { --accent: #B0B0B0; }
-.hub-root[data-accent="graphite"] { --accent: #8A8A8A; }
+/* [data-accent] swatch palettes removed 2026-07-27 — upstream chrome, not
+   Elevation brand, and the source of stray lilac/sage/sand tints. They also
+   outranked the brand alias above, so the hub could silently go grey. */
 
 .hub-root[data-density="compact"]     { --hub-gap: 22px; --hub-card-pad: 16px; }
 .hub-root[data-density="comfortable"] { --hub-gap: 30px; --hub-card-pad: 18px; }
@@ -223,7 +222,7 @@
   color: var(--fg); font: 400 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   transition: border-color 120ms var(--ease-out), background 120ms var(--ease-out);
 }
-.hub-input.mono { font-family: "Geist Mono", monospace; font-size: 12.5px; }
+.hub-input.mono { font-family: var(--ds-font); font-feature-settings: "tnum" on, "lnum" on; font-size: 12.5px; }
 .hub-input[type="number"] { appearance: textfield; }
 .hub-input[type="number"]::-webkit-outer-spin-button,
 .hub-input[type="number"]::-webkit-inner-spin-button { appearance: none; margin: 0; }
@@ -1029,7 +1028,7 @@
   display: inline-flex; align-items: center; height: 20px;
   padding: 0 8px; border-radius: 999px;
   border: 1px solid var(--border-soft);
-  color: var(--fg-faint); font: 600 10px/1 "Geist Mono", monospace;
+  color: var(--fg-faint); font: 700 10px/1 var(--ds-font); letter-spacing: var(--ds-label-track);
   text-transform: uppercase;
 }
 .hub-pack-source.ok { color: var(--status-done); border-color: color-mix(in srgb, var(--status-done) 35%, transparent); }

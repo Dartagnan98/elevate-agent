@@ -3,11 +3,11 @@ import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { api } from "@/lib/api";
 import type {
   OutreachTemplate,
-  SourceInboxProfileStatus,
   SourceInboxResponse,
   SourceInboxSentItem,
 } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "./leads-data";
+import { pipelineSlugForLabel } from "./pipeline-stages";
 import {
   computeLeadsKpis,
   mapLeadsDrafts,
@@ -36,16 +36,11 @@ export function sourceInboxDebugNote(inbox: SourceInboxResponse | null): string 
   return debug.fallbackError ? `${note} | fallback: ${debug.fallbackError}` : `${note} | fallback`;
 }
 
-export function sourceInboxProfileStatusForLabel(label: string): SourceInboxProfileStatus | null | undefined {
-  const key = label.trim().toLowerCase();
-  if (key === "no status") return null;
-  if (key === "new lead") return "new_lead";
-  if (key === "follow up") return "follow_up";
-  if (key === "ghosting") return "ghosting";
-  if (key === "dead") return "dead";
-  if (key === "closed seller") return "closed_seller";
-  if (key === "closed buyer") return "closed_buyer";
-  return undefined;
+// Map an operator-picked status-pill label to the slug to persist. Handles
+// Skyleigh's 9 stages plus the legacy labels older rows may still show.
+// Returns null to clear, undefined for an unrecognized label.
+export function sourceInboxProfileStatusForLabel(label: string): string | null | undefined {
+  return pipelineSlugForLabel(label);
 }
 
 export function useLeadsBoardData() {
@@ -54,6 +49,7 @@ export function useLeadsBoardData() {
   const setSourceInbox = data.setSourceInbox;
   const [templatesRaw, setTemplatesRaw] = useState<OutreachTemplate[] | null>(null);
   const [sentRaw, setSentRaw] = useState<SourceInboxSentItem[] | null>(null);
+  const [tempOverrides, setTempOverrides] = useState<Record<string, string>>({});
 
   const refreshTemplates = useCallback(async () => {
     const res = await api.getOutreachTemplates();
@@ -82,6 +78,14 @@ export function useLeadsBoardData() {
       })
       .catch(() => {
         if (!cancelled) setSentRaw([]);
+      });
+    api
+      .getAdminContactTemperatures()
+      .then((res) => {
+        if (!cancelled) setTempOverrides(res.overrides ?? {});
+      })
+      .catch(() => {
+        if (!cancelled) setTempOverrides({});
       });
     return () => {
       cancelled = true;
@@ -125,8 +129,8 @@ export function useLeadsBoardData() {
     [inbox],
   );
   const profiles = useMemo(
-    () => (inbox ? mapLeadsProfiles(inbox.profiles ?? []) : undefined),
-    [inbox],
+    () => (inbox ? mapLeadsProfiles(inbox.profiles ?? [], tempOverrides) : undefined),
+    [inbox, tempOverrides],
   );
   const pipeline = useMemo(
     () =>
@@ -169,11 +173,20 @@ export function useLeadsBoardData() {
   );
 
   const handleDraftAction = useCallback(
-    async (action: LeadsDraftAction, draft: LeadsDraft) => {
+    async (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => {
       if (!draft.sourceId || !draft.taskId) throw new Error("Draft is missing source/task identifiers.");
       try {
+        // For a channel switch, draft.channel carries the TARGET channel the
+        // toggle picked (e.g. "sms" or "email"); everything else sends the body.
+        const options =
+          action === "channel"
+            ? { channel: draft.channel }
+            : scheduledAt
+              ? { scheduledAt }
+              : undefined;
         const res = await api.updateSourceInboxDraft(
           draft.sourceId, draft.taskId, action, draft.body ?? "",
+          options,
         );
         setSourceInbox(res);
       } catch (err) {
@@ -216,6 +229,29 @@ export function useLeadsBoardData() {
     [setSourceInbox],
   );
 
+  // Bulk tag/segment/pipeline change from the redesigned Leads table selection
+  // bar. Fans the selected profiles out to their contactIds, calls the bulk
+  // endpoint, then refreshes so the board reflects the write.
+  const handleBulkUpdate = useCallback(
+    async (
+      profiles: LeadsProfile[],
+      action: "tags" | "segments" | "pipeline",
+      value: unknown,
+      mode?: "add" | "replace" | "remove",
+    ) => {
+      const contactIds = Array.from(
+        new Set(profiles.flatMap((p) => p.contactIds ?? []).filter(Boolean)),
+      );
+      if (contactIds.length === 0) {
+        throw new Error("None of the selected leads have a linked contact to update.");
+      }
+      const res = await api.bulkUpdateContacts(contactIds, action, value, mode);
+      await data.refresh({ force: true });
+      return res;
+    },
+    [data],
+  );
+
   return {
     data,
     inbox,
@@ -231,6 +267,7 @@ export function useLeadsBoardData() {
     handleDraftActionComplete,
     handleProfileFavoriteChange,
     handleProfileStatusChange,
+    handleBulkUpdate,
     handleToggleDirection,
     refreshSent,
     templateMutations,

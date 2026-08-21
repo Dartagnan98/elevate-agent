@@ -556,33 +556,51 @@ def _extract_output_tail(
     return tail
 
 
-def _looks_like_error_output(content: str) -> bool:
+def _looks_like_error_output(content: Any) -> bool:
     """Conservative stderr/error detector for tool-result previews.
 
     The old heuristic flagged any preview containing the substring "error",
     which painted perfectly normal terminal/json output red.  We now only
     mark output as an error when there is stronger evidence:
-      - structured JSON with an ``error`` key
-      - structured JSON with ``status`` of error/failed
+      - structured JSON/dicts with an ``error`` key
+      - structured JSON/dicts with ``status`` of error/failed
       - first line starts with a classic error marker
+
+    Tool result content can be a structured dict/list when a child agent returns
+    JSON-ish data.  Normalize it before string operations so delegation tracing
+    cannot crash with ``'dict' object has no attribute 'lstrip'``.
     """
     if not content:
         return False
 
-    head = content.lstrip()
-    if head.startswith("{") or head.startswith("["):
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, dict):
-                if parsed.get("error"):
-                    return True
-                status = str(parsed.get("status") or "").strip().lower()
-                if status in {"error", "failed", "failure", "timeout"}:
-                    return True
-        except Exception:
-            pass
+    parsed = None
+    if isinstance(content, dict):
+        parsed = content
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    elif isinstance(content, list):
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    elif isinstance(content, str):
+        text = content
+    else:
+        text = str(content)
 
-    first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
+    if parsed is None:
+        head = text.lstrip()
+        if head.startswith("{") or head.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+
+    if isinstance(parsed, dict):
+        if parsed.get("error"):
+            return True
+        status = str(parsed.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure", "timeout"}:
+            return True
+
+    lines = text.splitlines()
+    first = lines[0].strip().lower() if lines else ""
     return (
         first.startswith("error:")
         or first.startswith("failed:")
@@ -2350,8 +2368,13 @@ def _run_single_child(
                 elif msg.get("role") == "tool":
                     content = msg.get("content", "")
                     is_error = _looks_like_error_output(content)
+                    content_for_meta = (
+                        content
+                        if isinstance(content, str)
+                        else json.dumps(content, ensure_ascii=False, default=str)
+                    )
                     result_meta = {
-                        "result_bytes": len(content),
+                        "result_bytes": len(content_for_meta),
                         "status": "error" if is_error else "ok",
                     }
                     # Match by tool_call_id for parallel calls

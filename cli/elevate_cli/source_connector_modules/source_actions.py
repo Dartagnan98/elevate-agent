@@ -312,13 +312,38 @@ def update_source_task_state(
     config = config or source_connectors.load_config()
     info = source_connectors.get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
-    if not _mutable_source_exists(source_root, source_id):
-        raise ValueError(f"Unknown source connector: {source_id}")
     normalized = str(action or "").strip().lower()
+    if not _mutable_source_exists(source_root, source_id):
+        # Synthetic send_queue sources (paid-ads, leads-reengagement, crm,
+        # realtor-ca) are not mutable source connectors, but their approve /
+        # skip / edit act on the send_queue row, not a source dir. Allow those
+        # through when a pending_approval row exists for this (source_id,
+        # task_id|id); otherwise the source really is unknown.
+        pending_ok = False
+        if normalized in {"approve", "skip", "edit"}:
+            try:
+                from elevate_cli import outreach_db
+
+                for _r in outreach_db.list_recent_sends(statuses=("pending_approval",), limit=500):
+                    if str(_r.get("sourceId") or "") == source_id and (
+                        str(_r.get("taskId") or "") == task_id or str(_r.get("id") or "") == task_id
+                    ):
+                        pending_ok = True
+                        break
+            except Exception:
+                pending_ok = False
+        if not pending_ok:
+            raise ValueError(f"Unknown source connector: {source_id}")
     if normalized not in {"approve", "edit", "skip", "restore", "open"}:
         raise ValueError("Unsupported draft action")
 
     source_dir = _source_dir(source_root, source_id)
+    # A synthetic send_queue source may have no source dir yet; ensure it exists
+    # so the UI-state bookkeeping writes below never fail the approve/skip.
+    try:
+        source_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     state = _read_source_ui_state(source_dir)
     tasks = _as_dict(state.get("tasks"))
 

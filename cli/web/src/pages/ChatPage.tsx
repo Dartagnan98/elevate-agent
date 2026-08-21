@@ -19,7 +19,6 @@ import {
 } from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   api,
   type AgentHubAgent,
@@ -2334,188 +2333,11 @@ function modelLabel(info: SessionInfo): string {
   return model.split("/").slice(-1)[0] || model;
 }
 
-function formatCompactNumber(value: number | null | undefined): string {
-  const n = Math.max(0, Number(value ?? 0));
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 10_000) return `${Math.round(n / 1_000)}K`;
-  return n.toLocaleString();
-}
-
 function formatPersonName(email: string | null | undefined): string {
   if (!email) return "there";
   const raw = email.split("@")[0]?.split(/[._-]/)[0] || "";
   if (!raw) return "there";
   return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-}
-
-function dayKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-const DAY_MS = 86_400_000;
-
-function parseAnalyticsDay(key: string): Date {
-  return new Date(`${key}T12:00:00`);
-}
-
-function addDays(date: Date, days: number): Date {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function formatAnalyticsDay(key: string): string {
-  return parseAnalyticsDay(key).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function formatAnalyticsDayShort(key: string): string {
-  return parseAnalyticsDay(key).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function analyticsRangeLabel(range: StartAnalyticsRange): string {
-  if (range === "7d") return "Last 7 days";
-  if (range === "30d") return "Last 30 days";
-  return "All time";
-}
-
-function dailyTokenTotal(day: AnalyticsResponse["daily"][number]): number {
-  return Math.max(
-    0,
-    (day.input_tokens ?? 0) +
-      (day.output_tokens ?? 0) +
-      (day.cache_read_tokens ?? 0) +
-      (day.reasoning_tokens ?? 0),
-  );
-}
-
-function activeDayCount(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  return analytics.daily.filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0).length;
-}
-
-function longestActivityStreak(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  const active = new Set(
-    analytics.daily
-      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
-      .map((day) => day.day),
-  );
-  let best = 0;
-  let current = 0;
-  for (const day of analytics.daily) {
-    if (active.has(day.day)) {
-      current += 1;
-      best = Math.max(best, current);
-    } else {
-      current = 0;
-    }
-  }
-  return best;
-}
-
-function currentActivityStreak(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  const active = new Set(
-    analytics.daily
-      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
-      .map((day) => day.day),
-  );
-  let count = 0;
-  const cursor = new Date();
-  for (let i = 0; i < 365; i += 1) {
-    const key = dayKey(cursor);
-    if (!active.has(key)) break;
-    count += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return count;
-}
-
-function favoriteModel(analytics: AnalyticsResponse | null): string {
-  const model = analytics?.by_model?.[0]?.model;
-  if (!model) return "pending";
-  return model.split("/").slice(-1)[0] || model;
-}
-
-function usageHeatmapDays(
-  analytics: AnalyticsResponse | null,
-  range: StartAnalyticsRange,
-): Array<{
-  apiCalls: number;
-  key: string;
-  level: number;
-  sessions: number;
-  tip: string;
-  tokens: number;
-}> {
-  const byDay = new Map(
-    (analytics?.daily ?? []).map((day) => [day.day, day]),
-  );
-  const maxTokens = Math.max(1, ...Array.from(byDay.values()).map(dailyTokenTotal));
-  const days: Array<{
-    apiCalls: number;
-    key: string;
-    level: number;
-    sessions: number;
-    tip: string;
-    tokens: number;
-  }> = [];
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
-  const sortedDays = analytics?.daily ?? [];
-  let count = range === "7d" ? 7 : range === "30d" ? 30 : 30;
-  let cursor = addDays(today, -(count - 1));
-  if (range === "all" && sortedDays.length > 0) {
-    const first = parseAnalyticsDay(sortedDays[0].day);
-    const last = parseAnalyticsDay(sortedDays[sortedDays.length - 1].day);
-    const totalDays = Math.max(1, Math.round((last.getTime() - first.getTime()) / DAY_MS) + 1);
-    count = Math.min(91, totalDays);
-    cursor = addDays(last, -(count - 1));
-  }
-  const rangeText = analyticsRangeLabel(range).toLowerCase();
-  for (let i = 0; i < count; i += 1) {
-    const key = dayKey(cursor);
-    const entry = byDay.get(key);
-    const tokens = entry ? dailyTokenTotal(entry) : 0;
-    const sessions = entry?.sessions ?? 0;
-    const apiCalls = entry?.api_calls ?? 0;
-    const level = tokens === 0 ? 0 : Math.max(1, Math.min(5, Math.ceil((tokens / maxTokens) * 5)));
-    const tip = [
-      `${formatAnalyticsDay(key)} · ${rangeText}`,
-      `${formatCompactNumber(tokens)} tokens`,
-      `${formatCompactNumber(sessions)} sessions · ${formatCompactNumber(apiCalls)} calls`,
-    ].join("\n");
-    days.push({ apiCalls, key, level, sessions, tip, tokens });
-    cursor = addDays(cursor, 1);
-  }
-  return days;
-}
-
-function heatmapWindowLabel(
-  analytics: AnalyticsResponse | null,
-  range: StartAnalyticsRange,
-  days: Array<{ key: string }>,
-): string {
-  if (!analytics || days.length === 0) return `${analyticsRangeLabel(range)} · loading`;
-  const first = days[0].key;
-  const last = days[days.length - 1].key;
-  const visibleRange = `${formatAnalyticsDayShort(first)}-${formatAnalyticsDayShort(last)}`;
-  if (range !== "all") return `${analyticsRangeLabel(range)} · ${visibleRange}`;
-  const dataFirst = analytics.daily[0]?.day;
-  const dataLast = analytics.daily[analytics.daily.length - 1]?.day;
-  if (!dataFirst || !dataLast) return `All time · ${visibleRange}`;
-  if (dataFirst !== first) {
-    return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)} · heatmap recent ${days.length}d`;
-  }
-  return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)}`;
 }
 
 function normalizeUsage(raw: unknown): UsageInfo | null {
@@ -9289,14 +9111,8 @@ export default function ChatPage() {
 }
 
 function EmptyState({
-  analytics,
-  loading,
-  onRangeChange,
-  onViewChange,
-  range,
   state,
   userName,
-  view,
 }: {
   analytics: AnalyticsResponse | null;
   loading: boolean;
@@ -9307,140 +9123,21 @@ function EmptyState({
   userName: string;
   view: "overview" | "models";
 }) {
-  const totalTokens =
-    (analytics?.totals.total_input ?? 0) +
-    (analytics?.totals.total_output ?? 0) +
-    (analytics?.totals.total_cache_read ?? 0) +
-    (analytics?.totals.total_reasoning ?? 0);
-  const mostActiveDay = (analytics?.daily ?? []).reduce<AnalyticsResponse["daily"][number] | null>(
-    (best, day) => {
-      const tokens = day.input_tokens + day.output_tokens + day.reasoning_tokens;
-      const bestTokens = best
-        ? best.input_tokens + best.output_tokens + best.reasoning_tokens
-        : -1;
-      return tokens > bestTokens ? day : best;
-    },
-    null,
-  );
-  const metrics = [
-    { label: "Sessions", value: formatCompactNumber(analytics?.totals.total_sessions) },
-    { label: "Calls", value: formatCompactNumber(analytics?.totals.total_api_calls) },
-    { label: "Total tokens", value: formatCompactNumber(totalTokens) },
-    { label: "Active days", value: formatCompactNumber(activeDayCount(analytics)) },
-    { label: "Current streak", value: `${currentActivityStreak(analytics)}d` },
-    { label: "Longest streak", value: `${longestActivityStreak(analytics)}d` },
-    {
-      label: "Peak day",
-      value: mostActiveDay
-        ? new Date(`${mostActiveDay.day}T12:00:00`).toLocaleDateString([], {
-            month: "short",
-            day: "numeric",
-          })
-        : "pending",
-    },
-    { label: "Favorite model", value: favoriteModel(analytics) },
-  ];
-  const heatmapDays = usageHeatmapDays(analytics, range);
-  const heatmapWindow = heatmapWindowLabel(analytics, range, heatmapDays);
-  const modelRows = analytics?.by_model?.slice(0, 6) ?? [];
-
+  const who = userName && userName.trim() ? `, ${userName.trim()}` : "";
   return (
     <div className="chat-start">
-      <div className="chat-start-title">
-        <span className="chat-start-mark" aria-hidden="true">
-          {state === "connecting" ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : (
-            <Sparkles className="h-5 w-5" />
-          )}
-        </span>
-        <h2>{`What's up next, ${userName}?`}</h2>
-      </div>
-      <section className="chat-start-card" aria-label="Usage overview">
-        <div className="chat-start-toolbar">
-          <div className="chat-start-tabs" role="tablist" aria-label="Start view">
-            {(["overview", "models"] as const).map((item) => (
-              <button
-                key={item}
-                aria-pressed={view === item}
-                className={cn("chat-start-tab", view === item && "active")}
-                onClick={() => onViewChange(item)}
-                type="button"
-              >
-                {item === "overview" ? "Overview" : "Models"}
-              </button>
-            ))}
-          </div>
-          <div className="chat-start-tabs compact" aria-label="Usage range">
-            {([
-              ["all", "All"],
-              ["30d", "30d"],
-              ["7d", "7d"],
-            ] as const).map(([key, label]) => (
-              <button
-                key={key}
-                aria-pressed={range === key}
-                className={cn("chat-start-tab", range === key && "active")}
-                onClick={() => onRangeChange(key)}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+      <div className="ozzie-greeting">
+        <div className="ozzie-bubble">
+          <p className="ozzie-bubble-lead">Hi! I'm Ozzie, your executive assistant.</p>
+          <p>Need a hand? Or eight? What are we working on today{who}?</p>
         </div>
-        {view === "overview" ? (
-          <>
-            <div className="chat-start-window">{heatmapWindow}</div>
-            <div className="chat-start-metrics">
-              {metrics.map((metric) => (
-                <div className="chat-start-metric" key={metric.label}>
-                  <span>{metric.label}</span>
-                  {loading ? <Skeleton className="h-5 w-12" /> : <strong>{metric.value}</strong>}
-                </div>
-              ))}
-            </div>
-            <div className="chat-start-heatmap" aria-label="Recent activity">
-              {heatmapDays.map((day) => (
-                <span
-                  aria-label={day.tip.replace(/\n/g, ", ")}
-                  className={`chat-start-heat heat-${day.level}`}
-                  data-tip={day.tip}
-                  key={day.key}
-                  tabIndex={0}
-                  title={day.tip}
-                />
-              ))}
-            </div>
-            <div className="chat-start-note">
-              {loading ? (
-                <Skeleton className="h-4 w-48" />
-              ) : (
-                `${formatCompactNumber(totalTokens)} tokens in ${analyticsRangeLabel(range).toLowerCase()}.`
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="chat-start-models">
-            {modelRows.length ? (
-              modelRows.map((model) => {
-                const tokens = model.input_tokens + model.output_tokens;
-                return (
-                  <div className="chat-start-model" key={model.model}>
-                    <span className="model-name">{model.model.split("/").slice(-1)[0] || model.model}</span>
-                    <span>{formatCompactNumber(tokens)} tokens</span>
-                    <span>{formatCompactNumber(model.sessions)} sessions</span>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="chat-start-empty-models">
-                {loading ? <Skeleton className="h-5 w-40" /> : "No model activity yet"}
-              </div>
-            )}
-          </div>
-        )}
-      </section>
+        <img
+          className={cn("ozzie-img", state === "connecting" && "thinking")}
+          src="/octo-loader.png"
+          alt="Ozzie, your octopus executive assistant"
+          draggable={false}
+        />
+      </div>
     </div>
   );
 }
