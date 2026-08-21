@@ -9,6 +9,7 @@ the dashboard and skills can consume.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from copy import deepcopy
 from typing import Any, Mapping
 
@@ -48,11 +49,16 @@ def _wf(label: str, source_label: str | None = None) -> tuple[str, str]:
     return (_workflow_key(source_label or label), label)
 
 
-def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: list[tuple[str, str]] | None = None, docs: list[tuple[str, str]] | None = None, forms: list[tuple[str, str]] | None = None, triggers: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
+def _stage(title: str, subtitle: str, items: list[tuple[str, str]], *, fields: list[tuple[str, str]] | None = None, docs: list[tuple[str, str]] | None = None, forms: list[tuple[str, str]] | None = None, triggers: list[tuple[str, str, str]] | None = None, optional: set[str] | None = None) -> dict[str, Any]:
+    """`optional` names checklist ids that still SHOW on the card and still get
+    ticked, but never block the stage from advancing. Use it for a step whose
+    answer can legitimately be "no" -- an external-system lookup that comes back
+    empty is a finding, not a failure."""
+    _optional = optional or set()
     return {
         "title": title,
         "subtitle": subtitle,
-        "checklist": [{"id": item_id, "label": label, "required": True} for item_id, label in items],
+        "checklist": [{"id": item_id, "label": label, "required": item_id not in _optional} for item_id, label in items],
         "requiredFields": [{"field": field, "label": label} for field, label in (fields or [])],
         "requiredDocs": [{"kind": kind, "label": label} for kind, label in (docs or [])],
         "forms": [{"code": code, "name": name} for code, name in (forms or [])],
@@ -98,15 +104,27 @@ _BC: dict[str, Any] = {
                 "Dashboard setup + contact verification",
                 [
                     ("pre_cma_dashboard_setup", "Pre-CMA dashboard setup complete"),
-                    ("lofty_contact_verified", "Lofty contact verified / created"),
+                    ("lofty_contact_verified", "Client contact verified in CRM"),
                     ("pre_cma_handoff", "Client/property notes saved for CMA"),
                 ],
+                # Skyleigh 2026-08-20: the CRM lookup should still RUN, but a
+                # client who is not in the external CRM must not hold the card
+                # up -- the contact record on the deal is the real source of
+                # truth, and she is migrating everyone into the in-house Leads
+                # section anyway. Advisory, never blocking.
+                optional={"lofty_contact_verified"},
                 fields=[
                     _wf("Client 1 name", "Client 1 Name"),
+                    # A reachable CHANNEL, not an email specifically. Satisfied by
+                    # workflow_client_1_email OR workflow_client_1_phone -- see
+                    # _ANY_OF_FIELDS below. Phone-only intake is a real case and
+                    # must not leave a card un-advanceable.
                     _wf("Client 1 email", "Client 1 Email"),
-                    _wf("Lead source", "Lead Source"),
-                    _wf("CMA date requested", "CMA Date Requested"),
                 ],
+                # Lead source is enrichment. It is NEVER a reason to block a card
+                # (Skyleigh's standing anti-over-gating rule, and what
+                # pre-cma-dashboard-setup/SKILL.md has always said). Removed from
+                # the gate 2026-08-21; still writable and still shown on the card.
                 triggers=[
                     ("pre-cma-dashboard-setup", "Set up Pre-CMA dashboard", "pre-cma-dashboard-setup"),
                     ("lofty-crm-client-contacts", "Verify Lofty contact", "lofty-crm-client-contacts"),
@@ -121,7 +139,6 @@ _BC: dict[str, Any] = {
                     ("client_yes_to_listing", "Client said yes to listing"),
                 ],
                 fields=[
-                    _wf("CMA date requested", "CMA Date Requested"),
                     ("listPrice", "Recommended list price"),
                 ],
                 docs=[("cma_report", "CMA report")],
@@ -237,11 +254,19 @@ _BC: dict[str, Any] = {
                 fields=[
                     ("offerDate", "Offer received date"),
                     ("offerAcceptedAt", "Accepted offer date"),
+                    ("offerPrice", "Accepted offer price"),
+                    _wf("Buyer name(s)", "Buyer Names"),
+                    _wf("Cooperating agent", "Cooperating Agent"),
+                    _wf("Cooperating brokerage", "Cooperating Brokerage"),
                     _wf("Title charges ordered date", "Title Charges Ordered Date"),
                     ("depositInTrustAt", "Deposit ROF received date"),
                     ("completionDate", "Completion date"),
                 ],
-                docs=[("offer_pdf", "Offer PDF")],
+                docs=[
+                    ("offer_pdf", "Offer PDF"),
+                    ("disclosure_expected_remuneration", "Disclosure to Sellers of Expected Remuneration"),
+                    ("deal_sheet", "Deal sheet"),
+                ],
                 triggers=[("offer-review", "Review accepted-offer package", "offer-review")],
             ),
             _stage(
@@ -258,7 +283,7 @@ _BC: dict[str, Any] = {
                     ("subjectRemovalDate", "Subject removal date"),
                     _wf("Order sold rider date", "Order Sold Rider Date"),
                 ],
-                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt")],
+                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt"), ("order_to_lawyer", "Order to lawyer"), ("sales_report", "Sales report")],
                 triggers=[
                     ("subject-removal", "Run condition-removal admin check", "subject-removal"),
                     ("subject-removal-docs", "Sync condition-removal signing", "signing-package"),
@@ -285,10 +310,11 @@ _BC: dict[str, Any] = {
     },
     "buyer": {
         "stages": [
-            _stage("Offer Prep", "Comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("accepted-offer-checklist", "Accepted-offer checklist run"), ("doc-list", "Doc list built")], docs=[("cps_draft", "CPS draft")]),
-            _stage("Accepted", "Lender + docs", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked")], fields=[("subjectRemovalDate", "Subject removal date")]),
-            _stage("Conditions", "Inspection + strata", [("deposit-due", "Deposit due date tracked"), ("lawyer-info", "Lawyer / conveyancer info captured")], fields=[("depositDueDate", "Deposit due date")]),
-            _stage("Subjects Off", "Deposit + dates", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")]),
+            _stage("Client Onboarding", "Agency, disclosures + pre-approval", [("dorts-pnc", "DORTS + PNC signed"), ("fintrac-id", "FINTRAC ID collected"), ("pre-approval", "Pre-approval confirmed")], fields=[("preApprovalAmount", "Pre-approval amount")]),
+            _stage("Offer Prep", "Decided to write - comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("doc-list", "Doc list built"), ("cps-drafted", "CPS drafted")], docs=[("cps_draft", "CPS draft")]),
+            _stage("Accepted Offer", "Accepted - subjects pending", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked"), ("deposit-due", "Deposit due date tracked")], fields=[("subjectRemovalDate", "Subject removal date"), ("depositDueDate", "Deposit due date")], docs=[("cps_signed", "Fully-signed CPS")]),
+            _stage("Condition Removal", "Subjects off + firm", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("lawyer-info", "Lawyer / conveyancer info captured"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")], docs=[("subject_removal_form", "Fully-signed condition removal")]),
+            _stage("Closed", "Funded + keys", [("funds-received", "Funds received"), ("keys-released", "Keys released")]),
         ],
     },
 }
@@ -468,6 +494,19 @@ def package_key_from_deal(deal: Mapping[str, Any]) -> str:
     )
 
 
+def last_stage_for(package_key: Any, side: str) -> int:
+    """Highest valid stage index for a side within a package.
+
+    Side-aware upper bound so callers can reject out-of-range stage moves
+    (a buyer flow has fewer stages than a listing flow). Falls back to the
+    listing side for any unexpected side value.
+    """
+    package = _package_for_key(_slug(package_key) or DEFAULT_PACKAGE_KEY)
+    side_key = side if side in {"listing", "buyer"} else "listing"
+    stages = (package.get(side_key) or {}).get("stages") or []
+    return max(len(stages) - 1, 0)
+
+
 def resolve_admin_deal_flow(
     *,
     package_key: str,
@@ -517,6 +556,36 @@ def resolve_admin_deal_flow(
     }
 
 
+# A stage-entry run that dies mid-flight (e.g. the LLM gateway is out of quota)
+# stays "queued"/"running" forever and would otherwise block the phase gate
+# permanently. Age those machine-state runs out after this many seconds so a dead
+# automation never wedges the pipeline. Human/external waits are intentional gates
+# and are never aged out.
+_STALE_RUN_SECONDS = 30 * 60
+
+
+def _run_is_stale(run: Mapping[str, Any]) -> bool:
+    ts = run.get("updatedAt") or run.get("createdAt")
+    if not ts:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() > _STALE_RUN_SECONDS
+
+
+def _run_is_blocking(run: Mapping[str, Any]) -> bool:
+    status = run.get("status")
+    if status in {"waiting_human", "waiting_external"}:
+        return True
+    if status in {"queued", "running"}:
+        return not _run_is_stale(run)
+    return False
+
+
 def resolve_deal_phase(
     *,
     deal: Mapping[str, Any],
@@ -535,15 +604,30 @@ def resolve_deal_phase(
         conditions=conditions,
         condition_docs=condition_docs,
     )
-    done = checklist or {}
+    done = dict(checklist or {})
+    # A client with a contact record on the deal IS a verified contact, whether
+    # or not they exist in the external CRM. Mirrors the card's own auto-check
+    # (CHECKLIST_AUTO_CONDITIONS in deal-modal.tsx) so the gate and the tick the
+    # user can see never disagree.
+    if done.get("lofty_contact_verified") is not True and (
+        deal.get("primaryContactId") or deal.get("loftyContactId")
+    ):
+        done["lofty_contact_verified"] = True
     attachment_kinds = {str(item.get("kind") or "") for item in (attachments or [])}
     missing_checklist = [
         item for item in flow["checklistItems"]
         if item.get("required") and done.get(item["id"]) is not True
     ]
+    # Some required fields are really "any one of these". A client we can reach
+    # by phone is reachable, even with no email on file -- blocking on the email
+    # key specifically is over-gating.
     missing_fields = [
         item for item in flow["requiredFields"]
         if not _present(_deal_field_value(deal, done, str(item["field"])))
+        and not any(
+            _present(_deal_field_value(deal, done, alt))
+            for alt in _ANY_OF_FIELDS.get(str(item["field"]), ())
+        )
     ]
     missing_docs = [
         item for item in flow["requiredDocs"]
@@ -551,8 +635,8 @@ def resolve_deal_phase(
     ]
     blocking_runs = [
         _run_brief(run) for run in (prior_runs or [])
-        if run.get("status") in {"queued", "running", "waiting_human", "waiting_external"}
-        and _run_stage(run) == flow["stage"]
+        if _run_stage(run) == flow["stage"]
+        and _run_is_blocking(run)
     ]
     can_advance = (
         flow["nextStage"] is not None
@@ -575,6 +659,14 @@ def resolve_deal_phase(
         "blockingRuns": blocking_runs,
     }
     return flow
+
+
+# field -> other fields that equally satisfy it. Keep this small and obvious;
+# it exists so a gate can express "a way to reach them" rather than one exact key.
+_ANY_OF_FIELDS: dict[str, tuple[str, ...]] = {
+    "workflow_client_1_email": ("workflow_client_1_phone", "prospectPhones", "buyerPhones"),
+    "workflow_client_1_phone": ("workflow_client_1_email", "prospectEmails", "buyerEmails"),
+}
 
 
 def _condition_checklist_additions(
