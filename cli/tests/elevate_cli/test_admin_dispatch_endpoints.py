@@ -371,7 +371,7 @@ def test_stale_running_action_runs_fail_with_visible_error():
             """,
             (stale_at, stale_at, run_id),
         )
-        recovered = mark_stale_action_runs(conn, max_running_minutes=120, actor="test-worker")
+        recovered = mark_stale_action_runs(conn, max_running_minutes=120, actor="test-worker", requeue=False)
 
     assert len(recovered) == 1
     assert recovered[0]["status"] == "failed"
@@ -503,7 +503,7 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert {
         "real-estate-admin/pre-cma-dashboard-setup",
         "real-estate-admin/lofty-crm-client-contacts",
-        "real-estate-admin/cma-generator",
+        "real-estate-admin/cma",
         "real-estate-admin/mlc",
         "real-estate-admin/deal-matcher",
         "real-estate-admin/skyslope-sync",
@@ -522,6 +522,8 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert created_names["Pre-CMA: Verify CRM contact"]["toStage"] == 0
     # CMA generates at stage 1, MLC intake/documents land at Listing Intake (stage 2).
     assert created_names["CMA: Generate evaluation"]["toStage"] == 1
+    assert created_names["CMA: Generate evaluation"]["skill"] == "real-estate-admin/cma"
+    assert created_names["CMA: Generate evaluation"]["skillArgs"] == {"mode": "seller_evaluation"}
     assert created_names["Listing Intake: Collect MLC info"]["skillArgs"] == {"mode": "intake"}
     assert created_names["Listing Intake: Collect MLC info"]["toStage"] == 2
     assert created_names["Listing Intake: Prepare MLC documents"]["skillArgs"] == {"mode": "documents"}
@@ -533,11 +535,11 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     buyer_cps = created_names["Buyer Offer Prep: Prepare CPS draft"]
     assert buyer_cps["skill"] == "real-estate-admin/webforms"
     assert buyer_cps["side"] == "buyer"
-    assert buyer_cps["toStage"] == 0
+    assert buyer_cps["toStage"] == 1
     assert buyer_cps["approvalRequired"] is True
     assert buyer_cps["skillArgs"] == {"mode": "draft", "sendPolicy": "draft_only"}
-    # Buyer pipeline is wired across all four buyer stages.
-    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {0, 1, 2, 3}
+    # Buyer actions start at Offer Prep and cover Accepted, Conditions, and Subjects Off.
+    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {1, 2, 3, 4}
     assert created_names["Buyer Accepted: Review offer package"]["skill"] == "real-estate-admin/offer-review"
     assert created_names["Buyer Subjects Off: Run closing admin"]["skill"] == "real-estate-admin/closing-admin"
     assert "gmail-doc-router" not in created_skills
@@ -603,7 +605,7 @@ def test_seeded_defaults_launch_matrix_and_buyer_stages():
 
     with connect() as conn:
         buyer = create_deal(conn, title="Buyer deal", side="buyer", actor="human:test", current_stage=0)
-        move_deal_stage(conn, buyer["id"], to_stage=1, actor="human:test", force=True)
+        move_deal_stage(conn, buyer["id"], to_stage=2, actor="human:test", force=True)
         buyer_runs = list_action_runs(conn, deal_id=buyer["id"])
     assert any(run["skill"] == "real-estate-admin/offer-review" for run in buyer_runs)
 
@@ -611,7 +613,7 @@ def test_seeded_defaults_launch_matrix_and_buyer_stages():
 def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
     # A skill invoked in a live session finalizes the deal through the admin_deal
     # tool, mirroring the background run-result callback: the kanban card syncs
-    # (fields + checklist + artifact) and the stage advances.
+    # (fields + checklist + artifact); moving the stage remains explicit.
     import json
 
     monkeypatch.setattr("elevate_cli.access.is_entitlement_active", lambda *a, **k: True)
@@ -635,7 +637,7 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
     done = json.loads(_admin_deal_handler({
         "action": "complete_run",
         "deal_id": did,
-        "skill": "cma-generator",
+        "skill": "real-estate-admin/cma",
         "checklist_updates": [
             {"id": "cma_pdf_ready", "completed": True},
             {"id": "pricing_story_approved", "completed": True},
@@ -645,12 +647,13 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
         "artifacts": [{"kind": "cma_report", "file_path": "/tmp/cma.pdf", "summary": "CMA"}],
     }))
     assert done["completedRun"]
-    # The blocking run cleared and the card advanced CMA (1) -> Listing Intake (2).
-    assert done["gate"]["stage"] == 2
+    # Completion clears the gate; the agent must not move the card.
+    assert done["gate"]["stage"] == 1
+    assert done["gate"]["canAdvance"] is True
 
     with connect() as conn:
         runs = list_action_runs(conn, deal_id=did)
-    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma-generator")
+    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma")
     assert cma["status"] in {"succeeded", "completed"}
 
 
@@ -883,3 +886,31 @@ def test_date_trigger_firing_ledger_is_unique():
     assert first["created"] is True
     assert second["created"] is False
     assert second["id"] == first["id"]
+
+
+def test_mlc_worker_context_carries_saved_intake_and_resumed_answers(client, monkeypatch):
+    import json
+    from elevate_cli.data import dispatch, set_deal_money
+    from cron import jobs
+
+    deal = _new_listing_deal()
+    with connect() as conn:
+        set_deal_money(conn, deal["id"], list_price=725000, actor="human:test")
+        set_deal_toggle(conn, deal["id"], field="sellerLegalNames", value=["Test Seller"], actor="human:test")
+        create_action(conn, name="MLC context check", trigger="stage_entry", skill="mlc",
+                      side="listing", to_stage=2, approval_required=True, skill_args={"mode":"intake"})
+        move_deal_stage(conn, deal["id"], to_stage=2, actor="human:test", force=True)
+        run = list_action_runs(conn, deal_id=deal["id"])[0]
+    captured = []
+    monkeypatch.setattr(jobs, "create_job", lambda **kw: (captured.append(kw) or {"id":"test-job"}))
+    response = client.post(f"/api/admin/action-runs/{run['id']}/answer",
+                           json={"answers":{"Commission terms":"Negotiated terms"},"runNow":True})
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "running"
+    prompt = captured[0]["prompt"]
+    # Inspect the actual serialized worker context, not a mocked context builder.
+    context = json.loads(prompt[prompt.index('{\n  "source": "operational:deal_context"'):])
+    assert context["deal"]["listPrice"] == 725000
+    assert context["checklist"]["sellerLegalNames"] == ["Test Seller"]
+    assert context["currentRun"]["humanPrompt"]["providedAnswers"] == {"Commission terms":"Negotiated terms"}
+    assert context["currentRun"]["id"] == run["id"]

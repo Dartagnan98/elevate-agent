@@ -514,6 +514,25 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
+      case 'subagent.message': {
+        const text = String(ev.payload.text ?? '').trim()
+
+        if (!text) {
+          return
+        }
+
+        turnController.upsertSubagent(
+          ev.payload,
+          c => ({
+            notes: pushNote(c.notes, `User message queued: ${text}`),
+            status: keepTerminalElseRunning(c.status)
+          }),
+          { createIfMissing: false }
+        )
+
+        return
+      }
+
       case 'subagent.complete':
         turnController.upsertSubagent(
           ev.payload,
@@ -524,6 +543,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           }),
           { createIfMissing: false }
         )
+
+        if (getUiState().liveSubagent?.child_session_id === ev.payload.child_session_id) {
+          patchUiState({ liveSubagent: null })
+        }
 
         return
 

@@ -203,8 +203,12 @@ from cron.jobs import advance_next_run, ensure_system_jobs, get_due_jobs, mark_j
 SILENT_MARKER = "[SILENT]"
 
 _CORTEXT_CRON_SKILL_ALIASES: dict[str, tuple[str, ...]] = {
+    "digisign": ("real-estate-admin/digisign",),
+    "gmail-doc-router": ("real-estate-admin/gmail-doc-router",),
+    "subject-removal": ("real-estate-admin/subject-removal",),
     "surface-heartbeat": ("real-estate/surface-heartbeat",),
     "theta-wave": ("real-estate/theta-wave",),
+    "webforms": ("real-estate-admin/webforms",),
 }
 
 _CORTEXT_NATIVE_CRON_SKILLS: dict[str, str] = {
@@ -1367,15 +1371,26 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None, on_delive
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, **send_kwargs)
             try:
                 result = asyncio.run(coro)
-            except RuntimeError:
+            except RuntimeError as e:
                 # asyncio.run() checks for a running loop before awaiting the coroutine;
                 # when it raises, the original coro was never started — close it to
                 # prevent "coroutine was never awaited" RuntimeWarning, then retry in a
                 # fresh thread that has no running loop.
+                if "asyncio.run() cannot be called from a running event loop" not in str(e):
+                    msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
+                    logger.error("Job '%s': %s", job["id"], msg)
+                    delivery_errors.append(msg)
+                    continue
                 coro.close()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, **send_kwargs))
-                    result = future.result(timeout=30)
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, **send_kwargs))
+                        result = future.result(timeout=30)
+                except Exception as e:
+                    msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
+                    logger.error("Job '%s': %s", job["id"], msg)
+                    delivery_errors.append(msg)
+                    continue
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
                 logger.error("Job '%s': %s", job["id"], msg)
@@ -1533,15 +1548,23 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     # script that does `from elevate_cli... import main` (admin-calendar-sync,
     # operational-maintenance, freshness-snapshot) dies with
     # ModuleNotFoundError on customer installs. Point the child at this
-    # process's own cli root so the import always resolves, dev or bundle,
-    # regardless of the gateway's cwd.
+    # package roots so imports resolve in dev, bundles, and partial overlays.
+    # An overlay can extend elevate_cli.__path__ into the base installation;
+    # its sibling modules (e.g. elevate_constants) still need the base root on
+    # sys.path. Keep overlay precedence and any caller-provided PYTHONPATH.
     try:
         import elevate_cli as _elevate_cli_pkg
 
-        _cli_root = str(Path(_elevate_cli_pkg.__file__).resolve().parent.parent)
+        _package_paths = list(getattr(_elevate_cli_pkg, "__path__", ()))
+        if not _package_paths:
+            _package_paths = [Path(_elevate_cli_pkg.__file__).resolve().parent]
+        _cli_roots = list(dict.fromkeys(
+            str(Path(package_path).resolve().parent)
+            for package_path in _package_paths
+        ))
         _prior_pp = run_env.get("PYTHONPATH") or ""
-        run_env["PYTHONPATH"] = (
-            _cli_root + os.pathsep + _prior_pp if _prior_pp else _cli_root
+        run_env["PYTHONPATH"] = os.pathsep.join(
+            _cli_roots + ([_prior_pp] if _prior_pp else [])
         )
     except Exception:
         pass
@@ -1758,12 +1781,20 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         skills = [skills]
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    # Only the job's explicitly-requested skills get their full content inlined
+    # below. The agent's full baseline roster used to be inlined too, which bolted
+    # ~108k tokens of skill manuals (closing, offers, DigiSign, WEBForms, ...) onto
+    # the front of EVERY admin run even when the task (e.g. a CMA) needed none of
+    # them. Now the baseline extras are emitted as a one-line on-demand index the
+    # agent can expand with skill_view() only when a task actually requires one.
+    run_specific = list(skill_names)
+    baseline_extra: list[str] = []
     agent_id = _job_agent_id(job)
     if agent_id:
         try:
             from elevate_cli.agent_hub import agent_effective_skills, agent_run_context
 
-            skill_names = agent_effective_skills(agent_id, skill_names)
+            effective = agent_effective_skills(agent_id, skill_names)
             agent_context = agent_run_context(agent_id)
         except Exception:
             logger.debug(
@@ -1772,11 +1803,25 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 agent_id,
                 exc_info=True,
             )
+            effective = skill_names
             agent_context = ""
         if agent_context:
             prompt = f"{agent_context}\n\n{prompt}"
+        if run_specific:
+            # Full-load only the run-specific worker chain; index the rest.
+            # Match on basename so namespaced dupes (real-estate-admin/cma vs cma)
+            # are not double-counted.
+            _run_base = {s.strip().lower().rsplit("/", 1)[-1] for s in run_specific}
+            baseline_extra = [
+                s for s in effective
+                if s.strip().lower().rsplit("/", 1)[-1] not in _run_base
+            ]
+            skill_names = run_specific
+        else:
+            # Generic agent run with no explicit job skills: keep prior behavior.
+            skill_names = effective
 
-    if not skill_names:
+    if not skill_names and not baseline_extra:
         return _scan_assembled_cron_prompt(prompt, job)
 
     from tools.skills_tool import skill_view
@@ -1833,6 +1878,45 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             f"'⚠️ Skill(s) not found and skipped: {', '.join(skipped)}']"
         )
         parts.insert(0, notice)
+
+    if baseline_extra:
+        # One-line on-demand index for the agent's baseline skills that were NOT
+        # inlined in full. Descriptions come from a cheap frontmatter-only scan.
+        try:
+            from tools.skills_tool import _find_all_skills
+
+            desc_by_name = {}
+            for entry in _find_all_skills():
+                ename = str(entry.get("name") or "").strip().lower()
+                if ename:
+                    desc_by_name[ename] = str(entry.get("description") or "").strip()
+        except Exception:
+            logger.debug("Cron job: failed to build skill index descriptions", exc_info=True)
+            desc_by_name = {}
+
+        seen_idx: set[str] = set()
+        index_lines: list[str] = []
+        for name in baseline_extra:
+            base = name.strip().lower().rsplit("/", 1)[-1]
+            if not base or base in seen_idx:
+                continue
+            seen_idx.add(base)
+            desc = desc_by_name.get(base) or desc_by_name.get(name.strip().lower()) or ""
+            desc = " ".join(desc.split())
+            if len(desc) > 180:
+                desc = desc[:177] + "..."
+            index_lines.append(f"- {base}: {desc}" if desc else f"- {base}")
+
+        if index_lines:
+            if parts:
+                parts.append("")
+            parts.append(
+                "[ADDITIONAL SKILLS AVAILABLE ON DEMAND] The skills below are NOT loaded in "
+                "full here. If this task genuinely requires one, call skill_view(\"<name>\") to "
+                "load its full instructions before using it. Do not load them speculatively."
+            )
+            parts.append("")
+            parts.extend(index_lines)
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
@@ -2817,6 +2901,14 @@ def tick(verbose: bool = True, adapters=None, loop=None, on_delivered=None) -> i
             )
 
         def _process_job(job: dict) -> bool:
+            gate = (load_config() or {}).get("background_jobs", {}).get("lock_path")
+            if gate and not job.get("script"):
+                from elevate_cli.background_budget import background_slot
+                with background_slot(gate):
+                    return _process_job_admitted(job)
+            return _process_job_admitted(job)
+
+        def _process_job_admitted(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
             # Pre-allocate the cron session id here so the mark_job_run /
             # tui_gateway cleanup paths below can reference it on BOTH the

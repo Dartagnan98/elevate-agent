@@ -79,7 +79,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     turnController.fullReset()
     setVoiceRecording(false)
     setVoiceProcessing(false)
-    patchUiState({ bgTasks: new Set(), info: null, sid: null, usage: ZERO })
+    patchUiState({ bgTasks: new Set(), info: null, liveSubagent: null, sid: null, usage: ZERO })
     setHistoryItems([])
     setLastUserMsg('')
     setStickyPrompt('')
@@ -186,6 +186,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               setHistoryItems(r.info ? [introMsg(r.info), ...resumed] : resumed)
               patchUiState({
                 info: r.info ?? null,
+                liveSubagent: r.live_subagent ?? null,
                 sid: r.session_id,
                 status: 'ready',
                 usage: usageFrom(r.info ?? null)

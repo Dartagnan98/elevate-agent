@@ -128,7 +128,7 @@ elevate gateway status --system         # Linux only: inspect the system service
 | `/approve` | Approve a pending dangerous command |
 | `/deny` | Reject a pending dangerous command |
 | `/sethome` | Set this chat as the home channel |
-| `/compress` | Manually compress conversation context |
+| `/compact` | Manually compact conversation context |
 | `/title [name]` | Set or show the session title |
 | `/resume [name]` | Resume a previously named session |
 | `/usage` | Show token usage for this session |

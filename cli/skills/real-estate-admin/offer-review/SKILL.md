@@ -8,13 +8,18 @@ metadata:
       approval_required: true
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Offer Review
 
 Use when an offer is accepted or accepted-offer documents arrive.
 
 Match the deal, extract accepted offer date, subject removal date, deposit, completion, possession, inclusions/exclusions, buyer/lawyer info, and special terms. Attach extracted artifacts and create a human review task before moving forward.
 
-Do not advance the phase until the extracted terms are reviewed.
+Entering Accepted Offer on an authorized trigger starts this review automatically. Review completion alone does not advance to Condition Removal; use the shared stage trigger contract.
 
 ## Required Inputs
 

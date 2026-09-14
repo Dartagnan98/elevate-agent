@@ -56,7 +56,7 @@ Press **Ctrl+V** to paste an image from your clipboard directly into the chat. T
 
 ### Slash Command Autocomplete
 
-Type `/` and press **Tab** to see all available commands. This includes built-in commands (`/compress`, `/model`, `/title`) and every installed skill. You don't need to memorize anything — Tab completion has you covered.
+Type `/` and press **Tab** to see all available commands. This includes built-in commands (`/compact`, `/model`, `/title`) and every installed skill. You don't need to memorize anything — Tab completion has you covered.
 
 :::tip
 Use `/verbose` to cycle through tool output display modes: **off → new → all → verbose**. The "all" mode is great for watching what the agent does; "off" is cleanest for simple Q&A.
@@ -131,9 +131,9 @@ Memory is a frozen snapshot — changes made during a session don't appear in th
 
 Most LLM providers cache the system prompt prefix. If you keep your system prompt stable (same context files, same memory), subsequent messages in a session get **cache hits** that are significantly cheaper. Avoid changing the model or system prompt mid-session.
 
-### Use /compress Before Hitting Limits
+### Use /compact Before Hitting Limits
 
-Long sessions accumulate tokens. When you notice responses slowing down or getting truncated, run `/compress`. This summarizes the conversation history, preserving key context while dramatically reducing token count. Use `/usage` to check where you stand.
+Long sessions accumulate tokens. When you notice responses slowing down or getting truncated, run `/compact`. This summarizes the conversation history, preserving key context while dramatically reducing token count. Use `/usage` to check where you stand.
 
 ### Delegate for Parallel Work
 

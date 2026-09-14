@@ -23,7 +23,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { ListSkeleton } from "@/components/ui/skeleton";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
 
@@ -515,11 +517,18 @@ export default function HeartbeatPage() {
   const [editForm, setEditForm] = useState<FormValues>(EMPTY_FORM);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<CronJob | null>(null);
   const pollRef = useRef<number | null>(null);
 
   // Cached across tab switches: revisiting Heartbeat paints instantly and
   // revalidates in the background.
-  const { data: hbData, loading, refresh, mutate: mutateHeartbeat } = useCachedResource(
+  const {
+    data: hbData,
+    loading,
+    error: heartbeatError,
+    refresh,
+    mutate: mutateHeartbeat,
+  } = useCachedResource(
     "heartbeat-page",
     async () => {
       const [all, surfaceResp] = await Promise.all([
@@ -699,16 +708,13 @@ export default function HeartbeatPage() {
   };
 
   const handleDelete = async (job: CronJob) => {
-    const name = job.name || "this heartbeat";
-    if (!window.confirm(`Delete "${name}"? This removes the heartbeat schedule only.`)) {
-      return;
-    }
     markBusy(job.id, true);
     try {
       await api.deleteCronJob(job.id);
       showToast("Deleted", "success");
       mutateHeartbeat({ jobs: jobs.filter((j) => j.id !== job.id), surfaceByKey });
       if (editingId === job.id) setEditingId(null);
+      setDeleteTarget(null);
     } catch (e) {
       showToast(`Couldn't delete: ${e}`, "error");
     } finally {
@@ -760,6 +766,18 @@ export default function HeartbeatPage() {
   return (
     <div className="mx-auto w-full max-w-3xl space-y-6 pb-16">
       <Toast toast={toast} />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={`Delete "${deleteTarget?.name || "this heartbeat"}"?`}
+        description="This removes the heartbeat schedule only. Existing reports stay in the feed."
+        confirmLabel="Delete"
+        destructive
+        loading={deleteTarget ? busyIds.has(deleteTarget.id) : false}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void handleDelete(deleteTarget);
+        }}
+      />
 
       <header className="space-y-1">
         <div className="flex items-center gap-2">
@@ -799,10 +817,18 @@ export default function HeartbeatPage() {
           </div>
         </div>
 
-        {loading ? (
-              <ListSkeleton rows={3} />
-            ) : (
-              sorted.map((job) => {
+        {heartbeatError ? (
+          <RouteLoadError
+            title="Could not load heartbeats"
+            error={heartbeatError}
+            onRetry={refresh}
+          />
+        ) : null}
+
+        {heartbeatError && !hbData ? null : loading ? (
+          <ListSkeleton rows={3} />
+        ) : (
+          sorted.map((job) => {
             const busy = busyIds.has(job.id);
             const isEditing = editingId === job.id;
             const isOpen = expanded.has(job.id);
@@ -829,10 +855,11 @@ export default function HeartbeatPage() {
                       </span>
                       <button
                         type="button"
+                        aria-label="Close heartbeat editor"
                         onClick={() => setEditingId(null)}
                         className="text-muted-foreground hover:text-foreground"
                       >
-                        <X className="h-4 w-4" />
+                        <X aria-hidden="true" className="h-4 w-4" />
                       </button>
                     </div>
                     <HeartbeatForm
@@ -935,7 +962,7 @@ export default function HeartbeatPage() {
                           type="button"
                           title="Delete"
                           disabled={busy}
-                          onClick={() => handleDelete(job)}
+                          onClick={() => setDeleteTarget(job)}
                           className="rounded p-1.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive disabled:opacity-50"
                         >
                           <Trash2 className="h-4 w-4" />
@@ -995,14 +1022,14 @@ export default function HeartbeatPage() {
                 )}
               </div>
             );
-              })
-            )}
+          })
+        )}
 
-            {!loading && sorted.length === 0 && (
-              <div className="rounded-lg border border-dashed border-border bg-card/20 p-8 text-center text-sm text-muted-foreground">
-                No heartbeats yet. Create one above.
-              </div>
-            )}
+        {!heartbeatError && !loading && sorted.length === 0 && (
+          <div className="rounded-lg border border-dashed border-border bg-card/20 p-8 text-center text-sm text-muted-foreground">
+            No heartbeats yet. Create one above.
+          </div>
+        )}
       </section>
     </div>
   );

@@ -1,6 +1,6 @@
 ---
 name: closing-admin
-description: Final conveyance and closeout workflow: conveyancer package, mortgage instructions, insurance binder, sign-down, funds, commission, compliance close, and nurture handoff.
+description: "Final conveyance and closeout workflow: conveyancer package, mortgage instructions, insurance binder, sign-down, funds, commission, compliance close, and nurture handoff."
 metadata:
   elevate:
     tags: [real-estate, closing, conveyance]

@@ -113,8 +113,9 @@ class TestEffectiveTrigger:
         assert trigger == int(WINDOW * REAL_COUNT_MODE_THRESHOLD)
 
     def test_pinned_threshold_wins_in_real_mode(self, compressor):
-        # User pinned compression.threshold (even at the default value):
-        # real-count mode must NOT bump it to 0.90.
+        # If the caller marks a threshold as user-pinned, real-count mode must
+        # not bump it to 0.90. run_agent decides whether the default 0.85 is
+        # actually user-pinned.
         trigger = effective_compression_trigger_tokens(
             compressor,
             real_mode=True,
@@ -372,6 +373,25 @@ class TestModeThresholds:
         )
         assert real_mode is False
         assert measured == estimate_messages_tokens_rough(msgs)
+
+    def test_estimate_fallback_can_use_effective_cursor_payload(self, compressor):
+        """Resumed cursor sessions estimate summary+tail, not full transcript."""
+        full_transcript = _msgs(8, chars=4_000)
+        effective_payload = _msgs(2, chars=400)
+        compressor.last_prompt_tokens = 0
+
+        measured, _trigger, real_mode = resolve_compression_pressure(
+            compressor,
+            RealUsageProjector(),
+            full_transcript,
+            output_reserve_tokens=DEFAULT_RESERVE,
+            threshold_pinned=False,
+            fallback_messages=effective_payload,
+        )
+
+        assert real_mode is False
+        assert measured == estimate_messages_tokens_rough(effective_payload)
+        assert measured < estimate_messages_tokens_rough(full_transcript)
 
     def test_anti_thrash_backoff_still_applies(self, compressor):
         """#14695: two ineffective compressions in a row veto the trigger."""

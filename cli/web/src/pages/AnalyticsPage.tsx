@@ -15,7 +15,7 @@ import { timeAgo } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { RouteSkeleton } from "@/components/route-skeletons";
+import { RouteLoadError, RouteSkeleton } from "@/components/route-skeletons";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 
@@ -357,9 +357,9 @@ export default function AnalyticsPage() {
         <RouteSkeleton path="/analytics" />
       )}
 
-      {error && (
-        <p className="px-1 py-1 text-xs text-destructive">{error}</p>
-      )}
+      {error ? (
+        <RouteLoadError title="Could not load analytics" error={error} onRetry={load} />
+      ) : null}
 
       {data && (
         <>

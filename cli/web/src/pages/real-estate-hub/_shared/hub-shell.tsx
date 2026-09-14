@@ -1,7 +1,43 @@
 import type { ComponentType, ReactNode } from "react";
+import { RefreshCw } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { LoadingState } from "./loading-state";
 import type { HubData } from "./types";
+
+export function HubDataErrorBanner({
+  className,
+  data,
+}: {
+  className?: string;
+  data: HubData;
+}) {
+  if (!data.error) return null;
+
+  return (
+    <div
+      role="alert"
+      aria-live="polite"
+      className={cn(
+        "flex flex-col gap-3 rounded-md border border-warning/25 bg-warning/10 px-3 py-2 text-xs text-warning sm:flex-row sm:items-center sm:justify-between",
+        className,
+      )}
+    >
+      <span className="min-w-0 break-words">{data.error}</span>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="shrink-0 border-warning/40 text-warning hover:bg-warning/10"
+        disabled={data.refreshing}
+        onClick={() => void data.refresh({ force: true })}
+      >
+        <RefreshCw className={cn("h-3.5 w-3.5", data.refreshing && "animate-spin")} aria-hidden="true" />
+        Retry
+      </Button>
+    </div>
+  );
+}
 
 export function HubShell({
   children,
@@ -55,11 +91,7 @@ export function HubShell({
             {activeJobs} job{activeJobs === 1 ? "" : "s"}
           </span>
         </div>
-        {data.error && (
-          <div className="basis-full rounded-xl border border-warning/25 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {data.error}
-          </div>
-        )}
+        <HubDataErrorBanner className="basis-full" data={data} />
       </section>
 
       {children}

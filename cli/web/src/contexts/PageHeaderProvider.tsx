@@ -69,7 +69,7 @@ export function PageHeaderProvider({
               "z-1 w-full shrink-0",
               "box-border",
               isChatRoute ? "h-11 min-h-11" : "h-16 min-h-16",
-              isChatRoute ? "bg-[var(--chat-bg)]" : "bg-background",
+              isChatRoute ? "bg-[var(--chat-bg)]" : "bg-[var(--bg-1)]",
               "overflow-hidden",
             )}
             role="banner"

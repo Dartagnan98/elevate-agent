@@ -21,7 +21,7 @@ export async function requireAccess(
 
   const license = await findLicenseById(claims.license_id);
 
-  if (!license || license.revoked) {
+  if (!license || license.revoked || license.user_id !== claims.sub) {
     return { ok: false, status: 403, error: "license revoked" };
   }
 

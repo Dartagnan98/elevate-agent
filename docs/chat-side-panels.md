@@ -53,7 +53,9 @@ small backend endpoint. Here's why, verified against the code:
       at turn end (fine); if you want it to pop mid-turn the instant the tool runs, you'd need
       the gateway to also write/emit todo results live (bigger). v1: turn-end is acceptable.
 
-- **Files** = needs a backend endpoint (a workspace tree). Unchanged — see §4.
+- **Files** = uses the session-files endpoint. A workspace tree was tried, but
+  real chats touch scattered absolute paths, so the useful view is "files this
+  session worked on."
 
 Net: build order is still Plan-first (headline), but Plan ships with a tiny endpoint, not zero.
 
@@ -151,15 +153,12 @@ a lightweight task record; but v1 from the tool stream is enough.
 
 ## 4. Files panel
 
-**Backend (new):** `GET /api/files/tree?root=<dir>&depth=N` → a nested `{name, path, type:
-dir|file, children?}` tree for the chat's workspace root (default the session's working dir;
-clamp to it — no escaping). Follow the existing `/api/skills/{name}/tree` pattern
-(web_server.py:9768) + `/api/files/preview` (2758) for reads. Guard against huge dirs (cap
-entries, lazy-load children on expand).
+**Backend:** `GET /api/sessions/{id}/files` returns the files the session
+actually touched. Keep `/api/files/preview` for reads. Do not bring back a
+generic workspace tree unless a specific workflow needs it.
 
-**UI:** a filterable tree (the reference's "Filter files… (?text to search contents)"). Plain
-filter = name match; `?term` = content search (optional v2, calls a grep endpoint). Click a
-file → opens it in the **Preview** panel (`setSidePanel("preview")` + load that artifact).
+**UI:** a filterable grouped file list. Click a file → opens it in the
+**Preview** panel (`setSidePanel("preview")` + load that artifact).
 
 ## Build order
 
@@ -169,7 +168,7 @@ file → opens it in the **Preview** panel (`setSidePanel("preview")` + load tha
    simplification".)
 2. **Background tasks panel** (pure tool-stream filter + `ToolEntry.status`; truly no backend).
    Actually the cheapest panel — consider doing it alongside step 1 to de-risk the selector.
-3. **Files panel** (`/api/files/tree` endpoint + tree UI + click-to-preview).
+3. **Files panel** (`/api/sessions/{id}/files` + click-to-preview).
 
 ## Integration points (line anchors verified 2026-06-04)
 - `cli/web/src/pages/ChatPage.tsx`: `.chat-top` header `:5862` (selector; existing narrow
@@ -187,8 +186,9 @@ file → opens it in the **Preview** panel (`setSidePanel("preview")` + load tha
   for the new `/api/sessions/{id}/todos` endpoint.**
 - `cli/tools/{delegate_tool,mixture_of_agents_tool,agent_handoff_tool}.py` — tool names to
   filter for Background tasks. `agent/background_review.py` is NOT a tool (exclude).
-- `cli/elevate_cli/web_server.py:9768` (`/api/skills/{name}/tree`) + `:2758`
-  (`/api/files/preview`) — patterns for the new `/api/files/tree` AND `/api/sessions/{id}/todos`.
+- `cli/elevate_cli/web_server.py` (`/api/files/preview`,
+  `/api/sessions/{id}/files`, `/api/sessions/{id}/todos`) — file preview,
+  session-file inventory, and plan state.
 
 ## Out of scope (per Dartagnan)
 - **Diff** and **Terminal** — not wanted, not built.
@@ -202,9 +202,8 @@ eslint clean (warnings only, matching existing patterns).
 - `GET /api/sessions/{id}/todos` — backwards-scan mirror of `_hydrate_todo_store`, returns
   `{todos, summary}` untruncated. Verified against the live DB (found a real session's 4-item
   list, correct `{id,content,status}` shape + counts).
-- `GET /api/files/tree?root=&depth=` — lazy (1 level; dirs omit `children` until expanded),
-  clamped to `_preview_roots()`. Verified: 64 entries at cli root, `/etc`→403, subdir lazy-load
-  works, no-token→401.
+- `GET /api/files/tree?root=&depth=` was built as a lazy browse endpoint but
+  later proved unnecessary for the chat Files panel.
 
 **Frontend** (`cli/web/src/components/ChatSidePanels.tsx` — new; `pages/ChatPage.tsx` wired):
 - `SidePanelSelector` (header `PanelRight`+chevron dropdown, Preview/Files/Background tasks/Plan,
@@ -214,12 +213,11 @@ eslint clean (warnings only, matching existing patterns).
   endpoint = source of truth.
 - `BackgroundTasksPanel` — pure tool-stream filter on `{delegate, mixture_of_agents,
   agent_handoff}` + `ToolEntry.status`, Running/Finished sections. No backend.
-- `FilesPanel` — lists the files the agent actually worked on this session (from
-  `artifacts`, deduped + grouped by directory), filter box, click-file→Preview. Elevate chats
-  have no single workspace dir (`/api/status` working_directory is null; agents touch scattered
-  absolute paths), so a tree rooted at one dir was wrong — it fell back to Elevate's install dir.
-  The `/api/files/tree` endpoint stays deployed as a latent browse capability but the panel no
-  longer uses it.
+- `FilesPanel` — lists the files the agent actually worked on this session,
+  deduped + grouped by directory, filter box, click-file→Preview. Elevate chats
+  have no single workspace dir (`/api/status` working_directory is null; agents
+  touch scattered absolute paths), so a tree rooted at one dir was wrong — it
+  fell back to Elevate's install dir.
 - **Preview always opens** — selecting Preview with no current artifact shows an `EmptyPreviewPanel`
   ("No preview") instead of being a disabled/dead menu row (per Dartagnan: panels should pop up
   on click even when empty).

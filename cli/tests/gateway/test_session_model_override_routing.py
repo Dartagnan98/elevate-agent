@@ -12,6 +12,8 @@ import threading
 import types
 from unittest.mock import AsyncMock, MagicMock
 
+import threading
+
 import pytest
 
 import gateway.run as gateway_run
@@ -38,6 +40,10 @@ class _CapturingAgent:
 
 def _make_runner():
     runner = object.__new__(gateway_run.GatewayRunner)
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
     runner.adapters = {}
     runner.session_store = None
     runner.config = None

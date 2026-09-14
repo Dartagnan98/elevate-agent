@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { AgentHubSkeleton } from "@/components/agent-hub/AgentHubSkeleton";
+import { Button } from "@/components/ui/button";
 import { BoardSkeleton, ListSkeleton, PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -8,9 +10,64 @@ type RouteSkeletonProps = {
   path?: string;
 };
 
+type RouteLoadErrorProps = {
+  title: string;
+  error: unknown;
+  onRetry?: () => void | Promise<void>;
+  retryLabel?: string;
+  className?: string;
+};
+
 function normalizePath(path?: string) {
   if (!path) return "/";
   return path.split("?")[0].replace(/\/+$/, "") || "/";
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error == null) return "Unknown error";
+  return String(error);
+}
+
+export function RouteLoadError({
+  title,
+  error,
+  onRetry,
+  retryLabel = "Retry",
+  className,
+}: RouteLoadErrorProps) {
+  return (
+    <div
+      role="alert"
+      className={cn(
+        "flex flex-col gap-3 rounded-md border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive sm:flex-row sm:items-start sm:justify-between",
+        className,
+      )}
+    >
+      <div className="flex min-w-0 items-start gap-3">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+        <div className="min-w-0">
+          <p className="font-medium">{title}</p>
+          <p className="mt-1 break-words text-xs text-destructive/80">
+            {errorMessage(error)}
+          </p>
+        </div>
+      </div>
+      {onRetry ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10"
+          onClick={() => void onRetry()}
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          {retryLabel}
+        </Button>
+      ) : null}
+    </div>
+  );
 }
 
 function Shell({

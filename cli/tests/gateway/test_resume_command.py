@@ -66,6 +66,9 @@ def _make_runner(session_db=None, current_session_id="current_session_001",
     runner._voice_mode = {}
     runner._session_db = session_db
     runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
+    runner._agent_cache = {}
 
     # Compute the real session key if an event is provided
     session_key = build_session_key(event.source) if event else "agent:main:telegram:dm"
@@ -225,6 +228,32 @@ class TestHandleResumeCommand:
         await runner._handle_resume_command(event)
 
         assert real_key not in runner._running_agents
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_evicts_cached_agent(self, tmp_path):
+        """Switching sessions must not reuse an agent bound to the old session id."""
+        from elevate_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("old_session", "telegram")
+        db.set_session_title("old_session", "Old Work")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume Old Work")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        real_key = _session_key_for_event(event)
+        cached_agent = MagicMock()
+        cached_agent.session_id = "current_session_001"
+        runner._agent_cache[real_key] = (cached_agent, "same-config-signature")
+
+        await runner._handle_resume_command(event)
+
+        assert real_key not in runner._agent_cache
         db.close()
 
     @pytest.mark.asyncio

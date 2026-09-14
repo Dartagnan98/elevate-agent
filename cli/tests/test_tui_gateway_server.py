@@ -7,7 +7,15 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tui_gateway import server
+
+
+@pytest.fixture(autouse=True)
+def _allow_prompt_submit_without_license(monkeypatch):
+    """Unit tests in this file exercise gateway RPC behavior behind the gate."""
+    monkeypatch.setattr(server, "_license_signed_in", lambda: True)
 
 
 class _ChunkyStdout:
@@ -59,6 +67,36 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
+def test_debug_trace_log_redacts_secrets(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_elevate_home", tmp_path)
+
+    resp = server._methods["debug.trace"](
+        7,
+        {
+            "session_id": "sid-1",
+            "payload": {
+                "msg": (
+                    "blank for joe@example.com token=sk-secret123 "
+                    "password=hunter2 /Users/dartagnanpatricio/private/report.pdf"
+                ),
+                "authorization": "Bearer raw-token",
+            },
+        },
+    )
+
+    text = (tmp_path / "logs" / "blank-trace.log").read_text(encoding="utf-8")
+
+    assert resp["result"] == {"ok": True}
+    assert "joe@example.com" not in text
+    assert "sk-secret123" not in text
+    assert "hunter2" not in text
+    assert "/Users/dartagnanpatricio" not in text
+    assert "raw-token" not in text
+    assert "[redacted-email]" in text
+    assert "[redacted-secret]" in text
+    assert "[path:report.pdf]" in text
+
+
 def test_status_callback_emits_kind_and_text():
     with patch("tui_gateway.server._emit") as emit:
         cb = server._agent_cbs("sid")["status_callback"]
@@ -83,6 +121,169 @@ def test_status_callback_accepts_single_message_argument():
     )
 
 
+def test_emit_records_content_free_session_breadcrumb(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    server._sessions["sid"] = {"events_seq": 7}
+    try:
+        server._emit(
+            "message.complete",
+            "sid",
+            {
+                "message_id": "assistant-1",
+                "status": "complete",
+                "text": "raw answer",
+                "reasoning": "private reasoning",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 3,
+                    "reasoning_tokens": 2,
+                },
+            },
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert len(calls) == 1
+    event_type, kwargs = calls[0]
+    assert event_type == "message.complete"
+    assert kwargs["session_id"] == "sid"
+    assert kwargs["source"] == "tui_gateway"
+    assert kwargs["component"] == "tui_gateway.server"
+    assert kwargs["payload"] == {
+        "event_seq": 7,
+        "message_id": "assistant-1",
+        "status": "complete",
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "reasoning_tokens": 2,
+        "reasoning_chars": len("private reasoning"),
+        "text_chars": len("raw answer"),
+    }
+
+
+def test_emit_throttles_delta_recorder(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    server._RECORDER_DELTA_LAST.clear()
+    server._sessions["sid"] = {"events_seq": 1}
+    try:
+        server._emit("message.delta", "sid", {"message_id": "m1", "text": "a"})
+        server._emit("message.delta", "sid", {"message_id": "m1", "text": "b"})
+        server._emit("message.delta", "sid", {"message_id": "m2", "text": "c"})
+    finally:
+        server._sessions.pop("sid", None)
+        server._RECORDER_DELTA_LAST.clear()
+
+    assert [call[0] for call in calls] == ["message.delta", "message.delta"]
+    assert calls[0][1]["payload"]["message_id"] == "m1"
+    assert calls[1][1]["payload"]["message_id"] == "m2"
+
+
+def _capture_session_recorder(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    return calls
+
+
+def test_browser_tool_failure_records_friction_and_tool_error(monkeypatch):
+    calls = _capture_session_recorder(monkeypatch)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "browser_navigate",
+            {},
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "Timed out opening https://secret.example/path?token=abc",
+                    "browser_engine": "local",
+                }
+            ),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    friction = [call for call in calls if call[0] == "browser.friction_detected"]
+    tool_errors = [call for call in calls if call[0] == "tool.error"]
+    assert len(friction) == 1
+    assert len(tool_errors) == 1
+    payload = friction[0][1]["payload"]
+    assert payload["tool_name"] == "browser_navigate"
+    assert payload["stage"] == "navigate"
+    assert payload["friction_kind"] == "timeout"
+    assert payload["provider"] == "local"
+    assert payload["outcome"] == "failed"
+    assert "error" not in payload
+    assert "url" not in payload
+    assert "secret.example" not in json.dumps(payload)
+
+
+def test_browser_bot_warning_records_blocked_friction(monkeypatch):
+    calls = _capture_session_recorder(monkeypatch)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "browser_snapshot",
+            {},
+            json.dumps(
+                {
+                    "success": True,
+                    "bot_detection_warning": "captcha detected on page",
+                    "provider": "browser-use",
+                }
+            ),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    friction = [call for call in calls if call[0] == "browser.friction_detected"]
+    assert len(friction) == 1
+    assert friction[0][1]["payload"]["friction_kind"] == "blocked"
+    assert [call[0] for call in calls].count("tool.error") == 0
+
+
+def test_successful_browser_tool_records_no_friction(monkeypatch):
+    calls = _capture_session_recorder(monkeypatch)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "browser_navigate",
+            {},
+            json.dumps({"success": True, "result": "ok"}),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert [call[0] for call in calls] == []
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
@@ -99,6 +300,29 @@ def _session(agent=None, **extra):
         "tool_progress_mode": "all",
         **extra,
     }
+
+
+def test_reasoning_callbacks_honor_show_reasoning_toggle():
+    server._sessions["sid"] = _session(show_reasoning=False)
+    try:
+        with patch("tui_gateway.server._emit") as emit:
+            callbacks = server._agent_cbs("sid")
+            callbacks["reasoning_callback"]("private thought")
+            callbacks["thinking_callback"]("private thinking")
+        emit.assert_not_called()
+
+        server._sessions["sid"]["show_reasoning"] = True
+        with patch("tui_gateway.server._emit") as emit:
+            callbacks = server._agent_cbs("sid")
+            callbacks["reasoning_callback"]("visible thought")
+            callbacks["thinking_callback"]("visible thinking")
+
+        assert [item.args for item in emit.call_args_list] == [
+            ("reasoning.delta", "sid", {"text": "visible thought"}),
+            ("thinking.delta", "sid", {"text": "visible thinking"}),
+        ]
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_config_set_yolo_toggles_session_scope():
@@ -473,25 +697,26 @@ def test_config_set_personality_resets_history_and_returns_info(monkeypatch):
     assert ("session.info", "sid", {"model": "x"}) in emits
 
 
-def test_direct_compress_persists_and_emits_pill(monkeypatch):
+def test_direct_compress_keeps_append_only_transcript_and_emits_pill(monkeypatch):
     """Manual /compress must (1) emit the 'Compacting context' pill before the
-    blocking summary and 'Session compacted' after, and (2) PERSIST the
-    compressed history — _compress_context rotates to a fresh empty session, so
-    without an explicit flush the compress is lost on resume (the "compressed
-    twice" bug)."""
+    blocking summary and 'Session compacted' after, and (2) not duplicate rows.
+
+    Compaction redesign: _compress_context no longer ROTATES — the transcript is
+    append-only and compaction lives in the payload cursor + metadata. So the
+    session id is STABLE, session_key never swaps, and the in-memory history is
+    the (unchanged) transcript. The pill rides the status.update channel."""
     original = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-    compressed = [
-        {"role": "user", "content": "summary"},
-        {"role": "user", "content": "m7"},
-    ]
-    persisted = []
 
     agent = types.SimpleNamespace(
         compression_enabled=True,
         _cached_system_prompt="sys",
-        session_id="rotated-session",  # differs from session_key → rotation path
-        _compress_context=lambda *a, **k: (compressed, "sys"),
-        _persist_session=lambda msgs, hist: persisted.append(list(msgs)),
+        session_id="old-session",  # stable — no rotation in the cursor model
+        # New compress_context returns the SAME transcript unchanged (the cut +
+        # summary are persisted as metadata, not assembled into the list).
+        _compress_context=lambda hist, *a, **k: (hist, "sys"),
+        _persist_session=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("manual compact must not re-persist transcript rows")
+        ),
     )
     session = _session(agent=agent, session_key="old-session")
     session["history"] = list(original)
@@ -510,20 +735,20 @@ def test_direct_compress_persists_and_emits_pill(monkeypatch):
     finally:
         server._sessions.pop("dsid", None)
 
-    # Compressed history was persisted into the rotated session.
-    assert persisted == [compressed]
-    # In-memory history + session_key both moved to the compressed/rotated state.
-    assert session["history"] == compressed
-    assert session["session_key"] == "rotated-session"
-    # Pill on before, off after.
-    status_texts = [p.get("text") for (ev, p) in emitted if ev == "status"]
+    # The transcript stays unchanged in memory; session_key did NOT rotate.
+    assert session["history"] == original
+    assert session["session_key"] == "old-session"
+    # Pill on before, off after — on the status.update channel the client reads.
+    status_texts = [
+        p.get("text") for (ev, p) in emitted if ev == "status.update"
+    ]
     assert "Compacting context" in status_texts
     assert "Session compacted" in status_texts
     assert status_texts.index("Compacting context") < status_texts.index(
         "Session compacted"
     )
     # Result card still reports the numbers.
-    assert "Compressed" in out or "messages" in out
+    assert "Compressed" in out or "messages" in out or "compact" in out.lower()
 
 
 def test_session_compress_uses_compress_helper(monkeypatch):
@@ -646,6 +871,7 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
 
 
 def test_prompt_submit_forwards_persist_user_message(monkeypatch):
+    monkeypatch.setattr("elevate_cli.agent_hub.agent_recent_activity_digest", lambda *a, **k: "")
     captured = {}
 
     class _Agent:
@@ -972,6 +1198,78 @@ def test_session_steer_calls_agent_steer_when_agent_supports_it():
     assert resp["result"]["text"] == "also check auth.log"
     assert calls["steer_text"] == "also check auth.log"
     assert "interrupt_called" not in calls  # must NOT interrupt
+
+
+def test_session_steer_records_correction_without_text(monkeypatch):
+    recorder_calls = _capture_session_recorder(monkeypatch)
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    class _Agent:
+        def steer(self, text):
+            return True
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.steer",
+                "params": {
+                    "session_id": "sid",
+                    "text": "raw correction text with https://secret.example",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert "result" in resp, resp
+    corrections = [
+        call for call in recorder_calls
+        if call[0] == "experience.correction_requested"
+    ]
+    assert len(corrections) == 1
+    payload = corrections[0][1]["payload"]
+    assert payload == {
+        "stage": "steer",
+        "friction_kind": "correction",
+        "correction_count": 1,
+        "attempt_count": 1,
+        "friction_count": 1,
+        "outcome": "queued",
+    }
+    assert "raw correction" not in json.dumps(corrections)
+    assert "secret.example" not in json.dumps(corrections)
+
+
+def test_steer_applied_records_recovery_when_tool_progress_disabled(monkeypatch):
+    recorder_calls = _capture_session_recorder(monkeypatch)
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_progress(
+            "sid",
+            "steer.applied",
+            count=2,
+            via="tool_result",
+            sources=["not recorded"],
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    recovery = [
+        call for call in recorder_calls
+        if call[0] == "experience.recovery_attempted"
+    ]
+    assert len(recovery) == 1
+    assert recovery[0][1]["payload"] == {
+        "stage": "steer",
+        "friction_kind": "correction",
+        "correction_count": 2,
+        "attempt_count": 1,
+        "outcome": "applied",
+    }
+    assert "not recorded" not in json.dumps(recovery)
 
 
 def test_session_steer_rejects_empty_text():
@@ -1467,7 +1765,7 @@ def test_config_set_model_allowed_when_idle(monkeypatch):
 
 def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monkeypatch):
     """Slash worker passthrough (e.g. /model, /personality, /prompt,
-    /compress) must reject during an in-flight turn.  Same race as
+    /compact) must reject during an in-flight turn.  Same race as
     config.set — mutates live agent state while run_conversation is
     reading it."""
     import types
@@ -1492,7 +1790,7 @@ def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monke
         ("/model new/model", "model"),
         ("/personality default", "personality"),
         ("/prompt", "prompt"),
-        ("/compress", "compress"),
+        ("/compact", "compact"),
     ]:
         warning = server._mirror_slash_side_effects("sid", session, cmd)
         assert (
@@ -2098,3 +2396,53 @@ def test_async_delegate_sink_never_raises():
         sink(None)            # no payload
         sink({"results": "not a list"})  # wrong shape
     # No assertion needed beyond "did not raise".
+
+
+def test_slash_exec_compact_routes_to_compaction_handler(monkeypatch):
+    """/compact reaches the in-process compaction handler via slash.exec —
+    proving the command is wired end to end, not just that the strings exist
+    in source. (/compress was removed; only /compact compacts.)"""
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_run_direct_compress_slash",
+        lambda sid, session, focus: (calls.append((sid, focus)), "COMPACTED")[1],
+    )
+    server._sessions["sid"] = _session(
+        agent=types.SimpleNamespace(compression_enabled=True),
+        history=[{"role": "user", "content": str(i)} for i in range(6)],
+    )
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"session_id": "sid", "command": "/compact"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+    assert (
+        resp.get("result", {}).get("output") == "COMPACTED"
+    ), f"/compact did not route to the compaction handler: {resp}"
+    assert resp.get("result", {}).get("kind") == "compact"
+    assert resp.get("result", {}).get("display") == "Finished compacting"
+    assert calls, "/compact did not invoke _run_direct_compress_slash"
+
+
+def test_slash_exec_compact_short_session_uses_compact_wording():
+    """A too-short session yields the renamed 'compact' wording."""
+    server._sessions["sid"] = _session(history=[{"role": "user", "content": "hi"}])
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"session_id": "sid", "command": "/compact"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+    out = resp.get("result", {}).get("output", "")
+    assert "compact" in out.lower() and "compress" not in out.lower(), out
+    assert "display" not in resp.get("result", {})

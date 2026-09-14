@@ -30,6 +30,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, isoTimeAgo, timeAgo as epochTimeAgo } from "@/lib/utils";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
@@ -288,7 +289,7 @@ function AgentFleet({ agents, loading }: { agents: AgentHubAgent[]; loading?: bo
           <Bot className="h-5 w-5 text-foreground" />
           <CardTitle>Agent Status</CardTitle>
         </div>
-        <Link to="/hub" className="text-xs font-medium text-muted-foreground hover:text-foreground">
+        <Link to="/hub" className="inline-flex min-h-9 items-center text-xs font-medium text-muted-foreground hover:text-foreground">
           Open Hub
         </Link>
       </CardHeader>
@@ -353,7 +354,7 @@ function LiveActivity({ items, loading }: { items: ActivityItem[]; loading?: boo
           <Activity className="h-5 w-5 text-foreground" />
           <CardTitle>Live Activity</CardTitle>
         </div>
-        <Link to="/activity" className="text-xs font-medium text-muted-foreground hover:text-foreground">
+        <Link to="/activity" className="inline-flex min-h-9 items-center text-xs font-medium text-muted-foreground hover:text-foreground">
           View Feed
         </Link>
       </CardHeader>
@@ -418,7 +419,7 @@ function FocusPanel({ surfaces, tasks, loading }: { surfaces: HeartbeatSurface[]
           <Zap className="h-5 w-5 text-foreground" />
           <CardTitle>Current Focus</CardTitle>
         </div>
-        <Link to="/heartbeat" className="text-xs font-medium text-muted-foreground hover:text-foreground">
+        <Link to="/heartbeat" className="inline-flex min-h-9 items-center text-xs font-medium text-muted-foreground hover:text-foreground">
           Heartbeats
         </Link>
       </CardHeader>
@@ -734,10 +735,10 @@ export default function OverviewPage() {
       </header>
 
       {error ? (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn&apos;t load overview: {error}
-        </div>
-      ) : (
+        <RouteLoadError title="Could not load overview" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !data ? null : (
         <>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <MetricTile

@@ -787,17 +787,19 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
     # the draft queue entirely, leaving /leads empty under
     # ELEVATE_DATA_PRIMARY=db.
     from elevate_cli.source_connectors import (  # noqa: E402
+        SOURCE_INBOX_DRAFT_QUEUE_LIMIT,
         _collect_drafts_for_db_inbox,
     )
     from datetime import timedelta
 
     skipped_cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+    draft_limit = max(safe_limit, SOURCE_INBOX_DRAFT_QUEUE_LIMIT)
     drafts, skipped_drafts = _collect_drafts_for_db_inbox(
         source_root=source_root,
         connectors=connectors,
         threads=threads,
         skipped_cutoff=skipped_cutoff,
-        max_drafts=24,
+        max_drafts=draft_limit,
     )
     if suppressed_contact_ids:
         drafts = [
@@ -986,8 +988,8 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         "appleMessages": apple_messages,
         "profiles": profiles[:safe_limit],
         "threads": visible_threads,
-        "drafts": drafts[:safe_limit],
-        "skippedDrafts": skipped_drafts[: max(safe_limit, 50)],
+        "drafts": drafts[:draft_limit],
+        "skippedDrafts": skipped_drafts[: max(draft_limit, 50)],
         "privateSearchBuyers": private_search_buyers,
     }
 
@@ -1114,7 +1116,7 @@ def db_thread_context_response(
             if True:
                 activity_rows = conn.execute(
                     """
-                    SELECT id, kind, payload_json, ts
+                    SELECT id, kind, payload_json, payload_ref, ts
                     FROM events
                     WHERE contact_id = ?
                       AND kind IN (
@@ -1127,12 +1129,9 @@ def db_thread_context_response(
                     (contact["id"],),
                 ).fetchall()
                 for ev in activity_rows:
-                    payload: dict[str, Any] = {}
-                    if ev["payload_json"]:
-                        try:
-                            payload = json.loads(ev["payload_json"])
-                        except (TypeError, json.JSONDecodeError):
-                            payload = {}
+                    from elevate_cli.data._util import decode_payload
+                    decoded = decode_payload(ev["payload_json"], ev["payload_ref"])
+                    payload = decoded if isinstance(decoded, dict) else {}
                     legacy_type = payload.get("legacyType") or payload.get("legacy_type")
                     summary = (
                         payload.get("note")

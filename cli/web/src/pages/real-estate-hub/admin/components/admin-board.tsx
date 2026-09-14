@@ -1,5 +1,6 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   Plus,
   Refresh,
@@ -10,6 +11,8 @@ import {
   ShieldAlert,
   AlertTriangle,
   Clock,
+  Pin,
+  PinFilled,
 } from "../icons";
 import {
   ADMIN_PIPELINE,
@@ -21,7 +24,13 @@ import type { BuyerDeal } from "../admin-data";
 import type { AdminKpi } from "../compute-admin-kpis";
 import type { AdminEvent } from "../compute-admin-events";
 import DealDetailModal from "./deal-modal";
+import BoardLoader from "./BoardLoader";
+import CriticalDates from "./critical-dates";
+import ApprovalsQueue from "./approvals-queue";
+import CmaAddressIntake from "./cma-address-intake";
 import { api } from "@/lib/api";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
+import { adminDealToDeal, adminDealToBuyerDeal } from "../admin-mappers";
 import type { AdminDealCreateRequest, AdminDealSide } from "@/lib/api-types";
 
 export interface AdminBoardProps {
@@ -31,7 +40,7 @@ export interface AdminBoardProps {
   events?: AdminEvent[];
   loading?: boolean;
   error?: string | null;
-  onRefresh?: () => void;
+  onRefresh?: () => void | Promise<void>;
   onOpenDeal?: (dealId: string) => void;
   onMoveDeal?: (dealId: string, toStage: number) => void;
   onReRunOnboarding?: () => void;
@@ -113,11 +122,27 @@ interface KpiTileProps {
   breakdown?: string;
 }
 
+// Brand tone for the KPI value, keyed off the metric label.
+// Orange (#C46340) = hot / pending / in-flight money + dates.
+// Blue   (#5E8AD0) = closed / done outcomes.
+// White (bright)   = neutral headline metrics (Pipeline value, Active deals).
+function kpiValueTone(label: string): "hot" | "done" | "" {
+  const l = label.toLowerCase();
+  if (l.includes("gci pending") || l.includes("in offer") || l.includes("conditions") || l.includes("key date")) {
+    return "hot";
+  }
+  if (l.includes("gci ytd") || l.includes("closed ytd")) {
+    return "done";
+  }
+  return "";
+}
+
 function KpiTile({ label, value, delta, deltaTone, breakdown }: KpiTileProps) {
+  const tone = kpiValueTone(label);
   return (
     <div className="ab-kpi">
       <div className="ab-kpi-label">{label}</div>
-      <div className="ab-kpi-value">{value}</div>
+      <div className={"ab-kpi-value" + (tone ? " " + tone : "")}>{value}</div>
       {breakdown && <div className="ab-kpi-breakdown">{breakdown}</div>}
       {delta && <div className={"ab-kpi-delta " + (deltaTone || "")}>{delta}</div>}
     </div>
@@ -165,6 +190,7 @@ function PipelineVelocity({ dealsByPhase }: { dealsByPhase: Record<string, Deal[
 
 interface Deal {
   id: string;
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
@@ -180,6 +206,57 @@ interface Deal {
   price?: string;
   mls?: string;
   side?: string;
+  canAdvance?: boolean;
+  missingCount?: number;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
+  status?: string;
+  archivedNote?: string;
+  archivedAt?: string;
+}
+
+const DEAL_DRAG_MIME = "application/x-elevate-admin-deal-id";
+const POST_DRAG_CLICK_SUPPRESS_MS = 500;
+
+function formatArchivedDate(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  try {
+    return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "";
+  }
+}
+
+function phaseStageNumber(phase: PipelinePhase): number | null {
+  const value = Number.parseInt(String(phase.stage).replace(/^S/i, ""), 10);
+  return Number.isFinite(value) ? value : null;
+}
+
+function dealDragId(dataTransfer: DataTransfer, fallback?: string | null): string {
+  return (
+    dataTransfer.getData(DEAL_DRAG_MIME) ||
+    dataTransfer.getData("text/plain") ||
+    fallback ||
+    ""
+  );
+}
+
+function shouldDropDeal(
+  deals: Deal[],
+  draggedDeal: Deal | null | undefined,
+  stageNum: number | null,
+): stageNum is number {
+  if (!draggedDeal?.id || stageNum == null) return false;
+  if (deals.some((deal) => deal.id === draggedDeal.id)) return false;
+
+  const fromStage = typeof draggedDeal.stage === "number" ? draggedDeal.stage : null;
+  if (fromStage == null || stageNum === fromStage) return false;
+  if (stageNum < fromStage) return true;
+  return draggedDeal.canAdvance === true && stageNum === fromStage + 1;
 }
 
 function DealCard({
@@ -187,25 +264,81 @@ function DealCard({
   onOpen,
   onDragStart,
   onDragEnd,
+  onTogglePin,
   dragging,
 }: {
   deal: Deal;
   onOpen?: (deal: Deal) => void;
-  onDragStart?: (id: string) => void;
+  onDragStart?: (deal: Deal) => void;
   onDragEnd?: () => void;
+  /** Called after a pin toggle resolves so the board can refresh. */
+  onTogglePin?: (dealId: string) => void;
   dragging?: boolean;
 }) {
+  const lastDragAtRef = useRef(0);
+  const [pinning, setPinning] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+  const pinned = deal.primary === true;
+
+  const handleTogglePin = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (pinning) return;
+    setPinning(true);
+    setPinError(null);
+    try {
+      await api.setAdminDealToggle(deal.id, "pinnedTop25", !pinned);
+      onTogglePin?.(deal.id);
+    } catch {
+      setPinError("Could not update Top 25. Please try again.");
+    } finally {
+      setPinning(false);
+    }
+  };
+  const waitingCount = deal.waitingHumanCount ?? 0;
+  const runningCount = deal.runningRunCount ?? 0;
+  const activityLabel = deal.activeRunLabel || (deal.daysInStage ? `${deal.daysInStage} in stage` : "Stage date unavailable");
+  const statusLabel =
+    waitingCount > 0
+      ? "Waiting on you"
+      : runningCount > 0
+        ? runningCount > 1
+          ? `${runningCount} working`
+          : "Working"
+        : deal.activeRunStatus === "failed"
+          ? "Needs review"
+          : deal.blocked
+            ? "Blocked"
+            : null;
+  const statusClass =
+    waitingCount > 0
+      ? " waiting"
+      : runningCount > 0
+        ? " working"
+        : deal.activeRunStatus === "failed"
+          ? " failed"
+          : "";
+
   return (
     <div
       className={"ab-deal" + (deal.blocked ? " blocked" : "") + (dragging ? " dragging" : "")}
       draggable
       onDragStart={(e) => {
+        lastDragAtRef.current = Date.now();
         e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData(DEAL_DRAG_MIME, deal.id);
         e.dataTransfer.setData("text/plain", deal.id);
-        onDragStart?.(deal.id);
+        onDragStart?.(deal);
       }}
       onDragEnd={() => onDragEnd?.()}
-      onClick={() => onOpen?.(deal)}
+      onClick={(e) => {
+        if (Date.now() - lastDragAtRef.current < POST_DRAG_CLICK_SUPPRESS_MS) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        onOpen?.(deal);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -215,22 +348,39 @@ function DealCard({
       role="button"
       tabIndex={0}
     >
+      <button
+        type="button"
+        className={"ab-deal-pin" + (pinned ? " pinned" : "")}
+        disabled={pinning}
+        onClick={handleTogglePin}
+        title={pinned ? "In Top 25 — click to remove" : "Add to Top 25"}
+        aria-pressed={pinned}
+        aria-label={pinned ? "In Top 25 — click to remove" : "Add to Top 25"}
+      >
+        {pinned ? <PinFilled /> : <Pin />}
+      </button>
+      {pinError && <div className="dsk-err" role="alert">{pinError}</div>}
       <div className="ab-deal-addr" title={deal.addr}>{deal.addr}</div>
       <div className="ab-deal-line2">{deal.line2}</div>
       <div className="ab-deal-mid">
         <span className="ab-deal-badge">{deal.badge}</span>
         {deal.progress && <span className="ab-deal-progress mono">{deal.progress}</span>}
+        {deal.canAdvance ? (
+          <span className="ab-deal-gate ready">Ready to advance</span>
+        ) : !deal.blocked && deal.missingCount ? (
+          <span className="ab-deal-gate">{deal.missingCount} to advance</span>
+        ) : null}
       </div>
       <div className="ab-deal-next">
         <span className="ab-deal-next-label mono">Next</span>
         <span className="ab-deal-next-text">{deal.next}</span>
       </div>
       <div className="ab-deal-foot">
-        <span className="ab-deal-owner" title={deal.owner || "Demo Agent"}>
+        <span className="ab-deal-owner" title={deal.owner || "Unassigned"}>
           {deal.ownerInitial || "A"}
         </span>
-        <span className="ab-deal-time">{deal.daysInStage || "3d"} in stage</span>
-        {deal.blocked && <span className="ab-deal-flag">Blocked</span>}
+        <span className="ab-deal-time" title={activityLabel}>{activityLabel}</span>
+        {statusLabel && <span className={`ab-deal-flag${statusClass}`}>{statusLabel}</span>}
       </div>
     </div>
   );
@@ -247,28 +397,30 @@ function PipelineColumn({
   onDropDeal,
   onCardDragStart,
   onCardDragEnd,
-  draggingId,
+  onTogglePin,
+  draggingDeal,
   canDrop,
 }: {
   phase: PipelinePhase;
   deals: Deal[];
   onOpenDeal: (deal: Deal) => void;
   onDropDeal?: (dealId: string, toStage: number) => void;
-  onCardDragStart?: (id: string) => void;
+  onCardDragStart?: (deal: Deal) => void;
   onCardDragEnd?: () => void;
-  draggingId?: string | null;
+  onTogglePin?: (dealId: string) => void;
+  draggingDeal?: Deal | null;
   canDrop?: boolean;
 }) {
   const motion = phase.motion || phase.note;
   const [isOver, setIsOver] = useState(false);
   // phase.stage is "S<n>" — the numeric stage the move endpoint expects.
-  const stageNum = Number.parseInt(String(phase.stage).replace(/^S/i, ""), 10);
-  const dndEnabled = Boolean(onDropDeal) && Number.isFinite(stageNum);
+  const stageNum = phaseStageNumber(phase);
+  const dndEnabled = Boolean(onDropDeal) && stageNum != null;
   return (
     <div
       className={"ab-col" + (isOver && canDrop ? " drop-over" : "")}
       onDragOver={(e) => {
-        if (!dndEnabled || !draggingId) return;
+        if (!dndEnabled || !canDrop) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
         if (!isOver) setIsOver(true);
@@ -280,8 +432,10 @@ function PipelineColumn({
         if (!dndEnabled) return;
         e.preventDefault();
         setIsOver(false);
-        const id = e.dataTransfer.getData("text/plain") || draggingId;
-        if (id) onDropDeal?.(id, stageNum);
+        const id = dealDragId(e.dataTransfer, draggingDeal?.id);
+        if (id === draggingDeal?.id && shouldDropDeal(deals, draggingDeal, stageNum)) {
+          onDropDeal?.(id, stageNum);
+        }
       }}
     >
       <header className="ab-col-head">
@@ -295,7 +449,9 @@ function PipelineColumn({
       <div className="ab-col-deals">
         {deals.length === 0 ? (
           <div className="ab-col-empty">
-            {isOver && canDrop ? "Drop to move here" : "No deals in this stage"}
+            <span className="ab-col-empty-text">
+              {isOver && canDrop ? "Drop to move here" : "Nothing here yet"}
+            </span>
           </div>
         ) : (
           deals.map(d => (
@@ -305,7 +461,8 @@ function PipelineColumn({
               onOpen={onOpenDeal}
               onDragStart={onCardDragStart}
               onDragEnd={onCardDragEnd}
-              dragging={draggingId === d.id}
+              onTogglePin={onTogglePin}
+              dragging={draggingDeal?.id === d.id}
             />
           ))
         )}
@@ -322,33 +479,137 @@ function Top25Deals({
   deals,
   mode,
   onOpenDeal,
+  onRefresh,
 }: {
   deals: Deal[];
   mode: string;
   onOpenDeal: (deal: Deal) => void;
+  onRefresh?: () => void | Promise<void>;
 }) {
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [formName, setFormName] = useState("");
+  const [formTimeline, setFormTimeline] = useState("");
+  const [formBudget, setFormBudget] = useState("");
+  const [formLookingFor, setFormLookingFor] = useState("");
+  // Default the new-lead Side to the strip you're adding from: the buyer strip
+  // (mode "buyer") defaults Buyer, the "Top 25 sellers" strip defaults Seller
+  // (which maps to side:"listing" on create). Adding from a strip should land
+  // the lead in that same strip.
+  const [formSide, setFormSide] = useState<"buyer" | "seller">(mode === "buyer" ? "buyer" : "seller");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+
+  // Take a lead off the board. Archives the deal (status -> archived) so it
+  // drops out of the Top 25 + pipeline but stays recoverable in the Archived
+  // tab if their timeline picks back up.
+  const handleRemove = async (deal: Deal) => {
+    if (removingId) return;
+    const name = (deal.addr || "this lead").replace(/\s*[—-]\s*buyer track$/i, "");
+    if (!(await confirmAction(`Take ${name} off the board?\n\nIt moves to the Archived tab — you can restore it later if their timeline picks back up.`))) {
+      return;
+    }
+    setRemoveError(null);
+    setRemovingId(deal.id);
+    try {
+      await api.setAdminDealStatus(deal.id, "archived");
+      onRefresh?.();
+    } catch {
+      setRemoveError("Could not remove that lead. Try again.");
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  const resetForm = () => {
+    setFormName("");
+    setFormTimeline("");
+    setFormBudget("");
+    setFormLookingFor("");
+    setFormSide("buyer");
+    setCreateError(null);
+  };
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    nameRef.current?.focus();
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [pickerOpen]);
+
+  const canSubmitLead = formName.trim().length > 0 && !creating;
+
+  const handleCreateLead = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmitLead) return;
+    setCreating(true);
+    setCreateError(null);
+    const timeline = formTimeline.trim();
+    const budget = formBudget.trim();
+    const lookingFor = formLookingFor.trim();
+    const note = [budget, lookingFor].filter(Boolean).join(" · ");
+    try {
+      await api.createAdminDeal({
+        title: formName.trim(),
+        // Board "side": seller-side deals are stored as "listing".
+        side: formSide === "seller" ? "listing" : "buyer",
+        currentStage: 0,
+        fields: {
+          pinnedTop25: true,
+          hotLeadTimeline: timeline,
+          hotLeadBudget: budget,
+          hotLeadLookingFor: lookingFor,
+          top25Note: note,
+        },
+      });
+      onRefresh?.();
+      setPickerOpen(false);
+      resetForm();
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Could not add lead");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const ranked = useMemo(() => {
     const listingOrder = [
       "pre-cma", "cma", "intake", "skyslope", "go", "live",
       "offer", "conditions", "closing", "closed",
     ];
     const buyerOrder = [
-      "offer", "accepted", "conditions", "closed",
+      "offer", "accepted", "conditions", "removed",
     ];
     const order = mode === "buyer" ? buyerOrder : listingOrder;
     const score = (d: Deal) => {
       const stage = order.indexOf(d.phase);
       return (d.blocked ? 1000 : 0) + stage * 10 + (d.primary ? 5 : 0);
     };
-    return [...deals].sort((a, b) => score(b) - score(a)).slice(0, 25);
+    // Top 25 = hot leads Skyleigh explicitly pinned (d.primary), not all active deals.
+    const pinnedDeals = deals.filter(d => d.primary);
+    return [...pinnedDeals].sort((a, b) => score(b) - score(a)).slice(0, 25);
   }, [deals, mode]);
 
   const label = mode === "buyer" ? "Top 25 buyers" : "Top 25 sellers";
-  const subEmpty = mode === "buyer"
-    ? "No buyer-side deals tracked yet. Buyer deals show here when you start working a buyer."
-    : "No seller-side deals yet.";
+  const subEmpty = "No hot leads pinned yet — open a card and tap 'Add to Top 25'.";
 
-  return (
+  return <>{confirmationDialog}{removeError && <div className="dsk-err" role="alert">{removeError}</div>}{(
     <section className="ab-top25">
       <header className="ab-top25-head">
         <div className="ab-top25-title-block">
@@ -363,42 +624,144 @@ function Top25Deals({
           <span className="ab-top25-legend-item"><span className="ab-top25-legend-dot blocked"></span>blocked</span>
           <span className="ab-top25-legend-item"><span className="ab-top25-legend-dot primary"></span>primary</span>
         </div>
+        <button
+          type="button"
+          className="ab-top25-add"
+          onClick={() => setPickerOpen(o => !o)}
+          aria-expanded={pickerOpen}
+        >
+          + Add
+        </button>
+        {pickerOpen && (
+          <div className="ab-top25-add-pop" ref={pickerRef}>
+            <form className="ab-top25-form" onSubmit={handleCreateLead}>
+              <div className="ab-top25-form-title mono">NEW HOT LEAD</div>
+              <label className="ab-top25-form-field">
+                <span>Name</span>
+                <input
+                  ref={nameRef}
+                  type="text"
+                  value={formName}
+                  onChange={e => setFormName(e.target.value)}
+                  placeholder="Lead name"
+                />
+              </label>
+              <div className="ab-top25-form-side">
+                <span className="ab-top25-form-side-label">Side</span>
+                <div className="ab-top25-side-toggle">
+                  <button
+                    type="button"
+                    className={"ab-top25-side-btn" + (formSide === "buyer" ? " active" : "")}
+                    onClick={() => setFormSide("buyer")}
+                  >
+                    Buyer
+                  </button>
+                  <button
+                    type="button"
+                    className={"ab-top25-side-btn" + (formSide === "seller" ? " active" : "")}
+                    onClick={() => setFormSide("seller")}
+                  >
+                    Seller
+                  </button>
+                </div>
+              </div>
+              <label className="ab-top25-form-field">
+                <span>Timeline</span>
+                <input
+                  type="text"
+                  value={formTimeline}
+                  onChange={e => setFormTimeline(e.target.value)}
+                  placeholder="e.g. 30–60 days"
+                />
+              </label>
+              <label className="ab-top25-form-field">
+                <span>Budget</span>
+                <input
+                  type="text"
+                  value={formBudget}
+                  onChange={e => setFormBudget(e.target.value)}
+                  placeholder="e.g. $600–700K"
+                />
+              </label>
+              <label className="ab-top25-form-field">
+                <span>Looking for</span>
+                <textarea
+                  rows={3}
+                  value={formLookingFor}
+                  onChange={e => setFormLookingFor(e.target.value)}
+                  placeholder="What they want"
+                />
+              </label>
+              {createError && <div className="ab-top25-form-error">{createError}</div>}
+              <div className="ab-top25-form-actions">
+                <button
+                  type="button"
+                  className="ab-top25-form-cancel"
+                  onClick={() => { setPickerOpen(false); resetForm(); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="ab-top25-form-submit"
+                  disabled={!canSubmitLead}
+                >
+                  {creating ? "Adding…" : "Add to Top 25"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
       </header>
       {ranked.length === 0 ? (
-        <div className="ab-top25-empty">{subEmpty}</div>
+        <div className="ab-top25-empty">
+          <span>{subEmpty}</span>
+        </div>
       ) : (
         <div className="ab-top25-strip">
           {ranked.map((d, i) => (
-            <button
-              key={d.id}
-              type="button"
-              className={"ab-top25-card" + (d.blocked ? " blocked" : "") + (d.primary ? " primary" : "")}
-              onClick={() => onOpenDeal && onOpenDeal(d)}
-            >
-              <div className="ab-top25-rank mono">{(i + 1).toString().padStart(2, "0")}</div>
-              <div className="ab-top25-card-body">
-                <div className="ab-top25-card-head">
-                  <span className="ab-top25-card-addr">{d.addr}</span>
-                  {d.blocked && <span className="ab-top25-card-flag">&bull;</span>}
-                </div>
-                <div className="ab-top25-card-badge mono">{d.badge}</div>
-                {d.primary && d.top25Note && (
-                  <div className="ab-top25-card-note">
-                    <span className="ab-top25-card-note-label mono">Looking</span>
-                    <span className="ab-top25-card-note-text">{d.top25Note}</span>
+            <div className="ab-top25-card-wrap" key={d.id}>
+              <button
+                type="button"
+                className="ab-top25-card-remove"
+                title="Take off the board (archive)"
+                aria-label="Take off the board"
+                disabled={removingId === d.id}
+                onClick={(e) => { e.stopPropagation(); void handleRemove(d); }}
+              >
+                {removingId === d.id ? "…" : "×"}
+              </button>
+              <button
+                type="button"
+                className={"ab-top25-card" + (d.blocked ? " blocked" : "") + (d.primary ? " primary" : "")}
+                onClick={() => onOpenDeal && onOpenDeal(d)}
+              >
+                <div className="ab-top25-rank mono">{(i + 1).toString().padStart(2, "0")}</div>
+                <div className="ab-top25-card-body">
+                  <div className="ab-top25-card-head">
+                    <span className="ab-top25-card-addr">{d.addr}</span>
+                    {d.blocked && <span className="ab-top25-card-flag">&bull;</span>}
                   </div>
-                )}
-                <div className="ab-top25-card-foot">
-                  {d.price && <span className="ab-top25-card-price mono">{d.price}</span>}
-                  {d.progress && <span className="ab-top25-card-progress mono">{d.progress}</span>}
+                  {/* Hot leads don't show pipeline stage/progress — just who they are + what they want. */}
+                  {d.primary && d.top25Note && (
+                    <div className="ab-top25-card-note">
+                      <span className="ab-top25-card-note-label mono">Looking</span>
+                      <span className="ab-top25-card-note-text">{d.top25Note}</span>
+                    </div>
+                  )}
+                  {d.price && (
+                    <div className="ab-top25-card-foot">
+                      <span className="ab-top25-card-price mono">{d.price}</span>
+                    </div>
+                  )}
                 </div>
-              </div>
-            </button>
+              </button>
+            </div>
           ))}
         </div>
       )}
     </section>
-  );
+  )}</>;
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -595,7 +958,6 @@ function UnifiedInbox() {
                   {it.desc && <div className="ab-inbox-desc">{it.desc}</div>}
                 </div>
                 <span className="ab-inbox-meta mono">{it.meta}</span>
-                <button type="button" className="ab-inbox-open">Open</button>
               </div>
             );
           })
@@ -689,7 +1051,6 @@ function ActionRow({ action }: { action: ActionItem }) {
           {action.next && <span>{action.next}</span>}
         </div>
       </div>
-      <button className="ab-action-open" type="button">Open</button>
     </div>
   );
 }
@@ -750,6 +1111,51 @@ function WorkRow({ item }: { item: WorkItem }) {
    NewDealModal — minimal create form wired to api.createAdminDeal
    ───────────────────────────────────────────────────────────────── */
 
+/* ─────────────────────────────────────────────────────────────────
+   NewEvaluationModal — the CMA address front door (mockup screen 1).
+   Thin shell around CmaAddressIntake so the intake itself stays free
+   of board concerns and can move into the wizard's step 1 unchanged.
+   ───────────────────────────────────────────────────────────────── */
+
+function NewEvaluationModal({
+  onClose,
+  onOpenDeal,
+}: {
+  onClose: () => void;
+  onOpenDeal: (dealId: string) => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus({ dialogRef, initialFocusSelector: "input", onEscape: onClose });
+
+  return (
+    <div className="ab-modal-backdrop" onClick={onClose}>
+      <div
+        className="ab-modal"
+        ref={dialogRef}
+        tabIndex={-1}
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="New market evaluation"
+        style={{ maxWidth: "40rem" }}
+      >
+        <button className="ab-modal-close" onClick={onClose} aria-label="Close">
+          <span className="x">&times;</span>
+        </button>
+        <header className="abm-head">
+          <div className="abm-crumbs mono">
+            <span>ELEVATION &middot; CMA</span>
+          </div>
+          <h2 className="abm-title">New market evaluation</h2>
+        </header>
+        <div className="ab-modal-scroll">
+          <CmaAddressIntake onOpenDeal={onOpenDeal} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function NewDealModal({
   onClose,
   onCreated,
@@ -759,20 +1165,29 @@ function NewDealModal({
 }) {
   const [side, setSide] = useState<AdminDealSide>("listing");
   const [title, setTitle] = useState("");
+  const [clientName, setClientName] = useState("");
+  // Contact details at intake. Optional on purpose: if she has them off the top
+  // of her head she types them and the seller package goes out immediately;
+  // if she leaves them blank the server looks the client up (Elevation
+  // contacts, then Apple Contacts / Gmail / CRM) before asking her.
+  const [clientEmail, setClientEmail] = useState("");
+  const [clientPhone, setClientPhone] = useState("");
   const [province, setProvince] = useState("");
   const [listingAddress, setListingAddress] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSubmit = title.trim().length > 0 && province.trim().length > 0 && !submitting;
+  const isListing = side === "listing";
+  // A listing card is identified by the property, so the address IS the card
+  // title (the client is a separate contact). A buyer has no listing address,
+  // so the free-text title (client name / deal label) stands in.
+  const canSubmit =
+    province.trim().length > 0 &&
+    (isListing ? listingAddress.trim().length > 0 : title.trim().length > 0) &&
+    !submitting;
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus({ dialogRef, initialFocusSelector: "input", onEscape: () => { if (!submitting) onClose(); } });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -780,12 +1195,37 @@ function NewDealModal({
     setSubmitting(true);
     setError(null);
     const cleanAddress = listingAddress.trim();
+    const cleanClient = clientName.trim();
+    const cleanEmail = clientEmail.trim();
+    const cleanPhone = clientPhone.trim();
+    // Write BOTH vocabularies. `workflow_client_1_*` is what the Pre-CMA stage
+    // gate reads; the prospect./buyer. keys are what the score card displays.
+    // Writing only one is how a card ends up looking empty while the gate says
+    // it is satisfied (426 Gleneagles, 2026-08-20).
+    const fields: Record<string, unknown> = {};
+    if (cleanClient) {
+      fields.clientName = cleanClient;
+      fields.workflow_client_1_name = cleanClient;
+      if (isListing) fields.prospectClientNames = cleanClient;
+      else fields.buyerClientNames = cleanClient;
+    }
+    if (cleanEmail) {
+      fields.workflow_client_1_email = cleanEmail;
+      if (isListing) fields.prospectEmails = cleanEmail;
+      else fields.buyerEmails = cleanEmail;
+    }
+    if (cleanPhone) {
+      fields.workflow_client_1_phone = cleanPhone;
+      if (isListing) fields.prospectPhones = cleanPhone;
+      else fields.buyerPhones = cleanPhone;
+    }
     const request: AdminDealCreateRequest = {
-      title: title.trim(),
+      title: isListing ? cleanAddress : title.trim(),
       side,
       province: province.trim().toUpperCase(),
       currentStage: 0,
-      listingAddress: side === "listing" ? cleanAddress || null : null,
+      listingAddress: isListing ? cleanAddress || null : null,
+      fields: Object.keys(fields).length ? fields : undefined,
     };
     try {
       await api.createAdminDeal(request);
@@ -802,8 +1242,12 @@ function NewDealModal({
     <div className="ab-modal-backdrop" onClick={onClose}>
       <div
         className="ab-modal"
+        ref={dialogRef}
+        tabIndex={-1}
         onClick={(e: React.MouseEvent) => e.stopPropagation()}
         role="dialog"
+        aria-modal="true"
+        aria-label="New deal"
         style={{ maxWidth: "30rem" }}
       >
         <button className="ab-modal-close" onClick={onClose} aria-label="Close">
@@ -837,19 +1281,132 @@ function NewDealModal({
               </div>
             </div>
 
+            {isListing ? (
+              <>
+                <div className="abm-section">
+                  <label className="abm-section-label mono" htmlFor="nd-address">
+                    LISTING ADDRESS
+                  </label>
+                  <input
+                    id="nd-address"
+                    className="abm-input"
+                    value={listingAddress}
+                    onChange={(e) => setListingAddress(e.target.value)}
+                    placeholder="123 Sample Lane, Vancouver, BC"
+                    autoFocus
+                  />
+                  <span
+                    className="mono"
+                    style={{ fontSize: "0.7rem", opacity: 0.6, marginTop: 4, display: "block" }}
+                  >
+                    Becomes the card title
+                  </span>
+                </div>
+
+                <div className="abm-section">
+                  <label className="abm-section-label mono" htmlFor="nd-client">
+                    CLIENT NAME <span style={{ opacity: 0.6 }}>(optional)</span>
+                  </label>
+                  <input
+                    id="nd-client"
+                    className="abm-input"
+                    value={clientName}
+                    onChange={(e) => setClientName(e.target.value)}
+                    placeholder="Seller name"
+                  />
+                </div>
+
+            {/* Contact details — optional. Blank is fine: the server looks the
+                client up before it asks her for anything. */}
             <div className="abm-section">
-              <label className="abm-section-label mono" htmlFor="nd-title">
-                CLIENT / TITLE
+              <label className="abm-section-label mono" htmlFor="nd-email">
+                CLIENT EMAIL <span style={{ opacity: 0.6 }}>(optional)</span>
               </label>
               <input
-                id="nd-title"
+                id="nd-email"
                 className="abm-input"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Client name or deal title"
-                autoFocus
+                type="email"
+                value={clientEmail}
+                onChange={(e) => setClientEmail(e.target.value)}
+                placeholder="name@example.com"
               />
             </div>
+
+            <div className="abm-section">
+              <label className="abm-section-label mono" htmlFor="nd-phone">
+                CLIENT PHONE <span style={{ opacity: 0.6 }}>(optional)</span>
+              </label>
+              <input
+                id="nd-phone"
+                className="abm-input"
+                type="tel"
+                value={clientPhone}
+                onChange={(e) => setClientPhone(e.target.value)}
+                placeholder="250 555 1234"
+              />
+              <span
+                className="mono"
+                style={{ fontSize: "0.7rem", opacity: 0.6, marginTop: 4, display: "block" }}
+              >
+                Leave blank and I&rsquo;ll check your contacts, email and CRM. If I still
+                can&rsquo;t find them you&rsquo;ll get an Action Needed card.
+              </span>
+            </div>
+              </>
+            ) : (
+              <>
+              <div className="abm-section">
+                <label className="abm-section-label mono" htmlFor="nd-title">
+                  CLIENT / TITLE
+                </label>
+                <input
+                  id="nd-title"
+                  className="abm-input"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Client name or deal title"
+                  autoFocus
+                />
+              </div>
+              
+            {/* Contact details — optional. Blank is fine: the server looks the
+                client up before it asks her for anything. */}
+            <div className="abm-section">
+              <label className="abm-section-label mono" htmlFor="nd-email">
+                CLIENT EMAIL <span style={{ opacity: 0.6 }}>(optional)</span>
+              </label>
+              <input
+                id="nd-email"
+                className="abm-input"
+                type="email"
+                value={clientEmail}
+                onChange={(e) => setClientEmail(e.target.value)}
+                placeholder="name@example.com"
+              />
+            </div>
+
+            <div className="abm-section">
+              <label className="abm-section-label mono" htmlFor="nd-phone">
+                CLIENT PHONE <span style={{ opacity: 0.6 }}>(optional)</span>
+              </label>
+              <input
+                id="nd-phone"
+                className="abm-input"
+                type="tel"
+                value={clientPhone}
+                onChange={(e) => setClientPhone(e.target.value)}
+                placeholder="250 555 1234"
+              />
+              <span
+                className="mono"
+                style={{ fontSize: "0.7rem", opacity: 0.6, marginTop: 4, display: "block" }}
+              >
+                Leave blank and I&rsquo;ll check your contacts, email and CRM. If I still
+                can&rsquo;t find them you&rsquo;ll get an Action Needed card.
+              </span>
+            </div>
+            </>
+            )}
 
             <div className="abm-section">
               <label className="abm-section-label mono" htmlFor="nd-province">
@@ -863,21 +1420,6 @@ function NewDealModal({
                 placeholder="e.g. BC"
               />
             </div>
-
-            {side === "listing" && (
-              <div className="abm-section">
-                <label className="abm-section-label mono" htmlFor="nd-address">
-                  LISTING ADDRESS
-                </label>
-                <input
-                  id="nd-address"
-                  className="abm-input"
-                  value={listingAddress}
-                  onChange={(e) => setListingAddress(e.target.value)}
-                  placeholder="123 Sample Lane, Vancouver, BC"
-                />
-              </div>
-            )}
 
             {error && (
               <div className="abm-tag warn" style={{ display: "block", padding: "6px 8px" }}>
@@ -909,18 +1451,75 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const [query, setQuery] = useState("");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [showNewDeal, setShowNewDeal] = useState(false);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [showNewEval, setShowNewEval] = useState(false);
+  const [draggingDeal, setDraggingDeal] = useState<Deal | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const openRequest = useRef(0);
+  useEffect(() => () => { openRequest.current += 1; }, []);
+
+  // Restore an archived deal back to the live board (status -> active).
+  const handleRestore = async (deal: Deal | BuyerDeal) => {
+    if (restoringId) return;
+    setRestoringId(deal.id);
+    setActionError(null);
+    try {
+      await api.setAdminDealStatus(deal.id, "active");
+      onRefresh?.();
+    } catch {
+      setActionError("Could not restore that deal. Please try again.");
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  // Guaranteed octopus splash on a fresh app open. Data often loads from cache
+  // before the board's `loading` loader ever renders, so the mascot never gets
+  // seen. We force a short intro on mount, then gate it with sessionStorage so
+  // it only plays once per app session (fresh load = new session = key absent).
+  const [showIntro, setShowIntro] = useState(() => {
+    try {
+      return sessionStorage.getItem("adminOctoIntro") !== "1";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    if (!showIntro) return;
+    const t = setTimeout(() => {
+      try {
+        sessionStorage.setItem("adminOctoIntro", "1");
+      } catch {
+        /* SSR / private-mode safety: still hide the splash */
+      }
+      setShowIntro(false);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [showIntro]);
 
   // Never fall back to the ADMIN_DEALS / ADMIN_BUYER_DEALS demo fixtures: a
   // real account with no deals must see an empty board, not fabricated sample
   // listings ("Demo Listing", "Sample Drive", MLS DEMO…). The board is driven
   // entirely by the live /api/admin/deals fetch; absent data = empty.
-  const listingDeals = deals ?? [];
-  const buyerDealsResolved = buyerDeals ?? [];
+  const isArchived = (d: Deal | BuyerDeal) => (d.status ?? "").toLowerCase() === "archived";
+
+  // Archived deals (cancelled-without-relist) are filtered out of the live
+  // pipeline and shown only in the Archived tab.
+  const rawListingDeals = deals ?? [];
+  const rawBuyerDeals = buyerDeals ?? [];
+  const listingDeals = rawListingDeals.filter((d) => !isArchived(d));
+  const buyerDealsResolved = rawBuyerDeals.filter((d) => !isArchived(d));
+  const archivedDeals = useMemo(
+    () => [...rawListingDeals, ...rawBuyerDeals].filter(isArchived),
+    [rawListingDeals, rawBuyerDeals],
+  );
 
   const isBuyer = tab === "buyer";
+  const isArchivedTab = tab === "archived";
   const activePipeline = isBuyer ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
-  const allDeals       = isBuyer ? buyerDealsResolved   : listingDeals;
+  const allDeals = isArchivedTab ? archivedDeals : isBuyer ? buyerDealsResolved : listingDeals;
 
   // FIX 1: filter rendered deals by the search query (addr / line2 / mls)
   // before they get grouped into the kanban columns.
@@ -928,7 +1527,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
     const q = query.trim().toLowerCase();
     if (!q) return allDeals;
     return allDeals.filter((d) => {
-      const haystack = [d.addr, d.line2, (d as Deal).mls]
+      const haystack = [d.addr, d.line2, (d as Deal).mls, d.archivedNote]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -941,9 +1540,34 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
     onOpenDeal?.(deal.id);
   };
 
+  // Open a deal modal from a deal id (used by the Critical dates + Approvals
+  // desk sections, which only carry ids).
+  const openDealById = async (dealId: string) => {
+    const request = ++openRequest.current;
+    setActionError(null);
+    const known = [...rawListingDeals, ...rawBuyerDeals].find(d => d.id === dealId);
+    if (known) { setOpening(false); handleOpenDeal(known); return; }
+    // Intake may have just created this deal. Read it directly instead of
+    // depending on a cached list and the previous render's closure.
+    setOpening(true);
+    try {
+      const { deal } = await api.getDealContext(dealId);
+      if (request !== openRequest.current) return;
+      handleOpenDeal(deal.side === "buyer" ? adminDealToBuyerDeal(deal) : adminDealToDeal(deal));
+    } catch (e) {
+      if (request === openRequest.current) setActionError(e instanceof Error ? e.message : "Could not open the deal. Refresh and try again.");
+    } finally {
+      if (request === openRequest.current) setOpening(false);
+    }
+  };
+
   const dealsByPhase = useMemo(() => {
     const m: Record<string, Deal[]> = {};
-    for (const d of activeDeals) (m[d.phase] = m[d.phase] || []).push(d);
+    // Pinned Top-25 hot leads live ONLY in the Top 25 strip, not the pipeline columns.
+    for (const d of activeDeals) {
+      if (d.primary) continue;
+      (m[d.phase] = m[d.phase] || []).push(d);
+    }
     return m;
   }, [activeDeals]);
 
@@ -951,28 +1575,40 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
     <main className="admin-board">
       <header className="ab-top">
         <div className="ab-crumb">
+          {/* octopus moved to the global sidebar brand mark (on every page) */}
           <span className="crumb">Admin desk</span>
           <span className="sep">&middot;</span>
-          <span className="ab-live"><span className="ab-live-dot"></span>Local gateway online</span>
+          <span className="ab-live" role="status">{loading ? "Refreshing deals…" : error ? "Refresh needs attention" : "Deal workspace"}</span>
         </div>
         <div className="ab-top-actions">
           <button className="ab-btn ghost" type="button" onClick={onRefresh} disabled={loading}>
             <Refresh /><span>{loading ? "Refreshing..." : "Refresh"}</span>
           </button>
           <button className="ab-btn ghost" type="button" onClick={onReRunOnboarding}><Sparkles /><span>Re-run onboarding</span></button>
+          {/* The CMA front door. "New deal" asks for the whole card up front;
+              this asks only for an address, which is how an evaluation starts. */}
+          <button className="ab-btn ghost" type="button" onClick={() => setShowNewEval(true)}><Plus /><span>New evaluation</span></button>
           <button className="ab-btn primary" type="button" onClick={() => setShowNewDeal(true)}><Plus /><span>New deal</span></button>
         </div>
       </header>
 
       <div className="ab-scroll">
-        {error ? (
-          <div style={{ padding: "8px 12px", margin: "0 0 12px", background: "color-mix(in srgb, #b85a3f 12%, transparent)", border: "1px solid color-mix(in srgb, #b85a3f 30%, transparent)", borderRadius: 6, fontSize: 12 }}>
-            {error}
+        {error || actionError ? (
+          <div className="ab-error mono" role="alert" aria-live="polite">
+            <span>{error || actionError}</span>
+            <button className="ab-btn ghost ab-error-retry" type="button" onClick={onRefresh} disabled={loading}>
+              <Refresh /><span>{loading ? "Retrying..." : "Retry"}</span>
+            </button>
           </div>
         ) : null}
 
+        {opening && <div className="ab-opening" role="status">Opening deal…</div>}
+        {(loading && !rawListingDeals.length && !rawBuyerDeals.length) || showIntro ? (
+          <BoardLoader />
+        ) : (
+        <>
         {/* Top 25 deals strip */}
-        <Top25Deals deals={activeDeals} mode={tab} onOpenDeal={handleOpenDeal} />
+        {!isArchivedTab && <Top25Deals deals={activeDeals} mode={tab} onOpenDeal={handleOpenDeal} onRefresh={onRefresh} />}
 
         {/* KPI tiles */}
         <section className="ab-kpis">
@@ -1001,15 +1637,22 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           )}
         </section>
 
+        {/* Critical dates + Approvals — cross-deal desk sections (between KPIs and board) */}
+        <CriticalDates onOpenDeal={openDealById} refreshKey={deals} onChanged={onRefresh} />
+        <ApprovalsQueue onOpenDeal={openDealById} refreshKey={deals} onChanged={onRefresh} />
+
         {/* Kanban with tabs + search */}
         <section className="ab-card">
           <header className="ab-card-head">
             <div className="ab-tabs">
-              <button className={"ab-tab" + (tab === "listing" ? " active" : "")} onClick={() => setTab("listing")}>
+              <button type="button" aria-pressed={tab === "listing"} className={"ab-tab" + (tab === "listing" ? " active" : "")} onClick={() => setTab("listing")}>
                 <span>Listing admin</span><span className="count mono">{listingDeals.length}</span>
               </button>
-              <button className={"ab-tab" + (tab === "buyer" ? " active" : "")} onClick={() => setTab("buyer")}>
+              <button type="button" aria-pressed={tab === "buyer"} className={"ab-tab" + (tab === "buyer" ? " active" : "")} onClick={() => setTab("buyer")}>
                 <span>Buyer admin</span><span className="count mono">{buyerDealsResolved.length}</span>
+              </button>
+              <button type="button" aria-pressed={tab === "archived"} className={"ab-tab" + (tab === "archived" ? " active" : "")} onClick={() => setTab("archived")}>
+                <span>Archived</span><span className="count mono">{archivedDeals.length}</span>
               </button>
               {/* Real events only (Google Calendar + deal milestones via
                   useAdminEvents / computeAdminEvents). Never fall back to the
@@ -1022,6 +1665,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
                 <Search />
                 <input
                   type="text"
+                  aria-label="Search deals"
                   placeholder="Search deals"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
@@ -1030,7 +1674,46 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
             </div>
           </header>
 
-          {/* Kanban */}
+          {isArchivedTab ? (
+            /* Archived deals: cancelled-without-relist sellers. Compact cards,
+               open the same deal modal on click. */
+            <div className="ab-archived">
+              {activeDeals.length === 0 ? (
+                <div className="ab-archived-empty">{query.trim() ? "No archived deals match your search." : "Nothing archived yet."}</div>
+              ) : (
+                <div className="ab-archived-grid">
+                  {activeDeals.map((d) => (
+                    <div className="ab-archived-card-wrap" key={d.id}>
+                      <button
+                        type="button"
+                        className="ab-archived-restore"
+                        title="Restore to board"
+                        disabled={restoringId !== null}
+                        onClick={(e) => { e.stopPropagation(); void handleRestore(d); }}
+                      >
+                        {restoringId === d.id ? "Restoring…" : "Restore"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ab-archived-card"
+                        onClick={() => handleOpenDeal(d as Deal)}
+                      >
+                        <span className="ab-archived-tag mono">archived</span>
+                        <span className="ab-archived-addr">{d.addr}</span>
+                        {(d.archivedNote || d.line2) && (
+                          <span className="ab-archived-note">{d.archivedNote || d.line2}</span>
+                        )}
+                        {d.archivedAt && (
+                          <span className="ab-archived-date mono">{formatArchivedDate(d.archivedAt)}</span>
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+          /* Kanban */
           <div className="ab-kanban">
             {activePipeline.map((p) => (
               <PipelineColumn
@@ -1039,20 +1722,39 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
                 deals={dealsByPhase[p.id] || []}
                 onOpenDeal={handleOpenDeal}
                 onDropDeal={onMoveDeal}
-                onCardDragStart={(id) => setDraggingId(id)}
-                onCardDragEnd={() => setDraggingId(null)}
-                draggingId={draggingId}
-                canDrop={Boolean(draggingId)}
+                onCardDragStart={(deal) => setDraggingDeal(deal)}
+                onCardDragEnd={() => setDraggingDeal(null)}
+                onTogglePin={() => onRefresh?.()}
+                draggingDeal={draggingDeal}
+                canDrop={shouldDropDeal(dealsByPhase[p.id] || [], draggingDeal, phaseStageNumber(p))}
               />
             ))}
           </div>
+          )}
         </section>
+        </>
+        )}
       </div>
-      {activeDeal && <DealDetailModal deal={activeDeal} onClose={() => setActiveDeal(null)} />}
+      {activeDeal && (
+        <DealDetailModal
+          deal={activeDeal}
+          onClose={() => { setActiveDeal(null); void onRefresh?.(); }}
+        />
+      )}
       {showNewDeal && (
         <NewDealModal
           onClose={() => setShowNewDeal(false)}
           onCreated={() => { onRefresh?.(); }}
+        />
+      )}
+      {showNewEval && (
+        <NewEvaluationModal
+          onClose={() => setShowNewEval(false)}
+          onOpenDeal={(dealId) => {
+            setShowNewEval(false);
+            void openDealById(dealId);
+            void onRefresh?.();
+          }}
         />
       )}
     </main>
@@ -1060,6 +1762,13 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
 }
 
 export default AdminBoard;
+
+export const __adminBoardTestables = {
+  DEAL_DRAG_MIME,
+  dealDragId,
+  phaseStageNumber,
+  shouldDropDeal,
+};
 
 // Components defined above for future live-data wiring; reference them here
 // so noUnusedLocals stays quiet until they're rendered.

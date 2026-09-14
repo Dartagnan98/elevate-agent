@@ -657,12 +657,18 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
-def _locked_entitlements(frontmatter: Dict[str, Any]) -> List[str]:
+def _locked_entitlements(
+    frontmatter: Dict[str, Any],
+    access_config: Dict[str, Any] | None = None,
+) -> List[str]:
     """Return any required entitlements that are NOT active under the
     current access profile. Empty list means the skill is unlocked.
 
     Failures in the access module are treated as "no requirements" —
     we never block a skill because the access config couldn't load.
+
+    ``access_config`` may be passed in by callers that scan many skills so the
+    (expensive) config.yaml parse happens once instead of once per skill.
     """
     try:
         from elevate_cli.access import (
@@ -680,10 +686,11 @@ def _locked_entitlements(frontmatter: Dict[str, Any]) -> List[str]:
     if not required:
         return []
 
-    try:
-        access_config = load_access_config()
-    except Exception:
-        return []
+    if access_config is None:
+        try:
+            access_config = load_access_config()
+        except Exception:
+            return []
 
     return [
         ent for ent in required
@@ -691,9 +698,12 @@ def _locked_entitlements(frontmatter: Dict[str, Any]) -> List[str]:
     ]
 
 
-def _skill_entitlements_allowed(frontmatter: Dict[str, Any]) -> bool:
+def _skill_entitlements_allowed(
+    frontmatter: Dict[str, Any],
+    access_config: Dict[str, Any] | None = None,
+) -> bool:
     """True when the skill has no locked entitlements."""
-    return not _locked_entitlements(frontmatter)
+    return not _locked_entitlements(frontmatter, access_config)
 
 
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
@@ -715,6 +725,16 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
 
+    # Load the access config ONCE (not per-skill). Re-parsing config.yaml for
+    # every skill's entitlement check turns a scan of N skills into N full YAML
+    # parses, which pins the gateway main thread / GIL for seconds and stalls
+    # the slash-command menu (complete.slash) behind it.
+    try:
+        from elevate_cli.access import load_access_config
+        _access_config = load_access_config()
+    except Exception:
+        _access_config = None
+
     # Scan local dir first, then external dirs (local takes precedence)
     dirs_to_scan = []
     if SKILLS_DIR.exists():
@@ -735,7 +755,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if not skill_matches_platform(frontmatter):
                     continue
 
-                if not _skill_entitlements_allowed(frontmatter):
+                if not _skill_entitlements_allowed(frontmatter, _access_config):
                     continue
 
                 name = frontmatter.get("name", skill_dir.name)[:MAX_NAME_LENGTH]

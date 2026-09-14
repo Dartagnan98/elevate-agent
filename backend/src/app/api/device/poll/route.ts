@@ -83,7 +83,12 @@ export async function POST(req: NextRequest) {
   // (See approve/route.ts — it pre-creates the license but the raw refresh
   // token is short-lived and stored alongside the device_code so it's only
   // ever read by the polling CLI on exactly one successful claim.)
-  const refresh_payload = await consumeStashedRefresh(grant.id);
+  let refresh_payload: string;
+  try {
+    refresh_payload = await consumeStashedRefresh(grant.id);
+  } catch {
+    return NextResponse.json({ error: "invalid_grant" }, { status: 500 });
+  }
 
   await markDeviceGrantClaimed(grant.id);
 
@@ -119,9 +124,10 @@ async function consumeStashedRefresh(grantId: string): Promise<string> {
   if (error) throw error;
   const raw = (data as { refresh_token_plain: string | null }).refresh_token_plain;
   if (!raw) throw new Error("missing stashed refresh token");
-  await supabase()
+  const { error: clearError } = await supabase()
     .from("device_grants")
     .update({ refresh_token_plain: null })
     .eq("id", grantId);
+  if (clearError) throw clearError;
   return raw;
 }

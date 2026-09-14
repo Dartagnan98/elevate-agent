@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   Brain,
   BriefcaseBusiness,
+  Bug,
   Building2,
   ChevronDown,
   ChevronRight,
@@ -42,6 +43,7 @@ import {
   CheckCheck,
   FlaskConical,
   KanbanSquare,
+  LineChart,
   Folder,
   FolderOpen,
   Globe,
@@ -74,6 +76,7 @@ import {
   Wrench,
   X,
   Zap,
+  Palette,
 } from "lucide-react";
 import { SelectionSwitcher } from "@nous-research/ui/ui/components/selection-switcher";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
@@ -82,6 +85,8 @@ import type { AccessStatusResponse, LicenseStatusResponse } from "@/lib/api-type
 import { LoginCard } from "@/components/LoginCard";
 import { cn, timeAgo } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
+import { BugReporter } from "@/components/BugReporter";
+import ActionNeededPopup from "@/components/ActionNeededPopup";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { Toast } from "@/components/Toast";
@@ -122,14 +127,21 @@ const loadRealEstateAdminPage = () =>
 const loadRealEstateTemplatesPage = () => import("@/pages/RealEstateTemplatesPage");
 const loadRealEstateLeadsPage = () =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage }));
+const loadRealEstateReportingPage = () =>
+  import("@/pages/real-estate-hub/reporting/reporting-page").then((m) => ({
+    default: m.RealEstateReportingPage,
+  }));
 const loadRealEstateMemoryPage = () =>
   import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage }));
 const loadRealEstateSocialMediaPage = () =>
   import("@/pages/real-estate-hub/social").then((m) => ({ default: m.RealEstateSocialMediaPage }));
+const loadBrandPage = () => import("@/pages/BrandPage");
 const loadRealEstateTodayPage = () =>
   import("@/pages/real-estate-hub/today").then((m) => ({ default: m.RealEstateTodayPage }));
 const loadAgentOnboardingPage = () =>
   import("@/pages/agent-onboarding").then((m) => ({ default: m.AgentOnboardingPage }));
+const loadBugReportsPage = () =>
+  import("@/pages/BugReportsPage").then((m) => ({ default: m.BugReportsPage }));
 
 const ConfigPage = lazy(loadConfigPage);
 const DocsPage = lazy(loadDocsPage);
@@ -152,19 +164,25 @@ const ProjectPage = lazy(loadProjectPage);
 const RealEstateAdminPage = lazy(loadRealEstateAdminPage);
 const RealEstateTemplatesPage = lazy(loadRealEstateTemplatesPage);
 const RealEstateLeadsPage = lazy(loadRealEstateLeadsPage);
+const RealEstateReportingPage = lazy(loadRealEstateReportingPage);
 const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
 const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
 const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
+const BrandPage = lazy(loadBrandPage);
 const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
+const BugReportsPage = lazy(loadBugReportsPage);
 
 const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/today": loadRealEstateTodayPage,
   "/leads": loadRealEstateLeadsPage,
+  "/reporting": loadRealEstateReportingPage,
   "/admin": loadRealEstateAdminPage,
   "/admin/templates": loadRealEstateTemplatesPage,
   "/social-media": loadRealEstateSocialMediaPage,
+  "/brand": loadBrandPage,
   "/memory": loadRealEstateMemoryPage,
   "/hub": loadAgentHubPage,
+  "/agents": loadAgentHubPage,
   "/chat": loadChatPage,
   "/desktop-setup": loadDesktopSetupPage,
   "/agent-onboarding": loadAgentOnboardingPage,
@@ -184,6 +202,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/config": loadConfigPage,
   "/env": loadEnvPage,
   "/docs": loadDocsPage,
+  "/bugs": loadBugReportsPage,
 };
 
 const PRELOADED_ROUTES = new Set<string>();
@@ -196,7 +215,7 @@ function normalizePreloadPath(path: string): string {
 }
 
 function preloadRealEstateRouteData(path: string): void {
-  if (!["/", "/today", "/leads", "/admin", "/memory", "/social-media"].includes(path)) return;
+  if (!["/", "/today", "/leads", "/reporting", "/admin", "/memory", "/social-media", "/brand"].includes(path)) return;
   void import("@/pages/real-estate-hub/_shared/use-hub-data").then((module) => {
     void module.preloadRealEstateHubData(path);
   });
@@ -247,15 +266,9 @@ function scheduleRouteWarmup(paths: string[]): () => void {
 }
 
 function RootRedirect() {
-  // Start each launch on a fresh chat (mirrors the "New chat" button's
-  // ?new=&seed= params) when embedded chat is available; else fall back to /today.
-  const seed = useMemo(() => Date.now(), []);
-  return (
-    <Navigate
-      to={isDashboardEmbeddedChatEnabled() ? `/chat?new=${seed}&seed=${seed}` : "/today"}
-      replace
-    />
-  );
+  // Skyleigh's launch lands on Today, not a fresh chat (2026-06-22). She opens
+  // a new chat from the nav when she wants one.
+  return <Navigate to="/today" replace />;
 }
 
 function CoreRootRedirect() {
@@ -410,6 +423,7 @@ const CHAT_NAV_ITEM: NavItem = {
 /** Built-in routes except paid pack dashboards and /chat. */
 const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/hub": AgentHubPage,
+  "/agents": AgentHubPage,
   "/desktop-setup": DesktopSetupPage,
   "/agent-onboarding": AgentOnboardingPage,
   "/project": ProjectPage,
@@ -625,6 +639,7 @@ function buildAccessControlledBuiltinRoutes(
     "/": accessPending ? AccessLoadingPage : realEstateDashboard ? RootRedirect : CoreRootRedirect,
     "/today": realEstateDashboard ? RealEstateTodayPage : PendingOrLocked,
     "/leads": packs.realEstateSales ? RealEstateLeadsPage : PendingOrLocked,
+    "/reporting": packs.realEstateSales ? RealEstateReportingPage : PendingOrLocked,
     "/admin": packs.realEstateAdmin ? RealEstateAdminPage : PendingOrLocked,
     "/admin/templates": packs.realEstateAdmin
       ? RealEstateTemplatesPage
@@ -636,6 +651,10 @@ function buildAccessControlledBuiltinRoutes(
       : PendingOrLocked,
     "/marketing": packs.realEstateMarketing ? MarketingRedirect : PendingOrLocked,
     "/memory": RealEstateMemoryPage,
+    // Brand is not gated on a single pack: the kit dresses reports, graphics and
+    // email alike, so it is available wherever the dashboard is.
+    "/brand": BrandPage,
+    "/bugs": BugReportsPage,
     ...BUILTIN_ROUTES_BASE,
     ...(embeddedChat ? { "/chat": ChatPage } : {}),
   };
@@ -684,6 +703,20 @@ export default function App() {
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusResponse | null>(null);
   const [licenseChecked, setLicenseChecked] = useState(false);
   const startupReportedRef = useRef(false);
+
+  // Apply the global dashboard theme on mount so EVERY page (Today, Admin,
+  // Leads, Social, etc.) is skinned from first paint, before the Today route
+  // is ever visited. The Today header toggle keeps this attribute in sync.
+  // Token blocks live in src/index.css under :root[data-app-theme="X"].
+  useEffect(() => {
+    try {
+      const appTheme =
+        window.localStorage.getItem("elevate-today-theme") || "medium";
+      document.documentElement.setAttribute("data-app-theme", appTheme);
+    } catch {
+      document.documentElement.setAttribute("data-app-theme", "medium");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -873,7 +906,7 @@ export default function App() {
   }, [mobileOpen]);
 
   useEffect(() => {
-    const mql = window.matchMedia("(min-width: 0px)");
+    const mql = window.matchMedia("(min-width: 1024px)");
     const onChange = (e: MediaQueryListEvent) => {
       if (e.matches) setMobileOpen(false);
     };
@@ -908,13 +941,13 @@ export default function App() {
       <SelectionSwitcher />
       <OnboardingGate />
       <Backdrop />
+      {!isConfigRoute && accessChecked && <BugReporter />}
+      {!isConfigRoute && accessChecked && <ActionNeededPopup />}
       <PluginSlot name="backdrop" />
 
       <header
         className={cn(
-          // Desktop sidebar is persistent at every width (never auto-collapses),
-          // so the mobile top bar is always hidden (min-[0px] = always).
-          "min-[0px]:hidden fixed top-0 left-0 right-0 z-40 h-12",
+          "fixed top-0 left-0 right-0 z-40 h-12 lg:hidden",
           "flex items-center gap-2 px-3",
           "bg-background-base shadow-[0_1px_0_color-mix(in_srgb,var(--midground-base)_7%,transparent)]",
         )}
@@ -947,7 +980,7 @@ export default function App() {
           aria-label={t.app.closeNavigation}
           onClick={closeMobile}
           className={cn(
-            "min-[0px]:hidden fixed inset-0 z-40",
+            "fixed inset-0 z-40 lg:hidden",
             "bg-black/60 cursor-pointer",
           )}
         />
@@ -955,7 +988,7 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-12 min-[0px]:pt-0">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-12 lg:pt-0">
         <div className="flex min-h-0 min-w-0 flex-1">
           <aside
             id="app-sidebar"
@@ -966,12 +999,12 @@ export default function App() {
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               sidebarCollapsed
-                ? "min-[0px]:hidden"
+                ? "lg:hidden"
                 : cn(
-                    "min-[0px]:sticky min-[0px]:translate-x-0 min-[0px]:shrink-0",
-                    "min-[0px]:top-0 min-[0px]:h-dvh",
+                    "lg:sticky lg:translate-x-0 lg:shrink-0",
+                    "lg:top-0 lg:h-dvh",
                   ),
-              isConfigRoute && "min-[0px]:hidden",
+              isConfigRoute && "hidden",
             )}
           >
             <DesktopSidebar
@@ -1325,8 +1358,8 @@ function writeCachedSessions(sessions: SessionInfo[]) {
 
 function DesktopSidebar({
   embeddedChat,
-  // navItems no longer rendered in the sidebar (Tools moved to the profile
-  // menu); the prop stays on the type/caller but is unused here.
+  // navItems no longer rendered in the sidebar; the prop stays on the
+  // type/caller but is unused here.
   onNavigate,
   onPreloadRoute,
   onToggleSidebar,
@@ -1384,23 +1417,7 @@ function DesktopSidebar({
       /* ignore */
     }
   }, [automationsOpen]);
-  const [agentMoreOpen, setAgentMoreOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem("elevate.sidebar.agentMore.v1") === "1";
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        "elevate.sidebar.agentMore.v1",
-        agentMoreOpen ? "1" : "0",
-      );
-    } catch {
-      /* ignore */
-    }
-  }, [agentMoreOpen]);
+  const [agentMoreOpen, setAgentMoreOpen] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem("elevate.sidebar.sections.v1");
@@ -1509,7 +1526,12 @@ function DesktopSidebar({
     }
   }, [desktopUpdate?.status, desktopUpdater, runAction, showToast, updateStatus?.available]);
 
+  const sessionScanRunning = useRef(false);
   const loadSessions = useCallback(async (options?: { refresh?: boolean }) => {
+    // A full sidebar scan can outlast the polling interval. Never start a
+    // second scan while the first still occupies a browser connection.
+    if (sessionScanRunning.current) return;
+    sessionScanRunning.current = true;
     try {
       const nowSec = Date.now() / 1000;
       const byId = new Map<string, SessionInfo>();
@@ -1581,6 +1603,7 @@ function DesktopSidebar({
     } catch {
       setSessionError(true);
     } finally {
+      sessionScanRunning.current = false;
       setSessionsLoading(false);
     }
   }, []);
@@ -1875,6 +1898,7 @@ function DesktopSidebar({
   }
   if (realEstatePacks.realEstateSales) {
     agentPrimaryNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
+    agentPrimaryNavItems.push({ icon: LineChart, label: "Reporting", path: "/reporting" });
   }
   if (realEstatePacks.realEstateAdmin) {
     agentPrimaryNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });
@@ -1882,6 +1906,10 @@ function DesktopSidebar({
   if (realEstatePacks.realEstateMarketing) {
     agentPrimaryNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
+  // Brand sits in the PRIMARY nav, not under More and not inside a wizard. The kit
+  // it holds dresses the CMA, the listing graphics, the emails and the ads, so
+  // burying it under one of them would make it look like it belonged to that one.
+  agentPrimaryNavItems.push({ icon: Palette, label: "Brand", path: "/brand" });
   // Automations is the single scheduled-runs home; heartbeat check-ins are filtered there.
   agentPrimaryNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
   const agentMoreNavItems: NavItem[] = [
@@ -1892,16 +1920,15 @@ function DesktopSidebar({
     { icon: CheckCheck, label: "Approvals", path: "/approvals" },
     { icon: MessageSquare, label: "Comms", path: "/comms" },
     { icon: Activity, label: "Activity", path: "/activity" },
+    { icon: Puzzle, label: "Skills", path: "/skills" },
+    { icon: Brain, label: "Memory graph", path: "/memory" },
+    { icon: Bug, label: "Bug Reports", path: "/bugs" },
   ];
   const agentMoreActive = agentMoreNavItems.some((item) =>
     location.pathname === item.path || location.pathname.startsWith(`${item.path}/`),
   );
   const showAgentMoreItems = agentMoreOpen || agentMoreActive;
   const realEstateNavItems = [...agentPrimaryNavItems, ...agentMoreNavItems];
-  const toolsNavItems: NavItem[] = [
-    { icon: Puzzle, label: "Skills", path: "/skills" },
-    { icon: Brain, label: "Memory graph", path: "/memory" },
-  ];
   const go = (path: string) => {
     onPreloadRoute?.(path);
     navigate(path);
@@ -2119,11 +2146,14 @@ function DesktopSidebar({
       )}
       <div
         className="sidebar-top"
-        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        style={{ WebkitAppRegion: "drag", marginTop: "6px", paddingTop: "10px" } as React.CSSProperties}
       >
-        {/* Logo removed per request — empty spacer keeps the row height and the
-            traffic-light clearance on the left. */}
-        <div className="h-7 w-[9.75rem] shrink-0" aria-hidden />
+        {/* Elevation Real Estate logo — global, top of every page via the sidebar.
+            Blue on light/medium themes, white on dark (swapped by data-app-theme). */}
+        <div className="flex items-center pl-[4.5rem]" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+          <img src="/elevation-logo-blue.png" alt="Elevation Real Estate" className="elev-logo elev-logo-blue h-9 w-auto" />
+          <img src="/elevation-logo-white.png" alt="Elevation Real Estate" className="elev-logo elev-logo-white h-9 w-auto" />
+        </div>
 
         <button
           type="button"
@@ -2131,7 +2161,7 @@ function DesktopSidebar({
           aria-label={t.app.closeNavigation}
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           className={cn(
-            "absolute right-3 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 shrink-0 items-center justify-center min-[0px]:hidden",
+            "absolute right-3 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 shrink-0 items-center justify-center lg:hidden",
             "rounded-lg text-muted-foreground hover:bg-accent hover:text-midground",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
           )}
@@ -2140,7 +2170,7 @@ function DesktopSidebar({
         </button>
 
         <div
-          className="tools hidden min-[0px]:flex"
+          className="tools hidden lg:flex"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
           <button
@@ -2173,15 +2203,18 @@ function DesktopSidebar({
 
       <div className="sidebar-scroll overflow-x-hidden">
         <div className="space-y-0.5">
-          <button
-            type="button"
-            onClick={startNewChat}
-            className="new-chat"
-          >
-            <Plus />
-            <span className="truncate">New chat</span>
-            <span className="kbd">⌘N</span>
-          </button>
+          <div className="flex items-center gap-2 pl-3">
+            <img src="/octo-loader.png" alt="Elevation" aria-hidden="true" className="h-11 w-11 shrink-0 object-contain" />
+            <button
+              type="button"
+              onClick={startNewChat}
+              className="new-chat"
+            >
+              <Plus />
+              <span className="truncate">New chat</span>
+              <span className="kbd">⌘N</span>
+            </button>
+          </div>
           {searchOpen && (
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />
@@ -2305,29 +2338,6 @@ function DesktopSidebar({
           onOpenSession={openSession}
         />
 
-        <div className="mt-3 lg:mt-2.5">
-          <SidebarSectionLabel
-            collapsed={collapsedSections.tools}
-            onToggle={() => toggleSection("tools")}
-          >
-            Tools
-          </SidebarSectionLabel>
-          {!collapsedSections.tools && (
-            <div className="space-y-0.5">
-              {toolsNavItems.map((item) => (
-                <SidebarAction
-                  key={item.path}
-                  icon={item.icon}
-                  label={item.label}
-                  path={item.path}
-                  onNavigate={go}
-                  onPreload={onPreloadRoute}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
       </div>
 
       <div className="sidebar-foot shrink-0">
@@ -2387,10 +2397,19 @@ function SidebarUpdateCard({
 
   if (desktopVisible) {
     if (desktopStatus === "ready") {
-      title = "Update ready";
-      detail = `${desktopVersion} is downloaded.`;
-      action = "Click here to update";
-      blocked = false;
+      if (updateBusy) {
+        title = "Installing update";
+        detail = `${desktopVersion} will restart shortly.`;
+        action = "Installing";
+        icon = RefreshCw;
+        busy = true;
+        blocked = true;
+      } else {
+        title = "Update ready";
+        detail = `${desktopVersion} is downloaded.`;
+        action = "Click here to update";
+        blocked = false;
+      }
     } else if (desktopStatus === "error") {
       title = "Update failed";
       detail = desktopUpdate?.error || "Check again when you are online.";
@@ -2799,7 +2818,7 @@ function SessionListItem({
           {session.source ?? "local"} {timeAgo(sessionActivitySeconds(session))}
         </span>
       </NavLink>
-      <div className="session-actions hidden min-[0px]:flex">
+      <div className="session-actions flex">
         <button
           type="button"
           aria-label={pinned ? "Unpin chat" : "Pin chat"}

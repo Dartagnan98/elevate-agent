@@ -100,8 +100,18 @@ export interface SessionCreateResponse {
   session_id: string
 }
 
+export interface LiveSubagentTarget {
+  child_session_id: string
+  goal?: string
+  parent_session_id?: null | string
+  subagent_id?: null | string
+  task_id?: null | string
+  task_index?: number
+}
+
 export interface SessionResumeResponse {
   info?: SessionInfo
+  live_subagent?: LiveSubagentTarget | null
   message_count?: number
   messages: GatewayTranscriptMessage[]
   resumed?: string
@@ -304,29 +314,36 @@ export interface SubagentEventPayload {
   output_tokens?: number
   parent_id?: null | string
   reasoning_tokens?: number
+  source?: string
   status?: 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
   subagent_id?: string
   summary?: string
   task_count?: number
+  task_id?: null | string
   task_index: number
   text?: string
   tool_count?: number
   tool_name?: string
   tool_preview?: string
   toolsets?: string[]
+  child_session_id?: string
 }
 
 // ── Delegation control RPCs ──────────────────────────────────────────
 
 export interface DelegationStatusResponse {
   active?: {
+    async_task_id?: null | string
+    child_session_id?: null | string
     depth?: number
     goal?: string
     model?: null | string
     parent_id?: null | string
+    parent_session_id?: null | string
     started_at?: number
     status?: string
     subagent_id?: string
+    task_index?: number
     tool_count?: number
   }[]
   max_concurrent_children?: number
@@ -339,8 +356,17 @@ export interface DelegationPauseResponse {
 }
 
 export interface SubagentInterruptResponse {
+  child_session_id?: null | string
   found?: boolean
   subagent_id?: string
+  task_id?: null | string
+}
+
+export interface SubagentMessageResponse {
+  accepted?: number
+  emitted?: number
+  found?: boolean
+  targets?: LiveSubagentTarget[]
 }
 
 // ── Spawn-tree snapshots ─────────────────────────────────────────────
@@ -407,6 +433,7 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.thinking' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.tool' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.progress' }
+  | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.message' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { message_id?: string; rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | {

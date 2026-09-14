@@ -369,7 +369,8 @@ def test_telegram_default_uses_configured_tool_profile():
     assert {"memory", "messaging", "session_search", "todo"}.issubset(set(toolsets))
 
 
-def test_telegram_auto_mode_cma_message_escalates_to_skill_runner_profile():
+def test_telegram_auto_mode_cma_message_escalates_to_skill_runner_profile(monkeypatch):
+    monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
     runner = _make_runner()
     cfg = {
         "agent": {"gateway_tool_profile": "auto"},
@@ -389,7 +390,8 @@ def test_telegram_auto_mode_cma_message_escalates_to_skill_runner_profile():
     assert "image_gen" not in toolsets
 
 
-def test_telegram_auto_mode_deal_questions_load_admin_tool_profile():
+def test_telegram_auto_mode_deal_questions_load_admin_tool_profile(monkeypatch):
+    monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
     runner = _make_runner()
     cfg = {
         "agent": {"gateway_tool_profile": "auto"},
@@ -407,7 +409,8 @@ def test_telegram_auto_mode_deal_questions_load_admin_tool_profile():
     assert "browser" not in decision["selected_toolsets"]
 
 
-def test_telegram_auto_mode_preference_notes_stay_lightweight():
+def test_telegram_auto_mode_preference_notes_stay_lightweight(monkeypatch):
+    monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
     runner = _make_runner()
     cfg = {
         "agent": {"gateway_tool_profile": "auto"},
@@ -431,8 +434,9 @@ def test_telegram_auto_mode_preference_notes_stay_lightweight():
         assert heavy not in decision["selected_toolsets"]
 
 
-def test_telegram_auto_mode_keeps_followups_lean_and_escalates_file_intent():
+def test_telegram_auto_mode_keeps_followups_lean_and_escalates_file_intent(monkeypatch):
     """Light follow-ups should stay lean; file/code intent should still load local tools."""
+    monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
     runner = _make_runner()
     cfg = {
         "agent": {"gateway_tool_profile": "auto"},
@@ -451,8 +455,9 @@ def test_telegram_auto_mode_keeps_followups_lean_and_escalates_file_intent():
     assert {"terminal", "file", "todo"}.issubset(set(file_intent["selected_toolsets"]))
 
 
-def test_telegram_auto_mode_survives_saved_configurable_allowlist():
+def test_telegram_auto_mode_survives_saved_configurable_allowlist(monkeypatch):
     """A saved Telegram allowlist should narrow auto mode, not disable it."""
+    monkeypatch.setenv("ELEVATE_GATEWAY_TOOL_PROFILE", "auto")
     runner = _make_runner()
     from elevate_cli.tools_config import CONFIGURABLE_TOOLSETS
 

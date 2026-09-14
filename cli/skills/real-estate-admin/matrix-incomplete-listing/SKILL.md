@@ -9,7 +9,19 @@ metadata:
       result_writer: admin-result-writer
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Matrix / Xposure Incomplete Listing
+
+## Listing-agent defaults
+
+Use the configured primary listing agent. Leave co-listing/co-agent fields blank unless the realtor explicitly specifies a co-listing agent for this listing. Buyer-paperwork roles do not establish listing representation. Do not carry a buyer co-agent into Matrix/Xposure, a relist copied from a prior MLS, or the listing-side compliance file.
+
+When preparing or resuming a draft, check the actual selected agent record/picker key as well as the displayed name. Remove an unrequested co-listing agent inherited from a template or prior draft, save as incomplete, and reopen to verify the primary agent and blank co-listing selection persisted. If current signed listing paperwork names a co-listing agent and conflicts with the instructions, surface that conflict before changing the representation fields; do not alter signed paperwork to fit a default.
+
 
 Builds a brand-new MLS listing in the configured input platform from a signed MLC, in two passes that match the listing board:
 
@@ -17,6 +29,10 @@ Builds a brand-new MLS listing in the configured input platform from a signed ML
 - **`photos` (Marketing Go, stage 4)** — once photos are cleaned, select the best 99, upload them to the listing, and finish it so it is ready for the realtor to Submit.
 
 This is the new-listing sibling of the `relisting` skill. Relisting copies a prior MLS as a template; this skill fills a fresh listing from the deal's property facts. Both drive the same platform, so they share the same playbook and lessons.
+
+## Required documents and links
+
+Read [documents-and-links.md](references/documents-and-links.md) for every draft, relist handoff and photos/media completion pass. Verify the current title, BC Assessment PDF and Property Information Report PDF in Matrix Documents/Supplements; save the assessment/report PDFs in the listing Google Drive folder. Include floor-plan PDFs when available, plus floor-plan PDF, published landing-page and available video URLs in Matrix's links section. Reuse documents the realtor already uploaded. These are explicit preparation deliverables, not an optional supplement check.
 
 ## CRITICAL — read first
 
@@ -29,7 +45,7 @@ This is the new-listing sibling of the `relisting` skill. Relisting copies a pri
 
 - Does NOT Submit the listing or push it to the public MLS/REALTOR.ca.
 - Does NOT invent property facts — it fills only from `property-lookup` output, the signed MLC, and the deal record. A fact it cannot source is surfaced as a missing field, never guessed.
-- Does NOT touch the compliance portal (that is `skyslope-sync`) or the Drive folder structure.
+- Compliance filing is handled by `skyslope-sync`. Save property PDFs into the existing listing Drive folder as specified by the document handoff; preserve its folder structure.
 - Does NOT edit photos (that is `photo-cleanup`) — `photos` mode only selects the best 99 and uploads.
 
 ---
@@ -64,6 +80,9 @@ Clears (only with evidence): `best_99_matrix_photos_selected`, `matrix_photos_up
 ---
 
 ## Completion Gate (run before reporting "done")
+
+- [ ] Required document PDFs and available floor-plan documents/links verified after save; landing-page/video links verified when available. Pending items are named in the document/link manifest.
+
 
 A script exiting cleanly is NOT the finish line. Report evidence for every applicable line:
 

@@ -62,6 +62,7 @@ xcrun notarytool store-credentials elevate-notarization \
   --team-id "TEAMID"
 
 export CSC_NAME="Your Name (TEAMID)"
+# Optional when using the default profile. Export this only for a custom profile.
 export APPLE_KEYCHAIN_PROFILE="elevate-notarization"
 
 npm run release:mac
@@ -69,11 +70,15 @@ npm run release:mac
 
 Do not commit Apple credentials. The build config signs and notarizes the app
 bundles through the local Keychain certificate and electron-builder's
-notarization support.
+notarization support. `build:mac` and `release:mac` default
+`APPLE_KEYCHAIN_PROFILE` to `elevate-notarization` so app notarization does not
+silently skip when the profile is present but the environment variable is not.
 
-`npm run release:mac` also finalizes the DMG containers, refreshes
-`latest-mac.yml` after stapling changes the DMG bytes, and uploads the update
-feed artifacts to `https://api.elevationrealestatehq.com/updates`.
+`npm run release:mac` builds x64 and arm64 artifacts separately, merges
+`latest-mac.yml` so the feed lists both architectures, finalizes the DMG
+containers, refreshes feed hashes after stapling changes the DMG bytes, and
+uploads the update feed artifacts to
+`https://api.elevationrealestatehq.com/updates`.
 
 `npm run release:apple` runs the preflight first, then performs the full
 Developer ID build, notarization, stapling, feed refresh, and upload.

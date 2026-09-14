@@ -51,6 +51,20 @@ _DEAL_READONLY_ACTIONS = {"show", "list", "", None}
 # strings ("12", "the") would false-positive everywhere.
 _MIN_SUBSTR = 6
 
+# Deal address can live under any of these keys depending on the read path;
+# the listing flow stores it as ``listingAddress``. (The old matcher only
+# checked ``address``, which the deal dict never carries — so address-based
+# resolution silently never fired.)
+_DEAL_ADDRESS_KEYS = ("listingAddress", "address", "dealAddress")
+
+# Deal titles often carry a trailing side tag, e.g. "123 Main St (seller)".
+# Natural conversation never includes that tag, so strip it before matching —
+# otherwise the full-title substring check can never hit on real phrasing.
+_TITLE_SIDE_SUFFIX_RE = re.compile(
+    r"\s*[\(\[\-–—]\s*(?:seller|buyer|listing|purchase|sale)s?\s*[\)\]]?\s*$",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class Attribution:
@@ -167,13 +181,43 @@ def _norm(s: Any) -> str:
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
+def _deal_street_signature(deal: Mapping[str, Any]) -> str:
+    """The street line of the deal's address (everything before the first
+    comma), normalized. "742 Evergreen Terrace, Kamloops BC" -> "742 evergreen
+    terrace". Lets "the 742 Evergreen Terrace listing" resolve without the full
+    municipal address, while staying specific (number + street name)."""
+    raw = ""
+    for key in _DEAL_ADDRESS_KEYS:
+        raw = _norm(deal.get(key))
+        if raw:
+            break
+    if not raw:
+        raw = _norm(_TITLE_SIDE_SUFFIX_RE.sub("", str(deal.get("title") or "")))
+    street = raw.split(",")[0].strip()
+    # Require a house-number + a street-name token so a bare number can't match.
+    parts = street.split(" ")
+    if len(parts) >= 2 and any(c.isdigit() for c in parts[0]):
+        return street
+    return ""
+
+
 def _match_deal(text: str, deal: Mapping[str, Any]) -> float:
-    """Confidence that ``text`` references this deal via address/title."""
+    """Confidence that ``text`` references this deal via address/title.
+
+    Matches (in order): the full listing address as a substring; the title with
+    any trailing side tag like "(seller)" stripped; or the street line of the
+    address ("742 evergreen terrace"). ``text`` is already normalized."""
     best = 0.0
-    for key in ("address", "title"):
+    for key in _DEAL_ADDRESS_KEYS:
         needle = _norm(deal.get(key))
         if len(needle) >= _MIN_SUBSTR and needle in text:
-            best = max(best, 0.8)
+            return 0.85
+    title = _norm(_TITLE_SIDE_SUFFIX_RE.sub("", str(deal.get("title") or "")))
+    if len(title) >= _MIN_SUBSTR and title in text:
+        best = 0.8
+    sig = _deal_street_signature(deal)
+    if len(sig) >= _MIN_SUBSTR and sig in text:
+        best = max(best, 0.8)
     return best
 
 
@@ -248,7 +292,7 @@ def resolve_attributions(
         d = deal_by_id.get(did, {"id": did})
         out.append(Attribution(
             "deal", did, 1.0,
-            str(d.get("address") or d.get("title") or did), list(tools_used), summary,
+            str(d.get("listingAddress") or d.get("title") or did), list(tools_used), summary,
         ))
 
     for cid in explicit_contact_ids:
@@ -269,7 +313,7 @@ def resolve_attributions(
         if score >= AUTO_LOG_THRESHOLD:
             out.append(Attribution(
                 "deal", did, score,
-                str(d.get("address") or d.get("title") or did), list(tools_used), summary,
+                str(d.get("listingAddress") or d.get("title") or did), list(tools_used), summary,
             ))
 
     for c in contacts:
@@ -387,7 +431,27 @@ def build_turn_nudge(
                 if c is not None and not (c.get("pipelineStatus") or "").strip():
                     unlabeled.append(a.label)
 
-        deals = [a for a in attributions if a.entity_kind == "deal"]
+            # L3: the board-sync nudge is a FALLBACK. Drop a worked deal from the
+            # reminder only when post-turn inference (L2) already ticked cells for
+            # it AND its current stage has nothing open left — i.e. L2 fully
+            # caught it up. If open cells remain, or L2 did nothing, keep nudging.
+            from elevate_cli.data.deals import (
+                deal_had_recent_inferred_ticks,
+                deal_open_stage_cells,
+                get_deal,
+            )
+            deals = []
+            for a in attributions:
+                if a.entity_kind != "deal":
+                    continue
+                try:
+                    if deal_had_recent_inferred_ticks(conn, a.entity_id):
+                        deal = get_deal(conn, a.entity_id)
+                        if deal is not None and not deal_open_stage_cells(conn, deal):
+                            continue  # L2 handled it fully — no reminder needed
+                except Exception:
+                    pass
+                deals.append(a)
         lines: list[str] = []
         if deals:
             labels = ", ".join(sorted({a.label for a in deals})[:3])
@@ -509,12 +573,193 @@ def _run_micro_resolver(
         logger.debug("micro-resolver skipped: %s", exc)
 
 
+# ── L2: post-turn scorecard inference ────────────────────────────────────────
+# The case Phase B exists to fix: the agent gathers a fact in CONVERSATION (a
+# CMA list price, a confirmed inspection date) and never calls a write tool, so
+# the deal's checklist drifts and the realtor keeps asking it to update. The
+# deterministic layers above only stamp freshness; this reflects the actual
+# work onto the scorecard — bounded so it can never invent progress.
+
+# Confidence bar to WRITE an inferred cell. Higher than the freshness auto-log
+# bar (0.7): a wrong tick is more consequential than a wrong activity marker, so
+# we only infer on a deal we're confident the turn was actually about.
+SCORECARD_INFER_THRESHOLD = 0.8
+
+
+def _scorecard_inference_enabled() -> bool:
+    """L2 is ON by default for entitled real-estate accounts. Opt out with
+    ``attribution.scorecard_inference: false`` in ~/.elevate/config.yaml."""
+    try:
+        from elevate_cli.config import load_config
+        cfg = load_config() or {}
+        node = cfg.get("attribution")
+        if isinstance(node, dict) and "scorecard_inference" in node:
+            return bool(node.get("scorecard_inference"))
+    except Exception:
+        pass
+    return True
+
+
+def _infer_satisfied_cells(
+    turn_text: str,
+    summary: str,
+    open_cells: list[Mapping[str, Any]],
+    *,
+    main_runtime: Mapping[str, Any] | None,
+) -> set[str]:
+    """Schema-locked aux call: of THIS deal's open cells, which did the turn
+    actually complete? Conservative, and closed-set — only ids from the
+    provided list are ever returned (the model cannot invent a cell)."""
+    from agent.auxiliary_client import call_llm
+
+    valid_ids = {str(c.get("id")) for c in open_cells if c.get("id")}
+    if not valid_ids:
+        return set()
+    listing = "\n".join(f"  - {c['id']}: {c.get('label') or c['id']}" for c in open_cells)
+    prompt = (
+        "You track a real-estate deal's checklist. Below are the ONLY open "
+        "checklist items for its current stage. A turn of agent work just "
+        "finished. Decide which of these items the turn ACTUALLY completed or "
+        "confirmed done — not merely mentioned, planned, or researched.\n"
+        "Be conservative: if unsure, leave it out. Never invent ids.\n\n"
+        f"Open checklist items:\n{listing}\n\n"
+        f"Turn did: {summary}\n"
+        f"Turn text (truncated):\n{turn_text[:2500]}\n\n"
+        'Reply ONLY compact JSON: {"satisfied_ids":[...]} using ids from the '
+        "list above (empty array if none)."
+    )
+    resp = call_llm(
+        task="session_search",
+        main_runtime=dict(main_runtime or {}),
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200,
+        timeout=20,
+    )
+    content = (resp.choices[0].message.content or "").strip()
+    m = re.search(r"\{.*\}", content, re.DOTALL)
+    if not m:
+        return set()
+    parsed = json.loads(m.group(0))
+    ids = parsed.get("satisfied_ids") or []
+    # Closed-set guarantee: only ids that were actually open on this deal.
+    return {str(x) for x in ids if str(x) in valid_ids}
+
+
+def run_scorecard_inference(
+    turn: Sequence[Mapping[str, Any]],
+    *,
+    sticky_ids: Iterable[str] | None = None,
+    session_id: str | None = None,
+    main_runtime: Mapping[str, Any] | None = None,
+) -> list[tuple[str, str]]:
+    """L2 thread target: reflect conversational deal work onto the scorecard.
+
+    For each high-confidence resolved deal that has OPEN current-stage cells,
+    ask a schema-locked aux call which of those exact cells the turn satisfied,
+    then tick them (actor='agent:inferred') — skipping any the realtor
+    explicitly controls. Bounded all the way down: no resolved deal -> nothing;
+    no open cells -> no aux call; closed candidate set -> no invented progress.
+    Returns the [(deal_id, cell_id)] applied. Never raises.
+    """
+    applied: list[tuple[str, str]] = []
+    try:
+        if not turn:
+            return applied
+        from elevate_cli.data import connect
+        from elevate_cli.data.deals import (
+            deal_open_stage_cells,
+            get_deal,
+            human_controlled_checklist_cells,
+            set_deal_toggle,
+        )
+
+        with connect() as conn:
+            attributions = resolve_attributions(conn, turn, sticky_ids=sticky_ids)
+            deals = [
+                a for a in attributions
+                if a.entity_kind == "deal" and a.confidence >= SCORECARD_INFER_THRESHOLD
+            ]
+            if not deals:
+                return applied
+            tools_used = [name for name, _ in _iter_tool_calls(list(turn)) if name]
+            summary = _summarize(tools_used)
+            turn_text = _turn_text(turn)
+            for a in deals:
+                deal = get_deal(conn, a.entity_id)
+                if deal is None:
+                    continue
+                open_cells = deal_open_stage_cells(conn, deal)
+                if not open_cells:
+                    continue  # no open cells -> no aux call (cost guard)
+                protected = human_controlled_checklist_cells(conn, a.entity_id)
+                candidate = [c for c in open_cells if c["id"] not in protected]
+                if not candidate:
+                    continue
+                satisfied = _infer_satisfied_cells(
+                    turn_text, summary, candidate, main_runtime=main_runtime,
+                )
+                for cid in satisfied:
+                    try:
+                        set_deal_toggle(
+                            conn, a.entity_id, field=cid, value=True, actor="agent:inferred",
+                        )
+                        applied.append((a.entity_id, cid))
+                    except Exception as exc:
+                        logger.debug(
+                            "scorecard inference write failed %s/%s: %s", a.entity_id, cid, exc
+                        )
+        if applied:
+            logger.info(
+                "scorecard inference: ticked %d cell(s) [%s]",
+                len(applied),
+                ", ".join(f"{d}:{c}" for d, c in applied),
+            )
+    except Exception as exc:
+        logger.debug("scorecard inference skipped: %s", exc)
+    return applied
+
+
+# ── Async by default; one-shot runs drain inline before exit ─────────────────
+# Interactive + gateway turns stay async (snappy UI). One-shot / short-lived
+# runs (chat -q, cron) drain inline (wait=True), because the tick can't be
+# rescued at process exit: the inference's network aux call cannot complete
+# during interpreter shutdown (proven by a real one-shot test — an atexit drain
+# left the tick unticked). Persistent boots mark themselves; everything else
+# defaults to the safe inline wait so a tick is never silently lost.
+_INFERENCE_THREAD_NAME = "scorecard-inference"
+_INFERENCE_WAIT_TIMEOUT = 10.0
+_PERSISTENT_PROCESS_ENV = "ELEVATE_PERSISTENT_PROCESS"
+
+
+def mark_persistent_process() -> None:
+    """Long-running boots (dashboard, gateway, interactive REPL) call this so
+    post-turn scorecard inference stays ASYNC. One-shot processes don't, so
+    ``should_wait_for_inference()`` returns True for them and the tick drains
+    inline before exit."""
+    import os
+
+    os.environ[_PERSISTENT_PROCESS_ENV] = "1"
+
+
+def should_wait_for_inference() -> bool:
+    """True for one-shot / short-lived runs (drain the scorecard tick inline
+    before the process exits); False for persistent processes that can finish
+    the async tick in-flight. Safe default is True — a missed persistent marker
+    only costs a few seconds of latency; a missed one-shot would silently lose
+    the update."""
+    import os
+
+    return os.environ.get(_PERSISTENT_PROCESS_ENV) != "1"
+
+
 def attribute_turn_safely(
     messages: Sequence[Mapping[str, Any]],
     *,
     agent_id: str | None = None,
     session_id: str | None = None,
     main_runtime: Mapping[str, Any] | None = None,
+    wait: bool = False,
+    wait_timeout: float = _INFERENCE_WAIT_TIMEOUT,
 ) -> None:
     """Fire-and-forget post-turn attribution for the live agent loop.
 
@@ -522,12 +767,20 @@ def attribute_turn_safely(
     (nothing was *worked*), and never raises — attribution must never affect
     the user-facing turn. Gated to accounts that actually have the real-estate
     admin pack so non-RE sessions pay nothing.
+
+    Scorecard inference (L2) is async by default so interactive turns stay
+    snappy; a process-exit drain lets one-shot runs finish it. Pass ``wait=True``
+    to block up to ``wait_timeout`` for the tick to land before returning (for a
+    caller that knows it is about to exit and wants it inline).
     """
     try:
         turn = _current_turn(messages)
-        if not any(name for name, _ in _iter_tool_calls(turn)):
-            return  # pure conversational turn — no work to attribute
+        turn_has_tools = any(name for name, _ in _iter_tool_calls(turn))
 
+        # Entitlement gate FIRST — both freshness logging and scorecard inference
+        # need the real-estate pack, and gating here (rather than behind the tool
+        # check) is exactly what lets scorecard inference run on pure
+        # conversational turns. Non-RE sessions still pay nothing.
         from elevate_cli.access import (
             ENTITLEMENT_REAL_ESTATE_ADMIN,
             ENTITLEMENT_REAL_ESTATE_SALES,
@@ -542,16 +795,41 @@ def attribute_turn_safely(
         actor = f"agent:{(agent_id or '').strip() or 'session'}"
         sticky = session_sticky_ids(messages)
 
-        from elevate_cli.data import connect
-        with connect() as conn:
-            logged = record_turn_activity(
-                conn, messages, actor=actor, session_id=session_id, sticky_ids=sticky,
-            )
+        # ── Freshness logging — tool-gated (a "worked" turn used tools). ──
+        logged: list[Attribution] = []
+        if turn_has_tools:
+            from elevate_cli.data import connect
+            with connect() as conn:
+                logged = record_turn_activity(
+                    conn, messages, actor=actor, session_id=session_id, sticky_ids=sticky,
+                )
 
-        # Step 3 — micro-resolver backstop. Only when the deterministic layers
-        # placed NOTHING and the operator opted in (it costs an aux call). Runs
-        # off-thread so it never delays the response.
-        if not logged and _resolver_enabled():
+        # ── L2 scorecard inference — NOT tool-gated. ──
+        # Runs on any turn (including pure chat) so conversational deal work
+        # still reaches the checklist — the exact case freshness logging misses.
+        # Off-thread; self-bounded so it only spends an aux call when the
+        # resolved deal actually has open current-stage cells.
+        if _scorecard_inference_enabled():
+            import threading
+            t = threading.Thread(
+                target=run_scorecard_inference,
+                args=(list(turn),),
+                kwargs=dict(
+                    sticky_ids=set(sticky), session_id=session_id, main_runtime=main_runtime,
+                ),
+                name=_INFERENCE_THREAD_NAME,
+                daemon=True,
+            )
+            t.start()
+            if wait:
+                # One-shot / short-lived run: block up to the bound so the tick
+                # lands inline (a healthy interpreter — the aux call can run).
+                t.join(timeout=max(0.0, wait_timeout))
+            # else: stay async (snappy). Persistent processes finish it in-flight.
+
+        # Step 3 — micro-resolver backstop. Tool turns only, operator opt-in, and
+        # only when the deterministic layers placed NOTHING. Off-thread.
+        if turn_has_tools and not logged and _resolver_enabled():
             tools_used = [name for name, _ in _iter_tool_calls(turn) if name]
             text = _turn_text(turn)
             if text.strip():

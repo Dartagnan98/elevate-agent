@@ -143,6 +143,146 @@ def _gateway_platform_value(platform: Any) -> str:
     return str(getattr(platform, "value", platform) or "").strip().lower()
 
 
+# --- Session-hygiene ineffective-compression guard ----------------------------
+# Pure, unit-tested decision helpers for the hygiene no-op guard. Module-level so
+# tests pin the REAL logic, not a replica. State lives on the gateway as
+# self._hygiene_noop_guard: dict[session_id -> msg_count]; an entry means "this
+# session compacted with no reduction at ~this message count".
+_HYGIENE_NOOP_RETRY_MARGIN = 25
+_HYGIENE_NOOP_GUARD_MAX = 2048
+_HYGIENE_NOOP_GUARD_META_KEY = "gateway:hygiene_noop_guard:v1"
+
+
+def _hygiene_should_skip(
+    guard: dict,
+    session_id: str,
+    *,
+    msg_count: int,
+    margin: int,
+    reason: str,
+    approx_tokens: int,
+    warn_tokens: int,
+) -> bool:
+    """Whether to skip a hygiene compaction this turn to avoid re-running the
+    ~24-36s aux summary on a session that cannot be reduced.
+
+    SAFETY: only skip a previously-ineffective, *message-count-driven* session
+    that has not grown past the retry margin. NEVER skip when the token estimate
+    is at/over the 95% warn line; re-compaction can still help there, and
+    suppressing it would hand the next turn an over-limit payload.
+    Side effect: clears a stale entry once the session has grown past the margin.
+    """
+    prev = guard.get(session_id)
+    if prev is None:
+        return False
+    if msg_count > prev + margin:
+        guard.pop(session_id, None)  # grew past margin -> re-evaluate fresh
+        return False
+    # Within margin and previously ineffective -- but never suppress a session
+    # that genuinely needs compaction.
+    if approx_tokens >= warn_tokens:
+        return False
+    if reason != "message_count":
+        return False
+    return True
+
+
+def _hygiene_record(
+    guard: dict,
+    session_id: str,
+    *,
+    msg_count: int,
+    ineffective: bool,
+    max_entries: int = _HYGIENE_NOOP_GUARD_MAX,
+) -> None:
+    """Record (ineffective) or clear (effective) the guard entry for a session.
+
+    Bounded: re-inserts at the end so the dict stays ordered by recency, and
+    evicts the oldest entries past ``max_entries`` so a long-lived gateway cannot
+    grow the guard without bound.
+    """
+    guard.pop(session_id, None)  # drop existing so a re-record moves to the end
+    if not ineffective:
+        return
+    guard[session_id] = msg_count
+    while len(guard) > max_entries:
+        guard.pop(next(iter(guard)), None)
+
+
+def _hygiene_load_persisted_guard(session_db: Any) -> dict:
+    getter = getattr(session_db, "get_meta", None)
+    if not callable(getter):
+        return {}
+    try:
+        raw = getter(_HYGIENE_NOOP_GUARD_META_KEY)
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = OrderedDict()
+    for session_id, count in data.items():
+        try:
+            msg_count = int(count)
+        except (TypeError, ValueError):
+            continue
+        sid = str(session_id or "")
+        if sid and msg_count > 0:
+            out[sid] = msg_count
+    while len(out) > _HYGIENE_NOOP_GUARD_MAX:
+        out.popitem(last=False)
+    return dict(out)
+
+
+def _hygiene_persist_guard(session_db: Any, guard: dict) -> None:
+    setter = getattr(session_db, "set_meta", None)
+    if not callable(setter):
+        return
+    try:
+        bounded = OrderedDict()
+        for session_id, count in guard.items():
+            try:
+                msg_count = int(count)
+            except (TypeError, ValueError):
+                continue
+            sid = str(session_id or "")
+            if sid and msg_count > 0:
+                bounded[sid] = msg_count
+        while len(bounded) > _HYGIENE_NOOP_GUARD_MAX:
+            bounded.popitem(last=False)
+        setter(_HYGIENE_NOOP_GUARD_META_KEY, json.dumps(bounded))
+    except Exception:
+        pass
+
+
+def _hygiene_effective_messages_for_pressure(
+    history: List[Dict[str, Any]],
+    *,
+    compaction_cursor: int = 0,
+    compaction_summary: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return the cursor-trimmed payload shape used for hygiene estimates."""
+    cursor = int(compaction_cursor or 0)
+    summary = str(compaction_summary or "")
+    if cursor <= 0 or not summary or not history:
+        return history
+
+    if cursor >= len(history):
+        cursor = len(history) - 1
+        if cursor <= 0:
+            return history
+
+    summary_msg = {
+        "role": "user",
+        "content": (
+            "Conversation summary of earlier turns:\n"
+            f"{summary}\n\n"
+            "--- END OF CONTEXT SUMMARY - respond to the message below, not the summary above ---"
+        ),
+    }
+    return [summary_msg] + [dict(m) for m in history[cursor:]]
+
+
 def _redact_gateway_user_facing_secrets(text: str) -> str:
     """Best-effort secret redaction before text can leave the gateway."""
     redacted = str(text or "")
@@ -168,6 +308,19 @@ def _gateway_provider_error_reply(text: str) -> str:
     return (
         "⚠️ The model provider failed after retries. I kept raw provider details "
         "out of chat; check gateway logs for diagnostics."
+    )
+
+
+def _legacy_transcript_recovery_reply(platform: Any) -> str:
+    label = (
+        "Telegram thread"
+        if _gateway_platform_value(platform) == "telegram"
+        else "chat thread"
+    )
+    return (
+        f"⚠️ This older {label} is too large to recover automatically.\n"
+        "Start a new thread with /new, or ask support to archive the legacy "
+        "transcript."
     )
 
 
@@ -5561,7 +5714,7 @@ class GatewayRunner:
         if canonical == "sethome":
             return await self._handle_set_home_command(event)
 
-        if canonical == "compress":
+        if canonical == "compact":
             return await self._handle_compress_command(event)
 
         if canonical == "usage":
@@ -5967,6 +6120,7 @@ class GatewayRunner:
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
+        _legacy_recovery_failed = False
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
         logger.info(
             "inbound message: platform=%s user=%s chat=%s msg=%r",
@@ -6253,19 +6407,18 @@ class GatewayRunner:
         history = self.session_store.load_transcript(session_entry.session_id)
         
         # -----------------------------------------------------------------
-        # Session hygiene: auto-compress pathologically large transcripts
+        # Session hygiene: recover pathologically large transcripts
         #
         # Long-lived gateway sessions can accumulate enough history that
         # every new message rehydrates an oversized transcript, causing
-        # repeated truncation/context failures.  Detect this early and
-        # compress proactively — before the agent even starts.  (#628)
+        # repeated truncation/context failures. Gateway hygiene is a
+        # legacy/overflow wrapper only; normal model-facing compaction is
+        # owned by AIAgent so adapters share the same cursor contract. (#628)
         #
         # Token source priority:
-        # 1. Actual API-reported prompt_tokens from the last turn
-        #    (stored in session_entry.last_prompt_tokens)
-        # 2. Rough char-based estimate (str(msg)//4). Overestimates
-        #    by 30-50% on code/JSON-heavy sessions, but that just
-        #    means hygiene fires a bit early — safe and harmless.
+        # 1. Actual API-reported prompt_tokens from the last turn, when there
+        #    is no cursor metadata that could make the stored value stale.
+        # 2. Rough char-based estimate (str(msg)//4) of the effective payload.
         # -----------------------------------------------------------------
         if history and len(history) >= 4:
             from agent.model_metadata import (
@@ -6274,13 +6427,10 @@ class GatewayRunner:
             )
 
             # Read model + compression config from config.yaml.
-            # NOTE: hygiene threshold is intentionally HIGHER than the agent's
-            # own compressor (0.85 vs 0.50).  Hygiene is a safety net for
-            # sessions that grew too large between turns — it fires pre-agent
-            # to prevent API failures.  The agent's own compressor handles
-            # normal context management during its tool loop with accurate
-            # real token counts.  Having hygiene at 0.50 caused premature
-            # compression on every turn in long gateway sessions.
+            # NOTE: the 0.85 line is diagnostic only. Hygiene is an
+            # overflow/legacy recovery wrapper; AIAgent owns normal compaction
+            # so every adapter shares the same cursor contract. Hygiene only
+            # acts at the critical 0.95 line or for raw legacy message floods.
             _hyg_model = "anthropic/claude-sonnet-4.6"
             _hyg_threshold_pct = 0.85
             _hyg_compression_enabled = True
@@ -6379,23 +6529,57 @@ class GatewayRunner:
                 _warn_token_threshold = int(_hyg_context_length * 0.95)
 
                 _msg_count = len(history)
+                _hyg_compaction_cursor = 0
+                _hyg_compaction_summary = None
+                try:
+                    _hyg_session_db = getattr(self, "_session_db", None)
+                    if _hyg_session_db is not None:
+                        _hyg_row = (
+                            _hyg_session_db.get_session(session_entry.session_id)
+                            or {}
+                        )
+                        _hyg_compaction_cursor = int(
+                            _hyg_row.get("compaction_cursor") or 0
+                        )
+                        _hyg_compaction_summary = _hyg_row.get("compaction_summary")
+                except Exception:
+                    pass
+                _hyg_cursor_compacted = bool(
+                    _hyg_compaction_cursor > 0 and _hyg_compaction_summary
+                )
+                _hyg_pressure_history = _hygiene_effective_messages_for_pressure(
+                    history,
+                    compaction_cursor=_hyg_compaction_cursor,
+                    compaction_summary=_hyg_compaction_summary,
+                )
 
-                # Prefer actual API-reported tokens from the last turn
-                # (stored in session entry) over the rough char-based estimate.
+                # Prefer actual API-reported tokens only for uncompacted
+                # sessions. Once cursor metadata exists, the raw transcript is
+                # intentionally append-only and stored prompt counts can be
+                # stale/full-transcript after resume; estimate the same
+                # summary+tail payload the model actually receives.
                 _stored_tokens = session_entry.last_prompt_tokens
-                if _stored_tokens > 0:
+                if _hyg_cursor_compacted:
+                    _approx_tokens = estimate_messages_tokens_rough(
+                        _hyg_pressure_history
+                    )
+                    _token_source = "estimated_effective"
+                elif _stored_tokens > 0:
                     _approx_tokens = _stored_tokens
                     _token_source = "actual"
                 else:
-                    _approx_tokens = estimate_messages_tokens_rough(history)
-                    _token_source = "estimated"
-                    # Note: rough estimates overestimate by 30-50% for code/JSON-heavy
-                    # sessions, but that just means hygiene fires a bit early — which
-                    # is safe and harmless.  The 85% threshold already provides ample
-                    # headroom (agent's own compressor runs at 50%).  A previous 1.4x
-                    # multiplier tried to compensate by inflating the threshold, but
-                    # 85% * 1.4 = 119% of context — which exceeds the model's limit
-                    # and prevented hygiene from ever firing for ~200K models (GLM-5).
+                    _approx_tokens = estimate_messages_tokens_rough(
+                        _hyg_pressure_history
+                    )
+                    _token_source = (
+                        "estimated_effective"
+                        if _hyg_pressure_history is not history
+                        else "estimated"
+                    )
+                    # A previous 1.4x multiplier tried to compensate for rough
+                    # estimates by inflating the threshold, but 85% * 1.4 =
+                    # 119% of context. Keep the estimate plain; gateway only
+                    # acts on critical overflow or legacy raw-message recovery.
 
                 # Hard safety valve: force compression if message count is
                 # extreme, regardless of token estimates.  This breaks the
@@ -6405,19 +6589,114 @@ class GatewayRunner:
                 # but catches runaway growth before it becomes unrecoverable.
                 # (#2153)
                 _HARD_MSG_LIMIT = 400
-                _needs_compress = (
-                    _approx_tokens >= _compress_token_threshold
-                    or _msg_count >= _HARD_MSG_LIMIT
+                _message_count_trigger = (
+                    _msg_count >= _HARD_MSG_LIMIT and not _hyg_cursor_compacted
                 )
+                _normal_pressure_trigger = _approx_tokens >= _compress_token_threshold
+                _critical_pressure_trigger = _approx_tokens >= _warn_token_threshold
+                _needs_compress = _critical_pressure_trigger or _message_count_trigger
+                _hyg_reason = (
+                    "critical_pressure"
+                    if _critical_pressure_trigger
+                    else "message_count"
+                    if _message_count_trigger
+                    else "normal_pressure"
+                    if _normal_pressure_trigger
+                    else "below_threshold"
+                )
+                if _normal_pressure_trigger and not _needs_compress:
+                    logger.info(
+                        "Session hygiene: %s messages, ~%s tokens (%s) crossed "
+                        "normal line %s but below critical %s; deferring to agent",
+                        _msg_count,
+                        f"{_approx_tokens:,}",
+                        _token_source,
+                        f"{_compress_token_threshold:,}",
+                        f"{_warn_token_threshold:,}",
+                    )
+                if (
+                    not _needs_compress
+                    and _msg_count >= _HARD_MSG_LIMIT
+                    and _hyg_cursor_compacted
+                ):
+                    logger.debug(
+                        "Session hygiene: %s raw messages but cursor %s is active; "
+                        "effective payload ~%s tokens (%s), below threshold",
+                        _msg_count,
+                        _hyg_compaction_cursor,
+                        f"{_approx_tokens:,}",
+                        _token_source,
+                    )
+
+                # Cross-call ineffective-compression guard. The hygiene path builds
+                # a FRESH AIAgent per message, so the compressor's own 2-strike
+                # ineffective backoff never accumulates: a non-compressible session
+                # would otherwise re-run the ~24-36s aux summary every turn. We
+                # remember sessions that compacted with no reduction and skip them
+                # until they grow -- but ONLY when it's SAFE (_hygiene_should_skip
+                # never skips near the 95% critical line).
+                _noop_guard = getattr(self, "_hygiene_noop_guard", None)
+                if _noop_guard is None:
+                    _noop_guard = _hygiene_load_persisted_guard(
+                        getattr(self, "_session_db", None)
+                    )
+                    self._hygiene_noop_guard = _noop_guard
+                _guard_before = dict(_noop_guard)
+                _should_skip_hygiene = _needs_compress and _hygiene_should_skip(
+                    _noop_guard,
+                    session_entry.session_id,
+                    msg_count=_msg_count,
+                    margin=_HYGIENE_NOOP_RETRY_MARGIN,
+                    reason=_hyg_reason,
+                    approx_tokens=_approx_tokens,
+                    warn_tokens=_warn_token_threshold,
+                )
+                if _noop_guard != _guard_before:
+                    _hygiene_persist_guard(getattr(self, "_session_db", None), _noop_guard)
+                if _should_skip_hygiene:
+                    _needs_compress = False
+                    _prev_noop = _noop_guard.get(session_entry.session_id)
+                    logger.info(
+                        "Session hygiene: skipping %s — ineffective at %s msgs, now %s "
+                        "(reason=%s, tokens under warn line); waiting for growth",
+                        session_entry.session_id, _prev_noop, _msg_count, _hyg_reason,
+                    )
+                    logger.info(
+                        "compaction.skipped reason=legacy_hygiene source=%s "
+                        "trigger=noop_guard session=%s raw_messages=%d "
+                        "effective_messages=%d tokens_before=%s cursor_before=%s",
+                        _token_source,
+                        session_entry.session_id,
+                        _msg_count,
+                        len(_hyg_pressure_history),
+                        _approx_tokens,
+                        _hyg_compaction_cursor,
+                    )
 
                 if _needs_compress:
                     logger.info(
-                        "Session hygiene: %s messages, ~%s tokens (%s) — auto-compressing "
-                        "(threshold: %s%% of %s = %s tokens)",
+                        "compaction.decision reason=legacy_hygiene source=%s "
+                        "trigger=%s session=%s raw_messages=%d effective_messages=%d "
+                        "tokens_before=%s threshold_tokens=%s critical_tokens=%s "
+                        "cursor_before=%s",
+                        _token_source,
+                        _hyg_reason,
+                        session_entry.session_id,
+                        _msg_count,
+                        len(_hyg_pressure_history),
+                        _approx_tokens,
+                        _compress_token_threshold,
+                        _warn_token_threshold,
+                        _hyg_compaction_cursor,
+                    )
+                    logger.info(
+                        "Session hygiene: %s messages, ~%s tokens (%s) — recovery compacting "
+                        "(normal line: %s%% = %s, critical line: 95%% = %s of %s)",
                         _msg_count, f"{_approx_tokens:,}", _token_source,
                         int(_hyg_threshold_pct * 100),
-                        f"{_hyg_context_length:,}",
                         f"{_compress_token_threshold:,}",
+                        f"{_warn_token_threshold:,}",
+                        f"{_hyg_context_length:,}",
                     )
 
                     _hyg_meta = self._source_delivery_metadata(source)
@@ -6443,6 +6722,7 @@ class GatewayRunner:
                             ]
 
                             if len(_hyg_msgs) >= 4:
+                                _hyg_original_sid = session_entry.session_id
                                 _hyg_agent = AIAgent(
                                     **_hyg_runtime,
                                     model=_hyg_model,
@@ -6451,9 +6731,14 @@ class GatewayRunner:
                                     skip_memory=True,
                                     enabled_toolsets=["memory"],
                                     session_id=session_entry.session_id,
+                                    session_db=self._session_db,
                                 )
                                 try:
                                     _hyg_agent._print_fn = lambda *a, **kw: None
+                                    _hyg_pre_cursor = int(
+                                        getattr(_hyg_agent, "compaction_cursor", 0)
+                                        or 0
+                                    )
 
                                     loop = asyncio.get_running_loop()
                                     _compressed, _ = await loop.run_in_executor(
@@ -6464,31 +6749,109 @@ class GatewayRunner:
                                         ),
                                     )
 
-                                    # _compress_context ends the old session and creates
-                                    # a new session_id.  Write compressed messages into
-                                    # the NEW session so the old transcript stays intact
-                                    # and searchable via session_search.
-                                    _hyg_new_sid = _hyg_agent.session_id
-                                    if _hyg_new_sid != session_entry.session_id:
-                                        session_entry.session_id = _hyg_new_sid
-                                        self.session_store._save()
-
-                                    self.session_store.rewrite_transcript(
-                                        session_entry.session_id, _compressed
+                                    _hyg_post_cursor = int(
+                                        getattr(_hyg_agent, "compaction_cursor", 0)
+                                        or 0
                                     )
-                                    # Reset stored token count — transcript was rewritten
-                                    session_entry.last_prompt_tokens = 0
-                                    history = _compressed
-                                    _new_count = len(_compressed)
-                                    _new_tokens = estimate_messages_tokens_rough(
-                                        _compressed
+                                    _hyg_cursor_advanced = (
+                                        _hyg_post_cursor > _hyg_pre_cursor
+                                    )
+                                    _hyg_aborted = bool(getattr(
+                                        getattr(_hyg_agent, "context_compressor", None),
+                                        "_last_compress_aborted", False,
+                                    ))
+                                    _hyg_legacy_rewrite = (
+                                        not _hyg_cursor_advanced
+                                        and len(_compressed) < len(_hyg_msgs)
                                     )
 
-                                    logger.info(
-                                        "Session hygiene: compressed %s → %s msgs, "
-                                        "~%s → ~%s tokens",
-                                        _msg_count, _new_count,
-                                        f"{_approx_tokens:,}", f"{_new_tokens:,}",
+                                    if _hyg_legacy_rewrite:
+                                        # Legacy fallback only. Current compaction is
+                                        # cursor-based, so a normal successful compact
+                                        # must not rewrite the append-only transcript.
+                                        _hyg_new_sid = _hyg_agent.session_id
+                                        if _hyg_new_sid != session_entry.session_id:
+                                            session_entry.session_id = _hyg_new_sid
+                                            self.session_store._save()
+
+                                        self.session_store.rewrite_transcript(
+                                            session_entry.session_id, _compressed
+                                        )
+                                        session_entry.last_prompt_tokens = 0
+                                        history = _compressed
+                                        _new_count = len(_compressed)
+                                        _new_tokens = estimate_messages_tokens_rough(
+                                            _compressed
+                                        )
+                                        logger.info(
+                                            "Session hygiene: compressed %s -> %s msgs, "
+                                            "~%s -> ~%s tokens",
+                                            _msg_count, _new_count,
+                                            f"{_approx_tokens:,}", f"{_new_tokens:,}",
+                                        )
+                                    elif _hyg_cursor_advanced:
+                                        session_entry.last_prompt_tokens = 0
+                                        _new_count = _msg_count
+                                        _post_effective_history = (
+                                            _hygiene_effective_messages_for_pressure(
+                                                history,
+                                                compaction_cursor=_hyg_post_cursor,
+                                                compaction_summary=getattr(
+                                                    _hyg_agent,
+                                                    "compaction_summary",
+                                                    None,
+                                                ),
+                                            )
+                                        )
+                                        _new_tokens = estimate_messages_tokens_rough(
+                                            _post_effective_history
+                                        )
+                                        logger.info(
+                                            "Session hygiene: cursor compacted %s raw msgs "
+                                            "(cursor %s -> %s), effective ~%s -> ~%s tokens",
+                                            _msg_count,
+                                            _hyg_pre_cursor,
+                                            _hyg_post_cursor,
+                                            f"{_approx_tokens:,}",
+                                            f"{_new_tokens:,}",
+                                        )
+                                    else:
+                                        _new_count = _msg_count
+                                        _new_tokens = _approx_tokens
+                                        logger.info(
+                                            "Session hygiene: compression produced no "
+                                            "transcript reduction for %s msgs "
+                                            "(aborted=%s)",
+                                            _msg_count,
+                                            _hyg_aborted,
+                                        )
+
+                                    # Record/clear the ineffective-compression guard
+                                    # read at the gate above, so a non-compressible
+                                    # session stops re-running the aux summary every
+                                    # turn. A cursor advance is effective even though
+                                    # the visible transcript length stays unchanged.
+                                    _hyg_ineffective = (
+                                        not _hyg_cursor_advanced
+                                        and not _hyg_legacy_rewrite
+                                        and (
+                                            len(_compressed) >= len(_hyg_msgs)
+                                            or _hyg_aborted
+                                        )
+                                    )
+                                    _hygiene_record(
+                                        _noop_guard,
+                                        session_entry.session_id,
+                                        msg_count=_msg_count,
+                                        ineffective=_hyg_ineffective,
+                                    )
+                                    # An effective compaction rotates the session id;
+                                    # clear any stale guard entry under the OLD id too.
+                                    if _hyg_original_sid != session_entry.session_id:
+                                        _noop_guard.pop(_hyg_original_sid, None)
+                                    _hygiene_persist_guard(
+                                        getattr(self, "_session_db", None),
+                                        _noop_guard,
                                     )
 
                                     if _new_tokens >= _warn_token_threshold:
@@ -6504,6 +6867,36 @@ class GatewayRunner:
                         logger.warning(
                             "Session hygiene auto-compress failed: %s", e
                         )
+                        if (
+                            _hyg_reason == "message_count"
+                            and _approx_tokens < _warn_token_threshold
+                        ):
+                            _legacy_recovery_failed = True
+                            _hygiene_record(
+                                _noop_guard,
+                                session_entry.session_id,
+                                msg_count=_msg_count,
+                                ineffective=True,
+                            )
+                            _hygiene_persist_guard(
+                                getattr(self, "_session_db", None),
+                                _noop_guard,
+                            )
+                            logger.info(
+                                "compaction.failed reason=legacy_hygiene "
+                                "source=%s trigger=%s session=%s "
+                                "raw_messages=%d effective_messages=%d "
+                                "tokens_before=%s cursor_before=%s "
+                                "retry_guard=recorded error=%s",
+                                _token_source,
+                                _hyg_reason,
+                                session_entry.session_id,
+                                _msg_count,
+                                len(_hyg_pressure_history),
+                                _approx_tokens,
+                                _hyg_compaction_cursor,
+                                e,
+                            )
 
         # First-message onboarding -- only on the very first interaction ever
         if not history and not self.session_store.has_any_sessions():
@@ -6704,11 +7097,14 @@ class GatewayRunner:
                 )
 
                 if _is_ctx_fail:
-                    response = (
-                        "⚠️ Session too large for the model's context window.\n"
-                        "Use /compact to compress the conversation, or "
-                        "/reset to start fresh."
-                    )
+                    if _legacy_recovery_failed:
+                        response = _legacy_transcript_recovery_reply(source.platform)
+                    else:
+                        response = (
+                            "⚠️ Session too large for the model's context window.\n"
+                            "Use /compact to compress the conversation, or "
+                            "/reset to start fresh."
+                        )
                 else:
                     response = (
                         f"The request failed: {str(error_detail)[:300]}\n"
@@ -6983,6 +7379,8 @@ class GatewayRunner:
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
+                    if locals().get("_legacy_recovery_failed"):
+                        return _legacy_transcript_recovery_reply(source.platform)
                     return (
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "
@@ -9662,6 +10060,7 @@ class GatewayRunner:
 
         # Clear any running agent for this session key
         self._release_running_agent_state(session_key)
+        self._evict_cached_agent(session_key)
 
         # Switch the session entry to point at the old session
         new_entry = self.session_store.switch_session(session_key, target_id)
@@ -14179,6 +14578,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    # Long-running process: post-turn scorecard inference stays async (snappy).
+    try:
+        from agent.turn_attribution import mark_persistent_process
+
+        mark_persistent_process()
+    except Exception:
+        pass
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same ELEVATE_HOME.
     # The PID file is scoped to ELEVATE_HOME, so future multi-profile

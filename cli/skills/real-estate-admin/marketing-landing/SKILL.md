@@ -7,7 +7,14 @@ access:
   entitlement: "real_estate_marketing"
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Marketing Landing
+
+Read the installed workspace landing `lessons.md` and actual template before building. Preserve its full portrait and brokerage marks, room rotation, typography and text-only details section. Landing copy remains usable across the launch: no coming-soon or preview-status banner in the deployable page. Deliver owner photo downloads in the private review hub/Drive, not as public website download controls unless expressly requested.
 
 Run after `marketing-render`. Output is a per-listing landing page deployed to
 `<domains.landing_base>/<slug>/` (slug = `inputs.address_slug`). The landing
@@ -157,3 +164,7 @@ If the realtor declines the push, write `status: "preview-only"` with no
   `config/realtor.json`. Never narrow it to the primary market only.
 - Photos that are `null` in inputs.json must not appear in the rendered HTML
   (no broken `<img>` tags).
+
+## Matrix link handoff
+
+Once this listing page has its verified canonical published URL, include that URL and the matched deal/MLS in the result and refresh the existing Matrix links follow-up under the [document/link checklist](../matrix-incomplete-listing/references/documents-and-links.md). If no follow-up exists, create one scoped Matrix update task. Reuse the same listing draft and task on retries; a private/local preview URL does not satisfy the public listing link.

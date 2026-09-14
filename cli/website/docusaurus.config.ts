@@ -7,7 +7,7 @@ const config: Config = {
   tagline: 'AI chief of staff for real estate',
   favicon: 'img/favicon.ico',
 
-  url: 'https://github.com/Dartagnan98/elevate-agent',
+  url: 'https://elevate-agent.nousresearch.com',
   baseUrl: '/docs/',
 
   organizationName: 'CtrlStrategies',

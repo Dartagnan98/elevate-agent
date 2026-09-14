@@ -32,6 +32,7 @@ import logging
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -44,6 +45,74 @@ from agent.model_metadata import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    from agent.context_compressor import _LOW_YIELD_REMOVED_MESSAGES
+except Exception:  # pragma: no cover - defensive import fallback
+    _LOW_YIELD_REMOVED_MESSAGES = 1
+
+
+def _compaction_reason(force: bool) -> str:
+    return "critical_compact" if force else "full_compact"
+
+
+def _context_limit(agent: Any) -> int:
+    try:
+        return int(getattr(agent.context_compressor, "context_length", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _low_yield_count(agent: Any) -> int:
+    try:
+        return max(
+            0,
+            int(
+                getattr(
+                    agent.context_compressor,
+                    "_consecutive_low_yield_compactions",
+                    0,
+                )
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_compaction_event(
+    agent: Any,
+    event: str,
+    payload: dict[str, Any],
+    *,
+    severity: str = "info",
+) -> None:
+    session_id = str(getattr(agent, "session_id", "") or "")
+    if not session_id:
+        return
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            event,
+            session_id=session_id,
+            payload=payload,
+            severity=severity,
+            source="agent",
+            component="agent.conversation_compression",
+        )
+    except Exception:
+        logger.debug("compaction recorder write failed", exc_info=True)
+
+
+def _estimated_saved_tokens(messages: list, start: int, end: int, summary_text: str) -> int:
+    try:
+        raw_tokens = estimate_messages_tokens_rough(messages[max(0, start) : max(0, end)])
+    except Exception:
+        raw_tokens = 0
+    summary_tokens = (len(summary_text or "") + 3) // 4
+    return max(0, raw_tokens - summary_tokens)
 
 
 def _content_text(content: Any) -> str:
@@ -310,6 +379,8 @@ def check_compression_model_feasibility(agent: Any) -> None:
             provider=(_aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(agent, "provider", "")),
             custom_providers=agent._custom_providers,
         )
+        if aux_context:
+            agent.context_compressor.summary_context_length = aux_context
 
         # Hard floor: the auxiliary compression model must have at least
         # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model
@@ -484,15 +555,39 @@ def compress_context(
             agent._compression_feasibility_checked = True
 
     _pre_msg_count = len(messages)
+    _cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+    _reason = _compaction_reason(force)
+    _start_payload = {
+        "stage": "compaction",
+        "reason": _reason,
+        "status": "started",
+        "outcome": "started",
+        "message_count": _pre_msg_count,
+        "context_limit": _context_limit(agent),
+        "low_yield_count": _low_yield_count(agent),
+    }
+    if approx_tokens is not None:
+        _start_payload["context_tokens"] = int(approx_tokens)
+    _record_compaction_event(agent, "compact.health_sample", _start_payload)
+    logger.info(
+        "compaction.started reason=%s session=%s "
+        "messages=%d tokens=~%s cursor_before=%d",
+        _reason,
+        agent.session_id or "none",
+        _pre_msg_count,
+        f"{approx_tokens:,}" if approx_tokens else "unknown",
+        _cursor_before,
+    )
     logger.info(
         "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
         agent.session_id or "none", _pre_msg_count,
         f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
         focus_topic,
     )
-    agent._emit_status(
-        "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
-    )
+    try:
+        agent._emit_status("Working through earlier context so I can continue...")
+    except Exception:
+        pass  # a flaky status sink must never abort the compaction itself
 
     # Notify external memory provider before compression discards context
     if agent._memory_manager:
@@ -501,12 +596,70 @@ def compress_context(
         except Exception:
             pass
 
+    # Keepalive heartbeat for the blocking summary call. compress() runs the
+    # auxiliary summary LLM synchronously and can block the turn for tens of
+    # seconds (observed ~112s on a 252K-token session) with nothing streaming.
+    # During that window this thread (a) calls _touch_activity every interval to
+    # reset the gateway inactivity-kill watchdog, and (b) re-emits a status frame
+    # so the status pill stays visible and (where the throttle allows) ticks
+    # elapsed time, instead of the chat looking hung / the thinking
+    # indicator vanishing.
+    # NOTE: this is NOT what keeps the WebSocket open. uvicorn already pings every
+    # ~20s (ws_ping_interval default), so the socket survives a silent compaction
+    # on its own; _touch_activity only feeds the internal watchdog, and the
+    # throttled _emit_status (default 30s same-category) is SLOWER than uvicorn's
+    # ping -- it is for the pill/progress display, not socket survival. (To show
+    # true per-second elapsed on web, lower the throttle for this category; left
+    # as-is to avoid flooding no-overwrite lanes like Telegram.)
+    # Fires only past one interval (default 15s), so short compactions carry zero
+    # overhead; no-ops when the agent has no status_callback.
+    _ka_stop = threading.Event()
+    _ka_start = time.monotonic()
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        _ka_interval = float(os.getenv("ELEVATE_COMPACTION_KEEPALIVE_INTERVAL", "") or 15.0)
+    except (TypeError, ValueError):
+        _ka_interval = 15.0
+    if _ka_interval < 0.05:
+        _ka_interval = 0.05
+
+    def _compaction_keepalive() -> None:
+        while not _ka_stop.wait(_ka_interval):
+            _elapsed = int(time.monotonic() - _ka_start)
+            try:
+                agent._touch_activity(f"working through earlier context ({_elapsed}s elapsed)")
+            except Exception:
+                pass
+            try:
+                agent._emit_status(
+                    f"Still summarizing earlier context ({_elapsed}s elapsed)..."
+                )
+            except Exception:
+                pass
+
+    _ka_thread = threading.Thread(
+        target=_compaction_keepalive, daemon=True, name="compaction-keepalive"
+    )
+    _ka_thread.start()
+    # Compaction redesign (docs/compaction-redesign.md): the transcript is NEVER
+    # rewritten or rotated. Compute a new payload cursor + synthetic summary over
+    # messages[prev_cursor:compacted_idx], fold the prior summary in iteratively,
+    # and persist BOTH as session metadata. messages_for_api injects the summary
+    # and skips the compacted head only when the API payload is built.
+    _prev_cursor = _cursor_before
+    _prev_summary = getattr(agent, "compaction_summary", None)
+    try:
+        summary_text, compacted_idx = agent.context_compressor.summarize_to_cursor(
+            messages,
+            prev_cursor=_prev_cursor,
+            previous_summary=_prev_summary,
+            focus_topic=focus_topic,
+            force=force,
+        )
+    except Exception:
+        raise
+    finally:
+        _ka_stop.set()
+        _ka_thread.join(timeout=2.0)
 
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the
@@ -515,6 +668,35 @@ def compress_context(
     # the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
         _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
+        _error_payload = {
+            "stage": "compaction",
+            "reason": _reason,
+            "status": "aborted",
+            "outcome": "aborted",
+            "message_count": _pre_msg_count,
+            "context_limit": _context_limit(agent),
+            "compaction_removed_messages": 0,
+            "low_yield_count": _low_yield_count(agent),
+            "error_class": "compression_aborted",
+        }
+        if approx_tokens is not None:
+            _error_payload["context_tokens"] = int(approx_tokens)
+        _record_compaction_event(
+            agent,
+            "compact.error",
+            _error_payload,
+            severity="error",
+        )
+        logger.warning(
+            "compaction.failed reason=%s source=compress_context session=%s "
+            "raw_messages=%d tokens_before=%s cursor_before=%d aborted=true error=%s",
+            _reason,
+            agent.session_id or "none",
+            _pre_msg_count,
+            approx_tokens if approx_tokens is not None else "unknown",
+            _cursor_before,
+            _err,
+        )
         if getattr(agent, "_last_compression_summary_warning", None) != _err:
             agent._last_compression_summary_warning = _err
             agent._emit_warning(
@@ -529,6 +711,25 @@ def compress_context(
 
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
     if summary_error:
+        _summary_error_payload = {
+            "stage": "compaction",
+            "reason": _reason,
+            "status": "summary_failed",
+            "outcome": "recovered",
+            "message_count": _pre_msg_count,
+            "context_limit": _context_limit(agent),
+            "low_yield_count": _low_yield_count(agent),
+            "error_class": "summary_failed",
+            "recovered": True,
+        }
+        if approx_tokens is not None:
+            _summary_error_payload["context_tokens"] = int(approx_tokens)
+        _record_compaction_event(
+            agent,
+            "compact.error",
+            _summary_error_payload,
+            severity="warning",
+        )
         if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
             agent._last_compression_summary_warning = summary_error
             agent._emit_warning(
@@ -553,118 +754,97 @@ def compress_context(
                     "check auxiliary.compression.model in config.yaml."
                 )
 
-    plan_snapshot = None
+    # No-op compaction: the cut did not advance past the current cursor, so
+    # nothing new was hidden (summarize_to_cursor returned None without
+    # aborting). It already armed the low-yield cooldown so should_compress()
+    # backs off. Leave cursor/summary AND the usage projector untouched — the
+    # payload did not shrink — and return the transcript unchanged.
+    if summary_text is None:
+        _noop_payload = {
+            "stage": "compaction",
+            "reason": _reason,
+            "status": "noop",
+            "outcome": "noop",
+            "message_count": _pre_msg_count,
+            "context_limit": _context_limit(agent),
+            "compaction_removed_messages": 0,
+            "compaction_saved_tokens": 0,
+            "low_yield_count": _low_yield_count(agent),
+            "noop": True,
+        }
+        if approx_tokens is not None:
+            _noop_payload["context_tokens"] = int(approx_tokens)
+        _record_compaction_event(agent, "compact.health_sample", _noop_payload)
+        _record_compaction_event(
+            agent,
+            "compact.low_yield",
+            _noop_payload,
+            severity="warning",
+        )
+        logger.info(
+            "compaction.skipped reason=%s source=compress_context session=%s "
+            "raw_messages=%d tokens_before=%s cursor_before=%d note=no_cursor_advance",
+            _reason,
+            agent.session_id or "none",
+            _pre_msg_count,
+            approx_tokens if approx_tokens is not None else "unknown",
+            _cursor_before,
+        )
+        _existing_sp = getattr(agent, "_cached_system_prompt", None) or agent._build_system_prompt(system_message)
+        return messages, _existing_sp
+
+    # Trigger memory extraction over the compacted region before it scrolls out
+    # of the model's window. NO rotation: the session id is stable, the
+    # transcript stays append-only, only the compaction METADATA moves.
     try:
-        from tools.present_plan_tool import format_latest_plan_for_injection
-        plan_snapshot = format_latest_plan_for_injection(messages)
-    except Exception as e:
-        logger.debug("Plan snapshot preservation skipped: %s", e)
-    todo_snapshot = agent._todo_store.format_for_injection()
-    compressed = insert_preserved_context(compressed, [plan_snapshot, todo_snapshot])
+        agent.commit_memory_session(messages)
+    except Exception as _mem_err:
+        logger.debug("commit_memory_session (compression) skipped: %s", _mem_err)
 
-    agent._invalidate_system_prompt()
-    new_system_prompt = agent._build_system_prompt(system_message)
-    agent._cached_system_prompt = new_system_prompt
-
+    # Persist the new compaction state as SESSION METADATA (NOT message rows):
+    # the payload-time cursor + synthetic summary. The transcript is never
+    # rewritten — messages_for_api applies these only when building the API copy.
+    agent.compaction_cursor = compacted_idx
+    agent.compaction_summary = summary_text
     if agent._session_db:
         try:
-            # Propagate title to the new session with auto-numbering
-            old_title = agent._session_db.get_session_title(agent.session_id)
-            # Trigger memory extraction on the old session before it rotates.
-            agent.commit_memory_session(messages)
-            agent._session_db.end_session(agent.session_id, "compression")
-            old_session_id = agent.session_id
-            _new_sid_base = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-            # Preserve the cron_<jobid>_ prefix across compression-driven
-            # session rotation. Without this, the dashboard's per-cron
-            # session list (which groups by `cron_<jobid>_*` prefix in
-            # App.tsx) loses the restarted continuation and the user sees
-            # the cron as "nothing ran" even though the work completed.
-            if old_session_id and old_session_id.startswith("cron_"):
-                _parts = old_session_id.split("_", 3)  # ["cron", "<jobid>", "<ts>", ...]
-                if len(_parts) >= 2:
-                    agent.session_id = f"cron_{_parts[1]}_{_new_sid_base}"
-                else:
-                    agent.session_id = _new_sid_base
-            else:
-                agent.session_id = _new_sid_base
-            os.environ["ELEVATE_SESSION_ID"] = agent.session_id
-            try:
-                from gateway.session_context import _SESSION_ID
-                _SESSION_ID.set(agent.session_id)
-            except Exception:
-                pass
-            agent._session_db_created = False
-            agent._session_db.create_session(
-                session_id=agent.session_id,
-                source=agent.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
-                model=agent.model,
-                # getattr guard: a missing attribute here once aborted the whole
-                # rotation block AFTER end_session(old) — the continuation row
-                # was then backfilled by the message flush with NO parent link
-                # and NO title, surfacing as an unrelated new chat holding just
-                # the post-compaction turn and breaking the compression-tip
-                # walk (resume reloaded full history → re-compaction loop).
-                model_config=getattr(agent, "_session_init_model_config", None),
-                parent_session_id=old_session_id,
+            agent._session_db.update_compaction(
+                agent.session_id, summary_text, compacted_idx
             )
-            agent._session_db_created = True
-            # Auto-number the title for the continuation session
-            if old_title:
-                try:
-                    new_title = agent._session_db.get_next_title_in_lineage(old_title)
-                    agent._session_db.set_session_title(agent.session_id, new_title)
-                except (ValueError, Exception) as e:
-                    logger.debug("Could not propagate title on compression: %s", e)
-            agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
-            # Reset flush cursor — new session starts with no messages written
-            agent._last_flushed_db_idx = 0
-        except Exception as e:
-            logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
-
-    try:
-        _store_compression_checkpoint(
-            agent,
-            session_id=agent.session_id or "",
-            old_session_id=locals().get("old_session_id"),
-            source_messages=messages,
-            compressed_messages=compressed,
-        )
-    except Exception as _checkpoint_err:
-        logger.debug("compression checkpoint skipped: %s", _checkpoint_err)
-
-    # Notify the context engine that the session_id rotated because of
-    # compression (not a fresh /new). Plugin engines (e.g. elevate-lcm) use
-    # boundary_reason="compression" to preserve DAG lineage across the
-    # rollover instead of re-initializing fresh per-session state.
-    # See elevate-lcm#68. Built-in ContextCompressor ignores kwargs.
-    try:
-        _old_sid = locals().get("old_session_id")
-        if _old_sid and hasattr(agent.context_compressor, "on_session_start"):
-            agent.context_compressor.on_session_start(
-                agent.session_id or "",
-                boundary_reason="compression",
-                old_session_id=_old_sid,
+        except Exception as _meta_err:
+            _meta_payload = {
+                "stage": "compaction",
+                "reason": _reason,
+                "status": "metadata_write_failed",
+                "outcome": "metadata_write_failed",
+                "message_count": _pre_msg_count,
+                "context_limit": _context_limit(agent),
+                "compaction_removed_messages": max(0, compacted_idx - _prev_cursor),
+                "low_yield_count": _low_yield_count(agent),
+                "error_class": type(_meta_err).__name__,
+            }
+            if approx_tokens is not None:
+                _meta_payload["context_tokens"] = int(approx_tokens)
+            _record_compaction_event(
+                agent,
+                "compact.error",
+                _meta_payload,
+                severity="error",
             )
-    except Exception as _ce_err:
-        logger.debug("context engine on_session_start (compression): %s", _ce_err)
-
-    # Notify memory providers of the compression-driven session_id rotation
-    # so provider-cached per-session state (Hindsight's _document_id,
-    # accumulated turn buffers, counters) refreshes. reset=False because
-    # the logical conversation continues; only the id and DB row rolled
-    # over. See #6672.
-    try:
-        _old_sid = locals().get("old_session_id")
-        if _old_sid and agent._memory_manager:
-            agent._memory_manager.on_session_switch(
-                agent.session_id or "",
-                parent_session_id=_old_sid,
-                reset=False,
-                reason="compression",
+            logger.warning(
+                "Compaction metadata write failed for %s: %s",
+                agent.session_id, _meta_err,
             )
-    except Exception as _me_err:
-        logger.debug("memory manager on_session_switch (compression): %s", _me_err)
+
+    # The system prompt is intentionally NOT rebuilt on compaction: nothing
+    # about the cursor model changes it (the summary lives in a payload-time
+    # synthetic message, not the system prompt), and keeping it byte-stable
+    # preserves the provider prompt-cache prefix across the compaction boundary.
+    new_system_prompt = (
+        getattr(agent, "_cached_system_prompt", None)
+        or agent._build_system_prompt(system_message)
+    )
+    agent._cached_system_prompt = new_system_prompt
 
     # Warn on repeated compressions (quality degrades with each pass)
     _cc = agent.context_compressor.compression_count
@@ -675,20 +855,30 @@ def compress_context(
             force=True,
         )
 
-    # Update token estimate after compaction so pressure calculations
-    # use the post-compression count, not the stale pre-compression one.
-    # Use estimate_request_tokens_rough() so tool schemas are included —
-    # with 50+ tools enabled, schemas alone can add 20-30K tokens, and
-    # omitting them delays the next compression cycle far past the
-    # configured threshold (issue #14695).
-    _compressed_est = estimate_request_tokens_rough(
-        compressed,
-        system_prompt=new_system_prompt or "",
-        tools=agent.tools or None,
-    )
-    agent.context_compressor.last_prompt_tokens = _compressed_est
+    # Post-compaction trigger guard (#14695): the visible message list is
+    # unchanged, so the usage projector's snapshot (taken on the FULL payload)
+    # would project the pre-compaction size and immediately re-fire compaction.
+    # Park the -1 sentinel + invalidate the projector so the trigger stays quiet
+    # until the next API call reports real usage for the now-trimmed payload.
+    # (In the old rotating design the projector self-invalidated because the
+    # caller rebound `messages` to a brand-new list; the cursor model reuses the
+    # same list object, so we must invalidate explicitly here.)
+    agent.context_compressor.last_prompt_tokens = -1
     agent.context_compressor.last_completion_tokens = 0
+    try:
+        agent.context_compressor.awaiting_real_usage_after_compression = True
+    except Exception:
+        pass
+    _usage_projector = getattr(agent, "_usage_projector", None)
+    if _usage_projector is not None:
+        try:
+            _usage_projector.invalidate()
+        except Exception:
+            pass
 
+    # Context-pressure telemetry — summarise from the synthetic summary itself
+    # (the compacted head is now represented by it) so the dashboard pressure
+    # panel reflects what the model actually carries forward.
     try:
         from gateway.session_context import get_session_env
 
@@ -697,47 +887,83 @@ def compress_context(
             or str(getattr(agent, "_agent_id", "") or "")
             or os.environ.get("ELEVATE_AGENT_ID", "")
         ).strip()
-        _context_limit = int(getattr(agent.context_compressor, "context_length", 0) or 0)
-        if _pressure_agent_id and _context_limit:
+        _pressure_context_limit = int(
+            getattr(agent.context_compressor, "context_length", 0) or 0
+        )
+        if _pressure_agent_id and _pressure_context_limit:
             from elevate_cli.agent_policy import record_agent_context_pressure
             from elevate_cli.data import connect
 
-            _summary_bits = []
-            for _msg in compressed[:4]:
-                if isinstance(_msg, dict):
-                    _text = _content_text(_msg.get("content")).strip()
-                    if _text:
-                        _summary_bits.append(_text)
-                if len("\n\n".join(_summary_bits)) > 2400:
-                    break
             with connect() as _conn:
                 record_agent_context_pressure(
                     _pressure_agent_id,
                     session_id=str(getattr(agent, "session_id", "") or ""),
                     current_tokens=int(approx_tokens or 0),
-                    context_limit=_context_limit,
-                    summary="\n\n".join(_summary_bits)[:4000],
+                    context_limit=_pressure_context_limit,
+                    summary=str(summary_text or "")[:4000],
                     conn=_conn,
                     actor=_pressure_agent_id,
                 )
     except Exception as _pressure_exc:
         logger.debug("agent context-pressure record skipped: %s", _pressure_exc)
 
-    # Clear the file-read dedup cache.  After compression the original
-    # read content is summarised away — if the model re-reads the same
-    # file it needs the full content, not a "file unchanged" stub.
+    # Clear the file-read dedup cache.  After compaction the original read
+    # content is summarised away — if the model re-reads the same file it needs
+    # the full content, not a "file unchanged" stub.
     try:
         from tools.file_tools import reset_file_dedup
         reset_file_dedup(task_id)
     except Exception:
         pass
 
+    _removed_messages = max(0, compacted_idx - _prev_cursor)
+    _complete_payload = {
+        "stage": "compaction",
+        "reason": _reason,
+        "status": "complete",
+        "outcome": "complete",
+        "message_count": _pre_msg_count,
+        "context_limit": _context_limit(agent),
+        "compaction_removed_messages": _removed_messages,
+        "compaction_saved_tokens": _estimated_saved_tokens(
+            messages,
+            _prev_cursor,
+            compacted_idx,
+            summary_text or "",
+        ),
+        "low_yield_count": _low_yield_count(agent),
+        "success": True,
+    }
+    if approx_tokens is not None:
+        _complete_payload["context_tokens"] = int(approx_tokens)
+    _record_compaction_event(agent, "compact.health_sample", _complete_payload)
+    if _removed_messages <= _LOW_YIELD_REMOVED_MESSAGES:
+        _record_compaction_event(
+            agent,
+            "compact.low_yield",
+            _complete_payload,
+            severity="warning",
+        )
+
     logger.info(
-        "context compression done: session=%s messages=%d->%d tokens=~%s",
-        agent.session_id or "none", _pre_msg_count, len(compressed),
-        f"{_compressed_est:,}",
+        "compaction.completed reason=%s source=compress_context session=%s "
+        "raw_messages=%d tokens_before=%s cursor_before=%d cursor_after=%d "
+        "summary_chars=%d aborted=false sentinel=-1",
+        _reason,
+        agent.session_id or "none",
+        _pre_msg_count,
+        approx_tokens if approx_tokens is not None else "unknown",
+        _prev_cursor,
+        compacted_idx,
+        len(summary_text or ""),
     )
-    return compressed, new_system_prompt
+    logger.info(
+        "context compaction done: session=%s cursor=%d->%d summary=%d chars "
+        "(transcript untouched, no rotation)",
+        agent.session_id or "none", _prev_cursor, compacted_idx,
+        len(summary_text or ""),
+    )
+    return messages, new_system_prompt
 
 
 def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
@@ -1043,6 +1269,7 @@ def resolve_compression_pressure(
     *,
     output_reserve_tokens: int,
     threshold_pinned: bool,
+    fallback_messages: Optional[list] = None,
 ) -> Tuple[int, int, bool]:
     """Measurement + trigger line for the iteration-boundary check.
 
@@ -1056,8 +1283,9 @@ def resolve_compression_pressure(
          for the compacted conversation (#14695 guard).
       3. Stale-but-real last_prompt_tokens (list shape changed since) —
          estimate mode, matches the historical behavior.
-      4. Full chars/4 estimate of the message list (#2153 fallback when
-         usage was never reported).
+      4. Full chars/4 estimate of the effective payload list (#2153 fallback
+         when usage was never reported). For cursor-compacted sessions this is
+         summary + tail, not the append-only transcript.
     """
     projected = projector.project(messages) if projector is not None else None
     real_mode = projected is not None
@@ -1070,7 +1298,10 @@ def resolve_compression_pressure(
         elif last > 0:
             measured = last
         else:
-            measured = estimate_messages_tokens_rough(messages)
+            effective_messages = (
+                messages if fallback_messages is None else fallback_messages
+            )
+            measured = estimate_messages_tokens_rough(effective_messages)
 
     trigger = effective_compression_trigger_tokens(
         compressor,
@@ -1098,6 +1329,30 @@ def should_compress_now(compressor: Any, measured_tokens: int, trigger_tokens: i
         return False
     threshold_tokens = int(getattr(compressor, "threshold_tokens", 0) or 0)
     return bool(compressor.should_compress(max(measured_tokens, threshold_tokens)))
+
+
+# Critical line: the last synchronous-compaction trigger before a turn would
+# overflow the provider context window and fall back to error-recovery
+# compaction. The normal trigger leaves ``output_reserve`` of headroom and
+# obeys the anti-thrash backoff; the critical line fires a FORCED compaction
+# even when the backoff would otherwise skip, because at >=95% of the window
+# the next call is about to 400 on context length.
+CRITICAL_THRESHOLD = 0.95
+
+
+def should_critical_compress_now(measured_tokens: int, window: int) -> bool:
+    """True when compaction MUST run synchronously this iteration, bypassing the
+    anti-thrash cooldown.
+
+    ``measured_tokens`` is the projected (real-count) or estimated prompt size of
+    what the next call would send; ``window`` is the model context length. At or
+    above ``CRITICAL_THRESHOLD`` of the window, overflow safety wins over thrash
+    avoidance — the caller forces compaction (``force=True``) regardless of the
+    low-yield / ineffective-compression backoff.
+    """
+    if measured_tokens <= 0 or window <= 0:
+        return False
+    return measured_tokens >= int(window * CRITICAL_THRESHOLD)
 
 
 def should_prune_only_now(compressor: Any, measured_tokens: int, trigger_tokens: int) -> bool:
@@ -1143,6 +1398,8 @@ __all__ = [
     "RealUsageProjector",
     "effective_compression_trigger_tokens",
     "resolve_compression_pressure",
+    "CRITICAL_THRESHOLD",
+    "should_critical_compress_now",
     "should_compress_now",
     "should_prune_only_now",
 ]

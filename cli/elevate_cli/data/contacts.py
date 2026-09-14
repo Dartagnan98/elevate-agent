@@ -17,7 +17,7 @@ Every mutation writes a paired row into the ``events`` audit log via
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from elevate_cli.data import events as _events
 from elevate_cli.data._util import new_id, now_iso
@@ -32,6 +32,10 @@ def _row_to_contact(row: sqlite3.Row) -> dict[str, Any]:
         "displayName": row["display_name"],
         "primaryEmail": row["primary_email"],
         "primaryPhone": row["primary_phone"],
+        # Mailing address + birthday (added 2026-07-23). _get so rows that
+        # predate the columns don't KeyError.
+        "address": _get("address"),
+        "birthday": _get("birthday"),
         "type": row["type"],
         "stage": row["stage"],
         "ownerNotes": row["owner_notes"],
@@ -107,8 +111,16 @@ _FLAG_COLUMNS: dict[str, str] = {
 _HEAT_LABELS = {"hot", "warm", "watch", "normal"}
 _VALID_SIDES_FOR_ADMIN = {"buyer", "listing"}
 _PIPELINE_STATUS_VALUES = {
+    # Legacy 6 values written by the AI classifier + sync pipeline. Do NOT
+    # remove or repurpose these — source_connector_modules/*, review.py, etc.
+    # still write them.
     "new_lead", "follow_up", "ghosting", "dead",
     "closed_seller", "closed_buyer",
+    # Skyleigh's operator-facing 9-stage pipeline (New Lead reuses new_lead).
+    # These are settable via the operator dropdown but never auto-promote to
+    # the /admin kanban — only closed_seller/closed_buyer keep that behavior.
+    "attempted", "prospect", "client", "pending_deal",
+    "closed", "referred", "realtor_contact", "trash",
 }
 _PIPELINE_STATUS_SET_BY = {"operator", "ai"}
 
@@ -219,6 +231,188 @@ _ENRICHMENT_COLUMNS: tuple[str, ...] = (
 )
 
 
+def _digits_tail(value: Any, n: int = 10) -> str:
+    """Last n digits of a phone, so +1 (250) 371-1375 == 2503711375."""
+    d = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return d[-n:] if len(d) >= n else ""
+
+
+def match_contact_for_intake(
+    conn: sqlite3.Connection,
+    *,
+    name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Find the contact we ALREADY hold for someone being added to the board.
+
+    Returns ``(contact, reason)`` or ``(None, None)``. Ordered strongest first:
+    exact email, then phone (last 10 digits, so formatting differences do not
+    matter), then an exact display-name match.
+
+    A NAME match is only accepted when it is UNIQUE among visible contacts. Two
+    people called "Dave Smith" must never be silently merged into one deal --
+    an ambiguous name is left for the Action Needed card to resolve.
+
+    Why this exists: on 2026-08-20 a Pre-CMA card was created for Tod Wouters
+    with only his name, and the seller package stalled asking for an email --
+    while a contact record carrying both his email AND his phone had been
+    sitting in this table since 2026-07-27. Nothing looked.
+    """
+    def _row(r: Any) -> dict[str, Any]:
+        return _row_to_contact(r)
+
+    e = (email or "").strip().lower()
+    if e:
+        row = conn.execute(
+            "SELECT * FROM contacts WHERE lower(primary_email)=? AND hidden=0 "
+            "ORDER BY updated_at DESC LIMIT 1", (e,)
+        ).fetchone()
+        if row is not None:
+            return _row(row), "email"
+
+    p = _digits_tail(phone)
+    if p:
+        rows = conn.execute(
+            "SELECT * FROM contacts WHERE primary_phone IS NOT NULL AND primary_phone<>'' "
+            "AND hidden=0 ORDER BY updated_at DESC LIMIT 4000"
+        ).fetchall()
+        for row in rows or []:
+            if _digits_tail(row["primary_phone"]) == p:
+                return _row(row), "phone"
+
+    n = (name or "").strip().lower()
+    if n:
+        rows = conn.execute(
+            "SELECT * FROM contacts WHERE lower(trim(display_name))=? AND hidden=0",
+            (n,)
+        ).fetchall() or []
+        # Unique match only. Ambiguity is a question for the human, not a guess.
+        if len(rows) == 1:
+            return _row(rows[0]), "name"
+        if len(rows) > 1:
+            return None, None
+
+    # Nothing in our own store. Try HER macOS Contacts before giving up -- the
+    # client's number is very often already in her phone. Read-only, and still
+    # unique-match-only. Returns a synthetic dict (no contacts row yet); the
+    # caller uses the email/phone and can create the contact from it.
+    if n:
+        try:
+            from elevate_cli import apple_contacts as _ab
+
+            rec = _ab.cached_index().lookup_by_name(name or "")
+        except Exception:
+            rec = None
+        if rec is not None and (rec.emails or rec.phones):
+            return (
+                {
+                    "id": None,
+                    "displayName": rec.display_name,
+                    "primaryEmail": (rec.emails[0] if rec.emails else ""),
+                    "primaryPhone": (rec.phones[0] if rec.phones else ""),
+                    "appleContactId": rec.unique_id,
+                },
+                "apple_contacts",
+            )
+
+    return None, None
+
+
+# --- Local-edit field locks -------------------------------------------
+#
+# Skyleigh is migrating off Lofty onto the in-house Leads section, so an edit
+# made HERE has to outrank whatever the CRM happens to hold. Before this, the
+# contact sync (data/migrate.py -> upsert_contact) re-enriched every lead on a
+# loop and silently reverted hand-set values: on 2026-08-20 it put Tod Wouters'
+# lead_types_json back to Lofty's unset [-1], reformatted his phone and
+# replaced his crm_user_id, all within minutes of the edits.
+#
+# A lock records "a human/Elevate-side writer owns this column on this
+# contact". upsert_contact then refuses to touch it. Locks are per-field, not
+# per-contact, so an untouched column still gets fresh CRM data.
+
+_CONTACT_FIELD_LOCKS_DDL = """
+CREATE TABLE IF NOT EXISTS contact_field_locks (
+    contact_id TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    actor      TEXT,
+    locked_at  TEXT NOT NULL,
+    PRIMARY KEY (contact_id, field)
+)
+"""
+
+
+def _ensure_contact_field_locks_table(conn: sqlite3.Connection) -> None:
+    """Idempotently create the lock table. Works on pg + sqlite."""
+    conn.execute(_CONTACT_FIELD_LOCKS_DDL)
+
+
+def locked_contact_fields(conn: sqlite3.Connection, contact_id: str) -> set[str]:
+    """Column names on this contact that a local edit owns."""
+    if not contact_id:
+        return set()
+    try:
+        _ensure_contact_field_locks_table(conn)
+        rows = conn.execute(
+            "SELECT field FROM contact_field_locks WHERE contact_id=?", (contact_id,)
+        ).fetchall()
+    except Exception:  # never let a lock lookup break an ingest
+        return set()
+    out: set[str] = set()
+    for row in rows or []:
+        try:
+            value = row["field"]
+        except Exception:
+            value = row[0]
+        if value:
+            out.add(str(value))
+    return out
+
+
+def lock_contact_fields(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    fields: Sequence[str],
+    *,
+    actor: str = "local",
+) -> set[str]:
+    """Mark columns as locally owned so the CRM sync stops overwriting them."""
+    wanted = [str(f).strip() for f in (fields or []) if str(f or "").strip()]
+    if not contact_id or not wanted:
+        return locked_contact_fields(conn, contact_id)
+    _ensure_contact_field_locks_table(conn)
+    now = now_iso()
+    for field in wanted:
+        # ON CONFLICT DO NOTHING keeps the ORIGINAL locked_at/actor, so the
+        # record shows when local ownership started, not when it was last
+        # re-asserted.
+        conn.execute(
+            "INSERT INTO contact_field_locks(contact_id, field, actor, locked_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (contact_id, field) DO NOTHING",
+            (contact_id, field, actor, now),
+        )
+    return locked_contact_fields(conn, contact_id)
+
+
+def unlock_contact_fields(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    fields: Sequence[str],
+) -> set[str]:
+    """Hand a column back to the CRM sync."""
+    wanted = [str(f).strip() for f in (fields or []) if str(f or "").strip()]
+    if not contact_id or not wanted:
+        return locked_contact_fields(conn, contact_id)
+    _ensure_contact_field_locks_table(conn)
+    for field in wanted:
+        conn.execute(
+            "DELETE FROM contact_field_locks WHERE contact_id=? AND field=?",
+            (contact_id, field),
+        )
+    return locked_contact_fields(conn, contact_id)
+
+
 def upsert_contact(
     conn: sqlite3.Connection,
     *,
@@ -313,16 +507,24 @@ def upsert_contact(
         return get_contact(conn, cid)  # type: ignore[return-value]
 
     cid = existing["id"]
+    # Columns a local edit owns. Ingest (Lofty sync, iMessage, CSV) must not
+    # touch these -- see the lock helpers above. Everything else still gets
+    # fresh data, so this is a per-field veto, not a per-contact freeze.
+    locked = locked_contact_fields(conn, cid)
     # Patch only fields that the caller actually provided.
     sets: list[str] = []
     params: list[Any] = []
-    if display_name is not None and display_name != existing["display_name"]:
+    # Fill-only for the base fields: a blank/empty incoming value must NEVER
+    # overwrite an existing real one. The old `is not None` check let a "" phone
+    # (or name/email) wipe a good value on re-import. Only update when the
+    # incoming value is truthy (non-empty).
+    if "display_name" not in locked and display_name and display_name != existing["display_name"]:
         sets.append("display_name=?")
         params.append(display_name)
-    if primary_email is not None and primary_email != existing["primary_email"]:
+    if "primary_email" not in locked and primary_email and primary_email != existing["primary_email"]:
         sets.append("primary_email=?")
         params.append(primary_email)
-    if primary_phone is not None and primary_phone != existing["primary_phone"]:
+    if "primary_phone" not in locked and primary_phone and primary_phone != existing["primary_phone"]:
         sets.append("primary_phone=?")
         params.append(primary_phone)
     if ingest_run_id is not None and ingest_run_id != existing["ingest_run_id"]:
@@ -333,6 +535,8 @@ def upsert_contact(
     # updated_at honest (no UPDATE = no timestamp bump).
     existing_keys = set(existing.keys()) if hasattr(existing, "keys") else set()
     for col, value in clean_enrich.items():
+        if col in locked:
+            continue
         if col not in existing_keys:
             # Migration hasn't applied for this column on this DB yet —
             # skip silently rather than 500 the whole sync.
@@ -856,3 +1060,24 @@ def set_pipeline_status(
         payload={"pipelineStatus": norm, "setBy": set_by},
     )
     return get_contact(conn, contact_id) or contact
+
+
+_CONTACT_EDIT_COLUMNS = frozenset({
+    "display_name", "primary_email", "primary_phone", "buying_time_frame",
+    "pre_qual_status", "address", "birthday", "tags_json", "segments_json",
+    "cannot_call", "cannot_text", "cannot_email",
+})
+
+
+def update_contact_fields(conn, contact_id: str, fields: dict) -> None:
+    """Update editable card fields within the caller's transaction."""
+    unknown = fields.keys() - _CONTACT_EDIT_COLUMNS
+    if unknown:
+        raise ValueError(f"Unsupported contact fields: {sorted(unknown)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{column}=?" for column in fields)
+    conn.execute(
+        f"UPDATE contacts SET {assignments}, updated_at=? WHERE id=?",
+        (*fields.values(), now_iso(), contact_id),
+    )

@@ -24,6 +24,8 @@ Config in $ELEVATE_HOME/config.yaml (profile-scoped):
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
 import logging
 import re
 import threading
@@ -40,6 +42,17 @@ from .store import MemoryStore
 from .retrieval import FactRetriever
 
 logger = logging.getLogger(__name__)
+_embedding_warning_lock = threading.Lock()
+_embedding_warning_messages: set[str] = set()
+
+
+def _warn_embedding_unavailable_once(exc: EmbeddingError) -> None:
+    message = str(exc)
+    with _embedding_warning_lock:
+        if message in _embedding_warning_messages:
+            return
+        _embedding_warning_messages.add(message)
+    logger.warning("Embedding provider unavailable: %s", message)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +115,7 @@ FACT_STORE_SCHEMA = {
                     "rag_query",
                     "community_reports",
                     "relation_backfill",
+                    "backfill_critical",
                     "graph_reprocess",
                     "recall_route",
                     "document_add",
@@ -234,6 +248,20 @@ def _parse_int(value: object, default: int, *, minimum: int = 0) -> int:
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
+def _tool_result_json(value):
+    """Serialize Postgres values without hiding unsupported result types."""
+    def encode(item):
+        if isinstance(item, datetime):
+            return item.isoformat(sep=" ")
+        if isinstance(item, date):
+            return item.isoformat()
+        if isinstance(item, Decimal):
+            return float(item)
+        raise TypeError(f"Object of type {type(item).__name__} is not JSON serializable")
+
+    return json.dumps(value, default=encode)
+
+
 class HolographicMemoryProvider(MemoryProvider):
     """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
 
@@ -290,6 +318,25 @@ class HolographicMemoryProvider(MemoryProvider):
             4,
             minimum=1,
         )
+        # Trust ratchet + reserved critical recall lane.
+        self._trust_from_ranking_enabled = parse_bool(
+            self._config.get("trust_from_ranking_enabled"),
+            default=False,
+        )
+        self._critical_tier_enabled = parse_bool(
+            self._config.get("critical_tier_enabled"),
+            default=True,
+        )
+        self._critical_recall_limit = _parse_int(
+            self._config.get("critical_recall_limit"),
+            2,
+            minimum=1,
+        )
+        self._recorder_context_budget_chars = _parse_int(
+            self._config.get("recorder_context_budget_chars"),
+            12000,
+            minimum=1,
+        )
         self._graph_recall_limit = _parse_int(
             self._config.get("graph_recall_limit"),
             2,
@@ -305,6 +352,7 @@ class HolographicMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.RLock()
         self._last_layered_facts: list[dict] = []
         self._last_layered_chunks: list[dict] = []
+        self._recorder_layer_health_sessions: set[str] = set()
         self._session_topic_tokens: dict[str, set[str]] = {}
         self._session_turn_counts: dict[str, int] = {}
         self._topic_extraction_enabled = parse_bool(
@@ -391,6 +439,9 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "ephemeral_decay_enabled", "description": "Daily maintenance archives clear-cut task-chatter facts (never explicit/durable)", "default": "true", "choices": ["true", "false"]},
             {"key": "ephemeral_decay_min_age_days", "description": "Age (days) before unrecalled task-framed facts are archived", "default": "30"},
             {"key": "ephemeral_decay_max_archive", "description": "Max facts archived per daily decay run", "default": "200"},
+            {"key": "trust_from_ranking_enabled", "description": "Let the post-retrieval ranking outcome mutate trust_score/helpful_count (legacy ratchet). False = only explicit fact_feedback changes trust", "default": "false", "choices": ["true", "false"]},
+            {"key": "critical_tier_enabled", "description": "Inject a reserved 'Must-Follow Rules' lane of critical/pinned facts first, bypassing the trust floor and token-overlap verifier", "default": "true", "choices": ["true", "false"]},
+            {"key": "critical_recall_limit", "description": "Max facts injected in the Must-Follow Rules lane", "default": "2"},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
             {"key": "embedding_enabled", "description": "Enable semantic embeddings", "default": "false", "choices": ["true", "false"]},
@@ -426,7 +477,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 embedding_client = build_embedding_client(self._config)
             except EmbeddingError as exc:
                 self._embedding_error = str(exc)
-                logger.warning("Embedding provider unavailable: %s", exc)
+                _warn_embedding_unavailable_once(exc)
 
         self._store = MemoryStore(
             db_path=db_path,
@@ -437,6 +488,7 @@ class HolographicMemoryProvider(MemoryProvider):
             dedup_enabled=self._dedup_enabled,
             dedup_similarity_threshold=self._dedup_similarity_threshold,
             dedup_jaccard_threshold=self._dedup_jaccard_threshold,
+            trust_from_ranking_enabled=self._trust_from_ranking_enabled,
         )
         self._retriever = FactRetriever(
             store=self._store,
@@ -697,7 +749,7 @@ class HolographicMemoryProvider(MemoryProvider):
             retriever = self._retriever
 
             def dump(payload: object) -> str:
-                return json.dumps(payload, default=str)
+                return _tool_result_json(payload)
 
             if action == "add":
                 # Tool adds are explicit saves: the durability gate downgrades
@@ -736,7 +788,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     payload["warning"] = result["warning"]
                 if result.get("merged_with_similarity") is not None:
                     payload["merged_with_similarity"] = result["merged_with_similarity"]
-                return json.dumps(payload)
+                return _tool_result_json(payload)
 
             elif action == "search":
                 results = retriever.search(
@@ -790,7 +842,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 return dump({"results": results, "count": len(results)})
 
             elif action == "embedding_status":
-                return json.dumps(store.embedding_status())
+                return _tool_result_json(store.embedding_status())
 
             elif action == "embedding_backfill":
                 limit = args.get("limit")
@@ -813,7 +865,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     status="done" if result.get("enabled") else "skipped",
                     data=result,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "chunk_embedding_backfill":
                 limit = args.get("limit")
@@ -840,10 +892,10 @@ class HolographicMemoryProvider(MemoryProvider):
                     status="done" if result.get("enabled") else "skipped",
                     data=result,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "journal_status":
-                return json.dumps(
+                return _tool_result_json(
                     store.journal_status(
                         session_id=args.get("session_id"),
                         session_day=args.get("session_day"),
@@ -856,7 +908,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     session_day=args.get("session_day"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "recent":
                 turns = store.recent_turns(
@@ -866,14 +918,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args.get("limit", self._recent_recall_limit)),
                     include_assistant=bool(args.get("include_assistant", False)),
                 )
-                return json.dumps({"turns": turns, "count": len(turns)})
+                return _tool_result_json({"turns": turns, "count": len(turns)})
 
             elif action == "wiki":
                 result = store.entity_wiki(
                     args.get("entity") or args.get("query") or "",
                     limit=int(args.get("limit", 8)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "layered_recall":
                 query = args.get("query") or args.get("content") or ""
@@ -881,7 +933,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     query,
                     session_id=args.get("session_id") or self._session_id,
                 )
-                return json.dumps({"context": context, "empty": not bool(context.strip())})
+                return _tool_result_json({"context": context, "empty": not bool(context.strip())})
 
             elif action == "rag_query":
                 query = args.get("query") or args.get("content") or ""
@@ -898,23 +950,31 @@ class HolographicMemoryProvider(MemoryProvider):
                     only_need_context=bool(args.get("only_need_context", False)),
                     only_need_prompt=bool(args.get("only_need_prompt", False)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "community_reports":
                 cluster_id = args.get("cluster_id") or args.get("entity") or ""
                 query = args.get("query") or args.get("content") or ""
                 if cluster_id:
                     result = store.build_community_report(cluster_id, session_id=args.get("session_id") or self._session_id)
-                    return json.dumps(result)
+                    return _tool_result_json(result)
                 results = store.search_community_reports(query, limit=int(args.get("limit", 5)))
-                return json.dumps({"results": results, "count": len(results)})
+                return _tool_result_json({"results": results, "count": len(results)})
 
             elif action == "relation_backfill":
                 result = store.backfill_graph_relations(
                     source_type=args.get("source_type"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
+
+            elif action == "backfill_critical":
+                # Dry-run by default; pass dry_run=false to apply.
+                result = store.backfill_critical(
+                    dry_run=parse_bool(args.get("dry_run"), default=True),
+                    limit=int(args["limit"]) if args.get("limit") is not None else None,
+                )
+                return _tool_result_json(result)
 
             elif action == "graph_reprocess":
                 result = store.reprocess_memory_graph(
@@ -923,12 +983,12 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                     dry_run=bool(args.get("dry_run", False)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "recall_route":
                 query = args.get("query") or args.get("content") or ""
                 result = self._recall_route(query, session_id=args.get("session_id") or self._session_id)
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "document_add":
                 source_uri = args.get("source_uri") or args.get("path") or args.get("title") or ""
@@ -943,7 +1003,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     metadata=args.get("metadata") or {},
                     modal_assets=args.get("modal_assets") or args.get("assets") or [],
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "document_search":
                 results = store.document_search(
@@ -951,7 +1011,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_type=args.get("source_type"),
                     limit=int(args.get("limit", 8)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return _tool_result_json({"results": results, "count": len(results)})
 
             elif action == "document_status":
                 result = store.document_status(
@@ -960,21 +1020,21 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_type=args.get("source_type"),
                     limit=int(args.get("limit", 20)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "document_delete":
                 result = store.delete_document(
                     document_id=int(args["document_id"]) if args.get("document_id") is not None else None,
                     source_uri=args.get("source_uri") or args.get("path"),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "import_plaud_archive":
                 result = self._import_plaud_archive(
                     path=args.get("path"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "hygiene":
                 report = store.memory_hygiene_report(limit=int(args.get("limit", 20)))
@@ -982,23 +1042,23 @@ class HolographicMemoryProvider(MemoryProvider):
                     report["contradictions"] = retriever.contradict(limit=int(args.get("limit", 20)))
                 except Exception:
                     report["contradictions"] = []
-                return json.dumps(report)
+                return _tool_result_json(report)
 
             elif action == "memory_events":
                 events = store.recent_memory_events(
                     session_id=args.get("session_id"),
                     limit=int(args.get("limit", 50)),
                 )
-                return json.dumps({"events": events, "count": len(events)})
+                return _tool_result_json({"events": events, "count": len(events)})
 
             elif action == "memory_replay":
-                return json.dumps(store.memory_replay(
+                return _tool_result_json(store.memory_replay(
                     session_id=args.get("session_id") or self._session_id,
                     limit=int(args.get("limit", 50)),
                 ))
 
             elif action == "memory_profile":
-                return json.dumps(store.memory_profile(
+                return _tool_result_json(store.memory_profile(
                     session_id=args.get("session_id") or self._session_id,
                 ))
 
@@ -1006,7 +1066,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 fact_ids = args.get("fact_ids") or args.get("entities") or []
                 if isinstance(fact_ids, str):
                     fact_ids = [x.strip() for x in fact_ids.split(",") if x.strip()]
-                return json.dumps(store.refine_memory_clusters(
+                return _tool_result_json(store.refine_memory_clusters(
                     fact_ids=fact_ids,
                     query=args.get("query") or args.get("content") or "",
                     session_id=args.get("session_id") or self._session_id,
@@ -1016,7 +1076,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 fact_ids = args.get("fact_ids") or []
                 if isinstance(fact_ids, str):
                     fact_ids = [x.strip() for x in fact_ids.split(",") if x.strip()]
-                return json.dumps(store.infer_tags_for_facts(
+                return _tool_result_json(store.infer_tags_for_facts(
                     fact_ids=fact_ids,
                     limit=int(args.get("limit", 50)),
                 ))
@@ -1028,14 +1088,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     verified_ids = [x.strip() for x in verified_ids.split(",") if x.strip()]
                 if isinstance(rejected_ids, str):
                     rejected_ids = [x.strip() for x in rejected_ids.split(",") if x.strip()]
-                return json.dumps(store.confidence_maintenance(
+                return _tool_result_json(store.confidence_maintenance(
                     verified_ids=verified_ids,
                     rejected_ids=rejected_ids,
                     prune=str(args.get("prune", "true")).lower() not in ("false", "0", "no"),
                 ))
 
             elif action == "prune_logs":
-                return json.dumps(store.prune_memory_logs(
+                return _tool_result_json(store.prune_memory_logs(
                     retention_days=int(args.get("retention_days", args.get("limit", 30))),
                 ))
 
@@ -1043,12 +1103,12 @@ class HolographicMemoryProvider(MemoryProvider):
                 queries = args.get("queries") or args.get("entities") or []
                 if isinstance(queries, str):
                     queries = [q.strip() for q in queries.split("||") if q.strip()]
-                return json.dumps(store.memory_benchmark(queries=queries, limit=int(args.get("limit", 5))))
+                return _tool_result_json(store.memory_benchmark(queries=queries, limit=int(args.get("limit", 5))))
 
             elif action == "supersede":
                 old_id = int(args.get("old_fact_id") or args.get("fact_id"))
                 new_id = int(args.get("new_fact_id"))
-                return json.dumps({"superseded": store.supersede_fact(old_id, new_id)})
+                return _tool_result_json({"superseded": store.supersede_fact(old_id, new_id)})
 
             elif action == "update":
                 updated = store.update_fact(
@@ -1063,11 +1123,11 @@ class HolographicMemoryProvider(MemoryProvider):
                     observed_at=args.get("observed_at"),
                     memory_space=args.get("memory_space"),
                 )
-                return json.dumps({"updated": updated})
+                return _tool_result_json({"updated": updated})
 
             elif action == "remove":
                 removed = store.remove_fact(int(args["fact_id"]))
-                return json.dumps({"removed": removed})
+                return _tool_result_json({"removed": removed})
 
             elif action == "list":
                 facts = store.list_facts(
@@ -1090,7 +1150,7 @@ class HolographicMemoryProvider(MemoryProvider):
             fact_id = int(args["fact_id"])
             helpful = args["action"] == "helpful"
             result = self._store.record_feedback(fact_id, helpful=helpful)
-            return json.dumps(result)
+            return _tool_result_json(result)
         except KeyError as exc:
             return tool_error(f"Missing required argument: {exc}")
         except Exception as exc:
@@ -1822,6 +1882,36 @@ class HolographicMemoryProvider(MemoryProvider):
 
     # -- Layered recall ------------------------------------------------------
 
+    def _record_layer_health(
+        self,
+        session_id: str,
+        *,
+        critical_item_count: int,
+        context_chars: int,
+    ) -> None:
+        sid = session_id or self._session_id
+        if not sid or sid in self._recorder_layer_health_sessions:
+            return
+        self._recorder_layer_health_sessions.add(sid)
+        try:
+            from elevate_cli.diagnostics.session_recorder import record_session_event
+
+            record_session_event(
+                "memory.layer_health",
+                session_id=sid,
+                payload={
+                    "provider": "holographic",
+                    "status": "active",
+                    "critical_item_count": max(0, int(critical_item_count)),
+                    "context_tokens": (max(0, int(context_chars)) + 3) // 4,
+                    "context_limit": (self._recorder_context_budget_chars + 3) // 4,
+                },
+                source="memory",
+                component="memory.holographic",
+            )
+        except Exception:
+            pass
+
     def _build_layered_context(self, query: str, *, session_id: str = "") -> str:
         if not self._store or not self._retriever:
             return ""
@@ -1829,7 +1919,13 @@ class HolographicMemoryProvider(MemoryProvider):
         self._last_layered_chunks = []
 
         sections: list[str] = []
+        critical_chars = 0
+        critical_facts: list[dict] = []
+        # fact_ids surfaced by the reserved critical lane — deduped out of the
+        # Durable + Semantic lane so a rule is never double-injected.
+        critical_ids: set[int] = set()
 
+        recent: list[dict] = []
         if self._recent_recall_enabled:
             recent = self._store.recent_turns(
                 session_id=session_id or self._session_id,
@@ -1837,14 +1933,53 @@ class HolographicMemoryProvider(MemoryProvider):
                 limit=self._recent_recall_limit,
                 include_assistant=False,
             )
-            if recent:
+
+        # Reserved Must-Follow Rules lane — assembled FIRST and PREPENDED so it
+        # renders before Recent Session / Durable + Semantic. Bypasses the
+        # trust floor and the token-overlap verifier.
+        if self._critical_tier_enabled:
+            try:
+                session_text = " ".join(
+                    str(t.get("user_content", "")) for t in recent
+                )
+                entities = self._store.entity_candidates(query, limit=self._graph_recall_limit)
+                critical_facts = self._store.critical_facts_matching(
+                    query=query,
+                    session_text=session_text,
+                    entities=entities,
+                    limit=self._critical_recall_limit,
+                )
+            except Exception as exc:
+                logger.debug("critical_facts_matching failed: %s", exc)
+                critical_facts = []
+            if not isinstance(critical_facts, list):
+                critical_facts = list(critical_facts or [])
+            if critical_facts:
+                # CONSTRAINT 2: include critical fact_ids in _last_layered_facts
+                # so _record_context_injection logs them in memory_injections.
+                self._last_layered_facts = list(critical_facts)
+                critical_ids = {
+                    int(f.get("fact_id")) for f in critical_facts if f.get("fact_id")
+                }
                 lines = []
-                for turn in recent:
-                    text = self._clip(turn.get("user_content", ""), self._recent_turn_max_chars)
+                for fact in critical_facts:
+                    reason = str(fact.get("critical_reason") or "").strip()
+                    tag = " pinned" if fact.get("pinned") else (f" {reason}" if reason else "")
                     lines.append(
-                        f"- ({turn.get('session_day')}, {turn.get('session_id')}) {text}"
+                        f"- [must-follow{tag}] {self._clip(fact.get('content', ''), 320)}"
                     )
-                sections.append("### Recent Session\n" + "\n".join(lines))
+                critical_section = "### Must-Follow Rules\n" + "\n".join(lines)
+                critical_chars = len(critical_section)
+                sections.append(critical_section)
+
+        if recent:
+            lines = []
+            for turn in recent:
+                text = self._clip(turn.get("user_content", ""), self._recent_turn_max_chars)
+                lines.append(
+                    f"- ({turn.get('session_day')}, {turn.get('session_id')}) {text}"
+                )
+            sections.append("### Recent Session\n" + "\n".join(lines))
 
         durable_candidates = self._retriever.search(
             query,
@@ -1857,8 +1992,13 @@ class HolographicMemoryProvider(MemoryProvider):
             limit=self._durable_recall_limit,
             session_id=session_id or self._session_id,
         )
+        # Dedup the critical lane out of Durable + Semantic so a rule already
+        # surfaced as a Must-Follow Rule is not injected twice.
+        durable = [f for f in durable if int(f.get("fact_id") or 0) not in critical_ids]
         if durable:
-            self._last_layered_facts = list(durable)
+            # CONSTRAINT 2: APPEND — never overwrite the critical-lane facts
+            # already stashed in _last_layered_facts.
+            self._last_layered_facts = list(self._last_layered_facts) + list(durable)
             lines = []
             for fact in durable:
                 trust = float(fact.get("trust_score", fact.get("trust", 0.0)) or 0.0)
@@ -1912,8 +2052,34 @@ class HolographicMemoryProvider(MemoryProvider):
                 sections.append("### Graph Wiki\n" + "\n".join(graph_lines))
 
         if not sections:
+            self._record_layer_health(
+                session_id,
+                critical_item_count=len(critical_facts),
+                context_chars=0,
+            )
             return ""
-        return "## Elevate Memory Core\n" + "\n\n".join(sections)
+        context = "## Elevate Memory Core\n" + "\n\n".join(sections)
+        self._record_layer_health(
+            session_id,
+            critical_item_count=len(critical_facts),
+            context_chars=len(context),
+        )
+        if self._critical_tier_enabled:
+            try:
+                from elevate_cli.diagnostics.session_recorder import (
+                    record_memory_critical_sample,
+                )
+
+                record_memory_critical_sample(
+                    session_id or self._session_id,
+                    critical_chars=critical_chars,
+                    critical_item_count=len(critical_facts),
+                    context_budget_chars=self._recorder_context_budget_chars,
+                    provider="holographic",
+                )
+            except Exception:
+                pass
+        return context
 
     # -- Turn-journal organization / auto-extraction -------------------------
 

@@ -116,6 +116,8 @@ def applied(conn) -> dict[str, dict[str, str]]:
     ).fetchall()
     out: dict[str, dict[str, str]] = {}
     for r in rows:
+        if not str(r[1]).endswith(".sql"):
+            continue
         out[r[0]] = {"name": r[1], "sha256": r[2], "applied_at": r[3]}
     return out
 

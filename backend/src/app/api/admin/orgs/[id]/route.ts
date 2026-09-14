@@ -64,11 +64,23 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ error: "bad request", issues: parsed.error.issues }, { status: 400 });
   }
 
+  if (!(await findOrgById(id))) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
+  if (parsed.data.seat_limit !== undefined) {
+    const occupiedSeats = (await listMembershipsForOrg(id)).length;
+    if (parsed.data.seat_limit < occupiedSeats) {
+      return NextResponse.json({ error: "seat limit below occupied seats" }, { status: 409 });
+    }
+  }
+
   await updateOrg(id, parsed.data);
   await logAdminAction({
     actor_user_id: guard.claims.sub,
     target_user_id: null,
     action: "org_updated",
+    org_id: id,
     payload: { org_id: id, ...parsed.data } as Record<string, unknown>,
   });
   return NextResponse.json({ ok: true });
@@ -79,11 +91,16 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
   const { id } = await ctx.params;
 
+  if (!(await findOrgById(id))) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
   await deleteOrg(id);
   await logAdminAction({
     actor_user_id: guard.claims.sub,
     target_user_id: null,
     action: "org_deleted",
+    org_id: id,
     payload: { org_id: id },
   });
   return NextResponse.json({ ok: true });

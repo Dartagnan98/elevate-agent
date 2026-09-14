@@ -230,9 +230,15 @@ def load() -> Optional[License]:
 def save(lic: License) -> None:
     LICENSE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = LICENSE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(lic.to_dict(), indent=2))
-    os.chmod(tmp, 0o600)
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(lic.to_dict(), indent=2))
     tmp.replace(LICENSE_PATH)
+    os.chmod(LICENSE_PATH, 0o600)
 
 
 def clear() -> bool:

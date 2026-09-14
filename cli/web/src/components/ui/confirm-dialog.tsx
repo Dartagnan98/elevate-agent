@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
 
 export function ConfirmDialog({
   cancelLabel = "Cancel",
@@ -10,6 +11,7 @@ export function ConfirmDialog({
   description,
   destructive = false,
   loading = false,
+  overlayClassName,
   onCancel,
   onConfirm,
   open,
@@ -17,41 +19,23 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Focus the confirm button when opened; trap ESC to cancel.
-  useEffect(() => {
-    if (!open) return;
-
-    const prevActive = document.activeElement as HTMLElement | null;
-    dialogRef.current
-      ?.querySelector<HTMLButtonElement>("[data-confirm]")
-      ?.focus();
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-      prevActive?.focus?.();
-    };
-  }, [open, onCancel]);
+  useDialogFocus({
+    active: open,
+    dialogRef,
+    initialFocusSelector: "[data-confirm]",
+    onEscape: onCancel,
+  });
 
   if (!open) return null;
 
   return createPortal(
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       aria-describedby={description ? "confirm-dialog-desc" : undefined}
+      tabIndex={-1}
       onClick={(e) => {
         if (e.target === e.currentTarget) onCancel();
       }}
@@ -59,10 +43,10 @@ export function ConfirmDialog({
         "fixed inset-0 z-50 flex items-center justify-center",
         "bg-black/60",
         "animate-[fade-in_150ms_ease-out]",
+        overlayClassName,
       )}
     >
       <div
-        ref={dialogRef}
         className={cn(
           "relative w-full max-w-md mx-4",
           "overflow-hidden rounded-md border border-border bg-card",
@@ -131,6 +115,7 @@ interface ConfirmDialogProps {
   description?: string;
   destructive?: boolean;
   loading?: boolean;
+  overlayClassName?: string;
   onCancel: () => void;
   onConfirm: () => void;
   open: boolean;

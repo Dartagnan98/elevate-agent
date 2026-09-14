@@ -3,7 +3,12 @@ import { type MutableRefObject, useCallback, useRef } from 'react'
 import { attachedImageNotice } from '../domain/messages.js'
 import { looksLikeSlashCommand } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
-import type { InputDetectDropResponse, PromptSubmitResponse, ShellExecResponse } from '../gatewayTypes.js'
+import type {
+  InputDetectDropResponse,
+  PromptSubmitResponse,
+  ShellExecResponse,
+  SubagentMessageResponse
+} from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
 import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js'
 import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
@@ -50,7 +55,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const expand = expandSnips(composerState.pasteSnips)
 
       const startSubmit = (displayText: string, submitText: string) => {
-        const sid = getUiState().sid
+        const live = getUiState()
+        const sid = live.sid
 
         if (!sid) {
           return sys('session not ready yet')
@@ -60,6 +66,30 @@ export function useSubmission(opts: UseSubmissionOptions) {
         maybeGoodVibes(submitText)
         setLastUserMsg(text)
         appendMessage({ role: 'user', text: displayText })
+        if (live.liveSubagent?.child_session_id) {
+          patchUiState({ status: 'messaging subagent…' })
+
+          return gw
+            .request<SubagentMessageResponse>('subagent.message', {
+              child_session_id: live.liveSubagent.child_session_id,
+              display_text: displayText,
+              session_id: sid,
+              subagent_id: live.liveSubagent.subagent_id ?? undefined,
+              task_id: live.liveSubagent.task_id ?? undefined,
+              text: submitText
+            })
+            .then(r => {
+              if (!r?.accepted) {
+                sys(r?.found ? 'subagent did not accept the message' : 'subagent is no longer running')
+                if (!r?.found) {
+                  patchUiState({ liveSubagent: null })
+                }
+              }
+            })
+            .catch((e: Error) => sys(`error: ${e.message}`))
+            .finally(() => patchUiState({ busy: false, status: 'ready' }))
+        }
+
         patchUiState({ busy: true, status: 'running…' })
         turnController.bufRef = ''
         turnController.interrupted = false
@@ -206,7 +236,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
           return
         }
 
-        if (getUiState().busy) {
+        const current = getUiState()
+
+        if (current.busy && !current.liveSubagent) {
           composerRefs.queueRef.current.unshift(picked)
 
           return composerActions.syncQueue()
@@ -217,7 +249,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       composerActions.pushHistory(full)
 
-      if (getUiState().busy) {
+      const current = getUiState()
+
+      if (current.busy && !current.liveSubagent) {
         return composerActions.enqueue(full)
       }
 

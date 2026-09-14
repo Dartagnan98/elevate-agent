@@ -236,7 +236,7 @@ Type these during an interactive chat session.
 /retry               Resend last message
 /undo                Remove last exchange
 /title [name]        Name the session
-/compress            Manually compress context
+/compact            Manually compact context
 /stop                Kill background processes
 /rollback [N]        Restore filesystem checkpoint
 /background <prompt> Run prompt in background

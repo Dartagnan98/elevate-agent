@@ -27,7 +27,7 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from elevate_constants import get_elevate_home
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,12 @@ _WAL_INCOMPAT_MARKERS = (
     "locking protocol",       # SQLITE_PROTOCOL on NFS/SMB
     "not authorized",         # Some FUSE mounts block WAL pragma outright
     "disk i/o error",         # Flaky network FS during WAL setup
+)
+
+_CORRUPT_DB_MARKERS = (
+    "file is not a database",
+    "database disk image is malformed",
+    "malformed database schema",
 )
 
 # Last SessionDB() init error, per-process.  Surfaced in /resume and
@@ -122,8 +128,11 @@ def format_session_db_unavailable(prefix: str = "Session database not available"
     if not cause:
         return f"{prefix}."
     hint = ""
-    if any(marker in cause.lower() for marker in _WAL_INCOMPAT_MARKERS):
+    lower = cause.lower()
+    if any(marker in lower for marker in _WAL_INCOMPAT_MARKERS):
         hint = " (state.db may be on NFS/SMB/FUSE — see https://www.sqlite.org/wal.html)"
+    elif any(marker in lower for marker in _CORRUPT_DB_MARKERS):
+        hint = " (state.db appears corrupt; copy it aside, then restart to rebuild an empty session index)"
     return f"{prefix}: {cause}{hint}."
 
 
@@ -220,6 +229,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    compaction_summary TEXT,
+    compaction_cursor INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -435,7 +446,7 @@ def _list_sessions_rich_pg(
             COALESCE(
                 (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
                  FROM chat_messages m
-                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                  ORDER BY m.timestamp, m.id LIMIT 1),
                 ''
             ) AS _preview_raw,
@@ -970,6 +981,28 @@ class SessionDB:
         except Exception as exc:
             logger.debug("PG shadow system prompt update failed for %s: %s", session_id, exc)
 
+    def update_compaction(
+        self, session_id: str, summary: Optional[str], cursor: int
+    ) -> None:
+        """Store compaction metadata on the session row (redesign: payload-time
+        cursor + synthetic summary, never written into the message transcript).
+
+        ``cursor`` = number of leading messages the payload builder skips;
+        ``summary`` = the synthetic handoff summary injected only at API-build.
+        A cursor of 0 with a NULL summary is the legacy/no-compaction sentinel.
+        """
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET compaction_summary = ?, compaction_cursor = ? WHERE id = ?",
+                (summary, int(cursor or 0), session_id),
+            )
+        self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_update_compaction
+            shadow_update_compaction(session_id, summary, int(cursor or 0))
+        except Exception as exc:
+            logger.debug("PG shadow compaction update failed for %s: %s", session_id, exc)
+
     def update_token_counts(
         self,
         session_id: str,
@@ -1171,6 +1204,138 @@ class SessionDB:
             return result.rowcount
 
         return self._execute_write(_do) or 0
+
+    def finalize_interrupted_delegate_children(
+        self,
+        session_id: str,
+        *,
+        grace_seconds: float = 60.0,
+        active_child_session_ids: Optional[Set[str]] = None,
+    ) -> int:
+        """Close spawned subagent sessions orphaned by an interrupted parent turn.
+
+        Normal delegated children call ``end_session(..., 'delegation_complete')``
+        in ``delegate_tool`` once they finish. If the parent turn is interrupted,
+        the app restarts, or the async worker is lost between spawn and cleanup,
+        child rows can stay ``ended_at=NULL`` forever. The background-task panel
+        then reports those stale rows as still running after every restart.
+
+        Keep the repair narrow:
+        - zero-output rows still require an explicit interrupted parent tool row;
+        - rows with observed child work are only reaped when the caller proves the
+          child is not in the live subagent registry.
+        """
+        if not session_id:
+            return 0
+        cutoff = time.time() - float(grace_seconds)
+        root_id = self._get_lineage_root_sqlite(session_id)
+        registry_provided = active_child_session_ids is not None
+        active_ids = {
+            str(sid)
+            for sid in (active_child_session_ids or set())
+            if str(sid or "").strip()
+        }
+
+        def _not_active_clause(prefix: str = "child") -> tuple[str, list[str]]:
+            if not active_ids:
+                return "", []
+            placeholders = ",".join("?" for _ in active_ids)
+            return f" AND {prefix}.id NOT IN ({placeholders})", sorted(active_ids)
+
+        with self._lock:
+            not_active_sql, not_active_params = _not_active_clause("child")
+            rows = self._conn.execute(
+                f"""
+                WITH RECURSIVE session_tree AS (
+                    SELECT id
+                    FROM sessions
+                    WHERE id = ?
+                  UNION ALL
+                    SELECT child.id
+                    FROM sessions child
+                    JOIN session_tree parent ON child.parent_session_id = parent.id
+                )
+                SELECT child.id
+                FROM sessions child
+                JOIN session_tree parent ON child.parent_session_id = parent.id
+                WHERE child.ended_at IS NULL
+                  AND child.parent_session_id IS NOT NULL
+                  AND child.started_at < ?
+                  {not_active_sql}
+                  AND COALESCE(child.message_count, 0) <= 1
+                  AND COALESCE(child.tool_call_count, 0) = 0
+                  AND COALESCE(child.output_tokens, 0) = 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM sessions p
+                      WHERE p.id = child.parent_session_id
+                        AND p.end_reason = 'compression'
+                        AND p.ended_at IS NOT NULL
+                        AND child.started_at >= p.ended_at
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM messages m
+                      WHERE m.session_id = child.parent_session_id
+                        AND m.role = 'tool'
+                        AND m.timestamp >= child.started_at
+                        AND m.content LIKE '[Session was interrupted before this tool call returned%'
+                  )
+                ORDER BY child.started_at ASC, child.id ASC
+                """,
+                (root_id, cutoff, *not_active_params),
+            ).fetchall()
+
+        ids = [str(row["id"] if hasattr(row, "keys") else row[0]) for row in rows]
+        if registry_provided:
+            # A child with output/tool activity can be abandoned by an app restart
+            # after doing real work but before delegate_tool.finally closes its
+            # session. Only reap those when the live registry proves the child is
+            # not actually running anymore.
+            with self._lock:
+                not_active_sql, not_active_params = _not_active_clause("child")
+                rows = self._conn.execute(
+                    f"""
+                    WITH RECURSIVE session_tree AS (
+                        SELECT id
+                        FROM sessions
+                        WHERE id = ?
+                      UNION ALL
+                        SELECT child.id
+                        FROM sessions child
+                        JOIN session_tree parent ON child.parent_session_id = parent.id
+                    )
+                    SELECT child.id
+                    FROM sessions child
+                    JOIN session_tree parent ON child.parent_session_id = parent.id
+                    WHERE child.ended_at IS NULL
+                      AND child.parent_session_id IS NOT NULL
+                      AND child.started_at < ?
+                      {not_active_sql}
+                      AND (
+                        COALESCE(child.message_count, 0) > 1
+                        OR COALESCE(child.tool_call_count, 0) > 0
+                        OR COALESCE(child.output_tokens, 0) > 0
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM sessions p
+                          WHERE p.id = child.parent_session_id
+                            AND p.end_reason = 'compression'
+                            AND p.ended_at IS NOT NULL
+                            AND child.started_at >= p.ended_at
+                      )
+                    ORDER BY child.started_at ASC, child.id ASC
+                    """,
+                    (root_id, cutoff, *not_active_params),
+                ).fetchall()
+            ids.extend(
+                str(row["id"] if hasattr(row, "keys") else row[0]) for row in rows
+            )
+            ids = list(dict.fromkeys(ids))
+        for child_id in ids:
+            self.end_session(child_id, "delegation_interrupted")
+        return len(ids)
 
     def reap_idle_sessions(
         self, idle_seconds: float = 7200.0, draft_idle_seconds: float = 1200.0
@@ -1765,7 +1930,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
@@ -1788,7 +1953,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
@@ -1865,7 +2030,7 @@ class SessionDB:
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                      FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                      ORDER BY m.timestamp, m.id LIMIT 1),
                     ''
                 ) AS _preview_raw,
@@ -2001,6 +2166,16 @@ class SessionDB:
         msg_timestamp = time.time()
 
         def _do(conn):
+            # A resumed/compacted turn may replay an already-flushed prefix.
+            # The wire identity belongs to one message within this session;
+            # inserting it twice inflates history and triggers more compaction.
+            # Check inside the write transaction so concurrent writers agree.
+            existing = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND client_message_id = ? LIMIT 1",
+                (session_id, client_message_id),
+            ).fetchone()
+            if existing is not None:
+                return existing[0], False
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -2040,9 +2215,11 @@ class SessionDB:
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                     (session_id,),
                 )
-            return msg_id
+            return msg_id, True
 
-        result = self._execute_write(_do)
+        result, inserted = self._execute_write(_do)
+        if not inserted:
+            return result
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_append_message
             # content may be a list (multimodal) — encode for PG TEXT column.
@@ -3783,7 +3960,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw,
@@ -3812,7 +3989,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw,

@@ -15,6 +15,7 @@ import {
   Image as ImageIcon,
   ListChecks,
   Loader2,
+  MessageSquare,
   PanelRight,
   Square,
   X,
@@ -144,9 +145,9 @@ const SELECTOR_ROWS: {
 }[] = [
   { mode: "preview", label: "Preview", icon: <FileText className="h-4 w-4" />, hint: "⇧⌘P" },
   { mode: "artifacts", label: "Artifacts", icon: <FileStack className="h-4 w-4" /> },
-  { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" />, hint: "⇧⌘F" },
-  { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" /> },
-  { mode: "plan", label: "Plan", icon: <ListChecks className="h-4 w-4" /> },
+  { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" /> },
+  { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" />, hint: "⇧⌘B" },
+  { mode: "plan", label: "Plan", icon: <ListChecks className="h-4 w-4" />, hint: "⇧⌘O" },
 ];
 
 export function SidePanelSelector({
@@ -279,6 +280,27 @@ export function SidePanelSelector({
           )
         : null}
     </>
+  );
+}
+
+export type WorkPanelMode = "plan" | "tasks";
+
+export function StackedWorkPanels({
+  primary,
+  plan,
+  tasks,
+}: {
+  primary: WorkPanelMode;
+  plan: ReactNode;
+  tasks: ReactNode;
+}) {
+  const first = primary === "plan" ? plan : tasks;
+  const second = primary === "plan" ? tasks : plan;
+  return (
+    <div className="stacked-work-panels flex h-full min-h-0 flex-col gap-2">
+      <div className="stacked-work-panel min-h-[14rem] flex-[1.25] overflow-hidden">{first}</div>
+      <div className="stacked-work-panel min-h-[11rem] flex-1 overflow-hidden">{second}</div>
+    </div>
   );
 }
 
@@ -462,6 +484,8 @@ export interface BackgroundTaskItem {
   completedAt?: number;
   /** The subagent's own session id — when present the card opens its thread. */
   child_session_id?: string;
+  /** Async task id from live subagent events — message routing can target it. */
+  task_id?: string;
   /** Registry id from live subagent.* events — the kill switch targets this. */
   subagent_id?: string;
 }
@@ -477,7 +501,19 @@ function relativeTime(ts?: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function TaskStatusBadge({ status }: { status: BackgroundTaskItem["status"] }) {
+function taskDismissKey(task: BackgroundTaskItem): string {
+  return task.child_session_id
+    ? `child:${task.child_session_id}`
+    : `${task.kind}:${task.id}`;
+}
+
+function TaskStatusBadge({
+  onDismiss,
+  status,
+}: {
+  onDismiss?: () => void;
+  status: BackgroundTaskItem["status"];
+}) {
   if (status === "running") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-accent)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-accent)]">
@@ -487,11 +523,43 @@ function TaskStatusBadge({ status }: { status: BackgroundTaskItem["status"] }) {
     );
   }
   if (status === "error") {
+    if (onDismiss) {
+      return (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDismiss();
+          }}
+          className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-danger)] transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_22%,transparent)]"
+          title="Hide this failed task"
+        >
+          <AlertCircle className="h-3 w-3" />
+          Failed
+        </button>
+      );
+    }
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-danger)]">
         <AlertCircle className="h-3 w-3" />
         Failed
       </span>
+    );
+  }
+  if (status === "done" && onDismiss) {
+    return (
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onDismiss();
+        }}
+        className="inline-flex items-center gap-1 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-muted-strong)] transition-colors hover:bg-[color-mix(in_srgb,var(--fg)_10%,var(--chat-surface-strong))] hover:text-[var(--chat-text)]"
+        title="Hide this finished task"
+      >
+        <Check className="h-3 w-3" />
+        Done
+      </button>
     );
   }
   return (
@@ -511,15 +579,21 @@ const KIND_LABEL: Record<BackgroundTaskItem["kind"], string> = {
 
 function TaskCard({
   task,
+  onDismiss,
+  onMessage,
   onOpen,
   onStop,
 }: {
   task: BackgroundTaskItem;
+  onDismiss?: (task: BackgroundTaskItem) => void;
+  onMessage?: (task: BackgroundTaskItem) => void;
   onOpen?: (childSessionId: string) => void;
   onStop?: (task: BackgroundTaskItem) => void;
 }) {
   const canOpen = !!task.child_session_id && !!onOpen;
   const open = () => task.child_session_id && onOpen?.(task.child_session_id);
+  const canMessage =
+    task.status === "running" && !!task.child_session_id && !!onMessage;
   const [stopping, setStopping] = useState(false);
   const canStop =
     task.status === "running" &&
@@ -547,7 +621,14 @@ function TaskCard({
       }
     >
       <div className="flex items-center gap-2">
-        <TaskStatusBadge status={task.status} />
+        <TaskStatusBadge
+          status={task.status}
+          onDismiss={
+            task.status !== "running" && onDismiss
+              ? () => onDismiss(task)
+              : undefined
+          }
+        />
         <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">
           {task.label}
         </span>
@@ -556,6 +637,20 @@ function TaskCard({
             <ExternalLink className="h-3 w-3" />
             Open
           </span>
+        ) : null}
+        {canMessage ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMessage?.(task);
+            }}
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-muted-strong)] transition-colors hover:bg-[color-mix(in_srgb,var(--fg)_10%,var(--chat-surface-strong))] hover:text-[var(--chat-text)]"
+            title="Open this running subagent so the composer messages it directly."
+          >
+            <MessageSquare className="h-3 w-3" />
+            Message
+          </button>
         ) : null}
         {canStop ? (
           <button
@@ -611,27 +706,81 @@ function TaskCard({
 }
 
 export function BackgroundTasksPanel({
+  sessionId,
   tasks,
   onClose,
   onDrillIn,
+  onMessage,
   onStop,
 }: {
+  sessionId?: string;
   tasks: BackgroundTaskItem[];
   onClose: () => void;
   onDrillIn?: (childSessionId: string) => void;
+  onMessage?: (task: BackgroundTaskItem) => void;
   onStop?: (task: BackgroundTaskItem) => void;
 }) {
-  const running = tasks.filter((task) => task.status === "running");
-  const finished = tasks.filter((task) => task.status !== "running");
+  const dismissedStorageKey = sessionId
+    ? `elevate.chat.backgroundTasks.dismissed.v1:${sessionId}`
+    : "";
+  const [dismissedTaskIds, setDismissedTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    if (!dismissedStorageKey) {
+      setDismissedTaskIds(new Set());
+      return;
+    }
+    try {
+      const parsed = JSON.parse(
+        window.localStorage?.getItem(dismissedStorageKey) || "[]",
+      );
+      setDismissedTaskIds(
+        new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []),
+      );
+    } catch {
+      setDismissedTaskIds(new Set());
+    }
+  }, [dismissedStorageKey]);
+
+  const dismissTask = useCallback(
+    (task: BackgroundTaskItem) => {
+      const key = taskDismissKey(task);
+      setDismissedTaskIds((prev) => {
+        const next = new Set(prev);
+        next.add(key);
+        if (dismissedStorageKey) {
+          try {
+            window.localStorage?.setItem(
+              dismissedStorageKey,
+              JSON.stringify([...next]),
+            );
+          } catch {
+            /* ignore private mode / quota */
+          }
+        }
+        return next;
+      });
+    },
+    [dismissedStorageKey],
+  );
+
+  const visibleTasks = tasks.filter(
+    (task) =>
+      task.status === "running" || !dismissedTaskIds.has(taskDismissKey(task)),
+  );
+  const running = visibleTasks.filter((task) => task.status === "running");
+  const finished = visibleTasks.filter((task) => task.status !== "running");
 
   return (
     <PanelShell
       icon={<Boxes className="h-4.5 w-4.5" />}
       title="Background tasks"
-      subtitle={tasks.length ? `${tasks.length} this session` : "Subagent + handoff activity"}
+      subtitle={visibleTasks.length ? `${visibleTasks.length} this session` : "Subagent + handoff activity"}
       onClose={onClose}
     >
-      {tasks.length === 0 ? (
+      {visibleTasks.length === 0 ? (
         <PanelEmpty
           icon={<Boxes className="h-5 w-5" />}
           title="No background tasks"
@@ -644,7 +793,13 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Running</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {running.map((task) => (
-                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} onStop={onStop} />
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onMessage={onMessage}
+                    onOpen={onDrillIn}
+                    onStop={onStop}
+                  />
                 ))}
               </div>
             </div>
@@ -654,7 +809,14 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Finished</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {finished.map((task) => (
-                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} onStop={onStop} />
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onDismiss={dismissTask}
+                    onMessage={onMessage}
+                    onOpen={onDrillIn}
+                    onStop={onStop}
+                  />
                 ))}
               </div>
             </div>
@@ -740,10 +902,14 @@ function ArtifactCard<T extends ArtifactListItem>({
 
 export function ArtifactsPanel<T extends ArtifactListItem>({
   artifacts,
+  loading = false,
+  error = null,
   onOpen,
   onClose,
 }: {
   artifacts: T[];
+  loading?: boolean;
+  error?: string | null;
   onOpen: (item: T) => void;
   onClose: () => void;
 }) {
@@ -785,8 +951,8 @@ export function ArtifactsPanel<T extends ArtifactListItem>({
       {total === 0 ? (
         <PanelEmpty
           icon={<FileStack className="h-5 w-5" />}
-          title="No artifacts yet"
-          body="PDFs, documents, images, and files the agent generates this session show up here. Tap one to preview it."
+          title={loading ? "Loading files…" : error ? "Could not load files" : "No artifacts yet"}
+          body={error ? "Close and reopen this panel to retry loading your drafts." : "PDFs, documents, images, and files the agent generates this session show up here. Tap one to preview it."}
         />
       ) : (
         <div className="flex flex-col gap-3 p-3">

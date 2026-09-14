@@ -27,7 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RouteSkeleton } from "@/components/route-skeletons";
+import { RouteLoadError, RouteSkeleton } from "@/components/route-skeletons";
 import { useI18n } from "@/i18n";
 
 /* ------------------------------------------------------------------ */
@@ -374,7 +374,13 @@ export default function EnvPage() {
 
   // Shares the "agent-hub-envvars" cache with Agent Hub, so switching between
   // them is instant and they stay in sync.
-  const { data: varsData, mutate: mutateVars } = useCachedResource(
+  const {
+    data: varsData,
+    loading,
+    error: varsError,
+    refresh: refreshVars,
+    mutate: mutateVars,
+  } = useCachedResource(
     "agent-hub-envvars",
     () => api.getEnvVars(),
     { ttl: 10000 },
@@ -494,9 +500,32 @@ export default function EnvPage() {
     return { providerGroups: groups, nonProviderGrouped: nonProvider };
   }, [vars, showAdvanced, t]);
 
-  if (!vars) {
+  if (loading && !vars) {
     return (
       <RouteSkeleton path="/env" />
+    );
+  }
+
+  if (varsError && !vars) {
+    return (
+      <div className="flex flex-col gap-6">
+        <Toast toast={toast} />
+        <RouteLoadError
+          title="Could not load environment variables"
+          error={varsError}
+          onRetry={refreshVars}
+        />
+      </div>
+    );
+  }
+
+  if (!vars) {
+    return (
+      <RouteLoadError
+        title="Could not load environment variables"
+        error="The environment response was empty."
+        onRetry={refreshVars}
+      />
     );
   }
 
@@ -512,6 +541,14 @@ export default function EnvPage() {
   return (
     <div className="flex flex-col gap-6">
       <Toast toast={toast} />
+
+      {varsError ? (
+        <RouteLoadError
+          title="Environment variables may be stale"
+          error={varsError}
+          onRetry={refreshVars}
+        />
+      ) : null}
 
       <DeleteConfirmDialog
         open={keyClear.isOpen}

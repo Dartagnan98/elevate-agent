@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 import os
 import threading
 import time
+import uuid
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FuturesTimeoutError,
@@ -256,6 +257,186 @@ def interrupt_subagent_by_session(child_session_id: str) -> bool:
     return False
 
 
+def _record_child_session_id(record: Dict[str, Any]) -> str:
+    value = record.get("child_session_id")
+    if isinstance(value, str) and value:
+        return value
+    agent = record.get("agent")
+    value = getattr(agent, "session_id", None) if agent is not None else None
+    return value if isinstance(value, str) else ""
+
+
+def _record_parent_session_id(record: Dict[str, Any]) -> str:
+    value = record.get("parent_session_id")
+    if isinstance(value, str) and value:
+        return value
+    agent = record.get("agent")
+    value = getattr(agent, "_parent_session_id", None) if agent is not None else None
+    return value if isinstance(value, str) else ""
+
+
+def _persist_subagent_steer_message(
+    agent: Any,
+    child_session_id: str,
+    message: str,
+    client_message_id: str,
+) -> bool:
+    """Persist an accepted live child steer before the child gets to apply it."""
+    if not child_session_id or not client_message_id:
+        return False
+    db = getattr(agent, "_session_db", None)
+    if db is None:
+        return False
+    append_message = getattr(db, "append_message", None)
+    if not callable(append_message):
+        return False
+    try:
+        get_messages = getattr(db, "get_messages", None)
+        if callable(get_messages):
+            for row in get_messages(child_session_id):
+                if (
+                    isinstance(row, dict)
+                    and row.get("client_message_id") == client_message_id
+                ):
+                    return True
+    except Exception as exc:
+        logger.debug(
+            "subagent steer duplicate lookup failed for %s: %s",
+            child_session_id,
+            exc,
+        )
+    try:
+        ensure_session = getattr(db, "ensure_session", None)
+        if callable(ensure_session):
+            ensure_session(
+                child_session_id,
+                source=getattr(agent, "platform", None) or "tui",
+                model=getattr(agent, "model", None),
+            )
+        append_message(
+            session_id=child_session_id,
+            role="user",
+            content=message,
+            client_message_id=client_message_id,
+        )
+        return True
+    except Exception as exc:
+        logger.debug(
+            "subagent steer persist failed for %s: %s",
+            child_session_id,
+            exc,
+        )
+        return False
+
+
+def message_subagent(
+    text: str,
+    *,
+    subagent_id: str = "",
+    child_session_id: str = "",
+    task_id: str = "",
+    source: str = "subagent_message",
+    client_message_id: str = "",
+) -> Dict[str, Any]:
+    """Queue a live steering message directly into a running child agent.
+
+    This is the child-addressable counterpart to session.steer. It keeps a
+    running subagent drill-in from creating a second resumed turn when the user
+    sends follow-up instructions mid-run.
+    """
+    message = str(text or "").strip()
+    subagent_id = str(subagent_id or "").strip()
+    child_session_id = str(child_session_id or "").strip()
+    task_id = str(task_id or "").strip()
+    requested_client_message_id = str(client_message_id or "").strip()
+    if not message:
+        return {"found": False, "accepted": 0, "targets": [], "error": "text required"}
+    if not subagent_id and not child_session_id and not task_id:
+        return {
+            "found": False,
+            "accepted": 0,
+            "targets": [],
+            "error": "subagent_id, child_session_id, or task_id required",
+        }
+
+    with _active_subagents_lock:
+        records = list(_active_subagents.values())
+
+    matched = 0
+    accepted = 0
+    persisted = 0
+    targets: List[Dict[str, Any]] = []
+    direct_target = bool(subagent_id or child_session_id)
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        current_subagent_id = str(record.get("subagent_id") or "")
+        current_child_session_id = _record_child_session_id(record)
+        current_task_id = str(record.get("async_task_id") or "")
+        if subagent_id and current_subagent_id != subagent_id:
+            continue
+        if child_session_id and current_child_session_id != child_session_id:
+            continue
+        if task_id and current_task_id != task_id:
+            continue
+
+        matched += 1
+        agent = record.get("agent")
+        queue_soft_interrupt = (
+            getattr(agent, "queue_soft_interrupt", None) if agent is not None else None
+        )
+        if not callable(queue_soft_interrupt):
+            continue
+        target_client_message_id = (
+            requested_client_message_id
+            if requested_client_message_id and direct_target
+            else f"steer.{uuid.uuid4().hex}"
+        )
+        try:
+            ok = bool(
+                queue_soft_interrupt(
+                    message,
+                    source=source,
+                    client_message_id=target_client_message_id,
+                )
+            )
+        except Exception as exc:
+            logger.debug("message_subagent(%s) failed: %s", current_subagent_id, exc)
+            ok = False
+        if not ok:
+            continue
+
+        target_persisted = _persist_subagent_steer_message(
+            agent,
+            current_child_session_id,
+            message,
+            target_client_message_id,
+        )
+        if target_persisted:
+            persisted += 1
+        accepted += 1
+        targets.append(
+            {
+                "subagent_id": current_subagent_id or None,
+                "child_session_id": current_child_session_id or None,
+                "task_id": current_task_id or None,
+                "parent_session_id": _record_parent_session_id(record) or None,
+                "goal": record.get("goal") or "",
+                "task_index": record.get("task_index") or 0,
+                "client_message_id": target_client_message_id,
+                "persisted": target_persisted,
+            }
+        )
+
+    return {
+        "found": matched > 0,
+        "accepted": accepted,
+        "persisted": persisted,
+        "all_persisted": accepted > 0 and persisted == accepted,
+        "targets": targets,
+    }
+
+
 # Async (dispatched) delegations cancelled by the user. A cancelled task's
 # children are interrupted AND any late result is suppressed at the delivery
 # sink — "treat it as cancelled" must mean no ghost completion message
@@ -375,33 +556,51 @@ def _extract_output_tail(
     return tail
 
 
-def _looks_like_error_output(content: str) -> bool:
+def _looks_like_error_output(content: Any) -> bool:
     """Conservative stderr/error detector for tool-result previews.
 
     The old heuristic flagged any preview containing the substring "error",
     which painted perfectly normal terminal/json output red.  We now only
     mark output as an error when there is stronger evidence:
-      - structured JSON with an ``error`` key
-      - structured JSON with ``status`` of error/failed
+      - structured JSON/dicts with an ``error`` key
+      - structured JSON/dicts with ``status`` of error/failed
       - first line starts with a classic error marker
+
+    Tool result content can be a structured dict/list when a child agent returns
+    JSON-ish data.  Normalize it before string operations so delegation tracing
+    cannot crash with ``'dict' object has no attribute 'lstrip'``.
     """
     if not content:
         return False
 
-    head = content.lstrip()
-    if head.startswith("{") or head.startswith("["):
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, dict):
-                if parsed.get("error"):
-                    return True
-                status = str(parsed.get("status") or "").strip().lower()
-                if status in {"error", "failed", "failure", "timeout"}:
-                    return True
-        except Exception:
-            pass
+    parsed = None
+    if isinstance(content, dict):
+        parsed = content
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    elif isinstance(content, list):
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    elif isinstance(content, str):
+        text = content
+    else:
+        text = str(content)
 
-    first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
+    if parsed is None:
+        head = text.lstrip()
+        if head.startswith("{") or head.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+
+    if isinstance(parsed, dict):
+        if parsed.get("error"):
+            return True
+        status = str(parsed.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure", "timeout"}:
+            return True
+
+    lines = text.splitlines()
+    first = lines[0].strip().lower() if lines else ""
     return (
         first.startswith("error:")
         or first.startswith("failed:")
@@ -889,6 +1088,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    installed_agent: bool = False,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -938,7 +1138,16 @@ def _build_child_system_prompt(
         "Be thorough but concise -- your response is returned to the "
         "parent agent as a summary."
     )
-    if role != "orchestrator":
+    if installed_agent:
+        parts.append(
+            "\nINSTALLED AGENT MODE: You are running as the configured installed "
+            "agent selected for this task. Use your normal configured tools, "
+            "skills, and memory/context behavior. If your configured tools allow "
+            "delegation, any further delegation is still bounded by the live "
+            f"max_spawn_depth={max_spawn_depth}, concurrency limits, and kill "
+            "switches."
+        )
+    elif role != "orchestrator":
         # Single-orchestrator model: leaves cannot spawn their own subagents.
         # Instead of getting stuck or half-doing another specialist's job, a
         # leaf finishes what it can and hands the rest back UP — the main agent
@@ -1327,9 +1536,10 @@ def _build_child_agent(
 
     if _spec_def and _spec_def.get("toolsets"):
         # The specialist's loadout is authoritative — its full hub toolsets,
-        # NOT intersected with the parent. This is the recognized exception to
-        # child ⊆ parent. Still strip globally-blocked tools.
-        child_toolsets = _strip_blocked_tools(list(_spec_def.get("toolsets") or []))
+        # NOT intersected with the parent and NOT stripped like a generic helper.
+        # `delegate_task(agent="admin")` must mean "run Admin as configured";
+        # depth/concurrency/kill-switch limits are enforced at execution time.
+        child_toolsets = list(_spec_def.get("toolsets") or [])
     elif toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
@@ -1348,20 +1558,18 @@ def _build_child_agent(
     else:
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
-    # Orchestrators retain the 'delegation' toolset that _strip_blocked_tools
-    # removed.  The re-add is unconditional on parent-toolset membership because
-    # orchestrator capability is granted by role, not inherited — see the
-    # test_intersection_preserves_delegation_bound test for the design rationale.
-    if effective_role == "orchestrator" and "delegation" not in child_toolsets:
-        child_toolsets.append("delegation")
-    else:
-        # SINGLE-ORCHESTRATOR: a leaf subagent must NEVER spawn its own
-        # subagent. Strip the delegation toolset even when a named specialist's
-        # loadout carries it (every hub agent now ships `delegation`), so the
-        # only delegation tool in the tree belongs to the main agent. A leaf
-        # that discovers more work returns it upward (see the prompt note) and
-        # the main agent spawns the next worker from there.
-        child_toolsets = [t for t in child_toolsets if t != "delegation"]
+    if not _spec_def:
+        # Orchestrators retain the 'delegation' toolset that _strip_blocked_tools
+        # removed.  The re-add is unconditional on parent-toolset membership because
+        # orchestrator capability is granted by role, not inherited — see the
+        # test_intersection_preserves_delegation_bound test for the design rationale.
+        if effective_role == "orchestrator" and "delegation" not in child_toolsets:
+            child_toolsets.append("delegation")
+        else:
+            # SINGLE-ORCHESTRATOR: a generic leaf subagent must not spawn its own
+            # subagent. Installed specialists keep their configured loadout and
+            # are bounded by delegate_task's runtime depth/kill-switch checks.
+            child_toolsets = [t for t in child_toolsets if t != "delegation"]
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -1371,6 +1579,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        installed_agent=bool(_spec_def),
     )
     # Named-specialist: prepend the agent's lane persona so the child speaks and
     # acts as that specialist, not a generic subagent.
@@ -1564,9 +1773,11 @@ def _build_child_agent(
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
-        skip_context_files=True,
-        skip_memory=True,
-        clarify_callback=None,
+        skip_context_files=not bool(_spec_def),
+        skip_memory=not bool(_spec_def),
+        clarify_callback=(
+            getattr(parent_agent, "clarify_callback", None) if _spec_def else None
+        ),
         thinking_callback=child_thinking_cb,
         reasoning_callback=child_reasoning_cb,
         session_db=getattr(parent_agent, "_session_db", None),
@@ -1916,8 +2127,11 @@ def _run_single_child(
         _register_subagent(
             {
                 "subagent_id": _subagent_id,
+                "task_index": task_index,
                 "parent_id": _parent_sid if isinstance(_parent_sid, str) else None,
                 "async_task_id": getattr(child, "_async_task_id", None),
+                "child_session_id": getattr(child, "session_id", None),
+                "parent_session_id": getattr(child, "_parent_session_id", None),
                 "depth": _tui_depth,
                 "goal": goal,
                 "model": (
@@ -2154,8 +2368,13 @@ def _run_single_child(
                 elif msg.get("role") == "tool":
                     content = msg.get("content", "")
                     is_error = _looks_like_error_output(content)
+                    content_for_meta = (
+                        content
+                        if isinstance(content, str)
+                        else json.dumps(content, ensure_ascii=False, default=str)
+                    )
                     result_meta = {
-                        "result_bytes": len(content),
+                        "result_bytes": len(content_for_meta),
                         "status": "error" if is_error else "ok",
                     }
                     # Match by tool_call_id for parallel calls
@@ -3300,10 +3519,23 @@ def _build_top_level_description() -> str:
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
         "- Parallel independent workstreams (research A and B simultaneously)\n\n"
+        "ELEVATE SPECIALIST ROUTING:\n"
+        "- For work that belongs to a fleet specialist, set 'agent' instead of "
+        "making a generic toolset-scoped helper. The named specialist gets its "
+        "persona, full loadout, and skills.\n"
+        "- Use agent='admin' for Admin/deal/transaction work, full CMA or Market "
+        "Evaluation runs tied to Admin deals, Admin Hub CMA cards, report "
+        "attachments, SkySlope, WEBForms, MLC, signing packages, subject removal, "
+        "closing, checklists, or admin-result-writer closure.\n"
+        "- Use agent='analyst' only for research, market support packets, system "
+        "health, pipeline analytics, and pricing-trend evidence that does not "
+        "mutate Admin deal records or attach reports.\n\n"
         "WHEN NOT TO USE (use these instead):\n"
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
-        "- Tasks needing user interaction -> subagents cannot use clarify\n"
+        "- Tasks needing user interaction -> generic subagents cannot use "
+        "clarify; named installed agents keep their configured clarify/tool "
+        "behavior\n"
         "- Durable work that must survive an app restart / reboot -> use "
         "cronjob (action='create') or terminal(background=True, "
         "notify_on_complete=True) instead.\n\n"
@@ -3320,6 +3552,14 @@ def _build_top_level_description() -> str:
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
+        "- For operational workflows, context must include the exact user intent, "
+        "selected record/deal IDs, address/MLS/contact when available, loaded "
+        "skill or workflow name, test-vs-delivery mode, approval/no-send "
+        "constraints, fallback behavior, expected artifacts/record updates, and "
+        "what counts as done. If the user asks to test a full Admin-board skill "
+        "and the initially selected deal lacks property identity, tell the Admin "
+        "specialist to choose a real non-mock board deal with sufficient data "
+        "unless the user explicitly required that exact deal.\n"
         "- If the user is writing in a non-English language, or asked for "
         "output in a specific language / tone / style, say so in 'context' "
         "(e.g. \"respond in Chinese\", \"return output in Japanese\"). "
@@ -3332,9 +3572,13 @@ def _build_top_level_description() -> str:
         "subagent to return a verifiable handle (URL, ID, absolute path, HTTP "
         "status) and verify it yourself — fetch the URL, stat the file, read "
         "back the content — before telling the user the operation succeeded.\n"
-        "- Leaf subagents (role='leaf', the default) CANNOT call: "
+        "- Generic leaf subagents (role='leaf', the default) CANNOT call: "
         "delegate_task, clarify, memory, send_message, execute_code.\n"
-        "- Orchestrator subagents (role='orchestrator') retain "
+        "- Named installed agents (agent='admin', agent='outreach', etc.) keep "
+        "their configured persona, toolsets, skills, memory/context policy, and "
+        "clarify behavior; runtime depth/concurrency/kill-switch limits still "
+        "apply.\n"
+        "- Generic orchestrator subagents (role='orchestrator') retain "
         "delegate_task so they can spawn their own workers, but still "
         "cannot use clarify, memory, send_message, or execute_code. "
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
@@ -3439,9 +3683,11 @@ DELEGATE_TASK_SCHEMA = {
             "goal": {
                 "type": "string",
                 "description": (
-                    "What the subagent should accomplish. Be specific and "
-                    "self-contained -- the subagent knows nothing about your "
-                    "conversation history."
+                    "What the subagent should accomplish. Be specific, operational, "
+                    "and self-contained -- the subagent knows nothing about your "
+                    "conversation history. Include the workflow to run, target "
+                    "record/deal ID or file path when known, fallback behavior, "
+                    "expected artifacts or record updates, and done criteria."
                 ),
             },
             "cancel_task_id": {
@@ -3460,8 +3706,11 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Background information the subagent needs: file paths, "
-                    "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
+                    "error messages, project structure, constraints, selected "
+                    "deal/title/id/address/MLS/contact, loaded skill names, "
+                    "test-vs-delivery mode, approval/no-send constraints, and "
+                    "fallback instructions. The more specific you are, the better "
+                    "the subagent performs."
                 ),
             },
             "toolsets": {
@@ -3481,11 +3730,15 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Run the subagent AS a specialist from your fleet — it gets "
                     "that agent's persona, full tool loadout, and skills "
-                    "(overrides 'toolsets'). Use this to hand real work to the "
-                    "right specialist instead of a generic helper. Examples: "
-                    "'admin' (deal / transaction coordination — has admin_deal), "
+                    "(overrides 'toolsets'). Required for real specialist-owned "
+                    "work; do not omit it and fall back to a generic helper when "
+                    "the work has an owner. Examples: "
+                    "'admin' (deal / transaction coordination, full Admin-board "
+                    "CMA runs, SkySlope, WEBForms, MLC, signing, subject removal, "
+                    "closing, admin_deal/admin-result-writer), "
                     "'outreach' (lead response + status — has lead_status), "
-                    "'analyst', 'marketing', 'social-media'. Omit for a generic "
+                    "'analyst' (research/system/pipeline support only), "
+                    "'marketing', 'social-media'. Omit only for a truly generic "
                     "subagent scoped by 'toolsets'."
                 ),
             },
@@ -3494,10 +3747,21 @@ DELEGATE_TASK_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "goal": {"type": "string", "description": "Task goal"},
+                        "goal": {
+                            "type": "string",
+                            "description": (
+                                "Task goal. Must be self-contained with workflow, "
+                                "target record/file, fallback behavior, artifacts, "
+                                "and done criteria."
+                            ),
+                        },
                         "context": {
                             "type": "string",
-                            "description": "Task-specific context",
+                            "description": (
+                                "Task-specific context: IDs, files, selected deal, "
+                                "skill names, constraints, approval/no-send mode, "
+                                "and fallback instructions."
+                            ),
                         },
                         "toolsets": {
                             "type": "array",
@@ -3524,7 +3788,7 @@ DELEGATE_TASK_SCHEMA = {
                         },
                         "agent": {
                             "type": "string",
-                            "description": "Run THIS task as a fleet specialist (persona + full loadout + skills). See top-level 'agent'. e.g. 'admin', 'outreach', 'analyst'.",
+                            "description": "Run THIS task as a fleet specialist (persona + full loadout + skills). Use 'admin' for Admin/deal/full Admin-board CMA/SkySlope/WEBForms work; 'analyst' only for research/system/pipeline support.",
                         },
                     },
                     "required": ["goal"],

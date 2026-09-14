@@ -1,5 +1,6 @@
 import type {
   BuyerWatchlistEntry,
+  LeadSectionSummary,
   OutreachTemplate,
   SourceConnectorStatus,
   SourceInboxDraft,
@@ -20,6 +21,7 @@ import type {
   LeadsTemplateItem,
   LeadsTemplateLane,
 } from "./leads-data";
+import { pipelineStageLabel } from "./pipeline-stages";
 
 function ageLabel(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -94,22 +96,54 @@ export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
     heat: heatFromScore(d.score ?? null, d.leadLabel ?? undefined),
     sourceId: d.sourceId,
     taskId: d.taskId,
+    contactId: d.contactId,
+    threadId: d.threadId,
   }));
 }
 
 function statusLabel(profile: SourceInboxProfile): string {
-  if (profile.status === "new_lead") return "New lead";
-  if (profile.status === "follow_up") return "Follow up";
-  if (profile.status === "ghosting") return "Ghosting";
-  if (profile.status === "dead") return "Dead";
-  if (profile.status === "closed_seller") return "Closed seller";
-  if (profile.status === "closed_buyer") return "Closed buyer";
+  // Render the raw pipeline_status slug (AI's 6 legacy values or Skyleigh's own
+  // slugs) in her operator vocabulary. Falls through to CRM stage / heat when
+  // no pipeline_status is set.
+  if (profile.status) return pipelineStageLabel(profile.status);
   if (profile.crmStage) return profile.crmStage;
   return profile.heatLabel === "hot" ? "Hot" : "Open";
 }
 
-export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[] {
+// Days between now and an ISO timestamp; null when unparseable.
+function daysSince(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!isFinite(t) || t <= 0) return null;
+  const d = (Date.now() - t) / (24 * 60 * 60 * 1000);
+  return d < 0 ? 0 : d;
+}
+
+// Her follow-up segments. Prefer an explicit tag (SOI / Nurture / Past Client),
+// otherwise derive from days since last touch: Hot 0-30, Warm 30-90,
+// Lukewarm 90-180, Cool 180+. Falls back to Nurture when there is no signal.
+function deriveTemperature(p: SourceInboxProfile): LeadsProfile["temperature"] {
+  const tags = (p.tags || []).map((t) => t.toLowerCase());
+  if (tags.some((t) => t === "soi" || t.includes("sphere") || t.includes("past client"))) return "soi";
+  if (tags.some((t) => t.includes("nurture"))) return "nurture";
+  const d = daysSince(p.statusUpdatedAt || p.latestAt);
+  if (d === null) return "nurture";
+  if (d <= 30) return "hot";
+  if (d <= 90) return "warm";
+  if (d <= 180) return "lukewarm";
+  return "cool";
+}
+
+export function mapLeadsProfiles(
+  profiles: SourceInboxProfile[],
+  tempOverrides?: Record<string, string> | null,
+): LeadsProfile[] {
   return profiles.map((p) => {
+    // A manual override on any of the profile's contacts wins over the derived
+    // temperature so the list badge matches the contact card.
+    const tempOverride = (p.contactIds ?? [])
+      .map((id) => tempOverrides?.[id])
+      .find((v): v is string => Boolean(v));
     const verified = p.verifiers.length > 0 || p.hasCrm;
     const heatLabel = p.heatLabel === "hot" ? "hot" : p.heatLabel === "warm" ? "warm" : "watch";
     const group: LeadsProfile["group"] = heatLabel === "hot" ? "active" : verified ? "verified" : "unverified";
@@ -133,7 +167,7 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       group,
       verified,
       status: statusLabel(p),
-      source: (p.sources && p.sources[0]) || (p.sourceIds && p.sourceIds[0]) || "—",
+      source: p.leadSource || (p.sources && p.sources[0]) || (p.sourceIds && p.sourceIds[0]) || "—",
       email: p.emails[0] || "",
       phone: p.phones[0] || "",
       contact: p.emails[0] || p.phones[0] || "",
@@ -146,42 +180,123 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       sourceId,
       threadId,
       contactIds: p.contactIds || [],
+      threadIds: p.threadIds || [],
       favorite: Boolean(p.favorite),
       favoritedAt: p.favoritedAt ?? null,
+      pipelineStage: p.crmStage || statusLabel(p),
+      temperature: (tempOverride as LeadsProfile["temperature"]) || deriveTemperature(p),
+      latestAtIso: p.statusUpdatedAt || p.latestAt || null,
     };
   });
+}
+
+function profileThreadRef(p: SourceInboxProfile): { sourceId?: string; threadId?: string } {
+  const firstThreadKey = (p.threadIds && p.threadIds[0]) || "";
+  const firstSourceId = (p.sourceIds && p.sourceIds[0]) || "";
+  let sourceId = firstSourceId;
+  let threadId = firstThreadKey;
+  if (firstThreadKey.includes(":") && firstSourceId) {
+    const prefix = firstSourceId + ":";
+    if (firstThreadKey.startsWith(prefix)) threadId = firstThreadKey.slice(prefix.length);
+  }
+  if (!sourceId && firstThreadKey.includes(":")) sourceId = firstThreadKey.split(":", 1)[0];
+  return { sourceId, threadId };
+}
+
+function draftQueueEntry(d: SourceInboxDraft, signal: string): LeadsHotEntry {
+  return {
+    id: d.id,
+    name: d.personName || "Unknown",
+    signal: d.scoreReason || signal,
+    age: ageLabel(d.latestAt),
+    sourceId: d.sourceId,
+    threadId: d.threadId,
+  };
+}
+
+function sectionQueueEntries(
+  sectionId: "hot" | "follow_up",
+  leadSections: Record<string, LeadSectionSummary> | undefined,
+  profiles: SourceInboxProfile[],
+  threads: SourceInboxThread[],
+  fallbackDrafts: SourceInboxDraft[],
+  signal: string,
+): LeadsHotEntry[] {
+  const seen = new Set<string>();
+  const usedContacts = new Set<string>();
+  const out: LeadsHotEntry[] = [];
+  const add = (entry: LeadsHotEntry) => {
+    if (!entry.id || seen.has(entry.id)) return;
+    seen.add(entry.id);
+    out.push(entry);
+  };
+  const section = leadSections?.[sectionId];
+  const profileById = new Map(profiles.map((p) => [p.id, p]));
+  const threadById = new Map(threads.map((t) => [t.id, t]));
+
+  for (const profileId of section?.profileIds ?? []) {
+    const p = profileById.get(profileId);
+    if (!p) continue;
+    for (const contactId of p.contactIds ?? []) usedContacts.add(contactId);
+    add({
+      id: `profile:${p.id}`,
+      name: p.displayName || "Unknown",
+      signal: p.latestText || signal,
+      age: ageLabel(p.statusUpdatedAt || p.latestAt),
+      ...profileThreadRef(p),
+    });
+  }
+  const sectionContacts = new Set(section?.contactIds ?? []);
+  for (const p of profiles) {
+    if (!(p.contactIds ?? []).some((contactId) => sectionContacts.has(contactId))) continue;
+    for (const contactId of p.contactIds ?? []) usedContacts.add(contactId);
+    add({
+      id: `profile:${p.id}`,
+      name: p.displayName || "Unknown",
+      signal: p.latestText || signal,
+      age: ageLabel(p.statusUpdatedAt || p.latestAt),
+      ...profileThreadRef(p),
+    });
+  }
+  for (const threadId of section?.threadIds ?? []) {
+    const t = threadById.get(threadId);
+    if (!t || (t.contactId && usedContacts.has(t.contactId))) continue;
+    add({
+      id: `thread:${t.id}`,
+      name: t.personName || "Unknown",
+      signal: t.latestText || signal,
+      age: ageLabel(t.latestAt),
+      sourceId: t.sourceId,
+      threadId: t.threadId,
+    });
+  }
+  for (const draft of fallbackDrafts) add(draftQueueEntry(draft, signal));
+  return out.slice(0, 8);
 }
 
 export function mapLeadsPipeline(
   drafts: SourceInboxDraft[],
   skipped: SourceInboxDraft[],
   buyers: BuyerWatchlistEntry[],
+  leadSections?: Record<string, LeadSectionSummary>,
+  profiles: SourceInboxProfile[] = [],
+  threads: SourceInboxThread[] = [],
 ): LeadsPipeline {
-  const hot: LeadsHotEntry[] = drafts
-    .filter((d) => d.leadLabel === "hot" || (typeof d.score === "number" && d.score >= 0.7))
-    .slice(0, 8)
-    .map((d) => ({
-      id: d.id,
-      name: d.personName || "Unknown",
-      signal: d.scoreReason || "Hot signal",
-      age: ageLabel(d.latestAt),
-      sourceId: d.sourceId,
-      threadId: d.threadId,
-    }));
+  const hotDrafts = drafts.filter(
+    (d) => d.leadLabel === "hot" || (typeof d.score === "number" && d.score >= 0.7),
+  );
+  const followupDrafts = drafts.filter((d) => d.outreachLane === "follow-ups");
+  const hot = sectionQueueEntries("hot", leadSections, profiles, threads, hotDrafts, "Hot signal");
+  const followups = sectionQueueEntries(
+    "follow_up",
+    leadSections,
+    profiles,
+    threads,
+    followupDrafts,
+    "Follow-up cadence",
+  );
 
-  const followups: LeadsHotEntry[] = drafts
-    .filter((d) => d.outreachLane === "follow-ups")
-    .slice(0, 8)
-    .map((d) => ({
-      id: d.id,
-      name: d.personName || "Unknown",
-      signal: d.scoreReason || "Follow-up cadence",
-      age: ageLabel(d.latestAt),
-      sourceId: d.sourceId,
-      threadId: d.threadId,
-    }));
-
-  const skippedOut: LeadsSkippedEntry[] = skipped.slice(0, 12).map((d) => ({
+  const skippedOut: LeadsSkippedEntry[] = skipped.map((d) => ({
     id: d.id,
     name: d.personName || "Unknown",
     reason: d.scoreReason || "Skipped",
@@ -189,7 +304,12 @@ export function mapLeadsPipeline(
     taskId: d.taskId,
   }));
 
-  return { hot, followups, buyers: buyers.length, skipped: skippedOut };
+  return {
+    hot,
+    followups,
+    buyers: Math.max(buyers.length, leadSections?.buyer_search?.count ?? 0),
+    skipped: skippedOut,
+  };
 }
 
 export function computeLeadsKpis(
@@ -320,7 +440,7 @@ export function mapLeadsSent(items: SourceInboxSentItem[]): LeadsSentMessage[] {
       : it.sourceId;
     return {
       id: it.id,
-      when: ageLabel(it.createdAt),
+      when: ageLabel(it.updatedAt || it.createdAt),
       recipient,
       source,
       transport: transportFromChannel(it.channel),

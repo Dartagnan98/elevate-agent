@@ -254,6 +254,14 @@ class ToolRegistry:
         registrations that would shadow an existing tool from a different
         toolset are rejected to prevent accidental overwrites.
         """
+        # Callers may supply either a bare function schema or a complete
+        # Chat Completions tool definition. Store the bare function so all
+        # consumers (including get_schema) retain its description/parameters.
+        # Otherwise get_definitions wraps it twice and providers see a tool
+        # with no arguments, causing empty calls and avoidable repair turns.
+        while schema.get("type") == "function" and isinstance(schema.get("function"), dict):
+            schema = schema["function"]
+        schema = {**schema, "name": name}
         with self._lock:
             existing = self._tools.get(name)
             if existing and existing.toolset != toolset:

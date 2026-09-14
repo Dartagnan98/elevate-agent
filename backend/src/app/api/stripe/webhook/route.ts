@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
     }
     case "customer.subscription.deleted": {
       const sub = event.data.object as Stripe.Subscription;
-      await upsertSubscription(sub);
+      await upsertSubscription(sub, { allowUnknownPrice: true });
       await revokeLicenses(sub.customer as string);
       break;
     }
@@ -74,11 +74,15 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ received: true });
 }
 
-async function upsertSubscription(sub: Stripe.Subscription) {
+async function upsertSubscription(
+  sub: Stripe.Subscription,
+  options: { allowUnknownPrice?: boolean } = {},
+) {
   const user = await findUserByStripeCustomer(sub.customer as string);
   if (!user) return;
 
-  const tier = sub.items.data[0]?.price.id === process.env.STRIPE_PRICE_BUILDER_MONTHLY ? "builder" : "pro";
+  const tier = tierForPrice(sub.items.data[0]?.price.id);
+  if (!tier && !options.allowUnknownPrice) return;
 
   await updateUserSubscription(user.id, {
     status: ["active", "trialing"].includes(sub.status)
@@ -86,11 +90,17 @@ async function upsertSubscription(sub: Stripe.Subscription) {
       : sub.status === "past_due"
         ? "past_due"
         : "canceled",
-    tier,
+    ...(tier ? { tier } : {}),
     current_period_end: (sub as unknown as { current_period_end?: number }).current_period_end
       ? new Date((sub as unknown as { current_period_end: number }).current_period_end * 1000).toISOString()
       : null,
   });
+}
+
+function tierForPrice(priceId: string | undefined): "builder" | "pro" | null {
+  if (priceId && priceId === process.env.STRIPE_PRICE_BUILDER_MONTHLY) return "builder";
+  if (priceId && priceId === process.env.STRIPE_PRICE_PRO_MONTHLY) return "pro";
+  return null;
 }
 
 async function revokeLicenses(stripeCustomerId: string) {

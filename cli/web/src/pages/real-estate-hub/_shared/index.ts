@@ -26,7 +26,7 @@ export { HubMetric } from "./hub-metric";
 export { LeadStatusBadge, LeadStatusControl } from "./lead-status-control";
 export { parseIdentity, provenanceLine } from "./parse-identity";
 export type { ParsedIdentity } from "./parse-identity";
-export { HubShell } from "./hub-shell";
+export { HubDataErrorBanner, HubShell } from "./hub-shell";
 export { LoadingState } from "./loading-state";
 export { useHubHeader, useRealEstateHubData } from "./use-hub-data";
 export { WorkflowStrip } from "./workflow-strip";

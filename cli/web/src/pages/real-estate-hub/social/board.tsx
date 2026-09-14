@@ -41,6 +41,7 @@ const RANKINGS_YT: RankDef[] = [
   { id: "eng", label: "Most engagement", metric: "eng", order: "desc", fmt: "pct" },
   { id: "lviews", label: "Least views", metric: "views", order: "asc", fmt: "num" },
 ];
+const SOCIAL_POST_RENDER_LIMIT = 96;
 
 // ── helpers ─────────────────────────────────────────────────────────
 type PostWithInts = DesignPost & { ints: number };
@@ -161,8 +162,8 @@ function IdeaQueue({
         <span className="ab-card-title">AI idea approval queue</span>
         <div className="ab-card-actions">
           <span className={"sm-count" + (items.length ? " hot" : "")}>{items.length}</span>
-          <button className="sm-icon-btn" title="Refresh queue" onClick={onRefresh}>
-            <IcoRefresh width="13" height="13" />
+          <button className="sm-icon-btn" type="button" aria-label="Refresh queue" title="Refresh queue" onClick={onRefresh}>
+            <IcoRefresh width="13" height="13" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -253,8 +254,10 @@ function GranToggle({ gran, setGran }: { gran: Gran; setGran: (g: Gran) => void 
       {GRANS.map((g) => (
         <button
           key={g.id}
+          type="button"
           className={gran === g.id ? "active" : ""}
           aria-pressed={gran === g.id}
+          aria-label={"Show chart by " + g.noun}
           title={"By " + g.noun}
           onClick={() => setGran(g.id)}
         >
@@ -668,6 +671,7 @@ function YourPosts({
 
   const [tab, setTab] = useState<"all" | "instagram" | "youtube">("all");
   const visible = useMemo(() => (tab === "all" ? all : all.filter((p) => p.platform === tab)), [all, tab]);
+  const rendered = useMemo(() => visible.slice(0, SOCIAL_POST_RENDER_LIMIT), [visible]);
 
   const tabs: { id: "all" | "instagram" | "youtube"; label: string; n: number }[] = [
     { id: "all", label: "All", n: counts.all },
@@ -746,16 +750,21 @@ function YourPosts({
           </p>
         ) : isYT ? (
           <div className="sm-video-grid">
-            {visible.map((p) => (
+            {rendered.map((p) => (
               <VideoCard key={p.id} post={p} onSelect={onSelect} />
             ))}
           </div>
         ) : (
           <div className="sm-post-grid">
-            {visible.map((p) => (
+            {rendered.map((p) => (
               <PostCard key={p.id} post={p} onSelect={onSelect} />
             ))}
           </div>
+        )}
+        {visible.length > SOCIAL_POST_RENDER_LIMIT && (
+          <p className="sm-block-empty mono">
+            Showing first {SOCIAL_POST_RENDER_LIMIT} of {visible.length}. Narrow the platform or lookback to inspect older posts.
+          </p>
         )}
       </div>
     </section>
@@ -791,7 +800,7 @@ function PostDetailModal({ post, onClose }: { post: DesignPost; onClose: () => v
   // the scoped design tokens + styles outside the page subtree.
   return createPortal(
     <div className="sm-root">
-      <div className="sm-modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="sm-modal-overlay" role="dialog" aria-modal="true" aria-label={`${label} post details`} onClick={onClose}>
       <div className="sm-modal" onClick={(e) => e.stopPropagation()}>
         <button className="sm-modal-close" type="button" onClick={onClose} aria-label="Close">
           ×

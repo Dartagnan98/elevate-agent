@@ -21,6 +21,34 @@ def _make_schema(name="test_tool"):
 
 
 class TestRegisterAndDispatch:
+    def test_wrapped_schema_preserves_required_arguments_and_dynamic_overrides(self):
+        import copy
+
+        bare = {
+            "name": "lookup",
+            "description": "Read a record",
+            "parameters": {
+                "type": "object",
+                "properties": {"record_id": {"type": "string"}},
+                "required": ["record_id"],
+            },
+        }
+        wrapped = {"type": "function", "function": bare}
+        original = copy.deepcopy(wrapped)
+        reg = ToolRegistry()
+        reg.register(
+            name="lookup", toolset="core", schema=wrapped,
+            handler=lambda args, **kw: json.dumps(args),
+            dynamic_schema_overrides=lambda: {"description": "Current description"},
+        )
+        fn = reg.get_definitions({"lookup"})[0]["function"]
+        assert fn["parameters"] == bare["parameters"]
+        assert "function" not in fn
+        assert fn["description"] == "Current description"
+        assert reg.get_schema("lookup") == bare
+        assert json.loads(reg.dispatch("lookup", {"record_id": "abc"})) == {"record_id": "abc"}
+        assert wrapped == original
+
     def test_register_and_dispatch(self):
         reg = ToolRegistry()
         reg.register(

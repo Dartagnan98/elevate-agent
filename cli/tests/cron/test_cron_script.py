@@ -111,6 +111,47 @@ class TestRunJobScript:
         assert success is True
         assert output == "relative works"
 
+    def test_script_inherits_overlay_and_bundle_roots(self, cron_env, tmp_path, monkeypatch):
+        """A partial desktop overlay must also expose the bundle's sibling modules."""
+        import elevate_cli
+        from cron.scheduler import _run_job_script
+
+        overlay = tmp_path / "overlay"
+        bundle = tmp_path / "bundle"
+        custom = tmp_path / "custom"
+        for root in (overlay, bundle):
+            (root / "elevate_cli").mkdir(parents=True)
+        custom.mkdir()
+        overlay_init = overlay / "elevate_cli" / "__init__.py"
+        overlay_init.write_text(f"__path__.append({str(bundle / 'elevate_cli')!r})\n")
+        (bundle / "elevate_cli" / "__init__.py").write_text("")
+        (overlay / "overlay_choice.py").write_text("VALUE = 'overlay'\n")
+        (bundle / "overlay_choice.py").write_text("VALUE = 'bundle'\n")
+        (bundle / "bundle_constants.py").write_text("VALUE = 'bundled sibling'\n")
+        (custom / "custom_helper.py").write_text("VALUE = 'custom'\n")
+        (bundle / "elevate_cli" / "probe.py").write_text(textwrap.dedent("""\
+            import os
+            import bundle_constants
+            import overlay_choice
+            import custom_helper
+
+            def result():
+                return [bundle_constants.VALUE, overlay_choice.VALUE,
+                        custom_helper.VALUE, os.environ['ELEVATE_HOME']]
+        """))
+        script = cron_env / "scripts" / "overlay_probe.py"
+        script.write_text("import json\nfrom elevate_cli.probe import result\nprint(json.dumps(result()))\n")
+        monkeypatch.setattr(elevate_cli, "__file__", str(overlay_init))
+        monkeypatch.setattr(elevate_cli, "__path__", [
+            str(overlay / "elevate_cli"), str(bundle / "elevate_cli")
+        ])
+        monkeypatch.setenv("PYTHONPATH", str(custom))
+
+        success, output = _run_job_script(str(script))
+
+        assert success is True, output
+        assert json.loads(output) == ["bundled sibling", "overlay", "custom", str(cron_env)]
+
     def test_script_not_found(self, cron_env):
         from cron.scheduler import _run_job_script
 

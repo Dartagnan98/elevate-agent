@@ -17,6 +17,7 @@ export type PipelinePhase = {
 
 export type Deal = {
   id: string;
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
@@ -26,22 +27,43 @@ export type Deal = {
   price?: string;
   mls?: string;
   blocked?: boolean;
+  canAdvance?: boolean;
+  missingCount?: number;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
   primary?: boolean;
   top25Note?: string;
+  status?: string;
+  archivedNote?: string;
+  archivedAt?: string;
 };
 
 export type BuyerDeal = {
   id: string;
   side: "buyer";
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
   badge: string;
-  progress: string;
+  progress?: string;
   next: string;
   blocked?: boolean;
+  canAdvance?: boolean;
+  missingCount?: number;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
   primary?: boolean;
   top25Note?: string;
+  status?: string;
+  archivedNote?: string;
+  archivedAt?: string;
 };
 
 export type AdminAction = {
@@ -111,7 +133,7 @@ export type ConditionToggle = {
 // ---------------------------------------------------------------------------
 
 export const ADMIN_PIPELINE: PipelinePhase[] = [
-  { id: "pre-cma",    stage: "S0",  name: "Pre-CMA",                  next: "pre-CMA Google Form complete + Lofty contact verified",      note: "automated · approval" },
+  { id: "pre-cma",    stage: "S0",  name: "Pre-CMA",                  next: "pre-CMA dashboard setup complete + notes saved for CMA",      note: "automated · approval" },
   { id: "cma",        stage: "S1",  name: "CMA / Evaluation",         next: "CMA PDF/evaluation complete + client says yes",              note: "automated + background · approval" },
   { id: "intake",     stage: "S2",  name: "Listing Intake",           next: "MLC intake complete + listing docs ready",                  note: "automated · approval" },
   { id: "skyslope",   stage: "S3",  name: "SkySlope & Matrix Prep",   next: "signed docs saved + SkySlope/Matrix prep complete",         note: "automated + background · approval" },
@@ -127,10 +149,11 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_PIPELINE: PipelinePhase[] = [
-  { id: "offer",        stage: "S0",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
-  { id: "accepted",     stage: "S1",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
-  { id: "conditions",   stage: "S2",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
-  { id: "closed",       stage: "S4",  name: "Closed",              motion: "manual", next: "Moves on file archived",                  hint: "Archive + nurture" },
+  { id: "onboarding",   stage: "S0",  name: "Client Onboarding",   motion: "manual", next: "Moves on agency + disclosures signed",    hint: "Agency, DORTS, PNC, FINTRAC, pre-approval" },
+  { id: "offer",        stage: "S1",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
+  { id: "accepted",     stage: "S2",  name: "Accepted Offer",      motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
+  { id: "conditions",   stage: "S3",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
+  { id: "removed",      stage: "S4",  name: "Closed",              motion: "manual", next: "Moves on funds received + keys released", hint: "Funding + possession" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -225,9 +248,9 @@ export const ADMIN_SHOWINGS: Showing[] = [
 export const ADMIN_PHASE_DETAILS: Record<string, PhaseDetail> = {
   "pre-cma": {
     motion: "automated · approval",
-    movesOn: "pre-CMA Google Form complete + Lofty contact verified",
+    movesOn: "pre-CMA dashboard setup complete + notes saved for CMA",
     gate: "confirm missing contact/form details",
-    checklist: ["Pre-CMA Google Form filled", "Lofty contact verified / created", "Client/property notes saved for CMA"],
+    checklist: ["Pre-CMA dashboard setup complete", "Client contact verified in CRM", "Client/property notes saved for CMA"],
     documents: [["PNC", "Privacy Notice & Consent Form"], ["lockbox-auth", "Lockbox Acknowledgement, Consent, Release, and Indemnity"]],
   },
   "cma": {
@@ -300,6 +323,13 @@ export const ADMIN_PHASE_DETAILS: Record<string, PhaseDetail> = {
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_PHASE_DETAILS: Record<string, PhaseDetail> = {
+  "onboarding": {
+    motion: "manual",
+    movesOn: "agency agreement + disclosures signed",
+    gate: "confirm the client is set up to represent",
+    checklist: ["Buyer's Agency Agreement signed", "DORTS + PNC signed", "FINTRAC ID collected", "Pre-approval confirmed"],
+    documents: [["BAEC", "Buyer's Agency Agreement"], ["DORTS", "Disclosure of Representation"], ["PNC", "Privacy Notice & Consent"], ["FINTRAC", "Individual Identification"]],
+  },
   "intake": {
     motion: "manual",
     movesOn: "profile verified",

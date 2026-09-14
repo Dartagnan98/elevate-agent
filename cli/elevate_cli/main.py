@@ -6991,6 +6991,13 @@ def cmd_profile(args):
 
 def cmd_dashboard(args):
     """Start the web UI server."""
+    # Long-running process: post-turn scorecard inference stays async (snappy UI).
+    try:
+        from agent.turn_attribution import mark_persistent_process
+
+        mark_persistent_process()
+    except Exception:
+        pass
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
@@ -8385,6 +8392,8 @@ Examples:
     elevate debug share --lines 500  Include more log lines
     elevate debug share --expire 30  Keep paste for 30 days
     elevate debug share --local      Print report locally (no upload)
+    elevate debug share --session ID Include redacted recorder events for ID
+    elevate debug share --last 30m   Limit recorder events to recent window
     elevate debug delete <url>       Delete a previously uploaded paste
 """,
     )
@@ -8397,6 +8406,8 @@ Examples:
         "--lines",
         type=int,
         default=200,
+        choices=range(1, 10001),
+        metavar="1..10000",
         help="Number of log lines to include per log file (default: 200)",
     )
     share_parser.add_argument(
@@ -8411,10 +8422,19 @@ Examples:
         help="Print the report locally instead of uploading",
     )
     share_parser.add_argument(
+        "--session",
+        help="Include redacted session-recorder events for this session id",
+    )
+    share_parser.add_argument(
+        "--last",
+        default="30m",
+        help="Session-recorder lookback window, e.g. 600, 30m, 2h, all (default: 30m)",
+    )
+    share_parser.add_argument(
         "--no-redact",
         action="store_true",
         dest="no_redact",
-        help="Disable credential redaction in log uploads (default: redact)",
+        help="Disable credential redaction for --local output only (default: redact)",
     )
     delete_parser = debug_sub.add_parser(
         "delete",

@@ -5,6 +5,7 @@ import { Activity, Clock, FlaskConical, Loader2, RefreshCw } from "lucide-react"
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -159,10 +160,10 @@ export default function ActivityPage() {
       </header>
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn't load activity: {error}
-        </div>
-      ) : loading ? (
+        <RouteLoadError title="Could not load activity" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !data ? null : loading ? (
         <ul className="space-y-2">
           {Array.from({ length: 6 }).map((_, idx) => (
             <li

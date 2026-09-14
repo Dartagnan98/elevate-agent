@@ -25,29 +25,14 @@ export function Markdown({
   const blocks = useMemo(() => parseBlocks(content), [content]);
   const caret = streaming ? <StreamingCaret /> : null;
 
-  // Delegated click — paths render as <span data-md-path> so we don't thread a
-  // callback through the whole inline render tree.
-  const handleClick = onOpenPath
-    ? (e: React.MouseEvent<HTMLDivElement>) => {
-        const el = (e.target as HTMLElement).closest("[data-md-path]");
-        const path = el?.getAttribute("data-md-path");
-        if (path) {
-          e.preventDefault();
-          onOpenPath(path);
-        }
-      }
-    : undefined;
-
   return (
-    <div
-      className="text-sm text-foreground leading-relaxed space-y-2"
-      onClick={handleClick}
-    >
+    <div className="text-sm text-foreground leading-relaxed space-y-2">
       {blocks.map((block, i) => (
         <Block
           key={i}
           block={block}
           highlightTerms={highlightTerms}
+          onOpenPath={onOpenPath}
           caret={caret && i === blocks.length - 1 ? caret : null}
         />
       ))}
@@ -340,10 +325,12 @@ function Block({
   block,
   highlightTerms,
   caret,
+  onOpenPath,
 }: {
   block: BlockNode;
   highlightTerms?: string[];
   caret?: ReactNode;
+  onOpenPath?: (path: string) => void;
 }) {
   switch (block.type) {
     case "code":
@@ -361,7 +348,11 @@ function Block({
       };
       return (
         <Tag className={sizes[Tag]}>
-          <InlineContent text={block.content} highlightTerms={highlightTerms} />
+          <InlineContent
+            text={block.content}
+            highlightTerms={highlightTerms}
+            onOpenPath={onOpenPath}
+          />
           {caret}
         </Tag>
       );
@@ -384,7 +375,11 @@ function Block({
         >
           {block.items.map((item, i) => (
             <li key={i}>
-              <InlineContent text={item} highlightTerms={highlightTerms} />
+              <InlineContent
+                text={item}
+                highlightTerms={highlightTerms}
+                onOpenPath={onOpenPath}
+              />
               {i === last ? caret : null}
             </li>
           ))}
@@ -414,6 +409,7 @@ function Block({
                     <InlineContent
                       text={block.headers[c] ?? ""}
                       highlightTerms={highlightTerms}
+                      onOpenPath={onOpenPath}
                     />
                   </th>
                 ))}
@@ -433,6 +429,7 @@ function Block({
                       <InlineContent
                         text={row[c] ?? ""}
                         highlightTerms={highlightTerms}
+                        onOpenPath={onOpenPath}
                       />
                     </td>
                   ))}
@@ -448,7 +445,11 @@ function Block({
     case "paragraph":
       return (
         <p>
-          <InlineContent text={block.content} highlightTerms={highlightTerms} />
+          <InlineContent
+            text={block.content}
+            highlightTerms={highlightTerms}
+            onOpenPath={onOpenPath}
+          />
           {caret}
         </p>
       );
@@ -558,9 +559,11 @@ function parseInline(text: string): InlineNode[] {
 function InlineContent({
   text,
   highlightTerms,
+  onOpenPath,
 }: {
   text: string;
   highlightTerms?: string[];
+  onOpenPath?: (path: string) => void;
 }) {
   const nodes = useMemo(() => parseInline(text), [text]);
 
@@ -612,17 +615,24 @@ function InlineContent({
               </a>
             );
           case "path":
-            return (
-              <span
+            return onOpenPath ? (
+              <button
                 key={i}
+                type="button"
                 data-md-path={node.path}
-                role="button"
-                tabIndex={0}
                 title={`Open ${node.path}`}
+                onClick={() => onOpenPath(node.path)}
                 className="cursor-pointer rounded bg-primary/5 px-1 font-mono-ui text-[0.92em] text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/70"
               >
                 {node.path}
-              </span>
+              </button>
+            ) : (
+              <code
+                key={i}
+                className="rounded-sm bg-foreground/[0.08] px-1.5 py-0.5 text-[0.85em] font-mono text-foreground"
+              >
+                {node.path}
+              </code>
             );
           case "br":
             return <br key={i} />;

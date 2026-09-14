@@ -33,6 +33,7 @@ import type {
 import { timeAgo } from "@/lib/utils";
 import { Markdown } from "@/components/Markdown";
 import { PlatformsCard } from "@/components/PlatformsCard";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -309,17 +310,17 @@ function SessionRow({
       id={`session-row-${session.id}`}
       className="overflow-hidden rounded-md border border-border bg-card transition-colors"
     >
-      <button
-        type="button"
-        className="flex w-full items-center justify-between p-3 text-left cursor-pointer hover:bg-secondary/30 transition-colors"
-        onClick={onOpenChat}
-        title={
-          resumeInChatEnabled
-            ? t.sessions.resumeInChat
-            : "Start Agent Hub with chat enabled"
-        }
-      >
-        <div className="flex items-center gap-3 min-w-0 flex-1">
+      <div className="flex w-full items-center justify-between p-3 text-left hover:bg-secondary/30 transition-colors">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
+          onClick={onOpenChat}
+          title={
+            resumeInChatEnabled
+              ? t.sessions.resumeInChat
+              : "Start Agent Hub with chat enabled"
+          }
+        >
           <div className={`shrink-0 ${sourceInfo.color}`}>
             <SourceIcon className="h-4 w-4" />
           </div>
@@ -370,7 +371,7 @@ function SessionRow({
             </div>
             {snippet && <SnippetHighlight snippet={snippet} />}
           </div>
-        </div>
+        </button>
 
         <div className="flex items-center gap-2 shrink-0">
           <Badge variant="outline" className="text-[10px]">
@@ -419,7 +420,7 @@ function SessionRow({
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
-      </button>
+      </div>
 
       {isExpanded && (
         <div className="border-t border-border bg-background p-4">
@@ -574,7 +575,13 @@ export default function SessionsPage() {
   const logScrollRef = useRef<HTMLPreElement | null>(null);
 
   // Paginated list, cached per page across tab switches.
-  const { data: pageData, loading, mutate: mutatePage } = useCachedResource(
+  const {
+    data: pageData,
+    loading,
+    error: pageError,
+    refresh: refreshPage,
+    mutate: mutatePage,
+  } = useCachedResource(
     `sessions-page-${page}`,
     () => api.getSessions(PAGE_SIZE, page * PAGE_SIZE),
     { ttl: 5000 },
@@ -649,10 +656,11 @@ export default function SessionsPage() {
         {search && (
           <button
             type="button"
+            aria-label="Clear session search"
             className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-muted-foreground hover:text-foreground"
             onClick={() => setSearch("")}
           >
-            <X className="h-3 w-3" />
+            <X aria-hidden="true" className="h-3 w-3" />
           </button>
         )}
       </div>,
@@ -816,6 +824,14 @@ export default function SessionsPage() {
         loading={sessionDelete.isDeleting}
       />
 
+      {pageError ? (
+        <RouteLoadError
+          title="Could not load sessions"
+          error={pageError}
+          onRetry={refreshPage}
+        />
+      ) : null}
+
       {alerts.length > 0 && (
         <div className="rounded-md border border-border bg-card p-4">
           <div className="flex items-start gap-3">
@@ -977,7 +993,7 @@ export default function SessionsPage() {
         </Card>
       )}
 
-      {loading ? (
+      {pageError && !pageData ? null : loading ? (
         <div className="flex flex-col gap-1.5">
           {Array.from({ length: PAGE_SIZE }).map((_, i) => (
             <SessionRowSkeleton key={i} />

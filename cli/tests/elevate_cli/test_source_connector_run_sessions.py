@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from unittest import mock
+
+
+def _write_json(path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_all_wired_settings_connectors_open_agent_sessions() -> None:
@@ -43,3 +49,50 @@ def test_wired_prompts_are_executable_session_prompts() -> None:
     assert "contacts_with_xposure_contact_id" in prompts["xposure-pcs-views"]
     assert "Do not\n   run it in parallel with xposure-pcs" in prompts["xposure-pcs-views"]
     assert "VISIBLE SESSION CONTINUATION" in prompts["xposure-pcs"]
+
+
+def test_connector_response_includes_recovery_classification(tmp_path) -> None:
+    from elevate_cli.source_connectors import build_source_connectors_response
+
+    tools_root = tmp_path / "tools"
+    source_root = tools_root / "data" / "sources"
+    social_dir = source_root / "social"
+    _write_json(
+        social_dir / "source.json",
+        {
+            "provider": "Composio Social Accounts",
+            "owner_agent": "Social Media",
+            "enabled_ui_surfaces": ["Social Media", "Leads"],
+        },
+    )
+    _write_json(
+        social_dir / "status.json",
+        {
+            "connected": False,
+            "import_only": False,
+            "blocked": False,
+            "last_error": "HTTP 422 from Composio Gmail connected_accounts",
+            "last_checked_at": "2026-06-19T00:00:00+00:00",
+        },
+    )
+
+    response = build_source_connectors_response(
+        {"sources": {"tools_root": str(tools_root)}},
+        include_prompts=False,
+    )
+    by_id = {connector["id"]: connector for connector in response["connectors"]}
+
+    sms = by_id["sms-provider"]
+    assert sms["state"] == "not_configured"
+    assert sms["recoveryKind"] == "missing_config"
+    assert sms["recoverySeverity"] == "info"
+    assert sms["recoveryOwner"] == "Outreach"
+    assert "Initialize this source" in sms["recoveryAction"]
+
+    social = by_id["social"]
+    assert social["state"] == "error"
+    assert social["recoveryKind"] == "upstream_error"
+    assert social["recoverySeverity"] == "warning"
+    assert social["recoveryOwner"] == "Social Media"
+    assert "Composio panel" in social["recoveryAction"]
+    assert social["recoveryError"] == "HTTP 422 from Composio Gmail connected_accounts"

@@ -64,6 +64,18 @@ if _loaded_env_paths:
 else:
     logger.info("No .env file found. Using system environment variables.")
 
+DEFAULT_COMPRESSION_THRESHOLD = 0.85
+
+
+def _is_compression_threshold_pinned(compression_cfg: dict) -> bool:
+    if not isinstance(compression_cfg, dict) or "threshold" not in compression_cfg:
+        return False
+    try:
+        threshold = float(compression_cfg.get("threshold"))
+    except (TypeError, ValueError):
+        return True
+    return abs(threshold - DEFAULT_COMPRESSION_THRESHOLD) > 1e-9
+
 
 # Import our tool system
 from model_tools import (
@@ -1633,7 +1645,18 @@ class AIAgent:
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
-        
+
+        # Compaction redesign (docs/compaction-redesign.md): the transcript is
+        # NEVER rewritten or rotated. Compaction = a payload-time cursor + a
+        # synthetic summary, persisted as SESSION METADATA (sessions.
+        # compaction_cursor / compaction_summary) and injected ONLY when the
+        # API payload is built (see messages_for_api). 0 / None = the legacy /
+        # no-compaction sentinel; such sessions still resolve via the old
+        # rotation tip-walk read path. Hydrated from the row below (after the
+        # session DB is attached) so fresh + resume share one path.
+        self.compaction_cursor: int = 0
+        self.compaction_summary: Optional[str] = None
+
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
         
@@ -1685,7 +1708,30 @@ class AIAgent:
                 logger.warning(
                     "Session DB create_session failed (session_search still available): %s", e
                 )
-        
+
+        # Compaction redesign: hydrate the payload-time cursor + synthetic
+        # summary from the session row. For a fresh session the row was just
+        # created with the defaults (cursor 0 / NULL summary), so this is a
+        # no-op; for a RESUMED session (same session_id — create_session is an
+        # idempotent upsert) it restores the compaction state persisted by the
+        # last turn, so the model sees the trimmed window without re-walking a
+        # rotation tip. One path covers both fresh and resume.
+        if self._session_db:
+            try:
+                _crow = self._session_db.get_session(self.session_id)
+                if _crow:
+                    _cur = _crow.get("compaction_cursor")
+                    if _cur:
+                        self.compaction_cursor = int(_cur)
+                    _sum = _crow.get("compaction_summary")
+                    if _sum:
+                        self.compaction_summary = _sum
+            except Exception as _hydr_err:
+                logger.debug(
+                    "compaction metadata hydrate skipped for %s: %s",
+                    self.session_id, _hydr_err,
+                )
+
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
         self._todo_store = TodoStore()
@@ -1933,7 +1979,9 @@ class AIAgent:
         # first. 0.85 is the safe ceiling, NOT higher: threshold + worst-case
         # one-turn growth (~10% window of tool results + model output) must
         # stay under 100% or late turns hit context-overflow 400s.
-        compression_threshold = float(_compression_cfg.get("threshold", 0.85))
+        compression_threshold = float(
+            _compression_cfg.get("threshold", DEFAULT_COMPRESSION_THRESHOLD)
+        )
         # Real-count trigger (2026-06): when the provider has reported
         # prompt_tokens for the CURRENT message-list shape, the trigger runs
         # off that real count (+ delta estimates for appended messages only)
@@ -1942,7 +1990,7 @@ class AIAgent:
         # session max output tokens / summarizer overhead + pad) so the next
         # call's output and the compaction request always fit. A user-pinned
         # compression.threshold wins over both mode defaults.
-        self._compression_threshold_pinned = _compression_cfg.get("threshold") is not None
+        self._compression_threshold_pinned = _is_compression_threshold_pinned(_compression_cfg)
 
         # Session wall clock. max_iterations bounds the number of API calls
         # but not time — a loop of short calls (or slow tools) can run for
@@ -2636,6 +2684,21 @@ class AIAgent:
                 except Exception:
                     logger.debug("status_callback error in _emit_status", exc_info=True)
 
+    def _emit_warning(self, message: str) -> None:
+        """Emit a non-terminal warning without risking the active turn."""
+        try:
+            logger.warning("%s", message)
+        except Exception:
+            pass
+        try:
+            self._emit_status(message)
+        except Exception:
+            if self.status_callback:
+                try:
+                    self.status_callback("lifecycle", message)
+                except Exception:
+                    logger.debug("status_callback error in _emit_warning", exc_info=True)
+
     def _emit_error(self, message: str) -> None:
         """Emit a terminal error to the gateway as a persistent transcript message.
 
@@ -2713,6 +2776,8 @@ class AIAgent:
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
             )
+            if aux_context:
+                self.context_compressor.summary_context_length = aux_context
 
             # Hard floor: the auxiliary compression model must have at least
             # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model
@@ -3652,6 +3717,26 @@ class AIAgent:
             return
         self._apply_persist_user_message_override(messages)
         self._ensure_client_message_ids(messages)
+        existing_steer_client_ids: set[str] | None = None
+
+        def _has_existing_steer_client_id(client_message_id: str) -> bool:
+            nonlocal existing_steer_client_ids
+            if existing_steer_client_ids is None:
+                existing_steer_client_ids = set()
+                try:
+                    for row in self._session_db.get_messages(self.session_id):
+                        row_id = row.get("client_message_id") if isinstance(row, dict) else None
+                        if isinstance(row_id, str) and row_id.startswith("steer."):
+                            existing_steer_client_ids.add(row_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Session DB steer duplicate lookup failed for %s: %s",
+                        self.session_id,
+                        exc,
+                    )
+                    existing_steer_client_ids = set()
+            return client_message_id in existing_steer_client_ids
+
         try:
             # If create_session() failed at startup (e.g. transient lock), the
             # session row may not exist yet.  ensure_session() uses INSERT OR
@@ -3666,6 +3751,22 @@ class AIAgent:
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = self._strip_image_parts_for_persistence(msg.get("content"))
+                client_message_id = msg.get("client_message_id")
+                if (
+                    role == "user"
+                    and isinstance(client_message_id, str)
+                    and client_message_id.startswith("steer.")
+                    and _has_existing_steer_client_id(client_message_id)
+                ):
+                    continue
+                if (
+                    role == "user"
+                    and isinstance(client_message_id, str)
+                    and client_message_id.startswith("steer.")
+                    and isinstance(msg.get("_display_content"), str)
+                    and msg["_display_content"].strip()
+                ):
+                    content = msg["_display_content"].strip()
                 if isinstance(content, list):
                     # Multimodal turn — the SQLite `content` column is TEXT,
                     # so a raw block list would fail to bind.  Persist only
@@ -3709,7 +3810,7 @@ class AIAgent:
                     reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    client_message_id=msg.get("client_message_id"),
+                    client_message_id=client_message_id,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -4598,6 +4699,7 @@ class AIAgent:
         *,
         urgent: bool = False,
         source: str = "user",
+        client_message_id: str | None = None,
     ) -> bool:
         """Queue a mid-run message for injection at the next safe boundary.
 
@@ -4613,6 +4715,8 @@ class AIAgent:
             "source": str(source or "user")[:40],
             "queued_at": time.time(),
         }
+        if isinstance(client_message_id, str) and client_message_id.strip():
+            item["client_message_id"] = client_message_id.strip()
         _lock = getattr(self, "_pending_soft_interrupts_lock", None)
         if _lock is None:
             existing = getattr(self, "_pending_soft_interrupts", [])
@@ -4669,6 +4773,25 @@ class AIAgent:
         lines.append("Fold this into the current task before continuing. Do not restart work that is already complete.")
         return "\n".join(lines)
 
+    @staticmethod
+    def _soft_interrupt_display_text(items: list[dict[str, Any]]) -> str:
+        """Return only the user-authored text from soft-interrupt items."""
+        parts: list[str] = []
+        for item in items or []:
+            content = str(item.get("content") or "").strip()
+            if content:
+                parts.append(content)
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _soft_interrupt_client_message_id(items: list[dict[str, Any]]) -> str:
+        """Return a durable steer client id carried by queued soft interrupts."""
+        for item in items or []:
+            client_message_id = item.get("client_message_id")
+            if isinstance(client_message_id, str) and client_message_id.startswith("steer."):
+                return client_message_id
+        return ""
+
 
     def _notify_steer_applied(self, items: list[dict[str, Any]] | None, *, via: str) -> None:
         """Tell the host UI a queued mid-run follow-up was actually injected.
@@ -4690,6 +4813,11 @@ class AIAgent:
                 count=len(items or []) or 1,
                 via=via,
                 sources=[str(i.get("source") or "user") for i in (items or [])],
+                client_message_ids=[
+                    str(i.get("client_message_id"))
+                    for i in (items or [])
+                    if isinstance(i.get("client_message_id"), str)
+                ],
             )
         except Exception:
             pass
@@ -5406,6 +5534,116 @@ class AIAgent:
         return getattr(tc, "id", "") or ""
 
     _VALID_API_ROLES = frozenset({"system", "user", "assistant", "tool", "function", "developer"})
+
+    def messages_for_api(
+        self, api_messages: List[Dict[str, Any]], sys_offset: int
+    ) -> List[Dict[str, Any]]:
+        """Apply the compaction cursor + synthetic summary at payload-build time.
+
+        Compaction redesign (docs/compaction-redesign.md): the transcript is
+        never rewritten or rotated.  Instead, when ``self.compaction_cursor``
+        is set, the API payload skips the first ``compaction_cursor`` TRANSCRIPT
+        messages and represents them with a single synthetic summary message
+        injected here — and ONLY here.  ``self._session_messages`` (the visible,
+        persisted transcript) is left completely untouched.
+
+        ``api_messages`` is the already-built payload list, where the first
+        ``sys_offset`` entries are non-transcript leaders (the system prompt and
+        any prefill messages); everything at/after ``sys_offset`` is the
+        transcript copy.  The result is::
+
+            api_messages[:sys_offset]                       # system + prefill
+            + [synthetic summary]                           # if cursor + summary
+            + api_messages[sys_offset + compaction_cursor:] # the kept tail
+
+        Cursor 0 (or no summary) is the legacy / no-compaction sentinel and the
+        payload is returned unchanged.
+        """
+        cursor = int(getattr(self, "compaction_cursor", 0) or 0)
+        summary = getattr(self, "compaction_summary", None)
+        if cursor <= 0 or not summary:
+            return api_messages
+
+        sys_offset = max(0, int(sys_offset or 0))
+        n_transcript = len(api_messages) - sys_offset
+        if n_transcript <= 0:
+            return api_messages
+        # Defensive clamp: never skip past the end of the transcript.
+        if cursor >= n_transcript:
+            cursor = n_transcript - 1
+            if cursor <= 0:
+                return api_messages
+
+        cut = sys_offset + cursor
+        # Defensive tool-pair guard: the cursor is produced by the cutoff
+        # machinery (summarize_to_cursor) which aligns on tool boundaries, but
+        # if the first kept message is an orphan tool result (its tool_call was
+        # skipped by the cursor), nudge the cut BACK to include the parent
+        # assistant turn so the API never receives a mismatched pair.  The
+        # downstream _sanitize_api_messages would otherwise stub it; pulling the
+        # boundary keeps the kept window self-consistent.
+        guard = 0
+        while (
+            cut < len(api_messages)
+            and api_messages[cut].get("role") in ("tool", "function")
+            and cut > sys_offset
+            and guard < n_transcript
+        ):
+            cut -= 1
+            guard += 1
+        # If we walked back onto the assistant that owns the tool group, keep it.
+        if (
+            cut > sys_offset
+            and api_messages[cut].get("role") == "tool"
+        ):
+            # Could not find a clean non-tool boundary inside the kept window;
+            # fall back to no trim rather than ship an orphan.
+            return api_messages
+
+        from agent.context_compressor import SUMMARY_PREFIX as _SUMMARY_PREFIX
+        _summary_text = str(summary)
+        if not _summary_text.startswith(_SUMMARY_PREFIX):
+            _summary_text = f"{_SUMMARY_PREFIX}\n{_summary_text}"
+        _summary_text = (
+            _summary_text
+            + "\n\n--- END OF CONTEXT SUMMARY — "
+            "respond to the message below, not the summary above ---"
+        )
+        synthetic = {"role": "user", "content": _summary_text}
+
+        return api_messages[:sys_offset] + [synthetic] + api_messages[cut:]
+
+    def _messages_for_compression_pressure(
+        self,
+        messages: List[Dict[str, Any]],
+        active_system_prompt: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Non-mutating API-shaped payload used only for rough pressure checks."""
+        api_messages: List[Dict[str, Any]] = []
+        for msg in messages:
+            api_msg = msg.copy()
+            for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
+                api_msg.pop(internal_field, None)
+            api_messages.append(api_msg)
+
+        effective_system = active_system_prompt or ""
+        if self.ephemeral_system_prompt:
+            effective_system = (
+                effective_system + "\n\n" + self.ephemeral_system_prompt
+            ).strip()
+        _plan_suffix = self._plan_mode_suffix()
+        if _plan_suffix:
+            effective_system = (effective_system + "\n\n" + _plan_suffix).strip()
+
+        if effective_system:
+            api_messages = [{"role": "system", "content": effective_system}] + api_messages
+        if self.prefill_messages:
+            sys_offset = 1 if effective_system else 0
+            for idx, pfm in enumerate(self.prefill_messages):
+                api_messages.insert(sys_offset + idx, pfm.copy())
+
+        sys_offset = (1 if effective_system else 0) + len(self.prefill_messages or [])
+        return self.messages_for_api(api_messages, sys_offset)
 
     @staticmethod
     def _sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -10034,6 +10272,12 @@ class AIAgent:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
+            # Compaction redesign payload seam (max-iterations summary call):
+            # the final-summary request must also see the trimmed window.
+            _compaction_sys_offset = (1 if effective_system else 0) + len(
+                self.prefill_messages or []
+            )
+            api_messages = self.messages_for_api(api_messages, _compaction_sys_offset)
             api_messages = self._hydrate_media_refs_for_api(api_messages)
 
             summary_extra_body = {}
@@ -10496,12 +10740,15 @@ class AIAgent:
                 if _preflight_projector is not None else None
             )
             _preflight_real_mode = _preflight_projected is not None
+            _preflight_effective_messages = self._messages_for_compression_pressure(
+                messages, active_system_prompt or ""
+            )
             if _preflight_real_mode:
                 _preflight_tokens = _preflight_projected
             else:
                 _preflight_tokens = estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=active_system_prompt or "",
+                    _preflight_effective_messages,
+                    system_prompt="",
                     tools=self.tools or None,
                 )
             _preflight_trigger = _effective_trigger_tokens(
@@ -10553,17 +10800,20 @@ class AIAgent:
                 # context windows (each pass summarises the middle N turns).
                 for _pass in range(3):
                     _orig_len = len(messages)
+                    _pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
                     messages, active_system_prompt = self._compress_context(
                         messages, system_message, approx_tokens=_preflight_tokens,
                         task_id=effective_task_id,
                     )
-                    if len(messages) >= _orig_len:
+                    _cursor_advanced = (
+                        int(getattr(self, "compaction_cursor", 0) or 0) > _pre_cursor
+                    )
+                    if len(messages) >= _orig_len and not _cursor_advanced:
                         break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
-                    # pre-compression length.
+                    # Cursor-model compaction changes the API payload via
+                    # metadata, not necessarily the transcript length. Clear
+                    # the loaded-history reference so persistence does not use
+                    # a stale pre-compaction offset.
                     conversation_history = None
                     # Fix: reset retry counters after compression so the model
                     # gets a fresh budget on the compressed context.  Without
@@ -10577,9 +10827,12 @@ class AIAgent:
                     self._mute_post_response = False
                     # Re-estimate after compression (the projector was
                     # invalidated by compaction, so this is estimate mode).
+                    _preflight_effective_messages = self._messages_for_compression_pressure(
+                        messages, active_system_prompt or ""
+                    )
                     _preflight_tokens = estimate_request_tokens_rough(
-                        messages,
-                        system_prompt=active_system_prompt or "",
+                        _preflight_effective_messages,
+                        system_prompt="",
                         tools=self.tools or None,
                     )
                     _preflight_trigger = _effective_trigger_tokens(
@@ -11011,6 +11264,17 @@ class AIAgent:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
+
+            # Compaction redesign payload seam: skip the compacted transcript
+            # head and splice in the synthetic summary, ONLY for the API copy.
+            # sys_offset counts every non-transcript leader (system + prefill)
+            # so the cursor lands on transcript boundaries. Runs BEFORE
+            # _sanitize_api_messages so any tool_result whose tool_call was
+            # skipped by the cursor is re-stubbed below. No-op when cursor==0.
+            _compaction_sys_offset = (1 if effective_system else 0) + len(
+                self.prefill_messages or []
+            )
+            api_messages = self.messages_for_api(api_messages, _compaction_sys_offset)
 
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
@@ -12592,34 +12856,65 @@ class AIAgent:
                         self._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                         original_len = len(messages)
+                        # Cursor model: compaction advances the payload cursor and
+                        # leaves the transcript unchanged, so success is measured by
+                        # the cursor, not len(messages). force=True bypasses the
+                        # anti-thrash backoff (this is overflow recovery).
+                        _recover_pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message, approx_tokens=approx_tokens,
                             task_id=effective_task_id,
+                            force=True,
                         )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
                         conversation_history = None
 
-                        if len(messages) < original_len:
-                            self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                        _recover_cursor_advanced = int(
+                            getattr(self, "compaction_cursor", 0) or 0
+                        ) > _recover_pre_cursor
+                        if len(messages) < original_len or _recover_cursor_advanced:
+                            if len(messages) < original_len:
+                                self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            else:
+                                self._emit_status("🗜️ Compacted earlier turns, retrying...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
-                        else:
-                            self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                            logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
-                            self._persist_session(messages, conversation_history)
-                            return {
-                                "messages": messages,
-                                "completed": False,
-                                "api_calls": api_call_count,
-                                "error": "Request payload too large (413). Cannot compress further.",
-                                "partial": True,
-                                "failed": True,
-                                "compression_exhausted": True,
-                            }
+
+                        # Last resort: truncate oversized tool results (content
+                        # only, no rows removed), then retry once.
+                        try:
+                            _, _emerg_n = self.context_compressor.emergency_truncate_tool_results(messages)
+                        except Exception as _emerg_err:
+                            _emerg_n = 0
+                            logger.debug("emergency tool-result truncation skipped: %s", _emerg_err)
+                        if _emerg_n:
+                            self._emit_status(
+                                f"🗜️ Truncated {_emerg_n} oversized tool result(s) to fit — retrying..."
+                            )
+                            self.context_compressor.last_prompt_tokens = -1
+                            _usage_projector = getattr(self, "_usage_projector", None)
+                            if _usage_projector is not None:
+                                try:
+                                    _usage_projector.invalidate()
+                                except Exception:
+                                    pass
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
+
+                        self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
+                        self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
+                        logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
+                        self._persist_session(messages, conversation_history)
+                        return {
+                            "messages": messages,
+                            "completed": False,
+                            "api_calls": api_call_count,
+                            "error": "Request payload too large (413). Cannot compress further.",
+                            "partial": True,
+                            "failed": True,
+                            "compression_exhausted": True,
+                        }
 
                     # Check for context-length errors BEFORE generic 4xx handler.
                     # The classifier detects context overflow from: explicit error
@@ -12749,47 +13044,88 @@ class AIAgent:
                         self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                         original_len = len(messages)
+                        # Cursor model: compaction advances the payload cursor and
+                        # leaves the transcript (messages) unchanged, so "did it
+                        # help?" can no longer be measured by len(messages). Track
+                        # the cursor across the call. force=True bypasses the
+                        # anti-thrash backoff — this is overflow recovery, not a
+                        # routine trigger.
+                        _recover_pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
                         try:
                             messages, active_system_prompt = self._compress_context(
                                 messages, system_message, approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
                                 focus_topic="context-limit recovery",
+                                force=True,
                             )
                         except TypeError as type_error:
-                            if "unexpected keyword argument 'focus_topic'" not in str(type_error):
+                            if "unexpected keyword argument" not in str(type_error):
                                 raise
                             # Backwards compatibility for subclasses/tests with
-                            # the pre-focus_topic _compress_context signature.
+                            # the pre-focus_topic / pre-force _compress_context
+                            # signature.
                             messages, active_system_prompt = self._compress_context(
                                 messages, system_message, approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
                             )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
                         conversation_history = None
 
-                        if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
+                        _recover_cursor_advanced = int(
+                            getattr(self, "compaction_cursor", 0) or 0
+                        ) > _recover_pre_cursor
+                        if (
+                            len(messages) < original_len
+                            or _recover_cursor_advanced
+                            or (new_ctx and new_ctx < old_ctx)
+                        ):
                             if len(messages) < original_len:
                                 self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            elif _recover_cursor_advanced:
+                                self._emit_status("🗜️ Compacted earlier turns, retrying...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
-                        else:
-                            # Can't compress further and already at minimum tier
-                            self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
-                            logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
-                            self._persist_session(messages, conversation_history)
-                            return {
-                                "messages": messages,
-                                "completed": False,
-                                "api_calls": api_call_count,
-                                "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
-                                "partial": True,
-                                "failed": True,
-                                "compression_exhausted": True,
-                            }
+
+                        # Cursor could not advance and the list did not shrink —
+                        # even the cursor-trimmed tail exceeds the window (a single
+                        # enormous tool result). LAST RESORT before failing the
+                        # turn: unconditionally truncate oversized tool results in
+                        # the tail (edits content only, never removes rows), then
+                        # retry once.
+                        try:
+                            _, _emerg_n = self.context_compressor.emergency_truncate_tool_results(messages)
+                        except Exception as _emerg_err:
+                            _emerg_n = 0
+                            logger.debug("emergency tool-result truncation skipped: %s", _emerg_err)
+                        if _emerg_n:
+                            self._emit_status(
+                                f"🗜️ Truncated {_emerg_n} oversized tool result(s) to fit — retrying..."
+                            )
+                            self.context_compressor.last_prompt_tokens = -1
+                            _usage_projector = getattr(self, "_usage_projector", None)
+                            if _usage_projector is not None:
+                                try:
+                                    _usage_projector.invalidate()
+                                except Exception:
+                                    pass
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
+
+                        # Truly stuck: can't compress further and already at minimum tier
+                        self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
+                        self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
+                        logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                        self._persist_session(messages, conversation_history)
+                        return {
+                            "messages": messages,
+                            "completed": False,
+                            "api_calls": api_call_count,
+                            "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
+                            "partial": True,
+                            "failed": True,
+                            "compression_exhausted": True,
+                        }
 
                     # Check for non-retryable client errors.  The classifier
                     # already accounts for 413, 429, 529 (transient), context
@@ -13080,7 +13416,15 @@ class AIAgent:
                             (_tail["content"] or "") + "\n\n" + _cut_text
                         )
                     else:
-                        messages.append({"role": "user", "content": _cut_text})
+                        _cut_msg = {"role": "user", "content": _cut_text}
+                        if not _cut_steer:
+                            _cut_client_message_id = self._soft_interrupt_client_message_id(_cut_items)
+                            if _cut_client_message_id:
+                                _cut_msg["client_message_id"] = _cut_client_message_id
+                                _cut_display = self._soft_interrupt_display_text(_cut_items)
+                                if _cut_display:
+                                    _cut_msg["_display_content"] = _cut_display
+                        messages.append(_cut_msg)
                     self._notify_steer_applied(_cut_items, via="stream_cut")
                     self._session_messages = messages
                     self._save_session_log(messages)
@@ -13552,9 +13896,13 @@ class AIAgent:
                     from agent.conversation_compression import (
                         resolve_compression_pressure as _resolve_pressure,
                         should_compress_now as _should_compress_now,
+                        should_critical_compress_now as _should_critical_compress_now,
                         should_prune_only_now as _should_prune_only_now,
                     )
                     _compressor = self.context_compressor
+                    _pressure_fallback_messages = self._messages_for_compression_pressure(
+                        messages, active_system_prompt or ""
+                    )
                     _real_tokens, _trigger_tokens, _real_mode = _resolve_pressure(
                         _compressor,
                         getattr(self, "_usage_projector", None),
@@ -13565,12 +13913,54 @@ class AIAgent:
                         threshold_pinned=getattr(
                             self, "_compression_threshold_pinned", False
                         ),
+                        fallback_messages=_pressure_fallback_messages,
                     )
 
-                    if self.compression_enabled and _should_compress_now(
-                        _compressor, _real_tokens, _trigger_tokens
+                    # Critical line (0.95 of the window): force a synchronous
+                    # compaction that BYPASSES the anti-thrash backoff. At/above
+                    # 95% the next call is about to overflow the provider context
+                    # window, so overflow safety wins over thrash avoidance —
+                    # compress with force=True even if should_compress_now() would
+                    # be vetoed by the low-yield / ineffective-compression cooldown.
+                    _crit_window = int(getattr(_compressor, "context_length", 0) or 0)
+                    _critical_compact = (
+                        self.compression_enabled
+                        and _should_critical_compress_now(_real_tokens, _crit_window)
+                    )
+                    _compaction_source = (
+                        "real_count_projection"
+                        if _real_mode
+                        else "effective_estimate"
+                    )
+
+                    if self.compression_enabled and (
+                        _critical_compact
+                        or _should_compress_now(_compressor, _real_tokens, _trigger_tokens)
                     ):
-                        self._safe_print("  ⟳ compacting context…")
+                        _compaction_reason = (
+                            "critical_compact"
+                            if _critical_compact
+                            else "full_compact"
+                        )
+                        logger.info(
+                            "compaction.decision reason=%s source=%s session=%s "
+                            "raw_messages=%d effective_messages=%d tokens_before=%s "
+                            "threshold_tokens=%s context_limit=%s cursor_before=%s",
+                            _compaction_reason,
+                            _compaction_source,
+                            self.session_id or "none",
+                            len(messages),
+                            len(_pressure_fallback_messages),
+                            _real_tokens,
+                            _trigger_tokens,
+                            _crit_window,
+                            int(getattr(self, "compaction_cursor", 0) or 0),
+                        )
+                        self._safe_print(
+                            "  ⟳ recovering context…"
+                            if _critical_compact
+                            else "  ⟳ working through earlier context…"
+                        )
                         logger.info(
                             "Compaction trigger: ~%s tokens >= %s line (%s mode, "
                             "window %s, reserve %s)",
@@ -13581,8 +13971,9 @@ class AIAgent:
                         )
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
-                            approx_tokens=self.context_compressor.last_prompt_tokens,
+                            approx_tokens=_real_tokens,
                             task_id=effective_task_id,
+                            force=_critical_compact,
                         )
                         # Compression created a new session — clear history so
                         # _flush_messages_to_session_db writes compressed messages
@@ -13600,11 +13991,31 @@ class AIAgent:
                         # needed. No session rotation — message contents are
                         # rewritten in place; the session DB keeps the full-
                         # fidelity originals.
+                        logger.info(
+                            "compaction.decision reason=prune source=%s session=%s "
+                            "raw_messages=%d effective_messages=%d tokens_before=%s "
+                            "threshold_tokens=%s context_limit=%s cursor_before=%s",
+                            _compaction_source,
+                            self.session_id or "none",
+                            len(messages),
+                            len(_pressure_fallback_messages),
+                            _real_tokens,
+                            _trigger_tokens,
+                            _crit_window,
+                            int(getattr(self, "compaction_cursor", 0) or 0),
+                        )
                         messages, _pruned = _compressor.prune_only(
                             messages, current_tokens=_real_tokens,
                         )
                         if _pruned:
-                            self._safe_print("  ⟳ pruned stale context (no summary)")
+                            logger.info(
+                                "compaction.completed reason=prune source=%s session=%s "
+                                "tokens_before=%s threshold_tokens=%s note=no_summary",
+                                _compaction_source,
+                                self.session_id or "none",
+                                _real_tokens,
+                                _trigger_tokens,
+                            )
                     
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
@@ -13922,16 +14333,36 @@ class AIAgent:
                         self._notify_steer_applied(_soft_items, via="after_text")
                         messages.append(final_msg)
                         _continuation_parts = []
+                        _display_parts = []
                         if _steer_after_text:
                             _continuation_parts.append(_steer_after_text)
+                            _display_parts.append(_steer_after_text)
                         if _soft_items:
                             _continuation_parts.append(
                                 self._soft_interrupt_text(_soft_items)
                             )
-                        messages.append({
+                            _soft_display = self._soft_interrupt_display_text(_soft_items)
+                            if _soft_display:
+                                _display_parts.append(_soft_display)
+                        _continuation_msg = {
                             "role": "user",
                             "content": "\n\n".join(_continuation_parts),
-                        })
+                            # Durable marker for transcript hydration: the
+                            # dashboard folds steer.* user rows back into the
+                            # previous assistant turn instead of showing a
+                            # new "Worked..." block for the continuation.
+                            "client_message_id": (
+                                self._soft_interrupt_client_message_id(_soft_items)
+                                if _soft_items and not _steer_after_text
+                                else f"steer.{uuid.uuid4().hex}"
+                            ),
+                        }
+                        _display_content = "\n\n".join(
+                            p for p in _display_parts if str(p).strip()
+                        ).strip()
+                        if _display_content:
+                            _continuation_msg["_display_content"] = _display_content
+                        messages.append(_continuation_msg)
                         final_response = None
                         _turn_exit_reason = (
                             "steer_after_text_response"
@@ -14111,12 +14542,19 @@ class AIAgent:
         # Self-gated to real-estate accounts; never raises.
         if not interrupted:
             try:
-                from agent.turn_attribution import attribute_turn_safely
+                from agent.turn_attribution import (
+                    attribute_turn_safely,
+                    should_wait_for_inference,
+                )
+                # Persistent processes (dashboard/gateway/REPL) finish scorecard
+                # inference async; one-shot runs (chat -q, cron) drain it inline
+                # so the tick is never lost on exit.
                 attribute_turn_safely(
                     messages,
                     agent_id=getattr(self, "_agent_id", "") or "",
                     session_id=self.session_id,
                     main_runtime=self._current_main_runtime(),
+                    wait=should_wait_for_inference(),
                 )
             except Exception as exc:
                 logger.debug("turn attribution hook failed: %s", exc)

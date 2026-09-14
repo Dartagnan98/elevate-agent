@@ -423,6 +423,366 @@ def _ring_append(ring, params: dict, event_type) -> None:
     ring.append(params)
 
 
+def _event_is_followup(params: dict) -> bool:
+    payload = params.get("payload") if isinstance(params, dict) else None
+    return bool(
+        params.get("followup")
+        or (isinstance(payload, dict) and payload.get("followup"))
+    )
+
+
+def _event_child_session_id(event: dict) -> str:
+    payload = event.get("payload") if isinstance(event, dict) else None
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("child_session_id") or "")
+
+
+def _is_subagent_event_for_child(event: dict, child_session_id: str) -> bool:
+    event_type = event.get("type") if isinstance(event, dict) else None
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("subagent.")
+        and _event_child_session_id(event) == child_session_id
+    )
+
+
+def _event_ts(event: dict) -> float:
+    try:
+        return float(event.get("ts") or 0.0) if isinstance(event, dict) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+_RECORDER_DELTA_EVENTS = {"message.delta", "thinking.delta", "reasoning.delta"}
+_RECORDER_DELTA_INTERVAL_SECONDS = 1.0
+_RECORDER_DELTA_LAST: dict[tuple[str, str, str], float] = {}
+_RECORDER_DELTA_LOCK = threading.Lock()
+
+
+def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
+    """Write a content-free breadcrumb for session timeline debugging."""
+    if not sid:
+        return
+    payload = payload if isinstance(payload, dict) else {}
+    message_id = str(payload.get("message_id") or "")
+    if event in _RECORDER_DELTA_EVENTS:
+        key = (sid, event, message_id)
+        now = time.monotonic()
+        with _RECORDER_DELTA_LOCK:
+            last = _RECORDER_DELTA_LAST.get(key)
+            if last is not None and now - last < _RECORDER_DELTA_INTERVAL_SECONDS:
+                return
+            _RECORDER_DELTA_LAST[key] = now
+
+    clean: dict[str, Any] = {}
+    session = _sessions.get(sid)
+    if session is not None:
+        try:
+            clean["event_seq"] = int(session.get("events_seq", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+    for key in (
+        "assistant_message_id",
+        "child_session_id",
+        "kind",
+        "message_id",
+        "model",
+        "parent_session_id",
+        "provider",
+        "reason",
+        "request_id",
+        "source",
+        "status",
+        "task_id",
+        "turn_id",
+        "user_message_id",
+        "where",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            clean[key] = value
+
+    for key in ("followup", "failed", "noop", "running", "success"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            clean[key] = value
+
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                clean[key] = value
+
+    for key in ("api_calls", "duration_ms", "duration_seconds", "message_count", "tool_count"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            clean[key] = value
+
+    for key in ("message", "reasoning", "rendered", "text", "warning"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            clean[f"{key}_chars"] = len(value)
+
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            event,
+            session_id=sid,
+            payload=clean,
+            source="tui_gateway",
+            component="tui_gateway.server",
+        )
+    except Exception:
+        logger.debug("session recorder write failed", exc_info=True)
+
+
+def _record_backend_event(
+    event: str,
+    sid: str,
+    payload: dict | None,
+    *,
+    severity: str = "info",
+    source: str = "tui_gateway",
+) -> None:
+    if not sid:
+        return
+    clean = payload if isinstance(payload, dict) else {}
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            event,
+            session_id=sid,
+            payload=clean,
+            severity=severity,
+            source=source,
+            component="tui_gateway.server",
+        )
+    except Exception:
+        logger.debug("session recorder write failed", exc_info=True)
+
+
+def _tool_duration_ms(duration_s: float | None) -> int | None:
+    if duration_s is None:
+        return None
+    try:
+        return max(0, int(float(duration_s) * 1000))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_tool_result(result: str) -> dict | None:
+    try:
+        data = json.loads(result)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _tool_stage(name: str) -> str:
+    text = str(name or "")
+    if text.startswith("browser_"):
+        return text.removeprefix("browser_") or "browser"
+    return "tool_complete"
+
+
+def _tool_provider(data: dict | None) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    for key in ("provider", "browser_engine", "engine"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:80]
+    return None
+
+
+def _friction_kind_from_text(text: str) -> str | None:
+    lower = text[:4096].lower()
+    if "no browser session" in lower:
+        return "missing_session"
+    if "captcha" in lower or "bot detection" in lower or "bot-detection" in lower:
+        return "blocked"
+    if "cloudflare" in lower or "checking your browser" in lower or "access denied" in lower:
+        return "blocked"
+    if "timed out" in lower or "timeout" in lower:
+        return "timeout"
+    if "auth required" in lower or "login required" in lower or "sign in" in lower:
+        return "auth_required"
+    if "unauthorized" in lower or "forbidden" in lower:
+        return "auth_required"
+    return None
+
+
+def _browser_friction_kind(result: str, data: dict | None) -> str | None:
+    if isinstance(data, dict):
+        if data.get("bot_detection_warning"):
+            return "blocked"
+        if data.get("fallback_warning") or data.get("browser_engine_fallback"):
+            return "fallback"
+        structured = _friction_kind_from_text(str(data.get("error") or ""))
+        if structured:
+            return structured
+        if data.get("error") or data.get("success") is False:
+            return "error"
+    return _friction_kind_from_text(result or "")
+
+
+def _tool_error_kind(result: str, data: dict | None) -> str | None:
+    if isinstance(data, dict):
+        structured = _friction_kind_from_text(str(data.get("error") or ""))
+        if structured:
+            return structured
+        if data.get("error") or data.get("success") is False:
+            return "error"
+    return None
+
+
+def _record_tool_completion_friction(
+    sid: str,
+    name: str,
+    result: str,
+    duration_s: float | None,
+) -> None:
+    data = _parse_tool_result(result)
+    duration_ms = _tool_duration_ms(duration_s)
+
+    if str(name or "").startswith("browser_"):
+        kind = _browser_friction_kind(result or "", data)
+        if kind:
+            outcome = "recovered" if kind == "fallback" else "failed"
+            payload = {
+                "tool_name": name,
+                "stage": _tool_stage(name),
+                "friction_kind": kind,
+                "attempt_count": 1,
+                "outcome": outcome,
+            }
+            provider = _tool_provider(data)
+            if provider:
+                payload["provider"] = provider
+            if duration_ms is not None:
+                payload["duration_ms"] = duration_ms
+            _record_backend_event(
+                "browser.friction_detected",
+                sid,
+                payload,
+                severity="warning" if outcome == "failed" else "info",
+            )
+
+    error_kind = _tool_error_kind(result or "", data)
+    if error_kind:
+        payload = {
+            "tool_name": name,
+            "stage": _tool_stage(name),
+            "friction_kind": error_kind,
+            "attempt_count": 1,
+            "outcome": "failed",
+        }
+        provider = _tool_provider(data)
+        if provider:
+            payload["provider"] = provider
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        _record_backend_event("tool.error", sid, payload, severity="warning")
+
+
+def _subagent_replay_from_live_parent(
+    child_session_id: str,
+    transport,
+    *,
+    parent_session_id: str | None = None,
+) -> tuple[list[dict], int, bool, bool]:
+    """Replay a running child subagent's parent-relayed event stream.
+
+    Subagent progress is emitted through the parent gateway session because the
+    parent owns the delegation tool callback. The child session row only gets
+    its assistant/tool transcript after the child finishes, so drilling into a
+    running child must replay the parent's child-scoped subagent frames.
+
+    Returns ``(events, replay_seq, attached, saw_terminal)``. ``attached`` is
+    true when the caller's transport was added to a matching parent stream, so
+    future child events will continue to arrive live.
+    """
+    child_session_id = str(child_session_id or "")
+    parent_session_id = str(parent_session_id or "")
+    if not child_session_id:
+        return ([], 0, False, False)
+
+    replay_events: list[dict] = []
+    replay_seq = 0
+    attached = False
+    saw_terminal = False
+    for _existing_sid, existing_session in list(_sessions.items()):
+        existing_key = str(existing_session.get("session_key") or "")
+        parent_key_match = bool(parent_session_id and existing_key == parent_session_id)
+        ring = existing_session.get("events")
+        events_lock = existing_session.get("events_lock")
+
+        def _snapshot_and_bind() -> None:
+            nonlocal replay_seq, attached, saw_terminal
+            events = [
+                event
+                for event in list(ring or [])
+                if _is_subagent_event_for_child(event, child_session_id)
+            ]
+            if not events and not parent_key_match:
+                return
+            _bind_session_transport(existing_session, transport)
+            attached = True
+            replay_seq = max(replay_seq, int(existing_session.get("events_seq", 0)))
+            replay_events.extend(events)
+            if any(event.get("type") == "subagent.complete" for event in events):
+                saw_terminal = True
+
+        if ring is not None and events_lock is not None:
+            with events_lock:
+                _snapshot_and_bind()
+        else:
+            _snapshot_and_bind()
+
+    replay_events.sort(key=_event_ts)
+    return (replay_events, replay_seq, attached, saw_terminal)
+
+
+def _live_subagent_resume_payload(
+    child_session_id: str,
+    parent_session_id: str | None,
+    running: bool,
+) -> dict | None:
+    if not running or not child_session_id:
+        return None
+    payload: dict[str, Any] = {
+        "child_session_id": child_session_id,
+        "parent_session_id": parent_session_id or None,
+    }
+    try:
+        from tools.delegate_tool import list_active_subagents
+
+        for record in list_active_subagents():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("child_session_id") or "") != child_session_id:
+                continue
+            payload.update(
+                {
+                    "subagent_id": record.get("subagent_id") or None,
+                    "task_id": record.get("async_task_id") or None,
+                    "goal": record.get("goal") or "",
+                    "task_index": record.get("task_index") or 0,
+                }
+            )
+            if record.get("parent_session_id"):
+                payload["parent_session_id"] = record.get("parent_session_id")
+            break
+    except Exception:
+        pass
+    return payload
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
@@ -462,12 +822,12 @@ def write_json(obj: dict) -> bool:
                         # followup-flagged complete is a steer continuation
                         # of the same visual run — keep the ring so a
                         # reattach mid-steer replays the whole run.
-                        if event_type == "message.complete" and not params.get("followup"):
+                        if event_type == "message.complete" and not _event_is_followup(params):
                             ring.clear()
                 else:
                     sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
                     _ring_append(ring, params, event_type)
-                    if event_type == "message.complete" and not params.get("followup"):
+                    if event_type == "message.complete" and not _event_is_followup(params):
                         ring.clear()
         if sess is not None:
             transports = sess.get("transports")
@@ -502,16 +862,21 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     if payload is not None:
         params["payload"] = payload
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    _record_gateway_event(event, sid, payload)
 
 
-def _status_update(sid: str, kind: str, text: str | None = None):
+def _status_update(sid: str, kind: str, text: str | None = None, **extra):
     body = (text if text is not None else kind).strip()
     if not body:
         return
+    payload = {"kind": kind if text is not None else "status", "text": body}
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
     _emit(
         "status.update",
         sid,
-        {"kind": kind if text is not None else "status", "text": body},
+        payload,
     )
 
 
@@ -987,6 +1352,10 @@ def _tool_progress_enabled(sid: str) -> bool:
     return _session_tool_progress_mode(sid) != "off"
 
 
+def _show_reasoning_enabled(sid: str) -> bool:
+    return bool(_sessions.get(sid, {}).get("show_reasoning", False))
+
+
 def _restart_slash_worker(session: dict):
     worker = session.get("slash_worker")
     if worker:
@@ -1077,25 +1446,50 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     return {"value": result.new_model, "warning": result.warning_message or ""}
 
 
+def _estimate_compaction_request_tokens(agent, history: list[dict]) -> int:
+    from agent.model_metadata import (
+        estimate_messages_tokens_rough,
+        estimate_request_tokens_rough,
+    )
+
+    pressure_builder = getattr(type(agent), "_messages_for_compression_pressure", None)
+    if callable(pressure_builder):
+        try:
+            payload = agent._messages_for_compression_pressure(
+                history,
+                getattr(agent, "_cached_system_prompt", "") or "",
+            )
+            return estimate_request_tokens_rough(
+                payload,
+                system_prompt="",
+                tools=getattr(agent, "tools", None) or None,
+            )
+        except Exception:
+            pass
+    return estimate_messages_tokens_rough(history)
+
+
 def _compress_session_history(
     session: dict, focus_topic: str | None = None
 ) -> tuple[int, dict]:
-    from agent.model_metadata import estimate_messages_tokens_rough
 
     agent = session["agent"]
     history = list(session.get("history", []))
     if len(history) < 4:
         return 0, _get_usage(agent)
-    approx_tokens = estimate_messages_tokens_rough(history)
+    cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+    approx_tokens = _estimate_compaction_request_tokens(agent, history)
     compressed, _ = agent._compress_context(
         history,
         getattr(agent, "_cached_system_prompt", "") or "",
         approx_tokens=approx_tokens,
         focus_topic=focus_topic or None,
     )
+    cursor_after = int(getattr(agent, "compaction_cursor", 0) or 0)
     session["history"] = compressed
     session["history_version"] = int(session.get("history_version", 0)) + 1
-    return len(history) - len(compressed), _get_usage(agent)
+    removed = max(len(history) - len(compressed), cursor_after - cursor_before, 0)
+    return removed, _get_usage(agent)
 
 
 def _get_usage(agent) -> dict:
@@ -1316,6 +1710,7 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
 
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
+    started_at = time.time()
     if session is not None:
         try:
             from agent.display import capture_local_edit_snapshot
@@ -1325,7 +1720,6 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
         except Exception:
             pass
-        started_at = time.time()
         session.setdefault("tool_started_at", {})[tool_call_id] = started_at
         # Snapshot the running tool so session.resume can rebuild the
         # tool cards on reattach. The event ring rotates a long turn's
@@ -1364,6 +1758,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     duration_s = completed_at - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
+    _record_tool_completion_friction(sid, name, result, duration_s)
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
@@ -1393,12 +1788,27 @@ def _on_tool_progress(
     _args: dict | None = None,
     **_kwargs,
 ):
+    if event_type == "steer.applied":
+        try:
+            correction_count = max(1, int(_kwargs.get("count") or 1))
+        except (TypeError, ValueError):
+            correction_count = 1
+        payload = {
+            "stage": "steer",
+            "friction_kind": "correction",
+            "correction_count": correction_count,
+            "attempt_count": 1,
+            "outcome": "applied",
+        }
+        if _kwargs.get("child_session_id"):
+            payload["child_session_id"] = str(_kwargs["child_session_id"])
+        _record_backend_event("experience.recovery_attempted", sid, payload)
     if not _tool_progress_enabled(sid):
         return
     if event_type == "tool.started" and name:
         _emit("tool.progress", sid, {"name": name, "preview": preview or ""})
         return
-    if event_type == "reasoning.available" and preview:
+    if event_type == "reasoning.available" and preview and _show_reasoning_enabled(sid):
         _emit("reasoning.available", sid, {"text": str(preview)})
         return
     if event_type == "steer.applied":
@@ -1412,6 +1822,10 @@ def _on_tool_progress(
         }
         if _kwargs.get("sources"):
             payload["sources"] = [str(s) for s in _kwargs["sources"]]
+        if _kwargs.get("client_message_ids"):
+            payload["client_message_ids"] = [
+                str(s) for s in _kwargs["client_message_ids"] if s
+            ]
         if _kwargs.get("child_session_id"):
             payload["child_session_id"] = str(_kwargs["child_session_id"])
         _emit("steer.applied", sid, payload)
@@ -1492,8 +1906,10 @@ def _agent_cbs(sid: str) -> dict:
         ),
         tool_gen_callback=lambda name: _tool_progress_enabled(sid)
         and _emit("tool.generating", sid, {"name": name}),
-        thinking_callback=lambda text: _emit("thinking.delta", sid, {"text": text}),
-        reasoning_callback=lambda text: _emit("reasoning.delta", sid, {"text": text}),
+        thinking_callback=lambda text: _show_reasoning_enabled(sid)
+        and _emit("thinking.delta", sid, {"text": text}),
+        reasoning_callback=lambda text: _show_reasoning_enabled(sid)
+        and _emit("reasoning.delta", sid, {"text": text}),
         status_callback=lambda kind, text=None: _status_update(
             sid, str(kind), None if text is None else str(text)
         ),
@@ -2316,7 +2732,18 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 entry["message_id"] = _stable_id(m)
             messages.append(entry)
             continue
-        display = _content_to_text(m.get("content"))
+        display_source = (
+            m.get("_display_content")
+            if (
+                role == "user"
+                and isinstance(m.get("client_message_id"), str)
+                and str(m.get("client_message_id")).startswith("steer.")
+                and isinstance(m.get("_display_content"), str)
+                and str(m.get("_display_content")).strip()
+            )
+            else m.get("content")
+        )
+        display = _content_to_text(display_source)
         if not display.strip():
             continue
         entry = {"role": role, "text": display}
@@ -2459,6 +2886,7 @@ def _(rid, params: dict) -> dict:
             "session_id": sid,
             "persisted_session_id": key,
             **identity_payload,
+            "show_reasoning": _load_show_reasoning(),
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -2568,6 +2996,31 @@ def _(rid, params: dict) -> dict:
     active_target = str(identity_payload.get("active_session_id") or target)
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+    new_transport = current_transport() or _stdio_transport
+    parent_session_id = (
+        str(found.get("parent_session_id") or "") if isinstance(found, dict) else ""
+    )
+    (
+        child_replay_events,
+        child_replay_seq,
+        child_replay_attached,
+        child_replay_terminal,
+    ) = _subagent_replay_from_live_parent(
+        target,
+        new_transport,
+        parent_session_id=parent_session_id,
+    )
+    child_replay_running = bool(
+        child_replay_attached
+        and not child_replay_terminal
+        and isinstance(found, dict)
+        and found.get("ended_at") is None
+    )
+    live_subagent = _live_subagent_resume_payload(
+        target,
+        parent_session_id,
+        child_replay_running,
+    )
     for existing_sid, existing_session in list(_sessions.items()):
         existing_key = existing_session.get("session_key")
         if existing_key not in {target, active_target}:
@@ -2583,7 +3036,6 @@ def _(rid, params: dict) -> dict:
         # transport, which starved every other live viewer of the same
         # session (the open chat went deaf mid-turn whenever a second
         # surface resumed it; only re-attaching stole the stream back).
-        new_transport = current_transport() or _stdio_transport
         replay_events: list[dict] = []
         replay_seq = 0
         running_tools: list[dict] = []
@@ -2601,6 +3053,10 @@ def _(rid, params: dict) -> dict:
             # Legacy sessions created before the ring existed — bind
             # transport without the snapshot; replay just stays empty.
             _bind_session_transport(existing_session, new_transport)
+        if child_replay_events:
+            replay_events.extend(child_replay_events)
+            replay_events.sort(key=_event_ts)
+            replay_seq = max(replay_seq, child_replay_seq)
         with existing_session.get("history_lock", threading.Lock()):
             history = list(existing_session.get("history", []))
         messages = _history_to_messages(history) if include_messages else None
@@ -2614,34 +3070,61 @@ def _(rid, params: dict) -> dict:
             "message_count": len(messages) if messages is not None else len(history),
             "agent_ready": bool(existing_session.get("agent")),
             "info": _light_session_info(existing_session.get("agent")),
-            "running": bool(existing_session.get("running")),
+            "running": bool(existing_session.get("running") or child_replay_running),
             "replay_events": replay_events,
             "replay_seq": replay_seq,
             "running_tools": running_tools,
+            "show_reasoning": bool(existing_session.get("show_reasoning", False)),
         }
+        if live_subagent is not None:
+            result["live_subagent"] = live_subagent
         if messages is not None:
             result["messages"] = messages
         return _ok(rid, result)
 
     try:
-        # Follow the compression-continuation chain to its live tip before
-        # loading history. When a turn compacts, the agent rotates to a NEW
-        # child session holding the compressed (small) history; the original
-        # session keeps its full pre-compaction transcript and is marked
-        # ended ("compression"). A cold resume keyed on the ORIGINAL id would
-        # reload that full transcript every time — so the next turn's preflight
-        # immediately re-compacts, looping forever ("it already compacted twice
-        # but still thinks it needs to"). Resolving to the tip loads the small
-        # compressed history and binds the agent/slash-worker to the live
-        # continuation. get_compression_tip is idempotent and a no-op for
-        # sessions that were never compressed.
+        # Compaction redesign: a new-style session (compaction_cursor set on its
+        # row) is NEVER rotated. Its transcript is the full append-only history;
+        # the payload cursor + synthetic summary live in session METADATA and are
+        # hydrated onto the agent in AIAgent.__init__ (so the next turn trims the
+        # payload without touching the transcript). Resolve it directly — skip the
+        # compression-tip walk entirely so a stale/legacy tip can never redirect a
+        # cursor session — and load its full transcript verbatim.
+        _resume_row = None
         try:
-            _tip = db.get_compression_tip(target)
+            _resume_row = db.get_session(target)
         except Exception:
-            _tip = None
-        if _tip and _tip != target:
-            logger.info("resume: following compression chain %s -> %s", target, _tip)
-            target = _tip
+            _resume_row = None
+        _new_style_compaction = bool(
+            _resume_row and (_resume_row.get("compaction_cursor") or 0)
+        )
+        if not _new_style_compaction:
+            # Legacy (pre-redesign) read path — KEPT verbatim so old rotated
+            # lineages still open. Follow the compression-continuation chain to
+            # its live tip before loading history. When a turn compacted under the
+            # OLD design, the agent rotated to a NEW child session holding the
+            # compressed (small) history; the original keeps its full
+            # pre-compaction transcript and is marked ended ("compression"). A cold
+            # resume keyed on the ORIGINAL id would reload that full transcript
+            # every time — so the next turn's preflight immediately re-compacts,
+            # looping forever ("it already compacted twice but still thinks it
+            # needs to"). Resolving to the tip loads the small compressed history
+            # and binds the agent/slash-worker to the live continuation.
+            # get_compression_tip is idempotent and a no-op for sessions that were
+            # never compressed.
+            try:
+                _tip = db.get_compression_tip(target)
+            except Exception:
+                _tip = None
+            if _tip and _tip != target:
+                logger.info("resume: following compression chain %s -> %s", target, _tip)
+                target = _tip
+        else:
+            logger.info(
+                "resume: cursor-model session %s (compaction_cursor=%s) — "
+                "skipping tip-walk, loading full append-only transcript",
+                target, _resume_row.get("compaction_cursor"),
+            )
         identity_payload = _session_identity_for(db, target)
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
@@ -2745,7 +3228,14 @@ def _(rid, params: dict) -> dict:
         "message_count": len(messages) if messages is not None else len(history),
         "agent_ready": False,
         "info": _light_session_info(),
+        "running": child_replay_running,
+        "replay_events": child_replay_events,
+        "replay_seq": child_replay_seq,
+        "running_tools": [],
+        "show_reasoning": bool(session.get("show_reasoning", False)),
     }
+    if live_subagent is not None:
+        result["live_subagent"] = live_subagent
     if messages is not None:
         result["messages"] = messages
     return _ok(rid, result)
@@ -2822,7 +3312,7 @@ def _(rid, params: dict) -> dict:
         return err
     if session.get("running"):
         return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /compress"
+            rid, 4009, "session busy — /interrupt the current turn before /compact"
         )
     try:
         with session["history_lock"]:
@@ -2971,6 +3461,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    was_running = bool(session.get("running"))
     if hasattr(session["agent"], "interrupt"):
         session["agent"].interrupt()
     # Scope the pending-prompt release to THIS session.  A global
@@ -2984,6 +3475,27 @@ def _(rid, params: dict) -> dict:
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
     except Exception:
         pass
+    if was_running:
+        payload = {
+            "stage": "interrupt",
+            "friction_kind": "user_abandoned",
+            "attempt_count": 1,
+            "friction_count": 1,
+            "outcome": "interrupted",
+            "abandoned": True,
+        }
+        _record_backend_event(
+            "experience.friction_detected",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
+        _record_backend_event(
+            "experience.abandoned",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
     return _ok(rid, {"status": "interrupted"})
 
 
@@ -2992,6 +3504,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    was_running = bool(session.get("running"))
     interrupted = False
     killed = 0
     if hasattr(session["agent"], "interrupt"):
@@ -3013,6 +3526,27 @@ def _(rid, params: dict) -> dict:
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
     except Exception:
         pass
+    if was_running:
+        payload = {
+            "stage": "stop",
+            "friction_kind": "user_abandoned",
+            "attempt_count": 1,
+            "friction_count": 1,
+            "outcome": "stopped",
+            "abandoned": True,
+        }
+        _record_backend_event(
+            "experience.friction_detected",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
+        _record_backend_event(
+            "experience.abandoned",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
     _mark_session_idle(session)
     return _ok(
         rid,
@@ -3094,6 +3628,124 @@ def _(rid, params: dict) -> dict:
             "subagent_id": subagent_id or None,
             "child_session_id": child_session_id or None,
             "task_id": task_id or None,
+        },
+    )
+
+
+def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
+    display = str(text or "").strip()
+    if not display:
+        return 0
+    emitted = 0
+    seen: set[tuple[str, str]] = set()
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        child_session_id = str(target.get("child_session_id") or "")
+        parent_session_id = str(target.get("parent_session_id") or "")
+        if not child_session_id or not parent_session_id:
+            continue
+        for gateway_sid, session in list(_sessions.items()):
+            if not isinstance(session, dict):
+                continue
+            session_key = str(session.get("session_key") or "")
+            agent_session_id = str(
+                getattr(session.get("agent"), "session_id", "") or ""
+            )
+            if parent_session_id not in {session_key, agent_session_id}:
+                continue
+            marker = (gateway_sid, child_session_id)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            steer_payload = {
+                "subagent_id": target.get("subagent_id") or None,
+                "child_session_id": child_session_id,
+                "task_id": target.get("task_id") or None,
+                "task_index": target.get("task_index") or 0,
+                "goal": target.get("goal") or "",
+                "text": display,
+                "source": "subagent.message",
+                "client_message_id": target.get("client_message_id") or None,
+                "persisted": bool(target.get("persisted")),
+            }
+            # Direct child messages are soft steers, not fresh turns. Emit the
+            # same queued marker parent steering uses so the drill-in holds the
+            # current run open and later folds the message into the timeline at
+            # steer.applied instead of rendering "Worked..." + a restarted run.
+            _emit("steer.queued", gateway_sid, steer_payload)
+            _emit(
+                "subagent.message",
+                gateway_sid,
+                {
+                    "subagent_id": target.get("subagent_id") or None,
+                    "child_session_id": child_session_id,
+                    "task_id": target.get("task_id") or None,
+                    "task_index": target.get("task_index") or 0,
+                    "goal": target.get("goal") or "",
+                    "text": display,
+                    "status": "running",
+                    "source": "user",
+                    "client_message_id": target.get("client_message_id") or None,
+                    "persisted": bool(target.get("persisted")),
+                },
+            )
+            emitted += 1
+    return emitted
+
+
+@method("subagent.message")
+def _(rid, params: dict) -> dict:
+    """Steer a currently running child subagent by child/session/task id."""
+    from tools.delegate_tool import message_subagent
+
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return _err(rid, 4002, "text is required")
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    child_session_id = str(params.get("child_session_id") or "").strip()
+    task_id = str(params.get("task_id") or "").strip()
+    if not subagent_id and not child_session_id and not task_id:
+        return _err(rid, 4000, "subagent_id, child_session_id, or task_id required")
+    client_message_id = str(params.get("client_message_id") or "").strip()
+    if not client_message_id:
+        client_message_id = f"steer.{uuid.uuid4().hex}"
+
+    result = message_subagent(
+        text,
+        subagent_id=subagent_id,
+        child_session_id=child_session_id,
+        task_id=task_id,
+        source="dashboard_steer",
+        client_message_id=client_message_id,
+    )
+    display_text = str(params.get("display_text") or "").strip() or text
+    emitted = _emit_subagent_message_to_parent(
+        result.get("targets") if isinstance(result.get("targets"), list) else [],
+        display_text,
+    )
+    targets = result.get("targets") if isinstance(result.get("targets"), list) else []
+    client_message_ids = [
+        str(t.get("client_message_id"))
+        for t in targets
+        if isinstance(t, dict) and t.get("client_message_id")
+    ]
+    response_client_message_id = (
+        client_message_ids[0]
+        if len(client_message_ids) == 1
+        else (client_message_id if not client_message_ids else None)
+    )
+    return _ok(
+        rid,
+        {
+            "found": bool(result.get("found")),
+            "accepted": int(result.get("accepted") or 0),
+            "persisted": int(result.get("persisted") or 0),
+            "all_persisted": bool(result.get("all_persisted")),
+            "targets": targets,
+            "emitted": emitted,
+            "client_message_id": response_client_message_id,
+            "client_message_ids": client_message_ids,
         },
     )
 
@@ -3312,10 +3964,15 @@ def _forward_steer_to_children(parent_keys: set[str], text: str) -> int:
             if child_parent not in keys:
                 continue
             try:
-                if hasattr(child, "queue_soft_interrupt") and child.queue_soft_interrupt(
-                    text, source="dashboard_steer"
-                ):
-                    count += 1
+                child_session_id = str(getattr(child, "session_id", "") or "")
+                if not child_session_id:
+                    continue
+                result = _dt.message_subagent(
+                    text,
+                    child_session_id=child_session_id,
+                    source="dashboard_steer",
+                )
+                count += int(result.get("accepted") or 0)
             except Exception:
                 continue
     except Exception:
@@ -3398,6 +4055,24 @@ def _(rid, params: dict) -> dict:
         status = "steering_delegation" if forwarded else "queued_delegation"
     else:
         status = "queued"
+    if status != "rejected":
+        steer_sid = next(
+            (k for k, v in _sessions.items() if v is target_session), None
+        ) or str(params.get("session_id") or "")
+        payload = {
+            "stage": "steer",
+            "friction_kind": "correction",
+            "correction_count": 1,
+            "attempt_count": 1,
+            "friction_count": 1,
+            "outcome": status,
+        }
+        _record_backend_event("experience.friction_detected", steer_sid, payload)
+        _record_backend_event(
+            "experience.correction_requested",
+            steer_sid,
+            payload,
+        )
     if status == "queued":
         # The steered message renders INLINE in the run's timeline. Emitting
         # it as an event (instead of the sender drawing it locally) makes it
@@ -3803,6 +4478,36 @@ def _mark_session_idle(session: dict) -> None:
         session["idle_since"] = time.monotonic()
 
 
+_DEBUG_TRACE_SECRET_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+}
+
+
+def _redact_debug_trace_value(value, key: str = ""):
+    if key.lower() in _DEBUG_TRACE_SECRET_KEYS:
+        return "[redacted-secret]"
+    if isinstance(value, dict):
+        return {str(k)[:96]: _redact_debug_trace_value(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_debug_trace_value(v) for v in value[:50]]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    try:
+        from elevate_cli.diagnostics.session_recorder import _base_report, _redact_string
+
+        return _redact_string(text, _base_report())
+    except Exception:
+        return text
+
+
 @method("debug.trace")
 def _(rid, params: dict) -> dict:
     """Debug-only: append a client UI trace to blank-trace.log so a render
@@ -3810,11 +4515,12 @@ def _(rid, params: dict) -> dict:
     try:
         _bt = os.path.join(_elevate_home, "logs", "blank-trace.log")
         os.makedirs(os.path.dirname(_bt), exist_ok=True)
+        payload = _redact_debug_trace_value(params.get("payload") or params)
         with open(_bt, "a", encoding="utf-8") as f:
             f.write(
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} "
                 f"sid={params.get('session_id','')} "
-                f"{json.dumps(params.get('payload') or params, ensure_ascii=False)[:4000]}\n"
+                f"{json.dumps(payload, ensure_ascii=False)[:4000]}\n"
             )
     except Exception:
         pass
@@ -4081,32 +4787,14 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
-                # A session-id rotation means the turn COMPACTED (compress
-                # ends the old session, opens a fresh tip). Its compressed
-                # message list is authoritative and the pre-turn full history
-                # is now stale — so the write-back below must accept it even
-                # if the history_version moved, or session["history"] keeps
-                # the full pre-compaction history and the NEXT turn compacts
-                # all over again ("compacted twice" — Justin's report).
-                _turn_compacted = False
-                agent_session_id = getattr(agent, "session_id", None)
-                if isinstance(agent_session_id, str) and agent_session_id:
-                    old_session_key = str(session.get("session_key") or "")
-                    if agent_session_id != old_session_key:
-                        _turn_compacted = True
-                        logger.info(
-                            "prompt.submit: agent session rotated %s -> %s",
-                            old_session_key,
-                            agent_session_id,
-                        )
-                        session["session_key"] = agent_session_id
-                        db = _get_db()
-                        if db is not None:
-                            _emit(
-                                "session.identity",
-                                sid,
-                                _session_identity_for(db, agent_session_id),
-                            )
+                # Compaction redesign: a compacting turn NO LONGER rotates the
+                # session id — the transcript is append-only and compaction lives
+                # in the payload-time cursor + metadata. So the old
+                # rotation-compensation (session-key swap + session.identity emit
+                # + force-write-back that overrode a history_version bump) is gone;
+                # the plain version-match write-back below is sufficient. The
+                # "compacted twice" loop that needed the override can no longer
+                # happen because there is no rotation to desync on.
 
                 last_reasoning = None
                 status_note = None
@@ -4114,11 +4802,8 @@ def _(rid, params: dict) -> dict:
                     if isinstance(result.get("messages"), list):
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
-                            if current_version == current_history_version or _turn_compacted:
+                            if current_version == current_history_version:
                                 session["history"] = result["messages"]
-                                # Advance past whatever the latest version is —
-                                # on the compacted-override path current_version
-                                # may be ahead of our captured baseline.
                                 _next_ver = max(current_version, current_history_version) + 1
                                 session["history_version"] = _next_ver
                                 current_history_version = _next_ver
@@ -4189,6 +4874,19 @@ def _(rid, params: dict) -> dict:
                 if not has_followup:
                     _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
+                if followup_rounds > 0 and not has_followup:
+                    _record_backend_event(
+                        "experience.recovered",
+                        sid,
+                        {
+                            "stage": "followup",
+                            "friction_kind": "correction",
+                            "correction_count": followup_rounds,
+                            "attempt_count": followup_rounds,
+                            "outcome": status,
+                            "recovered": status == "complete",
+                        },
+                    )
 
                 # Auto-generate a session title after the first exchange.
                 # CLI parity: cli.py fires maybe_auto_title here, but the
@@ -5154,7 +5852,7 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
 )
 
 _TUI_EXTRA: list[tuple[str, str, str]] = [
-    ("/compact", "Toggle compact display mode", "TUI"),
+    ("/compactview", "Toggle compact display mode", "TUI"),
     ("/logs", "Show recent gateway log lines", "TUI"),
 ]
 
@@ -5889,8 +6587,8 @@ def _(rid, params: dict) -> dict:
         text_lower = text.lower()
         extras = [
             {
-                "text": "/compact",
-                "display": "/compact",
+                "text": "/compactview",
+                "display": "/compactview",
                 "meta": "Toggle compact display mode",
             },
             {
@@ -5971,7 +6669,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # worker thread running agent.run_conversation is using.  Parity
     # with the session.compress / session.undo guards and the gateway
     # runner's running-agent /model guard.
-    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress"}
+    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compact"}
     if name in _MUTATES_WHILE_RUNNING and session.get("running"):
         return f"session busy — /interrupt the current turn before running /{name}"
 
@@ -5987,7 +6685,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             new_prompt = (cfg.get("agent") or {}).get("system_prompt", "") or ""
             agent.ephemeral_system_prompt = new_prompt or None
             agent._cached_system_prompt = None
-        elif name == "compress" and agent:
+        elif name == "compact" and agent:
             with session["history_lock"]:
                 _compress_session_history(session, arg)
             _emit("session.info", sid, _session_info(agent))
@@ -6010,10 +6708,10 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
 
 
 def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str:
-    """Handle /compress in-process instead of paying the slash-worker tax."""
+    """Handle /compact in-process instead of paying the slash-worker tax."""
     agent = session.get("agent")
     if session.get("running"):
-        return "session busy — /interrupt the current turn before running /compress"
+        return "session busy — /interrupt the current turn before running /compact"
     if not agent:
         return "(._.) No active agent -- send a message first."
     if not getattr(agent, "compression_enabled", True):
@@ -6022,19 +6720,28 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
     with session["history_lock"]:
         original_history = list(session.get("history", []))
         if len(original_history) < 4:
-            return "(._.) Not enough conversation to compress (need at least 4 messages)."
+            return "(._.) Not enough conversation to compact (need at least 4 messages)."
 
         from agent.manual_compression_feedback import summarize_manual_compression
-        from agent.model_metadata import estimate_messages_tokens_rough
 
-        approx_tokens = estimate_messages_tokens_rough(original_history)
+        cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+        approx_tokens = _estimate_compaction_request_tokens(agent, original_history)
         # Surface the pill during the ~24-36s summary call. Manual /compress
         # runs OUTSIDE run_conversation, so the agent's status callbacks never
         # reach the client — without this the chat sits silent (no "Compacting
         # context" pill) until the result card pops. Client maps this text to
         # setCompacting(true); the "Session compacted" status below clears it.
         # try/finally guarantees the pill is released even on error.
-        _emit("status", sid, {"text": "Compacting context"})
+        # Emit on the status.update channel the frontend actually subscribes to
+        # (it has no gw.on("status") listener). Text "Compacting context" maps to
+        # setCompacting(true); "Session compacted" below maps to setCompacting(false).
+        _status_update(
+            sid,
+            "compacting_context",
+            "Compacting context",
+            reason="manual_compact",
+            source="manual",
+        )
         try:
             compressed, _ = agent._compress_context(
                 original_history,
@@ -6043,45 +6750,40 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
                 focus_topic=focus_topic or None,
             )
         except Exception:
-            _emit("status", sid, {"text": "Session compacted"})  # release the pill
+            _status_update(
+                sid,
+                "session_compacted",
+                "Session compacted",
+                reason="manual_compact",
+                source="manual",
+            )  # release the pill
             raise
+        cursor_after = int(getattr(agent, "compaction_cursor", 0) or 0)
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
 
-        # Durably write the compressed history. _compress_context ROTATES to a
-        # fresh session (ends the old, creates an empty tip, resets the flush
-        # cursor) but does NOT flush — inside run_conversation the turn's normal
-        # _persist_session does that. Manual /compress runs outside a turn, so
-        # without this the rotated session stays EMPTY in the DB: leaving and
-        # returning resumes the OLD 177-message session and re-compacts it (the
-        # "compressed twice with different numbers" bug). Flushing here makes
-        # the compress survive a resume. _last_flushed_db_idx was reset to 0 by
-        # the rotation, so this writes the full compressed list into the tip.
-        try:
-            agent._persist_session(compressed, None)
-        except Exception:
-            logger.exception("manual /compress: failed to persist compressed history")
+        # Cursor compaction persists cursor + summary inside _compress_context.
+        # The transcript remains append-only; re-persisting it here would append
+        # duplicate SQLite rows for messages that were already flushed.
 
-        if (
-            getattr(agent, "session_id", None)
-            and agent.session_id != session.get("session_key")
-        ):
-            session["session_key"] = agent.session_id
-            db = _get_db()
-            if db is not None:
-                _emit("session.identity", sid, _session_identity_for(db, agent.session_id))
-            _restart_slash_worker(session)
-
-        new_tokens = estimate_messages_tokens_rough(compressed)
+        new_tokens = _estimate_compaction_request_tokens(agent, compressed)
         summary = summarize_manual_compression(
             original_history,
             compressed,
             approx_tokens,
             new_tokens,
+            cursor_before=cursor_before,
+            cursor_after=cursor_after,
         )
 
     # Clear the pill and mark the moment done (client maps "compacted" → off).
-    _emit("status", sid, {"text": "Session compacted"})
+    _status_update(
+        sid,
+        "session_compacted",
+        "Session compacted",
+        reason="manual_compact",
+        source="manual",
+    )
     _emit("session.info", sid, _session_info(agent))
     icon = "🗜️" if summary["noop"] else "✅"
     lines = [
@@ -6091,6 +6793,21 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
     if summary["note"]:
         lines.append(f"     {summary['note']}")
     return "\n".join(lines)
+
+
+def _compact_slash_completed(output: str) -> bool:
+    """Return true when /compact reached the actual compaction path."""
+    clean = (output or "").strip().lower()
+    if not clean:
+        return False
+    failed_markers = (
+        "session busy",
+        "not enough conversation",
+        "no active agent",
+        "compression is disabled",
+        "live session sync failed",
+    )
+    return not any(marker in clean for marker in failed_markers)
 
 
 @method("slash.exec")
@@ -6117,21 +6834,25 @@ def _(rid, params: dict) -> dict:
             rid, 4018, f"pending-input command: use command.dispatch for /{_cmd_base}"
         )
 
-    if _cmd_base == "compress":
+    if _cmd_base == "compact":
         _focus = " ".join(_cmd_parts[1:]).strip() if len(_cmd_parts) > 1 else ""
         with session["history_lock"]:
             if len(session.get("history", [])) < 4:
                 return _ok(
                     rid,
                     {
-                        "output": "(._.) Not enough conversation to compress (need at least 4 messages)."
+                        "output": "(._.) Not enough conversation to compact (need at least 4 messages)."
                     },
                 )
         if wait_err := _wait_agent(session, rid):
             return wait_err
+        output = _run_direct_compress_slash(params.get("session_id", ""), session, _focus)
+        payload = {"output": output}
+        if _compact_slash_completed(output):
+            payload.update({"kind": "compact", "display": "Finished compacting"})
         return _ok(
             rid,
-            {"output": _run_direct_compress_slash(params.get("session_id", ""), session, _focus)},
+            payload,
         )
 
     if wait_err := _wait_agent(session, rid):

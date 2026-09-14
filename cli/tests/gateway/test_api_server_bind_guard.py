@@ -1,7 +1,7 @@
 """Tests for the API server bind-address startup guard.
 
 Validates that is_network_accessible() correctly classifies addresses and
-that connect() refuses to start on non-loopback without API_SERVER_KEY.
+that connect() refuses to start on non-loopback when no usable key can be obtained.
 """
 
 import socket
@@ -100,21 +100,23 @@ class TestConnectBindGuard:
     """Verify that connect() refuses dangerous configurations."""
 
     @pytest.mark.asyncio
-    async def test_refuses_ipv4_wildcard_without_key(self):
+    async def test_refuses_ipv4_wildcard_without_key(self, monkeypatch):
+        monkeypatch.setattr(APIServerAdapter, "_ensure_persisted_api_key", lambda self: "")
         adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "0.0.0.0"}))
         result = await adapter.connect()
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_refuses_ipv6_wildcard_without_key(self):
+    async def test_refuses_ipv6_wildcard_without_key(self, monkeypatch):
+        monkeypatch.setattr(APIServerAdapter, "_ensure_persisted_api_key", lambda self: "")
         adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "::"}))
         result = await adapter.connect()
         assert result is False
 
-    def test_allows_loopback_without_key(self):
-        """Loopback with no key should pass the guard."""
+    def test_loopback_generates_key_when_unconfigured(self):
+        """Loopback still requires a key, generated when none is configured."""
         adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1"}))
-        assert adapter._api_key == ""
+        assert adapter._api_key
         # The guard condition: is_network_accessible(host) AND NOT api_key
         # For loopback, is_network_accessible is False so the guard does not block.
         assert is_network_accessible(adapter._host) is False

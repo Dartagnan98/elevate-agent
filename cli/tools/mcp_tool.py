@@ -3562,6 +3562,45 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
             pass
 
 
+def _drain_mcp_loop_before_close(loop: asyncio.AbstractEventLoop) -> None:
+    """Run final asyncio cleanup while the MCP loop is still open."""
+    if loop.is_closed():
+        return
+
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    except Exception:
+        logger.debug("MCP loop pending-task drain failed", exc_info=True)
+
+    try:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        logger.debug("MCP loop async-generator shutdown failed", exc_info=True)
+
+    shutdown_default_executor = getattr(loop, "shutdown_default_executor", None)
+    if shutdown_default_executor is not None:
+        try:
+            loop.run_until_complete(
+                asyncio.wait_for(shutdown_default_executor(), timeout=2.0)
+            )
+        except asyncio.TimeoutError:
+            logger.debug("MCP loop default-executor shutdown timed out")
+        except Exception:
+            logger.debug("MCP loop default-executor shutdown failed", exc_info=True)
+
+    try:
+        import gc
+
+        gc.collect()
+        loop.run_until_complete(asyncio.sleep(0))
+    except Exception:
+        logger.debug("MCP loop final GC drain failed", exc_info=True)
+
+
 def _stop_mcp_loop():
     """Stop the background event loop and join its thread."""
     global _mcp_loop, _mcp_thread
@@ -3574,11 +3613,11 @@ def _stop_mcp_loop():
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
             thread.join(timeout=5)
+        # Reap stdio children before closing the loop so Python subprocess
+        # transports can finish cleanup without printing "Event loop is closed".
+        _kill_orphaned_mcp_children(include_active=True)
+        _drain_mcp_loop_before_close(loop)
         try:
             loop.close()
         except Exception:
             pass
-        # After closing the loop, any stdio subprocesses that survived the
-        # graceful shutdown are now orphaned — include active PIDs too
-        # since the loop is gone and no session can still be in flight.
-        _kill_orphaned_mcp_children(include_active=True)

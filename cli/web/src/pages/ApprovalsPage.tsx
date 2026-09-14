@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Modal } from "@/components/ui/modal";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -519,10 +520,10 @@ export default function ApprovalsPage() {
       </div>
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn't load approvals: {error}
-        </div>
-      ) : tab === "human" ? (
+        <RouteLoadError title="Could not load approvals" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !data ? null : tab === "human" ? (
         loading ? (
           <CardListSkeleton rows={5} />
         ) : humanTasks.length === 0 ? (

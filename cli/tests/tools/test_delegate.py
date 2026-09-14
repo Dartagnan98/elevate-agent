@@ -24,6 +24,8 @@ from tools.delegate_tool import (
     _get_max_concurrent_children,
     _LEGACY_EVENT_MAP,
     MAX_DEPTH,
+    _active_subagents,
+    _active_subagents_lock,
     check_delegate_requirements,
     delegate_task,
     _build_child_agent,
@@ -32,6 +34,7 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    message_subagent,
 )
 
 
@@ -55,6 +58,7 @@ def _make_mock_parent(depth=0):
     parent._print_fn = None
     parent.tool_progress_callback = None
     parent.thinking_callback = None
+    parent.clarify_callback = None
     # A bare MagicMock auto-vivifies _async_delegate_sink as a *callable*
     # attribute, which would route every test through the non-blocking async
     # path (returns {status:"dispatched"} instead of {results:[...]}). Real
@@ -147,6 +151,37 @@ class TestDelegateRequirements(unittest.TestCase):
         )
         self.assertIn(f"up to {_get_max_concurrent_children()}", fn["description"])
         self.assertIn(f"max_spawn_depth={_get_max_spawn_depth()}", fn["description"])
+
+    def test_schema_promotes_specialist_agent_for_admin_work(self):
+        """The model-facing schema should steer Admin workflows to agent='admin'.
+
+        Regression: a full Admin-board CMA test was delegated to Analyst with a
+        weak "report whether it can recover context" brief. The tool schema must
+        explicitly route full Admin/CMA/SkySlope/WEBForms work to Admin and
+        require a self-contained brief.
+        """
+        from tools.delegate_tool import _build_dynamic_schema_overrides
+
+        overrides = _build_dynamic_schema_overrides()
+        desc = overrides["description"]
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+
+        self.assertIn("agent='admin'", desc)
+        self.assertIn("full CMA", desc)
+        self.assertIn("SkySlope", desc)
+        self.assertIn("WEBForms", desc)
+        self.assertIn("real non-mock board deal", desc)
+
+        goal_desc = props["goal"]["description"]
+        context_desc = props["context"]["description"]
+        agent_desc = props["agent"]["description"]
+
+        self.assertIn("record/deal ID", goal_desc)
+        self.assertIn("fallback behavior", goal_desc)
+        self.assertIn("selected deal", context_desc)
+        self.assertIn("loaded skill names", context_desc)
+        self.assertIn("full Admin-board CMA", agent_desc)
+        self.assertIn("admin-result-writer", agent_desc)
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -437,6 +472,234 @@ class TestDelegateTask(unittest.TestCase):
         self.assertTrue(callable(mock_child.thinking_callback))
         mock_child.thinking_callback("deliberating...")
         parent.tool_progress_callback.assert_not_called()
+
+
+class TestInstalledAgentParity(unittest.TestCase):
+    @patch("gateway.agent_lanes.agent_lane_prompt", return_value="ADMIN PERSONA")
+    @patch("elevate_cli.agent_hub.get_agent_def")
+    def test_named_installed_agent_keeps_configured_loadout_and_policy(
+        self, mock_get_agent_def, mock_lane_prompt
+    ):
+        parent = _make_mock_parent(depth=0)
+        clarify_cb = object()
+        parent.clarify_callback = clarify_cb
+        mock_get_agent_def.return_value = {
+            "id": "admin",
+            "name": "Admin",
+            "enabled": True,
+            "toolsets": [
+                "admin_deal",
+                "delegation",
+                "memory",
+                "skills",
+                "clarify",
+                "code_execution",
+            ],
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Run the Admin workflow",
+                context="Use deal B11",
+                toolsets=["terminal"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                agent="admin",
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertEqual(kwargs["agent_id"], "admin")
+        self.assertEqual(
+            kwargs["enabled_toolsets"],
+            [
+                "admin_deal",
+                "delegation",
+                "memory",
+                "skills",
+                "clarify",
+                "code_execution",
+            ],
+        )
+        self.assertFalse(kwargs["skip_context_files"])
+        self.assertFalse(kwargs["skip_memory"])
+        self.assertIs(kwargs["clarify_callback"], clarify_cb)
+        self.assertIn("ADMIN PERSONA", kwargs["ephemeral_system_prompt"])
+        self.assertIn("INSTALLED AGENT MODE", kwargs["ephemeral_system_prompt"])
+        self.assertNotIn("HANDOFF RULE", kwargs["ephemeral_system_prompt"])
+
+    def test_generic_child_stays_restricted(self):
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "file", "delegation", "memory"]
+        parent.clarify_callback = object()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Generic helper task",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+        self.assertTrue(kwargs["skip_context_files"])
+        self.assertTrue(kwargs["skip_memory"])
+        self.assertIsNone(kwargs["clarify_callback"])
+        self.assertIn("HANDOFF RULE", kwargs["ephemeral_system_prompt"])
+
+
+class TestLiveSubagentMessaging(unittest.TestCase):
+    def tearDown(self):
+        with _active_subagents_lock:
+            _active_subagents.clear()
+
+    def test_message_subagent_routes_by_child_session_id(self):
+        agent = MagicMock()
+        agent.session_id = "child-1"
+        agent._parent_session_id = "parent-1"
+        agent._session_db = None
+        agent.queue_soft_interrupt.return_value = True
+        with _active_subagents_lock:
+            _active_subagents.clear()
+            _active_subagents["sa-1"] = {
+                "agent": agent,
+                "async_task_id": "dt-1",
+                "goal": "Assess pricing",
+                "parent_session_id": "parent-1",
+                "subagent_id": "sa-1",
+                "task_index": 2,
+            }
+
+        result = message_subagent("switch to seller follow-up", child_session_id="child-1")
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["persisted"], 0)
+        self.assertFalse(result["all_persisted"])
+        agent.queue_soft_interrupt.assert_called_once_with(
+            "switch to seller follow-up",
+            source="subagent_message",
+            client_message_id=result["targets"][0]["client_message_id"],
+        )
+        self.assertTrue(result["targets"][0]["client_message_id"].startswith("steer."))
+        self.assertEqual(
+            result["targets"],
+            [
+                {
+                    "subagent_id": "sa-1",
+                    "child_session_id": "child-1",
+                    "task_id": "dt-1",
+                    "parent_session_id": "parent-1",
+                    "goal": "Assess pricing",
+                    "task_index": 2,
+                    "client_message_id": result["targets"][0]["client_message_id"],
+                    "persisted": False,
+                }
+            ],
+        )
+
+    def test_message_subagent_routes_all_children_for_task_id(self):
+        agents = []
+        with _active_subagents_lock:
+            _active_subagents.clear()
+            for idx in range(2):
+                agent = MagicMock()
+                agent.session_id = f"child-{idx}"
+                agent._parent_session_id = "parent-1"
+                agent._session_db = None
+                agent.queue_soft_interrupt.return_value = True
+                agents.append(agent)
+                _active_subagents[f"sa-{idx}"] = {
+                    "agent": agent,
+                    "async_task_id": "dt-shared",
+                    "child_session_id": f"child-{idx}",
+                    "goal": f"Task {idx}",
+                    "parent_session_id": "parent-1",
+                    "subagent_id": f"sa-{idx}",
+                    "task_index": idx,
+                }
+
+        result = message_subagent("report status now", task_id="dt-shared")
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["accepted"], 2)
+        client_message_ids = [target["client_message_id"] for target in result["targets"]]
+        self.assertEqual(len(set(client_message_ids)), 2)
+        for idx, agent in enumerate(agents):
+            agent.queue_soft_interrupt.assert_called_once_with(
+                "report status now",
+                source="subagent_message",
+                client_message_id=client_message_ids[idx],
+            )
+        self.assertTrue(result["targets"][0]["client_message_id"].startswith("steer."))
+
+    def test_message_subagent_persists_accepted_steer_immediately(self):
+        class FakeDB:
+            def __init__(self):
+                self.rows = []
+
+            def ensure_session(self, *args, **kwargs):
+                return None
+
+            def get_messages(self, session_id):
+                return list(self.rows)
+
+            def append_message(self, **kwargs):
+                self.rows.append(kwargs)
+
+        agent = MagicMock()
+        agent.session_id = "child-1"
+        agent.platform = "tui"
+        agent.model = "gpt-test"
+        agent._parent_session_id = "parent-1"
+        agent._session_db = FakeDB()
+        agent.queue_soft_interrupt.return_value = True
+        with _active_subagents_lock:
+            _active_subagents.clear()
+            _active_subagents["sa-1"] = {
+                "agent": agent,
+                "async_task_id": "dt-1",
+                "child_session_id": "child-1",
+                "parent_session_id": "parent-1",
+                "subagent_id": "sa-1",
+            }
+
+        result = message_subagent(
+            "focus only on seller follow-up",
+            child_session_id="child-1",
+            client_message_id="steer.fixed",
+        )
+
+        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["persisted"], 1)
+        self.assertTrue(result["all_persisted"])
+        agent.queue_soft_interrupt.assert_called_once_with(
+            "focus only on seller follow-up",
+            source="subagent_message",
+            client_message_id="steer.fixed",
+        )
+        self.assertEqual(len(agent._session_db.rows), 1)
+        self.assertEqual(agent._session_db.rows[0]["session_id"], "child-1")
+        self.assertEqual(agent._session_db.rows[0]["role"], "user")
+        self.assertEqual(
+            agent._session_db.rows[0]["content"],
+            "focus only on seller follow-up",
+        )
+        self.assertEqual(agent._session_db.rows[0]["client_message_id"], "steer.fixed")
+        self.assertTrue(result["targets"][0]["persisted"])
 
 
 class TestToolNamePreservation(unittest.TestCase):

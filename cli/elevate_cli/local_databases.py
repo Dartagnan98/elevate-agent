@@ -95,11 +95,12 @@ def initialize_local_databases(*, include_memory: bool = True) -> list[LocalData
     if include_memory:
         try:
             from plugins.memory.holographic.store import MemoryStore
+            from elevate_cli.data.pg_server import pg_data_dir
 
             store = MemoryStore()
-            path = Path(store.db_path)
+            path = pg_data_dir()
             store.close()
-            results.append(_ok("memory", path, "memory store ready"))
+            results.append(_ok("memory", path, "memory store ready in embedded Postgres"))
         except Exception as exc:  # pragma: no cover - surfaced in installer output
             try:
                 from elevate_constants import get_elevate_home

@@ -1038,6 +1038,50 @@ class TestDeliverResultErrorReturns:
         assert result is not None
         assert "no delivery target" in result
 
+    def test_returns_error_when_send_helper_returns_error(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        send_mock = AsyncMock(return_value={"error": "403 Forbidden"})
+
+        job = {
+            "id": "send-error-job",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", new=send_mock):
+            result = _deliver_result(job, "Output.")
+
+        assert result == "delivery error: 403 Forbidden"
+
+    def test_returns_error_when_send_helper_raises(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        send_mock = AsyncMock(side_effect=RuntimeError("network timeout"))
+
+        job = {
+            "id": "send-exception-job",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", new=send_mock):
+            result = _deliver_result(job, "Output.")
+
+        assert result == "delivery to telegram:123 failed: network timeout"
+
 
 class TestRunJobSessionPersistence:
     def test_run_job_skips_disabled_agent_before_session_start(self, tmp_path):
@@ -1951,7 +1995,7 @@ class TestRunJobSkillBacked:
         assert "Instructions for maps." in prompt_arg
         assert "Combine the results." in prompt_arg
 
-    def test_build_job_prompt_inherits_agent_and_job_skills(self):
+    def test_build_job_prompt_loads_job_skills_and_indexes_agent_skills(self):
         calls: list[str] = []
 
         def _skill_view(name: str) -> str:
@@ -1978,13 +2022,12 @@ class TestRunJobSkillBacked:
             )
 
         assert "AGENT HUB CONTEXT" in result
-        assert "You are running as agent: Admin (admin)." in result
+        assert "You are running as agent: Admin · Transaction Coordinator (admin)." in result
         assert "outside this agent's specialization" in result
-        assert "Instructions for tasks." in result
-        assert "Instructions for nano-pdf." in result
-        assert "Instructions for admin-agent." in result
+        assert "ADDITIONAL SKILLS AVAILABLE ON DEMAND" in result
+        assert "admin-agent" in result
         assert "Instructions for heartbeat-specific." in result
-        assert calls.index("tasks") < calls.index("admin-agent") < calls.index("heartbeat-specific")
+        assert calls == ["heartbeat-specific"]
 
 
 class TestSilentDelivery:
@@ -2052,6 +2095,21 @@ class TestSilentDelivery:
             from cron.scheduler import tick
             tick(verbose=False)
         deliver_mock.assert_called_once()
+
+    def test_delivery_failure_is_recorded_separately_from_agent_success(self):
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "send this", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value="delivery error: 403 Forbidden"), \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        mark_mock.assert_called_once()
+        args, kwargs = mark_mock.call_args
+        assert args == ("monitor-job", True, None)
+        assert kwargs["delivery_error"] == "delivery error: 403 Forbidden"
+        assert kwargs["summary"] == "send this"
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
@@ -2448,6 +2506,25 @@ class TestBuildJobPromptMissingSkill:
         assert "Run the challenge." in result
         assert "Skill(s) not found" not in result
         mock_bump.assert_called_once_with("real-estate/theta-wave")
+
+    def test_real_estate_admin_skill_alias_loads_canonical_skill_when_short_name_is_ambiguous(self):
+        calls: list[str] = []
+
+        def _skill_view(name: str) -> str:
+            calls.append(name)
+            if name == "real-estate-admin/webforms":
+                return json.dumps({"success": True, "content": "Canonical webforms instructions."})
+            return json.dumps({"success": False, "error": f"Ambiguous skill name '{name}'"})
+
+        with patch("tools.skills_tool.skill_view", side_effect=_skill_view), \
+             patch("tools.skill_usage.bump_use") as mock_bump:
+            result = _build_job_prompt({"skills": ["webforms"], "prompt": "Run admin forms."})
+
+        assert calls == ["webforms", "real-estate-admin/webforms"]
+        assert "Canonical webforms instructions." in result
+        assert "Run admin forms." in result
+        assert "Skill(s) not found" not in result
+        mock_bump.assert_called_once_with("real-estate-admin/webforms")
 
 
 class TestBuildJobPromptBumpUse:

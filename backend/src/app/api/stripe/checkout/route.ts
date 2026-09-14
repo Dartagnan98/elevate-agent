@@ -56,36 +56,49 @@ export async function POST(req: NextRequest) {
   // Ensure we have a stripe Customer attached to the user so the portal works
   // for return visits and the webhook can match by customer id.
   let stripeCustomerId = fresh.stripe_customer;
-  if (!stripeCustomerId) {
-    const customer = await stripe.customers.create({
-      email: fresh.email,
-      metadata: { elevate_user_id: fresh.id },
+  let session: Stripe.Response<Stripe.Checkout.Session>;
+  try {
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: fresh.email,
+        metadata: { elevate_user_id: fresh.id },
+      });
+      stripeCustomerId = customer.id;
+      await updateUserSubscription(fresh.id, { stripe_customer: stripeCustomerId });
+    }
+
+    const origin = new URL(req.url).origin;
+    const safePath = (p?: string, fallback = "/account") =>
+      p && p.startsWith("/") && !p.startsWith("//") ? p : fallback;
+
+    session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: stripeCustomerId,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: `${origin}${safePath(parsed.data.success_path, "/account")}?upgrade=success`,
+      cancel_url: `${origin}${safePath(parsed.data.cancel_path, "/account")}?upgrade=cancel`,
+      client_reference_id: fresh.id,
+      metadata: { elevate_user_id: fresh.id, plan },
+      allow_promotion_codes: true,
     });
-    stripeCustomerId = customer.id;
-    await updateUserSubscription(fresh.id, { stripe_customer: stripeCustomerId });
+  } catch {
+    return NextResponse.json({ error: "checkout unavailable" }, { status: 503 });
   }
 
-  const origin = new URL(req.url).origin;
-  const safePath = (p?: string, fallback = "/account") =>
-    p && p.startsWith("/") && !p.startsWith("//") ? p : fallback;
+  if (!session.url) {
+    return NextResponse.json({ error: "checkout unavailable" }, { status: 503 });
+  }
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: stripeCustomerId,
-    line_items: [{ price: priceId, quantity: 1 }],
-    success_url: `${origin}${safePath(parsed.data.success_path, "/account")}?upgrade=success`,
-    cancel_url: `${origin}${safePath(parsed.data.cancel_path, "/account")}?upgrade=cancel`,
-    client_reference_id: fresh.id,
-    metadata: { elevate_user_id: fresh.id, plan },
-    allow_promotion_codes: true,
-  });
-
-  await logAdminAction({
-    actor_user_id: fresh.id,
-    target_user_id: fresh.id,
-    action: "billing.checkout_started",
-    payload: { plan, session_id: session.id },
-  });
+  try {
+    await logAdminAction({
+      actor_user_id: fresh.id,
+      target_user_id: fresh.id,
+      action: "billing.checkout_started",
+      payload: { plan, session_id: session.id },
+    });
+  } catch {
+    // Audit is best-effort; Stripe already returned a redirect URL.
+  }
 
   return NextResponse.json({ url: session.url });
 }

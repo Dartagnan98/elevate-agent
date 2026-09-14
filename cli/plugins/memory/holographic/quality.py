@@ -94,6 +94,83 @@ _CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Compliance / legal / filing language — narrow, high-stakes. These are the
+# rules a model must never silently forget (signatures, disclosures, accepted
+# offers, the contract of purchase and sale). Deliberately conservative: only
+# clear compliance terms fire it, never generic workflow words.
+_COMPLIANCE_RE = re.compile(
+    r"\b(signatures?|initials?|disclosures?|compliance|"
+    r"accepted\s+offer|cps|contract\s+of\s+purchase|filing|"
+    r"seller-?\s?side|buyer-?\s?side)\b",
+    re.IGNORECASE,
+)
+
+# Imperative / rule / verification context. A compliance noun only counts as
+# CRITICAL when it co-occurs with one of these — that is what separates a
+# must-verify RULE ("verify initials before uploading", "do not use a CPS
+# that...") from ordinary domain workflow chatter ("when uploading the CPS,
+# automatically fill the deal sheet", "include the disclosure in the package",
+# a branded email signature). Deliberately excludes workflow verbs like
+# create/include/fill/automatically/when.
+_RULE_CONTEXT_RE = re.compile(
+    r"\b(verify|verified|verifying|ensure|confirm|validate|validated|validating|"
+    r"make\s+sure|required|must|never|do\s+not|don'?t|"
+    r"check\s+(?:that|for|the)|enough\s+(?:initials|signatures)|"
+    r"before\s+(?:you\s+|the\s+)?(?:upload|uploading|file|filing|select|"
+    r"selecting|send|sending|submit|submitting|mark|marking|treating))\b",
+    re.IGNORECASE,
+)
+
+# Workflow / automation / marketing contexts that must NOT count as
+# compliance-critical even when they carry a domain noun + an imperative —
+# these are operational automation or branding, not must-verify rules:
+# accepted-offer reminders, CPS autofill/pull, disclosure-in-package, email
+# footer / signature block / marketing. (Verification rules like fact 45 ——
+# "verify enough initials/signatures before selecting or uploading" —— contain
+# none of these.)
+_COMPLIANCE_EXCLUDE_RE = re.compile(
+    r"(\breminders?\b|\bautomatically\b|auto-?fill|deal\s+sheet|\bthe\s+system\b|"
+    r"include\s+the\s+|in\s+the\s+accepted-offer\s+package|email\s+send\s+workflow|"
+    r"\bfooter\b|\bbranded\b|email\s+signature|signature\s+block|handwritten|"
+    r"marketing\s+(?:email|package|material))",
+    re.IGNORECASE,
+)
+
+# Dated state / data / status logs. These describe a point-in-time fact ("X as
+# of <date>", "credential file updated on <date>", "current buyers ...",
+# subject-removal/status snapshots, "main blocker: ...") rather than a durable
+# must-follow RULE. They stay durable but are NEVER auto-critical (they were
+# inflating correction-critical on real corpora).
+_STATE_LOG_RE = re.compile(
+    r"(\bas\s+of\s+\d|status\s+as\s+of|currentstage|"
+    r"(?:updated|corrected|moved)\s+(?:to\s+|on\s+)?\d{4}-\d{2}-\d{2}|"
+    r"credential\s+file|\bmain\s+blocker\b|status\s+note|"
+    r"current\s+buyers?|subject[-\s]removal|source-of-truth|"
+    r"dashboard\s+(?:status|source-of-truth)|was\s+(?:moved|updated|corrected)\s+(?:to|on))",
+    re.IGNORECASE,
+)
+
+# System / interruption / scaffolding notes that must NEVER be a "correction".
+_SYSTEM_NOTE_RE = re.compile(
+    r"(previous\s+turn\s+was\s+interrupted|your\s+previous\s+turn|"
+    r"interrupted\s+before\s+you\s+could|was\s+interrupted\s+before|"
+    r"\[system\s+note|tool\s+result|new\s+message\s+is\s+asking|"
+    r"runtime\s+note|internal\s+(?:agent|runtime)\s+note)",
+    re.IGNORECASE,
+)
+
+# Strong correction cues — the agent was told it got something WRONG and must
+# remember the fix. Bare "instead of"/"rather than" (common in plain
+# preferences like "user prefers X instead of Y") is deliberately NOT here, so
+# a preference can't masquerade as a critical correction.
+_CORRECTION_CRITICAL_RE = re.compile(
+    r"\b(actually|correction|corrected|wrong|i\s+told\s+you|"
+    r"you\s+(?:got|sent|used|should\s+have|were\s+supposed)|"
+    r"we\s+(?:talked|discussed|spoke)\s+about\s+this|"
+    r"renamed\s+to|moved\s+to|no\s+longer)\b",
+    re.IGNORECASE,
+)
+
 # Verified values: filesystem paths, URLs, emails, money, versions, ports,
 # long hex ids, key:value config fragments.
 _VALUE_RES = [
@@ -146,6 +223,12 @@ def classify_fact_durability(content: str) -> dict:
 
     Conservative bias: with no signals either way the result is ``durable``
     at low confidence — the gate only refuses clearly task-shaped chatter.
+
+    Additionally returns ``critical`` (bool) + ``critical_reason`` (str). A
+    fact is marked critical ONLY for clear-cut cases — a correction, an
+    explicit convention/rule, or compliance/legal/filing language — never for
+    generic workflow content. ``critical_reason`` names the firing signal
+    (``correction`` | ``convention`` | ``compliance``).
     """
     text = " ".join(str(content or "").strip().split())
     signals: list[str] = []
@@ -174,15 +257,21 @@ def classify_fact_durability(content: str) -> dict:
         ephemeral_score += 2.0
         signals.append("placeholder")
 
-    if _CONVENTION_RE.search(text):
+    is_convention = bool(_CONVENTION_RE.search(text))
+    is_correction = bool(_CORRECTION_RE.search(text))
+    is_compliance = bool(_COMPLIANCE_RE.search(text))
+    if is_convention:
         durable_score += 2.0
         signals.append("convention")
     if _PREFERENCE_RE.search(text):
         durable_score += 2.0
         signals.append("preference")
-    if _CORRECTION_RE.search(text):
+    if is_correction:
         durable_score += 2.0
         signals.append("correction")
+    if is_compliance:
+        durable_score += 1.5
+        signals.append("compliance")
     if _SCOPE_RE.search(text):
         durable_score += 1.0
         signals.append("scoped")
@@ -216,11 +305,42 @@ def classify_fact_durability(content: str) -> dict:
 
     confidence = round(winner / total, 3) if total > 0 else 0.5
 
+    # Critical tier — clear-cut, RARE only. v1 auto-critical requires CONTEXT,
+    # not bare domain vocabulary, so a compliance-dense corpus (e.g. a realtor's)
+    # doesn't flood the reserved Must-Follow lane:
+    #   correction  -> a STRONG correction cue (the agent was told it got
+    #                  something wrong), and NOT a system/interruption note;
+    #                  bare "instead of"/"rather than" preferences don't count.
+    #   compliance  -> a legal/domain noun AND imperative/rule/verification
+    #                  context (verify/must/never/before-upload/...), never a
+    #                  bare mention in a workflow/marketing fact.
+    # Precedence correction > compliance. Conventions are NOT auto-critical (too
+    # common); making one must-always needs a future deliberate pin. Never
+    # critical when the fact reads as task chatter (ephemeral) or a system note.
+    is_system_note = bool(_SYSTEM_NOTE_RE.search(text))
+    has_rule_context = bool(_RULE_CONTEXT_RE.search(text))
+    is_workflow_fp = bool(_COMPLIANCE_EXCLUDE_RE.search(text))
+    is_strong_correction = bool(_CORRECTION_CRITICAL_RE.search(text))
+    # Dated state/data logs ("X as of <date>", credential-file updates,
+    # current-buyers/subject-removal snapshots, "main blocker"/status notes)
+    # stay durable but are never auto-critical — they are point-in-time data,
+    # not must-follow rules, and were inflating correction-critical.
+    is_state_log = bool(_STATE_LOG_RE.search(text))
+    critical = False
+    critical_reason = ""
+    if durability == "durable" and not is_system_note and not is_state_log:
+        if is_correction and is_strong_correction:
+            critical, critical_reason = True, "correction"
+        elif is_compliance and has_rule_context and not is_workflow_fp:
+            critical, critical_reason = True, "compliance"
+
     return {
         "durability": durability,
         "confidence": confidence,
         "task_framed": task_framed,
         "signals": signals,
+        "critical": critical,
+        "critical_reason": critical_reason,
     }
 
 

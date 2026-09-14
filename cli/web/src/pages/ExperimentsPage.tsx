@@ -31,6 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -351,10 +352,11 @@ export function CycleRow({
               type="button"
               onClick={() => setConfirmDel(true)}
               disabled={busy}
+              aria-label="Remove cycle"
               title="Remove cycle"
               className="text-muted-foreground/60 hover:text-destructive"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </>
         )}
@@ -401,7 +403,7 @@ function Modal({
   }, [onClose]);
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
       onMouseDown={onClose}
     >
       <div
@@ -413,9 +415,11 @@ function Modal({
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close dialog"
+            title="Close"
             className="text-muted-foreground hover:text-foreground"
           >
-            <X className="h-4 w-4" />
+            <X className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
         <div className="p-4">{children}</div>
@@ -955,10 +959,11 @@ export function SurfaceGoalsForm({
                 </span>
                 <button
                   type="button"
+                  aria-label={`Remove goal ${i + 1}`}
                   onClick={() => removeGoal(i)}
                   className="shrink-0 text-muted-foreground/60 hover:text-destructive"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
               </div>
               <input
@@ -1303,10 +1308,10 @@ export default function ExperimentsPage() {
       </header>
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn't load experiments: {error}
-        </div>
-      ) : (
+        <RouteLoadError title="Could not load experiments" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !data ? null : (
         <>
           {/* Stat tiles — identical 5-col frame loading vs loaded */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">

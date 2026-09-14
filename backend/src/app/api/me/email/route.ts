@@ -54,7 +54,7 @@ export async function PATCH(req: NextRequest) {
     target_user_id: auth.user.id,
     action: "user.email_changed",
     payload: { from: fresh.email, to: newEmail },
-  });
+  }).catch(() => undefined);
 
   return NextResponse.json({ ok: true, email: newEmail });
 }

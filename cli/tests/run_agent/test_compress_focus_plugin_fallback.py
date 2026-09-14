@@ -37,6 +37,10 @@ def _make_agent_with_engine(engine):
     agent._emit_status = lambda *a, **kw: None
     agent._emit_warning = lambda *a, **kw: None
     agent._last_flushed_db_idx = 0
+    # Compaction redesign state (cursor model).
+    agent.compaction_cursor = 0
+    agent.compaction_summary = None
+    agent._usage_projector = None
     # Stub the few AIAgent methods _compress_context uses.
     agent.flush_memories = lambda *a, **kw: None
     agent._invalidate_system_prompt = lambda *a, **kw: None
@@ -83,14 +87,27 @@ def test_compress_context_falls_back_when_engine_rejects_focus_topic():
     assert agent.context_compressor is engine
 
 
-def test_compress_context_preserves_latest_present_plan_snapshot():
-    class _Engine:
-        compression_count = 0
+class _CursorEngine:
+    """Minimal cursor-model compressor stub: summarize_to_cursor returns a
+    (summary, cursor) pair and never assembles/rewrites the transcript."""
 
-        def compress(self, messages, current_tokens=None, focus_topic=None, force=False):
-            return [messages[0], messages[-1]]
+    compression_count = 0
 
-    agent = _make_agent_with_engine(_Engine())
+    def __init__(self, summary="## Active Task\n# Persisted Plan preserved", cursor=2):
+        self._summary = summary
+        self._cursor = cursor
+
+    def summarize_to_cursor(self, messages, *, prev_cursor=0, previous_summary=None,
+                            focus_topic=None, force=False):
+        self.compression_count += 1
+        return self._summary, self._cursor
+
+
+def test_compress_context_does_not_inject_plan_rows_into_transcript():
+    # Redesign: the plan is captured by the summarizer (cursor model), NOT
+    # re-injected as a PLAN_INJECTION_HEADER message row. The transcript is
+    # returned UNCHANGED — append-only, never rewritten.
+    agent = _make_agent_with_engine(_CursorEngine())
     messages = [
         {"role": "user", "content": "start"},
         {
@@ -103,34 +120,28 @@ def test_compress_context_preserves_latest_present_plan_snapshot():
         },
         {"role": "user", "content": "continue"},
     ]
+    snapshot = [dict(m) for m in messages]
 
     compressed, _system_prompt = compress_context(
-        agent,
-        messages,
-        "system",
-        approx_tokens=100,
+        agent, messages, "system", approx_tokens=100,
     )
 
-    preserved = [
-        m["content"]
-        for m in compressed
+    # Transcript untouched: no injected plan row, same list contents.
+    assert compressed == snapshot
+    injected = [
+        m for m in compressed
         if isinstance(m, dict)
         and isinstance(m.get("content"), str)
         and m["content"].startswith(PLAN_INJECTION_HEADER)
     ]
-    assert len(preserved) == 1
-    assert "# Persisted Plan" in preserved[0]
-    assert compressed[-1]["content"] == "continue"
+    assert injected == []
+    # The cursor + summary moved to agent metadata instead of a row.
+    assert agent.compaction_cursor == 2
+    assert agent.compaction_summary is not None
 
 
-def test_run_agent_compress_context_preserves_latest_present_plan_snapshot():
-    class _Engine:
-        compression_count = 0
-
-        def compress(self, messages, current_tokens=None, focus_topic=None):
-            return [messages[0], messages[-1]]
-
-    agent = _make_agent_with_engine(_Engine())
+def test_run_agent_compress_context_sets_cursor_not_plan_row():
+    agent = _make_agent_with_engine(_CursorEngine(cursor=2))
     messages = [
         {"role": "user", "content": "start"},
         {
@@ -143,21 +154,18 @@ def test_run_agent_compress_context_preserves_latest_present_plan_snapshot():
         },
         {"role": "user", "content": "continue"},
     ]
+    snapshot = [dict(m) for m in messages]
 
     compressed, _system_prompt = AIAgent._compress_context(
-        agent,
-        messages,
-        "system",
-        approx_tokens=100,
+        agent, messages, "system", approx_tokens=100,
     )
 
-    preserved = [
-        m["content"]
-        for m in compressed
+    assert compressed == snapshot  # transcript never rewritten
+    injected = [
+        m for m in compressed
         if isinstance(m, dict)
         and isinstance(m.get("content"), str)
         and m["content"].startswith(PLAN_INJECTION_HEADER)
     ]
-    assert len(preserved) == 1
-    assert "# Method Plan" in preserved[0]
-    assert compressed[-1]["content"] == "continue"
+    assert injected == []
+    assert agent.compaction_cursor == 2

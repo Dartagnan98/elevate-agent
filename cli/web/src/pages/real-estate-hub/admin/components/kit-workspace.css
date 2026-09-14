@@ -1,0 +1,36 @@
+.kit-workspace { position:fixed; inset:0; z-index:1100; display:flex; flex-direction:column; background:var(--ds-paper,#f5f7fa); color:var(--ds-ink,#182848); font-family:var(--ds-font,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif); }
+.kit-workspace-header { display:flex; gap:16px; align-items:center; flex-wrap:wrap; padding:12px 20px; background:var(--ds-card,#fff); border-bottom:1px solid var(--ds-border,#dde2ea); }
+.kit-workspace-title { min-width:0; flex:1; display:flex; flex-direction:column; gap:3px; }
+.kit-workspace-title strong { font-size:16px; overflow-wrap:anywhere; }
+.kit-workspace-title span { color:var(--ds-muted,#596579); font-size:13px; }
+.kit-workspace-scroll { flex:1; min-height:0; overflow:auto; }
+.kit-workspace-content { max-width:1080px; margin:0 auto; padding:20px 24px 48px; }
+.kit-workspace-error { padding:12px 24px; color:var(--ds-error,#b42318); background:var(--ds-card,#fff); }
+.kit-workspace :is(button,input,textarea,select,summary):focus-visible { outline:2px solid var(--ds-blue,#2864a5); outline-offset:3px; }
+.kit-secondary { border:1px solid var(--ds-border,#dde2ea); border-radius:8px; padding:9px 12px; background:var(--ds-card,#fff); color:inherit; font:inherit; font-size:14px; cursor:pointer; min-height:40px; }
+.kit-secondary:hover { background:var(--ds-paper,#f5f7fa); }
+.kit-secondary:disabled { opacity:.6; cursor:wait; }
+.kit-launcher { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px; border:1px solid var(--ds-border,#dde2ea); border-radius:12px; margin-bottom:16px; background:var(--ds-card,#fff); }
+.kit-launcher h3 { margin:0 0 5px; font-size:17px; }
+.kit-launcher p { margin:0; color:var(--ds-muted,#596579); font-size:14px; }
+.kit-primary { font:inherit; font-size:14px; font-weight:650; border:0; border-radius:8px; padding:11px 16px; background:var(--ds-navy-surface,#182848); color:#fff; cursor:pointer; min-height:44px; }
+.kit-primary:disabled { opacity:.6; cursor:wait; }
+.kit-term { display:flex; flex-direction:column; gap:7px; min-width:0; }
+.kit-term label { font-size:13px; font-weight:600; color:var(--ds-ink,#182848); }
+.kit-term :is(input,textarea,select) { width:100%; min-width:0; min-height:44px; box-sizing:border-box; font:inherit; font-size:15px; color:var(--ds-ink,#182848); border:1px solid var(--ds-border,#dde2ea); border-radius:8px; background:var(--ds-card,#fff); padding:10px 12px; }
+.kit-term textarea { resize:vertical; min-height:88px; }
+.kit-term small,.kit-preferences p { font-size:13px; line-height:1.5; color:var(--ds-muted,#596579); }
+.kit-use-default { font:inherit; text-align:left; font-size:12px; color:var(--ds-ink,#182848); background:none; border:0; padding:3px 0; cursor:pointer; }
+.kit-preferences { margin:16px 0 24px; padding:16px 0; border-block:1px solid var(--ds-border,#dde2ea); }
+.kit-preferences summary { font-size:14px; font-weight:650; cursor:pointer; }
+.kit-preferences-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:16px 0; }
+.kit-items { position:relative; }
+.kit-items details { margin-top:2px; }
+.kit-items summary { cursor:pointer; padding:8px 0; font-size:13px; color:var(--ds-ink,#182848); }
+.kit-items-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 14px; padding:8px 0; }
+.kit-items-options label { display:flex; align-items:center; gap:8px; font-size:14px; min-height:40px; font-weight:400; }
+.kit-items-options input { width:18px; min-height:18px; flex-shrink:0; }
+.kit-terms-section { margin:24px 0 12px; font-size:15px; font-weight:650; }
+.kit-terms-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+@media(max-width:640px) { .kit-workspace-header { padding:10px 12px; gap:10px; } .kit-workspace-content { padding:12px 10px 32px; } .kit-workspace-title { flex-basis:100%; } .kit-launcher { align-items:stretch; flex-direction:column; gap:12px; } .kit-preferences-grid,.kit-terms-grid { grid-template-columns:1fr; } .kit-secondary { min-height:44px; } .kit-preferences summary,.kit-items summary,.kit-use-default { min-height:44px; align-content:center; box-sizing:border-box; } }
+@media(prefers-reduced-motion:no-preference) { .kit-workspace { animation:kit-enter 160ms ease-out; } @keyframes kit-enter { from { transform:translateY(5px); } to { transform:translateY(0); } } }

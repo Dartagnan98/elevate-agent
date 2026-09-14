@@ -74,6 +74,7 @@ import type {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectOption } from "@/components/ui/select";
 import { RouteSkeleton } from "@/components/route-skeletons";
@@ -814,6 +815,7 @@ function DraftMessagesBoard({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const drafts = allDrafts.filter((d) => !dismissedIds.has(d.id));
@@ -898,6 +900,7 @@ function DraftMessagesBoard({
         });
       }
       try {
+        setActionError(null);
         const nextInbox = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
         data.setSourceInbox(nextInbox);
         if (!isDismiss) {
@@ -917,7 +920,7 @@ function DraftMessagesBoard({
           });
         }
         console.error("Failed to update draft", error);
-        window.alert(`Failed to ${action} draft: ${error instanceof Error ? error.message : String(error)}`);
+        setActionError(`Failed to ${action} draft: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
     [data],
@@ -1094,6 +1097,8 @@ function DraftMessagesBoard({
                 {helpOpen && (
                   <div
                     role="dialog"
+                    aria-modal="false"
+                    aria-label="Keyboard shortcuts"
                     className="absolute right-0 top-[calc(100%+6px)] z-30 w-64 rounded-md border border-border bg-card p-3 shadow-lg"
                   >
                     <div className="font-mono-ui mb-2 text-[0.66rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
@@ -1184,6 +1189,11 @@ function DraftMessagesBoard({
                 {showAll ? `Show first ${pageSize}` : `Show all ${drafts.length}`}
               </button>
             )}
+          </div>
+        )}
+        {actionError && (
+          <div className="mt-3 rounded-md border border-destructive/45 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+            {actionError}
           </div>
         )}
       </CardHeader>
@@ -1954,6 +1964,7 @@ function SkippedDraftsList({
   const { byThread } = useProfileLookups(data);
   const allSkipped = draftsOverride ?? data.sourceInbox?.skippedDrafts ?? [];
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   // Build thread lookup by (sourceId, threadId) AND bare threadId so we can
   // borrow Hot Leads-style heat/name/status from the real thread record.
@@ -2017,12 +2028,13 @@ function SkippedDraftsList({
   const restoreDraft = async (draft: SourceInboxDraft) => {
     if (restoringId) return;
     setRestoringId(draft.id);
+    setRestoreError(null);
     try {
       const nextInbox = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "restore", draft.draftText);
       data.setSourceInbox(nextInbox);
     } catch (error) {
       console.error("Failed to restore skipped draft", error);
-      window.alert(`Failed to restore draft: ${error instanceof Error ? error.message : String(error)}`);
+      setRestoreError(`Failed to restore draft: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setRestoringId(null);
     }
@@ -2030,6 +2042,11 @@ function SkippedDraftsList({
 
   return (
     <div className={LANE_LIST_SCROLL_CLASS}>
+      {restoreError && (
+        <div className="mb-2 rounded-md border border-destructive/45 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+          {restoreError}
+        </div>
+      )}
       {skipped.map((draft) => {
         const thread = (draft.sourceId && draft.threadId
           ? threadByKey.get(`${draft.sourceId}:${draft.threadId}`)
@@ -3130,6 +3147,7 @@ function TemplatesPanel() {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [suggestingLane, setSuggestingLane] = useState<OutreachLane | null>(null);
   const [showNew, setShowNew] = useState<OutreachLane | null>(null);
+  const [deleteTemplateTarget, setDeleteTemplateTarget] = useState<OutreachTemplate | null>(null);
   const [draft, setDraft] = useState<{ lane: OutreachLane; name: string; body: string }>({
     lane: "new-outreach",
     name: "",
@@ -3254,11 +3272,11 @@ function TemplatesPanel() {
     }
   };
   const remove = async (t: OutreachTemplate) => {
-    if (!confirm(`Delete template "${t.name}"? Past attempts stay logged.`)) return;
     setSavingId(t.id);
     try {
       await api.deleteOutreachTemplate(t.id);
       await reload();
+      setDeleteTemplateTarget(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -3499,7 +3517,7 @@ function TemplatesPanel() {
                             <Button
                               size="sm"
                               variant="ghost"
-                              onClick={() => remove(t)}
+                              onClick={() => setDeleteTemplateTarget(t)}
                               disabled={savingId === t.id}
                               className="text-destructive hover:bg-muted hover:text-destructive"
                             >
@@ -3541,6 +3559,18 @@ function TemplatesPanel() {
           </Card>
         );
       })}
+      <ConfirmDialog
+        open={deleteTemplateTarget !== null}
+        title={`Delete template "${deleteTemplateTarget?.name ?? ""}"?`}
+        description="Past attempts stay logged, but this template will be removed from active editing."
+        confirmLabel="Delete"
+        destructive
+        loading={deleteTemplateTarget ? savingId === deleteTemplateTarget.id : false}
+        onCancel={() => setDeleteTemplateTarget(null)}
+        onConfirm={() => {
+          if (deleteTemplateTarget) void remove(deleteTemplateTarget);
+        }}
+      />
     </div>
   );
 }
@@ -3890,8 +3920,11 @@ function RealEstateLeadsPageLegacy() {
             <PageSkeleton rows={4} variant="form" />
           </div>
         ) : leadsSetup.error ? (
-          <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
-            Could not load leads setup: {leadsSetup.error}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+            <span className="min-w-0">Could not load leads setup: {leadsSetup.error}</span>
+            <Button variant="outline" size="sm" onClick={() => void leadsSetup.refresh()}>
+              Retry
+            </Button>
           </div>
         ) : showOnboarding && setupSnapshot ? (
           <LeadsSetupLaunch
@@ -4093,8 +4126,11 @@ export function RealEstateLeadsPage() {
   }
   if (leadsSetup.error) {
     return (
-      <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground m-5">
-        Could not load leads setup: {leadsSetup.error}
+      <div className="m-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+        <span className="min-w-0">Could not load leads setup: {leadsSetup.error}</span>
+        <Button variant="outline" size="sm" onClick={() => void leadsSetup.refresh()}>
+          Retry
+        </Button>
       </div>
     );
   }

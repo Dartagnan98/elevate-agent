@@ -760,17 +760,6 @@ function Install-NodeDeps {
     }
 
     $cliDir = "$InstallDir\cli"
-    Push-Location $cliDir
-
-    if (Test-Path "package.json") {
-        Write-Info "Installing Node.js dependencies (browser tools)..."
-        try {
-            npm install --silent 2>&1 | Out-Null
-            Write-Success "Node.js dependencies installed"
-        } catch {
-            Write-Warn "npm install failed (browser tools may not work)"
-        }
-    }
 
     # Install TUI dependencies
     $tuiDir = "$cliDir\ui-tui"
@@ -785,10 +774,6 @@ function Install-NodeDeps {
         }
         Pop-Location
     }
-
-
-
-    Pop-Location
 }
 
 function Invoke-SetupWizard {

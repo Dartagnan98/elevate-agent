@@ -279,6 +279,7 @@ def record_lifecycle(
     payload: Any = None,
     conversation_id: str | None = None,
     source_id: str = "ui:lifecycle",
+    event_hash: str | None = None,
 ) -> dict[str, Any]:
     """Catch-all for lifecycle-shaped events: parked, unparked,
     lifecycle_change, note, merge, merge_conflict.
@@ -286,7 +287,8 @@ def record_lifecycle(
     source_id defaults to ``ui:lifecycle`` for in-app actions. Connectors
     replaying ``lead-events.jsonl`` should pass the real source id (``crm``,
     ``apple-messages``, etc.) so per-source filtering on the events table
-    works."""
+    works. Snapshot importers may supply a deterministic event_hash;
+    ordinary live actions retain their unique identities."""
     valid = {
         "parked", "unparked", "lifecycle_change", "note",
         "merge", "merge_conflict",
@@ -303,6 +305,7 @@ def record_lifecycle(
         actor=actor,
         payload=payload,
         ts=ts,
+        event_hash=event_hash,
     )
 
 

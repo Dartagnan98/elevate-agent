@@ -6,7 +6,8 @@
 // Flow:
 //   1. `npm run release:mac` builds + invokes this script
 //   2. We rsync the relevant files from ./dist into /var/www/elevate-updates/
-//   3. Done. Running apps poll the feed every 2hr (or on next launch).
+//   3. Verify the public feed/artifacts before declaring the release live.
+//   4. Running apps poll the feed every ~3min (and on window focus).
 //
 // Requirements:
 //   - SSH key auth set up for root@5.78.46.234
@@ -14,13 +15,105 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
 
 const DIST = path.resolve(__dirname, "..", "dist");
 const FEED = path.join(DIST, "latest-mac.yml");
+const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
 const HOST = "root@5.78.46.234";
 const REMOTE = "/var/www/elevate-updates/";
+const PUBLIC_URL = "https://api.elevationrealestatehq.com/updates";
+
+function curl(args, label) {
+  const result = spawnSync(
+    "curl",
+    ["--fail", "--silent", "--show-error", "--location", "--retry", "5", "--retry-delay", "2", ...args],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    const error = (result.stderr || result.stdout || "").trim();
+    throw new Error(`${label} failed${error ? `: ${error}` : ""}`);
+  }
+  return result.stdout || "";
+}
+
+function contentLength(headers) {
+  const match = String(headers || "").match(/^content-length:\s*(\d+)/im);
+  return match ? Number(match[1]) : null;
+}
+
+function verifyRemoteFile(name, expectedSize) {
+  const headers = curl(["--head", `${PUBLIC_URL}/${name}`], `verify ${name}`);
+  const actualSize = contentLength(headers);
+  if (expectedSize && actualSize !== expectedSize) {
+    throw new Error(`[ship] public ${name} size ${actualSize || "missing"} != ${expectedSize}`);
+  }
+}
+
+function verifyPublicRelease(feed, expectedVersion) {
+  console.log("[ship] verifying public feed and artifacts");
+  const remoteText = curl([`${PUBLIC_URL}/latest-mac.yml`], "fetch public latest-mac.yml");
+  const remoteFeed = yaml.load(remoteText);
+  if (remoteFeed.version !== expectedVersion) {
+    throw new Error(`[ship] public feed version ${remoteFeed.version || "missing"} != ${expectedVersion}`);
+  }
+
+  const localFiles = feed.files || [];
+  const remoteFiles = new Map((remoteFeed.files || []).map((file) => [file.url, file]));
+  for (const file of localFiles) {
+    if (!file.url) continue;
+    const remoteFile = remoteFiles.get(file.url);
+    if (!remoteFile) throw new Error(`[ship] public feed is missing ${file.url}`);
+    if (remoteFile.sha512 !== file.sha512) {
+      throw new Error(`[ship] public feed sha512 mismatch for ${file.url}`);
+    }
+    if (Number(remoteFile.size || 0) !== Number(file.size || 0)) {
+      throw new Error(`[ship] public feed size mismatch for ${file.url}`);
+    }
+    verifyRemoteFile(file.url, Number(file.size || 0));
+  }
+
+  for (const arch of ["arm64", "x64"]) {
+    const src = `Elevate-${expectedVersion}-mac-${arch}.dmg`;
+    const alias = `Elevate-latest-mac-${arch}.dmg`;
+    const localDmg = path.join(DIST, src);
+    if (fs.existsSync(localDmg)) {
+      verifyRemoteFile(alias, fs.statSync(localDmg).size);
+    }
+  }
+  console.log(`[ship] verified public ${expectedVersion} feed and artifacts`);
+}
+
+function hashFile(filePath) {
+  return crypto.createHash("sha512").update(fs.readFileSync(filePath)).digest("base64");
+}
+
+function verifyLocalRelease(feed, expectedVersion) {
+  if (feed.version !== expectedVersion) {
+    throw new Error(`[ship] local feed version ${feed.version || "missing"} != ${expectedVersion}`);
+  }
+  const files = new Map((feed.files || []).map((file) => [file.url, file]));
+  for (const name of [
+    `Elevate-${expectedVersion}-mac-x64.zip`,
+    `Elevate-${expectedVersion}-mac-arm64.zip`,
+    `Elevate-${expectedVersion}-mac-x64.dmg`,
+    `Elevate-${expectedVersion}-mac-arm64.dmg`,
+  ]) {
+    const file = files.get(name);
+    if (!file) throw new Error(`[ship] local feed missing ${name}`);
+    const filePath = path.join(DIST, name);
+    if (!fs.existsSync(filePath)) throw new Error(`[ship] missing ${filePath}`);
+    const size = fs.statSync(filePath).size;
+    if (Number(file.size || 0) !== size) {
+      throw new Error(`[ship] local feed size mismatch for ${name}`);
+    }
+    if (file.sha512 !== hashFile(filePath)) {
+      throw new Error(`[ship] local feed sha512 mismatch for ${name}`);
+    }
+  }
+}
 
 if (!fs.existsSync(DIST)) {
   console.error(`[ship] no dist/ folder at ${DIST} — did the build run?`);
@@ -36,6 +129,13 @@ if (!fs.existsSync(FEED)) {
 // Ship exactly the files referenced by the feed, plus matching blockmaps when
 // present, so stale artifacts in dist/ never leak into the update directory.
 const feed = yaml.load(fs.readFileSync(FEED, "utf8"));
+try {
+  verifyLocalRelease(feed, PKG_VERSION);
+} catch (err) {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+}
+
 const selected = new Set(["latest-mac.yml"]);
 for (const file of feed.files || []) {
   selected.add(file.url);
@@ -55,7 +155,6 @@ for (const file of feed.files || []) {
 // but they're the first-time MANUAL download. The feed only listed zips, so the
 // public .dmg used to go stale every release. Ship this version's DMGs too, and
 // refresh stable "latest" aliases (below) so the download link is permanent.
-const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
 for (const name of fs.readdirSync(DIST)) {
   if (name.endsWith(".dmg") && name.includes(`-${PKG_VERSION}-`)) selected.add(name);
 }
@@ -110,6 +209,7 @@ const dropBlockmaps = spawnSync(
 );
 if (dropBlockmaps.status !== 0) {
   console.error("[ship] blockmap purge failed — remove them manually so old clients fall back to full download");
+  process.exit(dropBlockmaps.status || 1);
 }
 
 // Refresh the stable "latest" fresh-download aliases so a single permanent URL
@@ -134,7 +234,14 @@ for (const arch of ["arm64", "x64"]) {
 const prune = spawnSync("ssh", [HOST, "bash /root/prune-elevate-updates.sh"], { stdio: "inherit" });
 if (prune.status !== 0) console.warn("[ship] artifact prune exited non-zero — disk may be growing");
 
-console.log("\n[ship] live at https://api.elevationrealestatehq.com/updates/");
+try {
+  verifyPublicRelease(feed, PKG_VERSION);
+} catch (err) {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+}
+
+console.log(`\n[ship] live at ${PUBLIC_URL}/`);
 console.log("[ship] running apps poll every ~3min (and on window focus), so it lands within minutes.");
 
 // Cleanup: electron-builder leaves unpacked .app bundles in dist/mac and

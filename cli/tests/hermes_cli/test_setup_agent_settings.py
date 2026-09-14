@@ -1,6 +1,20 @@
 """Tests for agent-settings copy in the interactive setup wizard."""
 
-from elevate_cli.setup import setup_agent_settings
+from elevate_cli.setup import _apply_default_agent_settings, setup_agent_settings
+
+
+def test_default_agent_settings_use_current_compression_threshold(monkeypatch, capsys):
+    config = {}
+
+    monkeypatch.setattr("elevate_cli.setup.save_env_value", lambda *args, **kwargs: None)
+    monkeypatch.setattr("elevate_cli.setup.save_config", lambda *args, **kwargs: None)
+
+    _apply_default_agent_settings(config)
+
+    assert config["compression"]["threshold"] == 0.85
+    out = capsys.readouterr().out
+    assert "Compression threshold: 0.85" in out
+    assert "Compression threshold: 0.50" not in out
 
 
 def test_setup_agent_settings_uses_displayed_max_iterations_value(tmp_path, monkeypatch, capsys):

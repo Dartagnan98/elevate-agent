@@ -156,7 +156,7 @@ cd elevate-agent/cli
 ```bash
 cd cli
 python3 -m py_compile elevate_cli/main.py elevate_cli/license.py elevate_cli/cloud_skills.py
-npx tsc -b
+npm --prefix web run build
 ./scripts/elevate-harness.sh smoke
 ./scripts/elevate-harness.sh memory
 ```

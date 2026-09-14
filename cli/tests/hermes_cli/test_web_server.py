@@ -2,6 +2,7 @@
 
 import os
 import json
+import logging
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -149,6 +150,52 @@ class TestWebServerEndpoints:
         assert "project_root" in data
         assert "elevate_home" in data
         assert "active_sessions" in data
+
+    def test_request_id_header_is_echoed_and_logged(self, caplog):
+        with caplog.at_level(logging.INFO, logger="elevate_cli.web_server"):
+            resp = self.client.get("/api/status", headers={"X-Request-Id": "rid 123"})
+
+        assert resp.status_code == 200
+        assert resp.headers["x-request-id"] == "rid_123"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "request complete request_id=rid_123 session_id=- method=GET path=/api/status status=200"
+            in message
+            for message in messages
+        )
+
+    def test_session_path_is_in_request_log(self, caplog):
+        with caplog.at_level(logging.INFO, logger="elevate_cli.web_server"):
+            resp = self.client.get(
+                "/api/sessions/session%20one/messages",
+                headers={"X-Request-Id": "rid-two"},
+            )
+
+        assert resp.headers["x-request-id"] == "rid-two"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "request complete request_id=rid-two session_id=session_one method=GET "
+            "path=/api/sessions/session one/messages"
+            in message
+            for message in messages
+        )
+
+    def test_unauthorized_request_id_header_is_echoed_and_logged(self, caplog):
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        client = TestClient(app)
+        with caplog.at_level(logging.INFO, logger="elevate_cli.web_server"):
+            resp = client.get("/api/env", headers={"X-Request-Id": "rid-unauth"})
+
+        assert resp.status_code == 401
+        assert resp.headers["x-request-id"] == "rid-unauth"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "request complete request_id=rid-unauth session_id=- method=GET path=/api/env status=401"
+            in message
+            for message in messages
+        )
 
     def test_get_agent_hub(self, monkeypatch):
         import elevate_cli.agent_hub as agent_hub
@@ -460,6 +507,42 @@ class TestWebServerEndpoints:
         assert first["method"] == "event"
         assert first["params"]["type"] == "gateway.ready"
 
+    def test_gateway_ws_rejects_bad_token(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect("/api/ws?token=wrong"):
+                pass
+
+        assert exc.value.code == 4401
+
+    def test_gateway_ws_rejects_missing_token(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect("/api/ws"):
+                pass
+
+        assert exc.value.code == 4401
+
+    def test_gateway_ws_rejects_when_embedded_chat_disabled(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", False)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect(f"/api/ws?token={web_server._SESSION_TOKEN}"):
+                pass
+
+        assert exc.value.code == 4403
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import elevate_cli.web_server as web_server
@@ -525,6 +608,19 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["gateway_state"] == "startup_failed"
         assert resp.json()["gateway_platforms"] == {}
+
+    def test_whatsapp_status_reads_config_enabled_flag(self, monkeypatch):
+        from elevate_cli.config import save_config
+        import elevate_cli.web_server as web_server
+
+        monkeypatch.delenv("WHATSAPP_ENABLED", raising=False)
+        monkeypatch.setattr(web_server, "_elevate_repo_root", lambda: Path("/missing"))
+        save_config({"platforms": {"whatsapp": {"enabled": True}}})
+
+        resp = self.client.get("/api/channels/whatsapp/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is True
 
     def test_get_config_schema(self):
         resp = self.client.get("/api/config/schema")
@@ -772,6 +868,35 @@ class TestWebServerEndpoints:
         resp = unauth_client.get("/api/status")
         assert resp.status_code == 200
 
+    def test_dashboard_plugin_rescan_requires_session_token(self):
+        """Plugin manifest reads are public; forced rescans mutate cache and require auth."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        unauth_client = TestClient(app)
+
+        assert unauth_client.get("/api/dashboard/plugins").status_code == 200
+        assert unauth_client.get("/api/dashboard/plugins/rescan").status_code == 401
+        assert self.client.get("/api/dashboard/plugins/rescan").status_code == 200
+
+    def test_dashboard_session_cookie_authorizes_api_requests(self):
+        """The served SPA cookie must cover first-load /api calls before JS runs."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import WEB_DIST, app, _SESSION_TOKEN
+
+        if not (WEB_DIST / "index.html").exists():
+            pytest.skip("frontend bundle not built")
+
+        browser = TestClient(app)
+        index = browser.get("/")
+
+        assert index.status_code == 200
+        assert browser.cookies.get("elevate_session") == _SESSION_TOKEN
+        assert "HttpOnly" in index.headers.get("set-cookie", "")
+
+        resp = browser.get("/api/env")
+        assert resp.status_code == 200
+
     def test_path_traversal_blocked(self):
         """Verify URL-encoded path traversal is blocked."""
         # %2e%2e = ..
@@ -788,6 +913,130 @@ class TestWebServerEndpoints:
         assert resp.status_code in (200, 404)
         if resp.status_code == 200:
             assert "FastAPI" not in resp.text  # Should not serve the actual source
+
+    def test_docs_dashboard_route_is_not_fastapi_swagger(self):
+        """The dashboard /docs route must not be shadowed by FastAPI docs."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import WEB_DIST, app
+
+        if not (WEB_DIST / "index.html").exists():
+            pytest.skip("frontend bundle not built")
+
+        resp = TestClient(app).get("/docs")
+
+        assert resp.status_code == 200
+        assert 'window.__ELEVATE_SESSION_TOKEN__' in resp.text
+        assert "SwaggerUIBundle" not in resp.text
+
+    def test_fastapi_swagger_lives_under_api_docs(self):
+        """Keep developer API docs reachable without taking /docs from the app."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        resp = TestClient(app).get("/api/docs")
+
+        assert resp.status_code == 200
+        assert "SwaggerUIBundle" in resp.text
+        assert "/api/openapi.json" in resp.text
+
+    def test_fastapi_openapi_schema_lives_under_api(self):
+        """The debug docs page must point at a schema endpoint that actually works."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        client = TestClient(app)
+
+        assert client.get("/openapi.json").status_code in (200, 404)
+        resp = client.get("/api/openapi.json")
+
+        assert resp.status_code == 200
+        assert resp.json()["info"]["title"] == "Elevate"
+
+    def test_file_preview_allows_temp_artifact(self):
+        artifact = Path(tempfile.gettempdir()) / "elevate-preview-test.txt"
+        artifact.write_text("preview ok", encoding="utf-8")
+        try:
+            resp = self.client.get("/api/files/preview", params={"path": str(artifact)})
+        finally:
+            try:
+                artifact.unlink()
+            except OSError:
+                pass
+
+        assert resp.status_code == 200
+        assert resp.text == "preview ok"
+        assert resp.headers["x-elevate-file-name"] == artifact.name
+
+    def test_file_preview_rejects_license_file_and_symlink_escape(self):
+        from elevate_constants import get_elevate_home
+
+        home = get_elevate_home()
+        home.mkdir(parents=True, exist_ok=True)
+        license_path = home / "license.json"
+        license_path.write_text('{"access_token":"secret"}', encoding="utf-8")
+
+        direct = self.client.get("/api/files/preview", params={"path": str(license_path)})
+        assert direct.status_code == 403
+
+        upload_dir = home / "uploads" / "preview-test"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        link = upload_dir / "license.json"
+        try:
+            link.symlink_to(license_path)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+
+        via_link = self.client.get("/api/files/preview", params={"path": str(link)})
+        assert via_link.status_code == 403
+
+    def test_upload_attachment_sanitizes_session_and_filename(self):
+        from elevate_constants import get_elevate_home
+
+        resp = self.client.post(
+            "/api/uploads/session%20weird",
+            files={"file": ("../../.env", b"hello", "text/plain")},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["name"] == "_env"
+        assert body["size"] == 5
+        path = Path(body["path"]).resolve()
+        assert path.is_file()
+        assert path.read_bytes() == b"hello"
+        assert path.parent == (get_elevate_home() / "uploads" / "session_weird").resolve()
+
+    def test_upload_attachment_rejects_oversize_and_removes_partial(self, monkeypatch):
+        from elevate_cli import web_server
+        from elevate_constants import get_elevate_home
+
+        monkeypatch.setattr(web_server, "_UPLOAD_MAX_PER_FILE", 4)
+        resp = self.client.post(
+            "/api/uploads/oversize",
+            files={"file": ("big.txt", b"12345", "text/plain")},
+        )
+
+        assert resp.status_code == 413
+        upload_dir = get_elevate_home() / "uploads" / "oversize"
+        assert list(upload_dir.glob("*")) == []
+
+    def test_upload_attachment_failure_response_does_not_leak_local_path(self, monkeypatch):
+        from elevate_cli import web_server
+
+        class FailingPath(type(Path())):
+            def mkdir(self, *args, **kwargs):  # noqa: ARG002
+                raise OSError("/Users/example/.elevate/uploads/secret")
+
+        monkeypatch.setattr(web_server, "get_elevate_home", lambda: FailingPath("/tmp/elevate-test-home"))
+
+        resp = self.client.post(
+            "/api/uploads/session",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+        )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Could not create upload directory"
+        assert "/Users/example" not in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -1052,6 +1301,800 @@ class TestNewEndpoints:
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
+    def test_source_inbox_debug_reports_db_read_path_and_counts(self, monkeypatch):
+        import elevate_cli.data as data_mod
+
+        def fake_db_source_inbox_response(*, limit=16):
+            return {
+                "toolsRoot": "/tmp/tools",
+                "toolsRootSource": "test",
+                "toolsRootIo": "local",
+                "sourceRoot": "/tmp/source",
+                "limit": limit,
+                "recordCounts": {"threads": 2, "drafts": 1},
+                "hiddenCounts": {"archived": 1},
+                "sources": [{"id": "lofty"}],
+                "profiles": [{"id": "person-1"}],
+                "threads": [{"id": "thread-1"}, {"id": "thread-2"}],
+                "drafts": [{"id": "draft-1"}],
+                "skippedDrafts": [{"id": "skipped-1"}],
+                "privateSearchBuyers": [{"id": "buyer-1"}],
+            }
+
+        monkeypatch.setattr(data_mod, "db_source_inbox_response", fake_db_source_inbox_response)
+
+        resp = self.client.get("/api/source-inbox?limit=3&debug=1")
+
+        assert resp.status_code == 200
+        debug = resp.json()["debug"]
+        assert debug["readPath"] == "db"
+        assert debug["fallback"] is False
+        assert debug["counts"]["threads"] == 2
+        assert debug["counts"]["drafts"] == 1
+        assert debug["counts"]["recordCounts"] == {"threads": 2, "drafts": 1}
+        assert debug["counts"]["hiddenCounts"] == {"archived": 1}
+
+    def test_source_inbox_debug_reports_jsonl_fallback(self, monkeypatch):
+        import elevate_cli.data as data_mod
+        import elevate_cli.source_connectors as source_connectors
+
+        def fail_db_source_inbox_response(*, limit=16):
+            raise RuntimeError(
+                "db offline postgres://user:pass@host/db "
+                "sk-1234567890abcdef agent@example.com /Users/example/.elevate/state.db"
+            )
+
+        def fake_jsonl_source_inbox_response(*, limit=16):
+            return {
+                "toolsRoot": "/tmp/tools",
+                "toolsRootSource": "test",
+                "toolsRootIo": "local",
+                "sourceRoot": "/tmp/source",
+                "limit": limit,
+                "recordCounts": {"threads": 1},
+                "hiddenCounts": {},
+                "sources": [],
+                "profiles": [],
+                "threads": [{"id": "thread-jsonl"}],
+                "drafts": [],
+                "skippedDrafts": [],
+                "privateSearchBuyers": [],
+            }
+
+        monkeypatch.setattr(data_mod, "db_source_inbox_response", fail_db_source_inbox_response)
+        monkeypatch.setattr(
+            source_connectors,
+            "build_source_inbox_response",
+            fake_jsonl_source_inbox_response,
+        )
+
+        resp = self.client.get("/api/source-inbox?debug=1")
+
+        assert resp.status_code == 200
+        debug = resp.json()["debug"]
+        assert debug["readPath"] == "jsonl"
+        assert debug["fallback"] is True
+        assert debug["fallbackError"] == "RuntimeError"
+        assert debug["fallbackErrorCode"] == "source_inbox_db_read_failed"
+        assert debug["counts"]["threads"] == 1
+        body = resp.text
+        assert "postgres://user:pass@host/db" not in body
+        assert "sk-1234567890abcdef" not in body
+        assert "agent@example.com" not in body
+        assert "/Users/example/.elevate/state.db" not in body
+
+    def test_source_inbox_total_failure_returns_sanitized_error(self, monkeypatch):
+        import elevate_cli.data as data_mod
+        import elevate_cli.source_connectors as source_connectors
+
+        def fail_db_source_inbox_response(*, limit=16):
+            raise RuntimeError("db exploded at /Users/example/.elevate/state.db")
+
+        def fail_jsonl_source_inbox_response(*, limit=16):
+            raise RuntimeError("jsonl exploded with sk-1234567890abcdef")
+
+        monkeypatch.setattr(data_mod, "db_source_inbox_response", fail_db_source_inbox_response)
+        monkeypatch.setattr(
+            source_connectors,
+            "build_source_inbox_response",
+            fail_jsonl_source_inbox_response,
+        )
+
+        resp = self.client.get("/api/source-inbox?debug=1")
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "source_inbox_unavailable"
+        body = resp.text
+        assert "/Users/example/.elevate/state.db" not in body
+        assert "sk-1234567890abcdef" not in body
+        assert "jsonl exploded" not in body
+
+    def test_source_inbox_profile_update_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+
+        def fake_update_profile_state(profile_id, status, *, return_inbox=True):
+            calls.append((profile_id, status, return_inbox))
+            return {"ok": True}
+
+        monkeypatch.setattr(source_connectors, "update_profile_state", fake_update_profile_state)
+
+        resp = self.client.post(
+            "/api/source-inbox/profile",
+            json={"profileId": "email:test@example.com", "status": "follow_up", "returnInbox": False},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert calls == [("email:test@example.com", "follow_up", False)]
+
+    def test_source_inbox_draft_update_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+
+        def fake_update_source_task_state(source_id, task_id, action, *, draft_text="", return_inbox=True):
+            calls.append((source_id, task_id, action, draft_text, return_inbox))
+            return {"ok": True}
+
+        monkeypatch.setattr(source_connectors, "update_source_task_state", fake_update_source_task_state)
+
+        resp = self.client.post(
+            "/api/source-inbox/draft",
+            json={
+                "sourceId": "email",
+                "taskId": "task-1",
+                "action": "approve",
+                "draftText": "send this",
+                "returnInbox": False,
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert calls == [("email", "task-1", "approve", "send this", False)]
+
+    def test_apple_messages_directions_update_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+
+        def fake_set_apple_messages_directions(*, inbound=None, outbound=None):
+            calls.append(("set", inbound, outbound))
+            return {"inbound": bool(inbound), "outbound": True if outbound is None else bool(outbound)}
+
+        monkeypatch.setattr(source_connectors, "set_apple_messages_directions", fake_set_apple_messages_directions)
+        monkeypatch.setattr(source_connectors, "initialize_apple_messages_source", lambda: calls.append(("init",)))
+
+        resp = self.client.post(
+            "/api/source-inbox/apple-messages/directions",
+            json={"inbound": False},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"inbound": False, "outbound": True}
+        assert calls == [("set", False, None), ("init",)]
+
+    def test_agent_setup_lifecycle_contract(self, monkeypatch):
+        import elevate_cli.data.agent_setup as agent_setup
+        from elevate_cli.config import load_config
+
+        monkeypatch.setattr(agent_setup, "_detect_runtime_credentials", lambda: {})
+
+        initial = self.client.get("/api/agent/setup")
+        assert initial.status_code == 200
+        initial_body = initial.json()
+        assert initial_body["complete"] is False
+        assert initial_body["requiredCount"] == 2
+        assert set(initial_body["missingRequiredKeys"]) == {"model_primary", "memory_store"}
+
+        incomplete = self.client.post("/api/agent/setup/complete")
+        assert incomplete.status_code == 409
+        assert "model_primary" in incomplete.json()["detail"]
+
+        invalid = self.client.put(
+            "/api/agent/setup",
+            json={"items": [{"key": "model_primary", "status": "jammed"}]},
+        )
+        assert invalid.status_code == 400
+
+        updated = self.client.put(
+            "/api/agent/setup",
+            json={
+                "items": [
+                    {
+                        "key": "model_primary",
+                        "status": "configured",
+                        "provider": "openai",
+                        "value": {"model": "gpt-5.5", "apiKey": "test-key"},
+                    },
+                    {
+                        "key": "model_embedding",
+                        "status": "configured",
+                        "provider": "openai",
+                        "value": {"model": "text-embedding-3-large", "apiKey": "test-key"},
+                    },
+                    {
+                        "key": "memory_store",
+                        "status": "configured",
+                        "provider": "sqlite_local",
+                        "value": {"mode": "local"},
+                    },
+                ]
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["complete"] is True
+
+        completed = self.client.post("/api/agent/setup/complete")
+        assert completed.status_code == 200
+        body = completed.json()
+        assert body["complete"] is True
+        assert body["completedAt"]
+        assert body["materialized"] == {
+            "model": {"provider": "openai-codex", "model": "gpt-5.5"},
+            "embedding": {"provider": "openai", "model": "text-embedding-3-large"},
+            "memory": {"provider": "holographic"},
+        }
+
+        cfg = load_config()
+        assert cfg["model"]["provider"] == "openai-codex"
+        assert cfg["model"]["default"] == "gpt-5.5"
+        assert cfg["plugins"]["elevate-memory-store"]["embedding_model"] == "text-embedding-3-large"
+        assert cfg["memory"]["provider"] == "holographic"
+
+        reset = self.client.post("/api/agent/setup/reset")
+        assert reset.status_code == 200
+        reset_body = reset.json()
+        assert reset_body["complete"] is True
+        assert reset_body["completedAt"] is None
+
+    def test_leads_setup_lifecycle_contract(self):
+        from elevate_constants import get_elevate_home
+        from elevate_cli.data import connect
+        from elevate_cli.data.admin_setup import get_admin_setup, update_admin_setup
+
+        with connect() as conn:
+            get_admin_setup(conn)
+            update_admin_setup(
+                conn,
+                profile={
+                    "realtorLegalName": "Test Realtor",
+                    "brokerageName": "Test Brokerage",
+                    "crmProvider": "lofty",
+                    "province": "BC",
+                },
+                items=[
+                    {
+                        "key": "crm",
+                        "status": "connected",
+                        "provider": "lofty",
+                        "value": {"verification": {"checkedAt": "2026-06-19T00:00:00+00:00"}},
+                    }
+                ],
+            )
+
+        initial = self.client.get("/api/leads/setup")
+        assert initial.status_code == 200
+        initial_body = initial.json()
+        by_key = {item["key"]: item for item in initial_body["items"]}
+        assert by_key["crm"]["provider"] == "lofty"
+        assert by_key["crm"]["status"] == "connected"
+        assert initial_body["leadSourcesReady"] is True
+        assert initial_body["complete"] is False
+        assert initial_body["missingRequiredKeys"] == ["auto_reply_policy"]
+
+        incomplete = self.client.post("/api/leads/setup/complete")
+        assert incomplete.status_code == 409
+        assert "auto_reply_policy" in incomplete.json()["detail"]
+
+        invalid = self.client.put(
+            "/api/leads/setup",
+            json={"items": [{"key": "auto_reply_policy", "status": "jammed"}]},
+        )
+        assert invalid.status_code == 400
+
+        missing = self.client.put(
+            "/api/leads/setup",
+            json={"items": [{"key": "missing_connector", "status": "configured"}]},
+        )
+        assert missing.status_code == 404
+
+        updated = self.client.put(
+            "/api/leads/setup",
+            json={
+                "items": [
+                    {
+                        "key": "website_form_webhook",
+                        "status": "connected",
+                        "provider": "website",
+                        "value": {"url": "https://example.test/hooks/leads"},
+                    },
+                    {
+                        "key": "auto_reply_policy",
+                        "status": "configured",
+                        "provider": "elevate",
+                        "value": {
+                            "enabled": False,
+                            "initialMessageTemplate": "Thanks, I will follow up shortly.",
+                            "followUpCadenceDays": 2,
+                        },
+                    },
+                ]
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["complete"] is True
+
+        completed = self.client.post("/api/leads/setup/complete")
+        assert completed.status_code == 200
+        body = completed.json()
+        assert body["complete"] is True
+        assert body["completedAt"]
+        assert body["leadSourcesReady"] is True
+
+        memory_path = get_elevate_home() / "memories" / "LEADS_ONBOARDING.md"
+        memory = memory_path.read_text()
+        assert "Provider: lofty" in memory
+        assert "Auto first-touch: off" in memory
+        assert "Default follow-up cadence: 2 day(s)" in memory
+
+        reset = self.client.post("/api/leads/setup/reset")
+        assert reset.status_code == 200
+        reset_body = reset.json()
+        assert reset_body["complete"] is True
+        assert reset_body["completedAt"] is None
+
+    def test_browser_use_launch_missing_api_key_returns_recovery(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from elevate_cli.data import connect
+        from elevate_cli.data.admin_setup import get_admin_setup, update_admin_setup
+
+        monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
+        monkeypatch.delenv("BROWSERUSE_API_KEY", raising=False)
+        monkeypatch.setattr(web_server, "load_config", lambda: {"browser": {"api_key": ""}})
+
+        with connect() as conn:
+            get_admin_setup(conn)
+            update_admin_setup(
+                conn,
+                profile={"province": "BC"},
+                items=[
+                    {
+                        "key": "browser_workflows",
+                        "status": "configured",
+                        "provider": "browser-use",
+                        "value": {
+                            "playbooks": {
+                                "mls": {
+                                    "loginUrl": "https://mls.example.test/login",
+                                    "provider": "Matrix MLS",
+                                    "credentialRef": "1Password:MLS",
+                                }
+                            }
+                        },
+                    }
+                ],
+            )
+
+        resp = self.client.post(
+            "/api/admin/onboarding/browser-use/launch",
+            json={"portalKey": "mls"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        assert "BROWSER_USE_API_KEY not configured" in body["error"]
+        assert "Browser Use" in body["error"]
+        assert body["portal"] == {
+            "loginUrl": "https://mls.example.test/login",
+            "provider": "Matrix MLS",
+            "credentialRef": "1Password:MLS",
+        }
+
+    def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
+        from cron import jobs as cron_jobs
+
+        monkeypatch.setattr(
+            cron_jobs,
+            "list_jobs",
+            lambda include_disabled=False: [
+                {
+                    "id": "job-error",
+                    "name": "broken sync",
+                    "enabled": True,
+                    "last_status": "error",
+                    "last_error": "bad token",
+                    "last_run_at": "2026-06-18T00:00:00+00:00",
+                },
+                {
+                    "id": "job-stale",
+                    "name": "stale sync",
+                    "enabled": True,
+                    "last_status": "ok",
+                    "last_run_at": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "job-disabled",
+                    "name": "disabled",
+                    "enabled": False,
+                    "last_status": "error",
+                    "last_error": "ignored",
+                    "last_run_at": "2026-01-01T00:00:00+00:00",
+                },
+            ],
+        )
+
+        resp = self.client.get("/api/cron/attention")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [job["id"] for job in data["errored_jobs"]] == ["job-error"]
+        assert [job["id"] for job in data["stale_jobs"]] == ["job-stale"]
+        assert data["total"] == 2
+
+    def test_activity_feed_projects_surface_activity(self):
+        from elevate_cli.data import connect, surface_state
+        import elevate_cli.web_server as web_server
+
+        with web_server._FS_SCAN_CACHE_LOCK:
+            web_server._FS_SCAN_CACHE.clear()
+
+        with connect() as conn:
+            surface_state.append_activity(
+                conn,
+                "leads",
+                "contract_ping",
+                message="Activity route contract ready",
+                metadata={"kind": "agent_activity", "severity": "info"},
+                at="2099-01-01T00:00:00+00:00",
+            )
+
+        resp = self.client.get("/api/activity?agent=leads&limit=1")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "items": [
+                {
+                    "kind": "agent_activity",
+                    "agent": "leads",
+                    "ts": "2099-01-01T00:00:00+00:00",
+                    "title": "contract_ping",
+                    "detail": "Activity route contract ready",
+                    "status": "info",
+                }
+            ]
+        }
+
+    def test_integrations_route_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+        settings = {
+            "configPath": "/tmp/config.json",
+            "secretsPath": "/tmp/.env",
+            "sourceRoot": "/tmp/sources",
+            "crm": {"provider": "custom", "label": "CRM"},
+        }
+
+        def fake_get_integration_settings():
+            calls.append(("get",))
+            return settings
+
+        def fake_save_integration_settings(form):
+            calls.append(("save", form["provider"], form["baseUrl"]))
+            return {**settings, "crm": {"provider": form["provider"], "baseUrl": form["baseUrl"]}}
+
+        def fake_test_crm_connection(form):
+            calls.append(("test", form["provider"], form["action"]))
+            return {"success": True, "status": 200, "message": "ok"}
+
+        monkeypatch.setattr(source_connectors, "get_integration_settings", fake_get_integration_settings)
+        monkeypatch.setattr(source_connectors, "save_integration_settings", fake_save_integration_settings)
+        monkeypatch.setattr(source_connectors, "test_crm_connection", fake_test_crm_connection)
+
+        form = {"provider": "lofty", "label": "Lofty", "baseUrl": "https://crm.test"}
+
+        assert self.client.get("/api/integrations").json() == settings
+        assert self.client.put("/api/integrations", json=form).json()["crm"] == {
+            "provider": "lofty",
+            "baseUrl": "https://crm.test",
+        }
+        assert self.client.post("/api/integrations", json={**form, "action": "test"}).json() == {
+            "success": True,
+            "status": 200,
+            "message": "ok",
+        }
+        assert self.client.post("/api/integrations", json=form).status_code == 400
+        assert calls == [
+            ("get",),
+            ("save", "lofty", "https://crm.test"),
+            ("test", "lofty", "test"),
+        ]
+
+    def test_ayrshare_route_contract(self, monkeypatch):
+        import elevate_cli.ayrshare_client as ayrshare_client
+
+        calls = []
+        status = {"configured": True, "hasKey": True, "valid": True, "baseUrl": "https://ayrshare.test"}
+
+        monkeypatch.setattr(ayrshare_client, "get_status", lambda: calls.append(("status",)) or status)
+        monkeypatch.setattr(
+            ayrshare_client,
+            "set_api_key",
+            lambda api_key: calls.append(("set", api_key)) or {"ok": api_key == "good", "error": "bad key"},
+        )
+        monkeypatch.setattr(ayrshare_client, "clear_api_key", lambda: calls.append(("clear",)) or {"ok": True})
+        monkeypatch.setattr(ayrshare_client, "profiles", lambda: calls.append(("profiles",)) or {"ok": True, "data": []})
+        monkeypatch.setattr(ayrshare_client, "list_scheduled", lambda: calls.append(("scheduled",)) or {"ok": True, "data": []})
+        monkeypatch.setattr(
+            ayrshare_client,
+            "history",
+            lambda *, last_records=100, last_days=None: calls.append(("history", last_records, last_days))
+            or {"ok": True, "data": []},
+        )
+
+        assert self.client.get("/api/ayrshare/status").json() == status
+        assert self.client.post("/api/ayrshare/key", json={"apiKey": "bad"}).status_code == 400
+        assert self.client.post("/api/ayrshare/key", json={"apiKey": "good"}).json() == status
+        assert self.client.delete("/api/ayrshare/key").json() == status
+        assert self.client.get("/api/ayrshare/profiles").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/ayrshare/scheduled").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/ayrshare/history?last_records=7&last_days=30").json() == {
+            "ok": True,
+            "data": [],
+        }
+        assert calls == [
+            ("status",),
+            ("set", "bad"),
+            ("set", "good"),
+            ("status",),
+            ("clear",),
+            ("status",),
+            ("profiles",),
+            ("scheduled",),
+            ("history", 7, 30),
+        ]
+
+    def test_composio_route_contract(self, monkeypatch):
+        import elevate_cli.composio_client as composio_client
+        import elevate_cli.composio_inbound as composio_inbound
+        import elevate_cli.web_server as web_server
+
+        calls = []
+        status = {"configured": True, "hasKey": True, "valid": False, "baseUrl": "https://composio.test"}
+
+        with web_server._COMPOSIO_SWR_LOCK:
+            web_server._COMPOSIO_SWR.clear()
+        web_server._COMPOSIO_TOOLKITS_CACHE.clear()
+
+        monkeypatch.setattr(web_server, "_prewarm_composio_toolkits_in_background", lambda: calls.append(("prewarm",)))
+        monkeypatch.setattr(composio_client, "get_status", lambda: calls.append(("status",)) or status)
+        monkeypatch.setattr(
+            composio_client,
+            "set_api_key",
+            lambda api_key: calls.append(("set", api_key)) or {"ok": api_key == "good", "error": "bad key"},
+        )
+        monkeypatch.setattr(composio_client, "clear_api_key", lambda: calls.append(("clear",)) or {"ok": True})
+        monkeypatch.setattr(
+            composio_client,
+            "list_connected_accounts",
+            lambda: calls.append(("connections",)) or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(
+            composio_client,
+            "list_all_connected_accounts",
+            lambda *, toolkit=None, page_size=100, max_pages=50: calls.append(("connections-all", toolkit, page_size, max_pages))
+            or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(composio_client, "load_capability_matrix", lambda: calls.append(("capabilities",)) or {"gmail": {"send": {"supported": True}}})
+        monkeypatch.setattr(composio_client, "capability", lambda toolkit: calls.append(("capability", toolkit)) or {"toolkit": toolkit})
+        monkeypatch.setattr(
+            composio_client,
+            "list_toolkits",
+            lambda *, category=None, limit=100, cursor=None, search=None: calls.append(("toolkits-page", category, limit, cursor, search))
+            or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(
+            composio_client,
+            "list_all_toolkits",
+            lambda *, category=None, page_size=100: calls.append(("toolkits-all", category, page_size))
+            or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(
+            composio_client,
+            "initiate_connection",
+            lambda toolkit, redirect_url=None, user_id=None, auth_config_id=None: calls.append(
+                ("connect", toolkit, redirect_url, user_id, auth_config_id)
+            )
+            or {"ok": True, "data": {"redirect_url": "https://connect.test"}},
+        )
+        monkeypatch.setattr(composio_client, "get_toolkit_details", lambda slug: calls.append(("details", slug)) or {"ok": True, "slug": slug})
+        monkeypatch.setattr(
+            composio_client,
+            "create_custom_auth_config",
+            lambda toolkit, credentials, auth_scheme=None: calls.append(("custom-auth", toolkit, credentials, auth_scheme))
+            or {"ok": True, "data": {"auth_config": {"id": "auth-1"}}},
+        )
+        monkeypatch.setattr(composio_client, "delete_connected_account", lambda account_id: calls.append(("delete", account_id)) or {"ok": True})
+        monkeypatch.setattr(composio_inbound, "list_facebook_pages_for_picker", lambda: calls.append(("fb-pages",)) or {"pages": []})
+        monkeypatch.setattr(composio_inbound, "set_facebook_page_selection", lambda page_ids: calls.append(("fb-set", page_ids)) or {"ok": True})
+        monkeypatch.setattr(composio_inbound, "pull_all_supported", lambda: calls.append(("pull",)) or {"ok": True, "total_new": 0})
+
+        assert self.client.get("/api/composio/status").json() == status
+        assert self.client.post("/api/composio/key", json={"apiKey": "bad"}).status_code == 400
+        assert self.client.post("/api/composio/key", json={"apiKey": "good"}).json() == status
+        assert self.client.delete("/api/composio/key").json() == status
+        assert self.client.get("/api/composio/connections?fresh=1").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/connections/all?toolkit=gmail&page_size=2&max_pages=3").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/capabilities").json() == {"gmail": {"send": {"supported": True}}}
+        assert self.client.get("/api/composio/capabilities?toolkit=gmail").json() == {"toolkit": "gmail"}
+        assert self.client.get("/api/composio/toolkits?all=false&limit=2&cursor=c1").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/toolkits?search=gmail&category=crm").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/toolkits?category=crm&limit=5").json() == {"ok": True, "data": []}
+        assert self.client.post(
+            "/api/composio/connect",
+            json={"toolkitSlug": "gmail", "redirectUrl": "app://return", "userId": "user-1"},
+        ).json() == {"ok": True, "data": {"redirect_url": "https://connect.test"}}
+        assert self.client.get("/api/composio/toolkits/gmail").json() == {"ok": True, "slug": "gmail"}
+        custom = self.client.post(
+            "/api/composio/auth-configs/custom",
+            json={
+                "toolkitSlug": "gmail",
+                "credentials": {"client_id": "id"},
+                "authScheme": "oauth2",
+                "redirectUrl": "app://return",
+                "userId": "user-1",
+            },
+        ).json()
+        assert custom["data"]["auth_config_id"] == "auth-1"
+        assert custom["data"]["auth_config_created"] is True
+        assert self.client.delete("/api/composio/connections/account-1").json() == {"ok": True}
+        assert self.client.get("/api/composio/facebook/pages").json() == {"pages": []}
+        assert self.client.put("/api/composio/facebook/pages", json={"pageIds": ["page-1"]}).json() == {"ok": True}
+        assert self.client.post("/api/composio/inbound/pull").json() == {"ok": True, "total_new": 0}
+
+        assert calls == [
+            ("status",),
+            ("set", "bad"),
+            ("set", "good"),
+            ("status",),
+            ("clear",),
+            ("status",),
+            ("connections",),
+            ("connections-all", "gmail", 2, 3),
+            ("capabilities",),
+            ("capability", "gmail"),
+            ("toolkits-page", None, 2, "c1", None),
+            ("toolkits-page", "crm", 100, None, "gmail"),
+            ("toolkits-all", "crm", 5),
+            ("connect", "gmail", "app://return", "user-1", None),
+            ("details", "gmail"),
+            ("custom-auth", "gmail", {"client_id": "id"}, "oauth2"),
+            ("connect", "gmail", "app://return", "user-1", "auth-1"),
+            ("delete", "account-1"),
+            ("fb-pages",),
+            ("fb-set", ["page-1"]),
+            ("pull",),
+        ]
+
+    def test_social_route_contract(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import elevate_cli.source_connectors as source_connectors
+        import elevate_cli.web_server as web_server
+
+        home = tmp_path / "home"
+        source_root = tmp_path / "sources"
+        social_root = source_root / "social"
+        social_root.mkdir(parents=True)
+        monkeypatch.setenv("ELEVATE_HOME", str(home))
+        monkeypatch.setenv("ELEVATE_WORKSPACE_ID", "ws")
+        monkeypatch.setattr(source_connectors, "get_source_root_info", lambda: {"sourceRoot": str(source_root)})
+
+        snapshot_dir = home / "state" / "ws"
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / "social-snapshot.json").write_text(
+            json.dumps({"exists": True, "summary": {"reach": 12}}),
+            encoding="utf-8",
+        )
+        (social_root / "tasks.jsonl").write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {
+                        "source_record_id": "idea-open",
+                        "task_type": "social_post_idea",
+                        "status": "open",
+                        "timestamp": "2099-01-02T00:00:00+00:00",
+                        "hook": "Open idea",
+                    },
+                    {
+                        "source_record_id": "idea-approved",
+                        "task_type": "social_post_idea",
+                        "status": "approved",
+                        "timestamp": "2099-01-01T00:00:00+00:00",
+                        "hook": "Approved idea",
+                    },
+                    {"source_record_id": "task-other", "task_type": "other", "status": "open"},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (snapshot_dir / "social-metrics.jsonl").write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {
+                        "platform": "instagram",
+                        "post_id": "post-1",
+                        "posted_at": "2099-01-01T00:00:00+00:00",
+                        "fetched_at": "2099-01-01T00:00:00+00:00",
+                        "caption": "first",
+                        "raw": {"keep": True},
+                    },
+                    {
+                        "platform": "instagram",
+                        "post_id": "post-1",
+                        "posted_at": "2099-01-02T00:00:00+00:00",
+                        "fetched_at": "2099-01-02T00:00:00+00:00",
+                        "caption": "newest",
+                    },
+                    {"platform": "instagram", "post_id": "account", "media_type": "ACCOUNT"},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        refresh_calls = []
+        monkeypatch.setattr(
+            web_server,
+            "_load_social_fetcher",
+            lambda module_name: SimpleNamespace(
+                fetch=lambda *, lookback_days, max_posts: refresh_calls.append((module_name, lookback_days, max_posts))
+                or {"platform": module_name, "status": "ok", "posts_seen": 2}
+            ),
+        )
+
+        assert self.client.get("/api/social/snapshot").json()["summary"] == {"reach": 12}
+        ideas = self.client.get("/api/social/ideas").json()
+        assert ideas["count"] == 1
+        assert ideas["items"][0]["source_record_id"] == "idea-open"
+        approved = self.client.get("/api/social/ideas?status=approved").json()
+        assert approved["items"][0]["source_record_id"] == "idea-approved"
+
+        action = self.client.post(
+            "/api/social/ideas/idea-open/action",
+            json={"action": "approve", "notes": "ship it"},
+        )
+        assert action.json() == {"ok": True, "record_id": "idea-open", "action": "approve"}
+        assert self.client.post("/api/social/ideas/idea-open/action", json={"action": "nope"}).status_code == 400
+        assert self.client.post("/api/social/ideas/missing/action", json={"action": "approve"}).status_code == 404
+
+        updated_tasks = [
+            json.loads(line)
+            for line in (social_root / "tasks.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        updated = next(row for row in updated_tasks if row["source_record_id"] == "idea-open")
+        assert updated["status"] == "approved"
+        assert updated["approval_required"] is False
+        assert updated["notes"][0]["text"] == "ship it"
+
+        posts = self.client.get("/api/social/recent-posts?limit=1").json()
+        assert posts["count"] == 1
+        assert posts["items"][0]["caption"] == "newest"
+        assert posts["items"][0]["raw"] == {"keep": True}
+
+        refreshed = self.client.post(
+            "/api/social/refresh?platform=instagram&lookback_days=3&max_posts=4"
+        ).json()
+        assert refreshed["results"]["instagram"]["posts_seen"] == 2
+        assert refresh_calls == [("instagram_insights", 3, 4)]
+        assert self.client.post("/api/social/refresh?platform=threads").status_code == 400
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
@@ -1064,6 +2107,16 @@ class TestNewEndpoints:
         if skills:
             assert "name" in skills[0]
             assert "enabled" in skills[0]
+
+    def test_example_plugin_api_mount(self):
+        resp = self.client.get("/api/plugins/example/hello")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "message": "Hello from the example plugin!",
+            "plugin": "example",
+            "version": "1.0.0",
+        }
 
     def test_skills_list_includes_disabled_skills(self, monkeypatch):
         import tools.skills_tool as skills_tool

@@ -87,6 +87,7 @@ function AdminTaskDialog({
     <div
       role="dialog"
       aria-modal="true"
+      aria-label={target.kind === "deal-task" ? "Deal task detail" : "Action run detail"}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6 animate-[fade-in_120ms_ease-out]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -105,8 +106,15 @@ function AdminTaskDialog({
               {task?.title || run?.registryName || run?.skill || <Skeleton className="h-5 w-48" />}
             </div>
           </div>
-          <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
-            <CloseIcon className="h-4 w-4" />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onClose}
+            aria-label="Close task drawer"
+            title="Close"
+            className="text-foreground/75 hover:text-foreground"
+          >
+            <CloseIcon className="h-4 w-4" aria-hidden="true" />
           </Button>
         </div>
 

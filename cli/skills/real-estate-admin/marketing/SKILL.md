@@ -8,13 +8,22 @@ metadata:
       approval_required: true
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Listing Marketing
+
+Preserve explicit approvals already supplied in chat or with launch timing. “Send the coming-soons now; landing approved; video later” means execute the non-video launch and leave only video pending. Use the recorded-authorization handoff instead of creating another final-approval loop.
+
+For Marketing Go draft review and approved continuation, read [references/review-approval.md](references/review-approval.md). Prepare the complete package before the ACTION NEEDED publishing approval. Register every final asset with the originating chat preview bar. Resume approved artifacts without rebuilding them.
 
 Use once the listing is live or approved for launch.
 
 Require address, MLS number, live date, price, approved photos, and open-house/signage inputs before creating assets. Create drafts/tasks for social posts, email blasts, listing updates, and seller communications.
 
-Never post or send directly. Missing launch inputs should produce `waiting_human` with the exact required fields.
+Prepare first; publish or schedule only through the explicitly approved review continuation. Missing launch inputs should produce `waiting_human` with the exact required fields after independent preparation is complete. Route per-listing landing-page implementation to `marketing-landing` and retain its output in the same Marketing Go package.
 
 ## Required Inputs
 

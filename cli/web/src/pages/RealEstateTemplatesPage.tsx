@@ -16,6 +16,7 @@ import { cn, isoTimeAgo } from "@/lib/utils";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/useToast";
 
@@ -207,12 +208,23 @@ function LeaderboardCard({
   onRetire,
   onEdit,
   bucket,
+  busy,
 }: {
   row: LeaderboardEntry;
-  onRetire: (id: string) => void;
-  onEdit: (id: string, body: string) => void;
+  onRetire: (row: LeaderboardEntry) => void;
+  onEdit: (id: string, body: string) => Promise<void> | void;
   bucket: "authoritative" | "trial";
+  busy: boolean;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draftBody, setDraftBody] = useState(row.body);
+  const canSave = draftBody.trim().length > 0 && draftBody.trim() !== row.body.trim();
+
+  useEffect(() => {
+    setEditing(false);
+    setDraftBody(row.body);
+  }, [row.body, row.displayId]);
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-3">
@@ -233,7 +245,8 @@ function LeaderboardCard({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => onEdit(row.displayId, row.body)}
+            onClick={() => setEditing(true)}
+            disabled={busy}
             title="Edit body (bumps version)"
           >
             <Pencil className="h-3.5 w-3.5" />
@@ -242,7 +255,8 @@ function LeaderboardCard({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => onRetire(row.displayId)}
+            onClick={() => onRetire(row)}
+            disabled={busy}
             title="Retire this template"
           >
             <Archive className="h-3.5 w-3.5" />
@@ -251,9 +265,50 @@ function LeaderboardCard({
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">
-          {row.body}
-        </p>
+        {editing ? (
+          <div className="flex flex-col gap-2">
+            <textarea
+              value={draftBody}
+              onChange={(e) => setDraftBody(e.target.value)}
+              className={cn(
+                "min-h-[7.5rem] w-full resize-y rounded-sm border border-border bg-card px-3 py-2",
+                "text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/70",
+                "focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              )}
+              rows={6}
+              spellCheck
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setDraftBody(row.body);
+                  setEditing(false);
+                }}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  void Promise.resolve(onEdit(row.displayId, draftBody.trim())).then(() => {
+                    setEditing(false);
+                  });
+                }}
+                disabled={busy || !canSave}
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
+                Save edit
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">
+            {row.body}
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <MetricCell
             label="Reply rate"
@@ -284,11 +339,13 @@ function ProposedCard({
 }: {
   template: Template;
   onApprove: (id: string) => void;
-  onReject: (id: string) => void;
-  onEdit: (id: string, body: string) => void;
+  onReject: (id: string, reason: string) => Promise<void> | void;
+  onEdit: (id: string, body: string) => Promise<void> | void;
   busy: boolean;
 }) {
   const [draftBody, setDraftBody] = useState(template.body);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
   const dirty = draftBody !== template.body;
 
   return (
@@ -339,7 +396,7 @@ function ProposedCard({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => onReject(template.id)}
+              onClick={() => setRejecting(true)}
               disabled={busy}
             >
               <X className="h-3.5 w-3.5" />
@@ -356,6 +413,51 @@ function ProposedCard({
             </Button>
           </div>
         </div>
+        {rejecting && (
+          <div className="flex flex-col gap-2 rounded-md border border-border bg-background/40 p-3">
+            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
+              Reject reason
+              <textarea
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                rows={3}
+                className={cn(
+                  "w-full resize-y rounded-sm border border-border bg-card px-3 py-2",
+                  "text-sm font-normal leading-relaxed text-foreground placeholder:text-muted-foreground/70",
+                  "focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                )}
+                placeholder="Keep a short note for future template learning."
+              />
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setRejecting(false);
+                  setRejectReason("");
+                }}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => {
+                  void Promise.resolve(onReject(template.id, rejectReason.trim())).then(() => {
+                    setRejecting(false);
+                    setRejectReason("");
+                  });
+                }}
+                disabled={busy || !rejectReason.trim()}
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                Reject template
+              </Button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -413,6 +515,7 @@ export default function RealEstateTemplatesPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [retireTarget, setRetireTarget] = useState<LeaderboardEntry | null>(null);
 
   const refresh = useCallback(
     async (which: TabKey | "all" = "all") => {
@@ -498,9 +601,8 @@ export default function RealEstateTemplatesPage() {
   );
 
   const handleReject = useCallback(
-    async (id: string) => {
-      const reason = window.prompt("Reject reason? (kept on the template for learning)");
-      if (!reason || !reason.trim()) return;
+    async (id: string, reason: string) => {
+      if (!reason.trim()) return;
       setBusyId(id);
       try {
         await api.reject(id, reason.trim());
@@ -519,12 +621,11 @@ export default function RealEstateTemplatesPage() {
   );
 
   const handleEdit = useCallback(
-    async (id: string, currentBody: string) => {
-      const next = window.prompt("New body? (this bumps the version)", currentBody);
-      if (!next || !next.trim() || next === currentBody) return;
+    async (id: string, body: string) => {
+      if (!body.trim()) return;
       setBusyId(id);
       try {
-        await api.edit(id, next.trim());
+        await api.edit(id, body.trim());
         showToast("Edit saved — version bumped.", "success");
         await refresh("all");
       } catch (e) {
@@ -541,14 +642,12 @@ export default function RealEstateTemplatesPage() {
 
   const handleRetire = useCallback(
     async (id: string) => {
-      if (!window.confirm("Retire this template? It stops being eligible for the picker.")) {
-        return;
-      }
       setBusyId(id);
       try {
         await api.retire(id);
         showToast("Template retired.", "success");
         await refresh("all");
+        setRetireTarget(null);
       } catch (e) {
         showToast(
           `Retire failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -616,11 +715,25 @@ export default function RealEstateTemplatesPage() {
         </div>
       )}
 
+      <ConfirmDialog
+        open={retireTarget !== null}
+        title={`Retire "${retireTarget?.name ?? "this template"}"?`}
+        description="It stops being eligible for the picker, but performance history remains available."
+        confirmLabel="Retire"
+        destructive
+        loading={retireTarget ? busyId === retireTarget.displayId : false}
+        onCancel={() => setRetireTarget(null)}
+        onConfirm={() => {
+          if (retireTarget) void handleRetire(retireTarget.displayId);
+        }}
+      />
+
       {tab === "live" && (
         <LiveTabContent
           data={live}
+          busyId={busyId}
           onEdit={handleEdit}
-          onRetire={handleRetire}
+          onRetire={setRetireTarget}
         />
       )}
 
@@ -641,12 +754,14 @@ export default function RealEstateTemplatesPage() {
 
 function LiveTabContent({
   data,
+  busyId,
   onEdit,
   onRetire,
 }: {
   data: LiveResponse | null;
-  onEdit: (id: string, body: string) => void;
-  onRetire: (id: string) => void;
+  busyId: string | null;
+  onEdit: (id: string, body: string) => Promise<void> | void;
+  onRetire: (row: LeaderboardEntry) => void;
 }) {
   if (!data) {
     return null;
@@ -673,6 +788,7 @@ function LiveTabContent({
                 key={row.lineageRootId}
                 row={row}
                 bucket="authoritative"
+                busy={busyId === row.displayId}
                 onEdit={onEdit}
                 onRetire={onRetire}
               />
@@ -693,6 +809,7 @@ function LiveTabContent({
                 key={row.lineageRootId}
                 row={row}
                 bucket="trial"
+                busy={busyId === row.displayId}
                 onEdit={onEdit}
                 onRetire={onRetire}
               />
@@ -714,8 +831,8 @@ function ProposedTabContent({
   items: Template[] | null;
   busyId: string | null;
   onApprove: (id: string) => void;
-  onReject: (id: string) => void;
-  onEdit: (id: string, body: string) => void;
+  onReject: (id: string, reason: string) => Promise<void> | void;
+  onEdit: (id: string, body: string) => Promise<void> | void;
 }) {
   if (!items) return null;
   if (items.length === 0) {
@@ -771,4 +888,3 @@ function SectionHead({ label, hint }: { label: string; hint: string }) {
     </header>
   );
 }
-

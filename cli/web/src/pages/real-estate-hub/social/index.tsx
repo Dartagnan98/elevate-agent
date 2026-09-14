@@ -1,10 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type { SocialIdea, SocialMetricRow, SocialSnapshot } from "@/lib/api";
-import { useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { cn } from "@/lib/utils";
+import { HubDataErrorBanner, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { SocialBoard } from "./board";
 import { buildSocialViewModel } from "./view-model";
 import "./social.css";
+
+export function socialLoadErrorFromResults(results: PromiseSettledResult<unknown>[]): string | null {
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length === 0) return null;
+  const reason = failed[0].reason;
+  const message = reason instanceof Error ? reason.message : "Failed to load social data";
+  if (failed.length === results.length) return message;
+  return `${failed.length} social source${failed.length === 1 ? "" : "s"} failed: ${message}`;
+}
+
+export function socialIdeaQueueStatus(): string | undefined {
+  return undefined;
+}
 
 export function RealEstateSocialMediaPage() {
   const data = useRealEstateHubData();
@@ -29,22 +44,14 @@ export function RealEstateSocialMediaPage() {
     try {
       const [snapRes, ideaRes, recentRes] = await Promise.allSettled([
         api.getSocialSnapshot(signal),
-        api.getSocialIdeas("pending", signal),
+        api.getSocialIdeas(socialIdeaQueueStatus(), signal),
         api.getSocialRecentPosts(1000, signal),
       ]);
       if (signal.aborted) return;
       if (snapRes.status === "fulfilled") setSnapshot(snapRes.value);
       if (ideaRes.status === "fulfilled") setIdeas(ideaRes.value.items || []);
       if (recentRes.status === "fulfilled") setRecentPosts(recentRes.value.items || []);
-      // allSettled never rejects, so surface a banner when every source failed.
-      if (
-        snapRes.status === "rejected" &&
-        ideaRes.status === "rejected" &&
-        recentRes.status === "rejected"
-      ) {
-        const reason = snapRes.reason;
-        setSocialError(reason instanceof Error ? reason.message : "Failed to load social data");
-      }
+      setSocialError(socialLoadErrorFromResults([snapRes, ideaRes, recentRes]));
     } catch (e) {
       if (signal.aborted) return;
       setSocialError(e instanceof Error ? e.message : "Failed to load social data");
@@ -112,7 +119,21 @@ export function RealEstateSocialMediaPage() {
 
   return (
     <div className="sm-root">
-      {socialError && <div className="sm-error mono">{socialError}</div>}
+      <HubDataErrorBanner className="mb-3" data={data} />
+      {socialError && (
+        <div className="sm-error mono" role="alert" aria-live="polite">
+          <span>{socialError}</span>
+          <button
+            className="ab-btn ghost sm-error-retry"
+            type="button"
+            onClick={refresh}
+            disabled={loadingSocial}
+          >
+            <RefreshCw className={cn(loadingSocial && "animate-spin")} aria-hidden="true" />
+            <span>{loadingSocial ? "Retrying..." : "Retry"}</span>
+          </button>
+        </div>
+      )}
       <SocialBoard
         vm={vm}
         refreshing={refreshing}

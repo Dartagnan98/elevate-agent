@@ -7,8 +7,7 @@ const { spawnSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const REPO = path.resolve(ROOT, "..");
-const DIST = path.join(ROOT, "dist");
-const FEED = path.join(DIST, "latest-mac.yml");
+const PUBLIC_FEED_URL = "https://api.elevationrealestatehq.com/updates/latest-mac.yml";
 const packageJson = require(path.join(ROOT, "package.json"));
 const packageLock = require(path.join(ROOT, "package-lock.json"));
 
@@ -81,10 +80,17 @@ function currentNodeVersionAtLeast(major, minor) {
 }
 
 function latestFeedVersion() {
-  if (!fs.existsSync(FEED)) return null;
-  const text = fs.readFileSync(FEED, "utf8");
+  const result = spawnSync(
+    "curl",
+    ["--fail", "--silent", "--show-error", "--location", "--max-time", "20", PUBLIC_FEED_URL],
+    { cwd: ROOT, encoding: "utf8", timeout: 30_000 },
+  );
+  if (result.status !== 0) {
+    return { version: null, error: (result.stderr || result.stdout || "").trim() || `curl exited ${result.status}` };
+  }
+  const text = result.stdout || "";
   const match = text.match(/^version:\s*([^\s]+)/m);
-  return match ? match[1].trim() : null;
+  return { version: match ? match[1].trim() : null, error: match ? "" : "missing version" };
 }
 
 function hasDsStore(relativePath) {
@@ -142,11 +148,11 @@ record(
   `${packageJson.version} / ${packageLock.packages?.[""]?.version || "missing"}`
 );
 
-const feedVersion = latestFeedVersion();
+const feed = latestFeedVersion();
 record(
-  "package version is newer than current update feed",
-  !feedVersion || compareSemver(packageJson.version, feedVersion) > 0,
-  feedVersion ? `${packageJson.version} > ${feedVersion}` : "no feed found"
+  "package version is newer than public update feed",
+  Boolean(feed.version) && compareSemver(packageJson.version, feed.version) > 0,
+  feed.version ? `${packageJson.version} > ${feed.version}` : feed.error
 );
 
 record("xcrun available", commandExists("xcrun", ["--version"]));
@@ -172,11 +178,14 @@ record(
 
 record("hardened runtime enabled", packageJson.build?.mac?.hardenedRuntime === true);
 record("electron-builder notarization enabled", packageJson.build?.mac?.notarize === true);
+record("macOS minimum version pinned", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion === "12.0", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion || "missing");
 record("Developer ID targets configured", JSON.stringify(packageJson.build?.mac?.target || []).includes("dmg"));
 record("app icon present", exists("desktop/assets/icon.icns"));
-record("web dashboard bundle present", exists("cli/elevate_cli/web_dist/index.html"));
+record("web dashboard source present", exists("cli/web/package.json"));
 record("arm64 bundled Python present", isExecutable("desktop/runtime/arm64/python/bin/python3.12"));
 record("x64 bundled Python present", isExecutable("desktop/runtime/x64/python/bin/python3.12"));
+record("WhatsApp bridge script present", exists("cli/scripts/whatsapp-bridge/bridge.js"));
+record("WhatsApp bridge package present", exists("cli/scripts/whatsapp-bridge/package.json"));
 
 const runtimeDsStore = hasDsStore("desktop/runtime");
 record("bundled runtime has no .DS_Store files", !runtimeDsStore, runtimeDsStore || "clean");

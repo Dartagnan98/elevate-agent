@@ -6,6 +6,8 @@ import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import threading
+
 import pytest
 import yaml
 
@@ -46,6 +48,10 @@ def _install_fake_agent(monkeypatch):
 
 def _make_runner():
     runner = object.__new__(gateway_run.GatewayRunner)
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
     runner.adapters = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []

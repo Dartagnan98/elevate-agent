@@ -30,6 +30,7 @@ type Me = {
   orgs: Array<{ id: string; slug: string; name: string; role: "owner" | "admin" | "member" }>;
   billing?: {
     has_customer: boolean;
+    has_subscription: boolean;
     current_period_end: string | null;
     personal_tier: "pro" | "builder";
     personal_status: string;
@@ -543,7 +544,7 @@ export default function AccountPage() {
                   <div>
                     <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Billing</h2>
                     <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
-                      {me.billing?.has_customer
+                      {me.billing?.has_subscription
                         ? "Manage subscription, invoices, and payment methods."
                         : "No subscription yet. Upgrade to unlock skill packages."}
                     </div>
@@ -583,7 +584,7 @@ export default function AccountPage() {
               </div>
 
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {me.billing?.has_customer ? (
+                {me.billing?.has_subscription ? (
                   <Button
                     variant="primary"
                     size="sm"

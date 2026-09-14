@@ -1,12 +1,17 @@
 ---
 name: subject-removal
-description: Handle subject-removal admin work: docs, deposit receipt, lawyer info, sold rider/sign tasks, title charge checks, and human confirmation before phase completion.
+description: "Handle subject-removal admin work: docs, deposit receipt, lawyer info, sold rider/sign tasks, title charge checks, and human confirmation before phase completion."
 metadata:
   elevate:
     tags: [real-estate, subjects, closing]
     runtime:
       approval_required: true
 ---
+
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
 
 # Subject Removal
 
@@ -56,3 +61,7 @@ Human confirmation is required before the subject-removal phase is marked comple
   "risks": []
 }
 ```
+
+## Filing on the condition-removal trigger
+
+A verified removal trigger authorizes uploading that document to the matching SkySlope transaction. Verify contract, transaction and checklist placement; reuse an existing upload by checksum/provider receipt and read back the result. If verbal confirmation arrived without the document, request/locate the form and keep the filing task waiting_human. Attach the upload evidence and close this run through admin-result-writer. Do not mark the deal Closed or sign/final-submit on this authority.

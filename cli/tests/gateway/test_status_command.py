@@ -54,6 +54,7 @@ def _make_runner(session_entry: SessionEntry):
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._session_db = MagicMock()
+    runner._session_db.get_session.return_value = {"input_tokens": session_entry.total_tokens}
     runner._session_db.get_session_title.return_value = None
     runner._reasoning_config = None
     runner._provider_routing = {}

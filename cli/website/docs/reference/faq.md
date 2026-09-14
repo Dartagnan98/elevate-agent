@@ -292,7 +292,7 @@ elevate chat --model openrouter/meta-llama/llama-3.1-70b-instruct
 **Solution:**
 ```bash
 # Compress the current session
-/compress
+/compact
 
 # Or start a fresh session
 elevate chat
@@ -502,14 +502,14 @@ You can verify the plist has the correct PATH:
 **Solution:**
 ```bash
 # Compress the conversation to reduce tokens
-/compress
+/compact
 
 # Check session token usage
 /usage
 ```
 
 :::tip
-Use `/compress` regularly during long sessions. It summarizes the conversation history and reduces token usage significantly while preserving context.
+Use `/compact` regularly during long sessions. It summarizes the conversation history and reduces token usage significantly while preserving context.
 :::
 
 #### Session getting too long
@@ -519,7 +519,7 @@ Use `/compress` regularly during long sessions. It summarizes the conversation h
 **Solution:**
 ```bash
 # Compress current session (preserves key context)
-/compress
+/compact
 
 # Start a new session with a reference to the old one
 elevate chat
@@ -820,5 +820,5 @@ If using OpenRouter, make sure your API key has credits. A 400 from OpenRouter o
 If your issue isn't covered here:
 
 1. **Search existing issues:** [GitHub Issues](https://github.com/Dartagnan98/elevate-agent/issues)
-2. **Ask the community:** [Elevation Real Estate HQ Discord](https://)
+2. **Ask the community:** Elevation Real Estate HQ Discord link pending
 3. **File a bug report:** Include your OS, Python version (`python3 --version`), Elevate version (`elevate --version`), and the full error message

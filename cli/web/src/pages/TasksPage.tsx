@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Modal } from "@/components/ui/modal";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -87,6 +88,8 @@ const STATUS_ORDER: Record<TaskStatus, number> = {
   completed: 3,
   cancelled: 4,
 };
+const TASK_COLUMN_RENDER_LIMIT = 80;
+const TASK_LIST_RENDER_LIMIT = 300;
 
 function unique(values: Array<string | null | undefined>): string[] {
   const out: string[] = [];
@@ -318,9 +321,16 @@ function KanbanBoard({
                   No tasks
                 </p>
               ) : (
-                column.tasks.map((task) => (
-                  <TaskCard key={task.id} task={task} onClick={onTaskClick} />
-                ))
+                <>
+                  {column.tasks.slice(0, TASK_COLUMN_RENDER_LIMIT).map((task) => (
+                    <TaskCard key={task.id} task={task} onClick={onTaskClick} />
+                  ))}
+                  {column.tasks.length > TASK_COLUMN_RENDER_LIMIT && (
+                    <p className="px-2 py-2 text-center text-xs text-muted-foreground">
+                      Showing first {TASK_COLUMN_RENDER_LIMIT} of {column.tasks.length}. Use filters to narrow.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -407,6 +417,7 @@ function TaskListTable({ tasks, onTaskClick }: { tasks: SurfaceTask[]; onTaskCli
     });
     return copy;
   }, [tasks, sortDir, sortField]);
+  const visibleRows = sorted.slice(0, TASK_LIST_RENDER_LIMIT);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -458,20 +469,29 @@ function TaskListTable({ tasks, onTaskClick }: { tasks: SurfaceTask[]; onTaskCli
               </td>
             </tr>
           ) : (
-            sorted.map((task) => (
-              <tr
-                key={task.id}
-                onClick={() => onTaskClick(task)}
-                className="cursor-pointer transition-colors hover:bg-secondary/20"
-              >
-                <td className="max-w-[320px] truncate px-3 py-2 font-medium">{task.title}</td>
-                <td className="px-3 py-2"><StatusBadge status={task.status} /></td>
-                <td className="px-3 py-2"><PriorityBadge priority={task.priority} /></td>
-                <td className="px-3 py-2 text-muted-foreground">{taskAssignee(task) || "-"}</td>
-                <td className="px-3 py-2"><OrgBadge org={task.org} /></td>
-                <td className="px-3 py-2 text-muted-foreground">{timeAgo(createdAt(task)) || "-"}</td>
-              </tr>
-            ))
+            <>
+              {visibleRows.map((task) => (
+                <tr
+                  key={task.id}
+                  onClick={() => onTaskClick(task)}
+                  className="cursor-pointer transition-colors hover:bg-secondary/20"
+                >
+                  <td className="max-w-[320px] truncate px-3 py-2 font-medium">{task.title}</td>
+                  <td className="px-3 py-2"><StatusBadge status={task.status} /></td>
+                  <td className="px-3 py-2"><PriorityBadge priority={task.priority} /></td>
+                  <td className="px-3 py-2 text-muted-foreground">{taskAssignee(task) || "-"}</td>
+                  <td className="px-3 py-2"><OrgBadge org={task.org} /></td>
+                  <td className="px-3 py-2 text-muted-foreground">{timeAgo(createdAt(task)) || "-"}</td>
+                </tr>
+              ))}
+              {sorted.length > TASK_LIST_RENDER_LIMIT && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-3 text-center text-xs text-muted-foreground">
+                    Showing first {TASK_LIST_RENDER_LIMIT} of {sorted.length}. Use filters to narrow.
+                  </td>
+                </tr>
+              )}
+            </>
           )}
         </tbody>
       </table>
@@ -706,7 +726,11 @@ function CreateTaskForm({
         </Field>
       )}
       <div className="flex items-center gap-3">
-        <Switch checked={needsApproval} onCheckedChange={setNeedsApproval} />
+        <Switch
+          checked={needsApproval}
+          onCheckedChange={setNeedsApproval}
+          aria-label="Needs approval before execution"
+        />
         <Label className="cursor-pointer text-sm text-foreground">Needs approval before execution</Label>
       </div>
       <div className="flex justify-end gap-2 pt-1">
@@ -874,7 +898,7 @@ function TaskDetailSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
       onMouseDown={() => onOpenChange(false)}
     >
       <div
@@ -1297,13 +1321,11 @@ export default function TasksPage() {
         onClearAll={clearFilters}
       />
 
-      {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-          Could not load tasks: {error}
-        </div>
-      )}
+      {error ? (
+        <RouteLoadError title="Could not load tasks" error={error} onRetry={() => fetchTasks(true)} />
+      ) : null}
 
-      {loading ? (
+      {error && !data ? null : loading ? (
         view === "kanban" ? <KanbanBoardSkeleton /> : <TaskListTableSkeleton />
       ) : tasks.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-border py-16 text-center">

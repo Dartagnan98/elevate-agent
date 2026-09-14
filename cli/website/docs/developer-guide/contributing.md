@@ -35,7 +35,7 @@ We value contributions in this order:
 | **Git** | With `--recurse-submodules` support, and the `git-lfs` extension installed |
 | **Python 3.11+** | uv will install it if missing |
 | **uv** | Fast Python package manager ([install](https://docs.astral.sh/uv/)) |
-| **Node.js 20+** | Optional — needed for browser tools and WhatsApp bridge (matches root `package.json` engines) |
+| **Node.js 20+** | Optional — needed for dashboard, TUI, and WhatsApp bridge development |
 
 ### Clone and Install
 
@@ -51,8 +51,9 @@ export VIRTUAL_ENV="$(pwd)/venv"
 uv pip install -e ".[all,dev]"
 uv pip install -e "./tinker-atropos"
 
-# Optional: browser tools
-npm install
+# Optional: frontend tools
+npm --prefix web install
+npm --prefix ui-tui install
 ```
 
 ### Configure for Development
@@ -224,7 +225,7 @@ fix(security): prevent shell injection in sudo password piping
 
 ## Community
 
-- **Discord**: [](https://)
+- **Discord**: channel link pending
 - **GitHub Discussions**: For design proposals and architecture discussions
 - **Skills Hub**: Upload specialized skills and share with the community
 

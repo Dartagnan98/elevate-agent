@@ -12,6 +12,8 @@ call is mocked — we never actually shell out during unit tests.
 
 from __future__ import annotations
 
+from pathlib import Path
+import tomllib
 from typing import Iterator
 
 import pytest
@@ -94,6 +96,13 @@ class TestAllowlist:
             for spec in specs:
                 assert ld._spec_is_safe(spec), \
                     f"{feature}: spec {spec!r} fails safety check"
+
+    def test_edge_tts_lazy_spec_matches_project_dependency(self):
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        deps = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+        edge_dep = next(dep for dep in deps if dep.startswith("edge-tts"))
+
+        assert ld.LAZY_DEPS["tts.edge"] == (edge_dep,)
 
     def test_feature_install_command_returns_pip_invocation(self):
         cmd = ld.feature_install_command("memory.honcho")

@@ -81,6 +81,12 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
 
     try:
         with connect() as conn:
+            if action == "trigger":
+                from elevate_cli.listing_triggers import apply_listing_trigger
+                result = apply_listing_trigger(conn, deal_id, trigger=args.get("trigger"),
+                    evidence=args.get("evidence"), to_stage=args.get("to_stage"), actor=_ACTOR)
+                return tool_result(success=True, **result)
+
             if action == "show":
                 ctx = get_deal_context(conn, deal_id)
                 deal = ctx.get("deal") or {}
@@ -96,13 +102,31 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 )
 
             if action == "set_checklist":
-                field = str(args.get("field") or "").strip()
-                if not field:
-                    return tool_error("set_checklist requires 'field' (a checklist/workflow id)")
-                value = args.get("value", True)
-                set_deal_toggle(conn, deal_id, field=field, value=value, actor=_ACTOR)
+                # Accept either one cell (field + value) or many in one call
+                # (cells: {id: value}). Bulk avoids the "tick one cell and stop"
+                # failure where the model fires a single toggle and moves on.
+                cells = args.get("cells")
+                applied: dict[str, Any] = {}
+                if isinstance(cells, dict) and cells:
+                    for raw_field, raw_value in cells.items():
+                        cell = str(raw_field or "").strip()
+                        if not cell:
+                            continue
+                        set_deal_toggle(conn, deal_id, field=cell, value=raw_value, actor=_ACTOR)
+                        applied[cell] = raw_value
+                    if not applied:
+                        return tool_error("set_checklist 'cells' had no valid checklist ids")
+                else:
+                    field = str(args.get("field") or "").strip()
+                    if not field:
+                        return tool_error(
+                            "set_checklist requires 'field' (a checklist/workflow id) or a 'cells' map"
+                        )
+                    value = args.get("value", True)
+                    set_deal_toggle(conn, deal_id, field=field, value=value, actor=_ACTOR)
+                    applied[field] = value
                 ctx = get_deal_context(conn, deal_id)
-                return tool_result(success=True, applied={field: value}, gate=_gate_brief(ctx))
+                return tool_result(success=True, applied=applied, gate=_gate_brief(ctx))
 
             if action == "set_fields":
                 fields = args.get("fields")
@@ -143,34 +167,22 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 )
 
             if action == "advance":
+                # Bare advancement has no event/intent evidence. Use trigger.
                 ctx = get_deal_context(conn, deal_id)
-                gate = ((ctx.get("dealFlow") or {}).get("gate") or {})
-                next_stage = gate.get("nextStage")
-                force = _parse_bool(args.get("force"))
-                if next_stage is None:
-                    return tool_result(
-                        success=False,
-                        message="deal is already at the final stage",
-                        gate=_gate_brief(ctx),
-                    )
-                if not force and not gate.get("canAdvance"):
-                    return tool_result(
-                        success=False,
-                        message="phase gate is blocked — resolve the missing items first, or pass force=true",
-                        gate=_gate_brief(ctx),
-                    )
-                move_deal_stage(
-                    conn, deal_id,
-                    to_stage=int(next_stage), actor=_ACTOR,
-                    force=force, gate_checked=not force,
+                return tool_result(
+                    success=False,
+                    message=(
+                        "Bare advance has no trigger evidence. For an authorized BC listing "
+                        "request or verified document event, use action=trigger with its "
+                        "named trigger and evidence. Workflow completion alone is not authorization."
+                    ),
+                    gate=_gate_brief(ctx),
                 )
-                ctx = get_deal_context(conn, deal_id)
-                return tool_result(success=True, advanced=True, gate=_gate_brief(ctx))
 
             if action == "complete_run":
                 # Finalize the stage's pending run the way the cron callback does:
                 # apply checklist updates + artifacts, clear the blocking run, and
-                # let the gate auto-advance. This is the in-session equivalent of
+                # report readiness without inferring a new trigger. This is the in-session equivalent of
                 # the background run-result callback.
                 from elevate_cli.data import list_action_runs, record_run_result
 
@@ -212,6 +224,23 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 if to_stage is None:
                     return tool_error("move requires 'to_stage'")
                 force = _parse_bool(args.get("force"))
+                # Same rule as `advance`: an agent may never move a card FORWARD.
+                # Backward moves stay allowed — those are corrections and
+                # collapses (a fallen-through sale going back to Listing Live),
+                # which are recoveries, not decisions about her pipeline.
+                _cur = int((get_deal_context(conn, deal_id).get("deal") or {}).get("currentStage") or 0)
+                if int(to_stage) > _cur:
+                    ctx = get_deal_context(conn, deal_id)
+                    return tool_result(
+                        success=False,
+                        message=(
+                            f"refusing to move this card forward ({_cur} -> {int(to_stage)}). "
+                            "Use action=trigger with an authorized event and evidence for forward moves. "
+                            "Backward moves (corrections, collapses) "
+                            "are still allowed."
+                        ),
+                        gate=_gate_brief(ctx),
+                    )
                 move_deal_stage(
                     conn, deal_id,
                     to_stage=int(to_stage), actor=_ACTOR,
@@ -242,17 +271,18 @@ ADMIN_DEAL_SCHEMA = {
             "gathered what a skill needed (e.g. CMA list price) in the chat: "
             "write it to the deal and the board syncs live.\n\n"
             "Actions:\n"
+            "- trigger: apply an authorized BC listing event with trigger + evidence. See the shared listing stage trigger contract. Queues destination work atomically; completion alone is not a trigger.\n"
             "- show: deal + gate (stage, what's missing, whether it can advance).\n"
-            "- set_checklist: tick one checklist/workflow cell (field + value).\n"
+            "- set_checklist: tick checklist/workflow cells — one (field + value) or many at once (cells map). Prefer the cells map when a stage completes several items.\n"
             "- set_fields: set named deal fields (listPrice, listingAddress, dates...).\n"
             "- attach: attach an artifact (kind + file_path).\n"
             "- complete_run: finalize the stage's pending run (applies checklist_updates "
-            "+ artifacts, clears the blocking run, auto-advances). Use this to close out "
+            "+ artifacts and clears the blocking run; does not authorize a stage move). Use this to close out "
             "a skill the deal launched on stage entry — it's the in-session equivalent of "
             "the background result callback. Resolves the deal's active run automatically "
             "(or pass run_id / skill).\n"
-            "- advance: move the card to the next stage when the gate is clear.\n"
-            "- move: move to an explicit stage (use force=true to override the gate).\n\n"
+            "- advance: bare advancement is blocked; use trigger for authorized BC listing events.\n"
+            "- move: backward corrections only. Forward listing moves use trigger.\n\n"
             "A deal that entered a stage on its own has a pending run that BLOCKS the gate "
             "until done — use complete_run to close it, not force. Every write returns the "
             "updated gate. Approval-gated cells (stage-complete, listing-description-approved, "
@@ -264,12 +294,15 @@ ADMIN_DEAL_SCHEMA = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["show", "set_checklist", "set_fields", "attach", "complete_run", "advance", "move"],
+                    "enum": ["show", "set_checklist", "set_fields", "attach", "complete_run", "advance", "move", "trigger"],
                     "description": "Which board operation to run.",
                 },
+                "trigger": {"type": "string", "description": "Approved listing trigger name from the shared contract."},
+                "evidence": {"type": "object", "description": "sourceId, matchConfirmed and request or verified-document evidence per shared contract."},
                 "deal_id": {"type": "string", "description": "The deal id to operate on."},
-                "field": {"type": "string", "description": "set_checklist: the checklist/workflow id to tick."},
+                "field": {"type": "string", "description": "set_checklist: the checklist/workflow id to tick (single-cell form)."},
                 "value": {"description": "set_checklist: the value (default true). Booleans tick cells; strings/dates fill workflow fields."},
+                "cells": {"type": "object", "description": "set_checklist: { checklistId: value } to tick several cells in one call. Use instead of field/value when a stage completes multiple items."},
                 "fields": {"type": "object", "description": "set_fields: { fieldName: value } of named deal fields."},
                 "kind": {"type": "string", "description": "attach: artifact kind (e.g. cma_report, offer_pdf)."},
                 "file_path": {"type": "string", "description": "attach: path to the artifact file."},

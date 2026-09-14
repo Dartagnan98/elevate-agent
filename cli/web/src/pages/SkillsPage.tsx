@@ -16,7 +16,6 @@ import {
   Folder,
   FolderOpen,
   Megaphone,
-  MoreVertical,
   Package,
   Paintbrush,
   Route,
@@ -35,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Markdown } from "@/components/Markdown";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 
@@ -362,7 +362,13 @@ function groupSkillsByPurpose(skills: SkillInfo[]) {
 
 export default function SkillsPage() {
   // Cached across tab switches so revisiting Skills paints instantly.
-  const { data: skills = [], loading, error: skillsError, mutate: mutateSkills } = useCachedResource(
+  const {
+    data: skills = [],
+    loading,
+    error: skillsError,
+    refresh: refreshSkills,
+    mutate: mutateSkills,
+  } = useCachedResource(
     "skills-list",
     () => api.getSkills(),
     { ttl: 10000 },
@@ -524,9 +530,13 @@ export default function SkillsPage() {
           Flows
         </button>
         <div className="relative w-full min-w-0 sm:max-w-xs">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Search
+            aria-hidden="true"
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground"
+          />
           <Input
-            className="h-8 pl-8 pr-7 text-xs"
+            className="min-h-[40px] pl-8 pr-7 text-xs"
+            aria-label="Search skills"
             placeholder={t.common.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -534,10 +544,11 @@ export default function SkillsPage() {
           {search && (
             <button
               type="button"
+              aria-label="Clear skill search"
               className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               onClick={() => setSearch("")}
             >
-              <X className="h-3 w-3" />
+              <X aria-hidden="true" className="h-3 w-3" />
             </button>
           )}
         </div>
@@ -593,9 +604,30 @@ export default function SkillsPage() {
     });
   };
 
+  if (skillsError && skills.length === 0) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Toast toast={toast} />
+        <RouteLoadError
+          title="Could not load skills"
+          error={skillsError}
+          onRetry={refreshSkills}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Toast toast={toast} />
+
+      {skillsError ? (
+        <RouteLoadError
+          title="Could not load skills"
+          error={skillsError}
+          onRetry={refreshSkills}
+        />
+      ) : null}
 
       {!loading && showWorkflows && (
         <section className="rounded-md border border-border bg-card p-4">
@@ -891,6 +923,7 @@ function SkillRailRow({
         checked={skill.enabled}
         disabled={toggling}
         onCheckedChange={() => onToggleEnable()}
+        aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
         className="h-4 w-7 [&>span]:h-3 [&>span]:w-3"
       />
     </div>
@@ -1132,14 +1165,8 @@ function SkillDetail({
             checked={skill.enabled}
             onCheckedChange={onToggleEnable}
             disabled={toggling}
+            aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
           />
-          <button
-            type="button"
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
-            aria-label="More"
-          >
-            <MoreVertical className="h-4 w-4" />
-          </button>
         </div>
       </header>
 
@@ -1266,6 +1293,7 @@ function WorkflowFlowCard({
               checked={skill.enabled}
               disabled={togglingSkills.has(skill.name)}
               onCheckedChange={() => onToggle(skill)}
+              aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
             />
           </div>
         ))}

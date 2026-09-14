@@ -28,7 +28,7 @@ The Vite dev server proxies `/api` requests to `http://127.0.0.1:9119` (the Fast
 npm run build
 ```
 
-This outputs to `../elevate_cli/web_dist/`, which the FastAPI server serves as a static SPA. The built assets are included in the Python package via `pyproject.toml` package-data.
+This outputs to `../elevate_cli/web_dist/`, which the FastAPI server serves as a static SPA. Desktop packaging runs this build before bundling the Python package data.
 
 ## Structure
 

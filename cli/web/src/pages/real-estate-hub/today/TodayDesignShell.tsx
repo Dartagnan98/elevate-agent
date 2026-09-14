@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import BoardLoader from "@/pages/real-estate-hub/admin/components/BoardLoader";
 import type {
   AdminDeal,
   AdminUpcomingEvent,
@@ -9,7 +10,7 @@ import type {
   SourceInboxThread,
   TodayDashboardResponse,
 } from "@/lib/api-types";
-import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { HubDataErrorBanner, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { TodayBoard } from "./components/today-board";
 import type {
   TodayAgentRun,
@@ -33,6 +34,10 @@ import "../leads/leads.css";
 import "./today.css";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Octopus intro gate. Module-scoped so it resets on every full page load/refresh
+// (the module re-evaluates) but stays suppressed during in-app navigation.
+let octoIntroShown = false;
 
 const STAGE_LABELS = [
   ["Pre-CMA", "Intake"],
@@ -500,9 +505,65 @@ export function TodayDesignShell() {
   const [today, setToday] = useState<TodayDashboardResponse | null>(null);
   const [todayLoading, setTodayLoading] = useState(false);
   const [todayError, setTodayError] = useState<string | null>(null);
+  const [todayActionError, setTodayActionError] = useState<string | null>(null);
   const [deals, setDeals] = useState<AdminDeal[]>([]);
   const [events, setEvents] = useState<AdminUpcomingEvent[]>([]);
   const [greetingName, setGreetingName] = useState<string>("there");
+  const hasLoaded = useRef(false);
+  const [theme, setTheme] = useState<string>(() => {
+    try {
+      // The global data-app-theme attribute (set in App.tsx on mount) is the
+      // source of truth; fall back to the persisted key, then "medium".
+      return (
+        document.documentElement.getAttribute("data-app-theme") ||
+        localStorage.getItem("elevate-today-theme") ||
+        "medium"
+      );
+    } catch {
+      return "medium";
+    }
+  });
+  useEffect(() => {
+    try {
+      // Drive the GLOBAL attribute so every page re-skins live, and persist.
+      document.documentElement.setAttribute("data-app-theme", theme);
+      localStorage.setItem("elevate-today-theme", theme);
+    } catch {
+      // ignore storage failures (private mode, etc.)
+    }
+  }, [theme]);
+  const themeControl = (
+    <div className="td-theme-toggle" role="group" aria-label="Color theme">
+      {([
+        ["light", "Light"],
+        ["medium", "Medium"],
+        ["dark", "Dark"],
+      ] as const).map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          className={"td-theme-btn" + (theme === value ? " active" : "")}
+          aria-pressed={theme === value}
+          onClick={() => setTheme(value)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+  // Octopus splash on first open this session. data.loading can start false (so
+  // the loading-only condition never fires), so gate on a short timer too —
+  // mirrors the admin board's intro so the octopus reliably shows on open.
+  const [showIntro, setShowIntro] = useState(() => {
+    if (octoIntroShown) return false;
+    octoIntroShown = true;
+    return true;
+  });
+  useEffect(() => {
+    if (!showIntro) return;
+    const t = setTimeout(() => setShowIntro(false), 1900);
+    return () => clearTimeout(t);
+  }, [showIntro]);
 
   const loadToday = useCallback(async () => {
     setTodayLoading(true);
@@ -552,6 +613,7 @@ export function TodayDesignShell() {
   const sourceBreakdown = useMemo(() => mapSourceBreakdown(threads), [threads]);
 
   const handleRefresh = useCallback(async () => {
+    setTodayActionError(null);
     await Promise.all([
       data.refresh({ force: true }),
       loadToday(),
@@ -566,17 +628,30 @@ export function TodayDesignShell() {
 
   const handleDraftAction = useCallback<NonNullable<TodayBoardProps["onDraftAction"]>>(
     async (action, draftId) => {
+      setTodayActionError(null);
       const draft = drafts.find((d) => d.id === draftId);
-      if (!draft) return;
+      if (!draft) {
+        const message = "Draft is no longer available. Refresh Today and try again.";
+        setTodayActionError(message);
+        throw new Error(message);
+      }
       try {
         const res = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action);
         data.setSourceInbox(res);
       } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const verb = action === "approve" ? "approve and send" : "skip";
+        setTodayActionError(`Could not ${verb} draft: ${detail}`);
         console.error("today draft action failed", err);
+        throw err instanceof Error ? err : new Error(detail);
       }
     },
     [drafts, data],
   );
+
+  const isLoading = todayLoading || data.loading;
+  if (!isLoading) hasLoaded.current = true;
+  const showLoader = showIntro || (!hasLoaded.current && isLoading);
 
   const rootAttrs = {
     "data-accent": "graphite" as const,
@@ -587,8 +662,17 @@ export function TodayDesignShell() {
     "data-artifacts": "hidden" as const,
   };
 
+  if (showLoader) {
+    return (
+      <div className="app today-design-embedded" data-today-theme={theme} {...rootAttrs}>
+        <BoardLoader label="Pulling up your day…" />
+      </div>
+    );
+  }
+
   return (
-    <div className="app today-design-embedded" {...rootAttrs}>
+    <div className="app today-design-embedded" data-today-theme={theme} {...rootAttrs}>
+      <HubDataErrorBanner className="mb-3" data={data} />
       <TodayBoard
         greetingName={greetingName}
         pulse={pulse}
@@ -607,9 +691,10 @@ export function TodayDesignShell() {
         wins={wins}
         sourceBreakdown={sourceBreakdown}
         loading={todayLoading || data.loading}
-        error={todayError}
+        error={todayActionError || todayError}
         onRefresh={handleRefresh}
         onDraftAction={handleDraftAction}
+        themeControl={themeControl}
       />
     </div>
   );

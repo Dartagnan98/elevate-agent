@@ -34,6 +34,7 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { AgentLoops } from "@/components/agent/agent-loops";
 import { AgentHubSkeleton } from "@/components/agent-hub/AgentHubSkeleton";
 import { ListSkeleton } from "@/components/ui/skeleton";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   AgentTelegramLaneEditor,
   type AgentEditPatch,
@@ -336,6 +337,7 @@ function PairingApprovalBlock({
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void approve(code); }}
+          aria-label="Paste Telegram pairing code"
           placeholder="Paste pairing code"
           spellCheck={false}
           className="mono"
@@ -2268,6 +2270,7 @@ function ExecutiveTelegramControls({
             autoComplete="new-password"
             type="password"
             value={token}
+            aria-label="Executive bot token"
             placeholder={envPlaceholder(
               envVars,
               EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY,
@@ -2282,6 +2285,7 @@ function ExecutiveTelegramControls({
           <input
             className="hub-input mono"
             value={home}
+            aria-label="Executive chat or topic"
             placeholder={envPlaceholder(
               envVars,
               EXECUTIVE_TELEGRAM_CHANNEL_KEY,
@@ -3782,6 +3786,7 @@ export default function AgentHubPage() {
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [savingTelegram, setSavingTelegram] = useState(false);
   const [savingAgentId, setSavingAgentId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AgentHubAgent | null>(null);
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramHome, setTelegramHome] = useState("");
   const [telegramLanes, setTelegramLanes] = useState<Record<string, string>>({});
@@ -4214,12 +4219,6 @@ export default function AgentHubPage() {
       const isCortextPreset = Boolean(
         (agent.metadata as Record<string, unknown> | undefined)?.cortext_preset,
       );
-      const message = isCortextPreset
-        ? `Delete ${agent.name}? This removes the custom Agent Hub config plus its imported heartbeat surface, onboarding task, and Cortext memory seed.`
-        : `Delete ${agent.name}? This removes only the custom Agent Hub config entry.`;
-      if (!window.confirm(message)) {
-        return;
-      }
       setSavingAgentId(agent.id);
       try {
         if (isCortextPreset) {
@@ -4229,6 +4228,7 @@ export default function AgentHubPage() {
         }
         await load();
         showToast(`${agent.name} deleted.`, "success");
+        setDeleteTarget(null);
       } catch (error) {
         showToast(error instanceof Error ? error.message : "Agent delete failed", "error");
       } finally {
@@ -4255,6 +4255,22 @@ export default function AgentHubPage() {
   return (
     <div className="hub-root">
       <Toast toast={toast} />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={`Delete ${deleteTarget?.name ?? "this agent"}?`}
+        description={
+          deleteTarget && (deleteTarget.metadata as Record<string, unknown> | undefined)?.cortext_preset
+            ? "This removes the custom Agent Hub config plus its imported heartbeat surface, onboarding task, and Cortext memory seed."
+            : "This removes only the custom Agent Hub config entry."
+        }
+        confirmLabel="Delete"
+        destructive
+        loading={deleteTarget ? savingAgentId === deleteTarget.id : false}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void deleteAgent(deleteTarget);
+        }}
+      />
       <div className="hub">
         <div className="hub-inner">
           {/* Title/status/Refresh live in the app page header (usePageHeader),
@@ -4278,6 +4294,7 @@ export default function AgentHubPage() {
                 onClick={() => void runAction("start")}
                 disabled={snapshot.gateway.running || busyAction !== null}
                 aria-label={snapshot.gateway.running ? "Gateway already online" : "Start gateway"}
+                title={snapshot.gateway.running ? "Gateway is already online." : busyAction !== null ? "Gateway action in progress." : undefined}
               >
                 {busyAction === "start" ? (
                   <Ico.refresh width="13" height="13" className="spin" />
@@ -4292,6 +4309,7 @@ export default function AgentHubPage() {
                 onClick={() => void runAction("restart")}
                 disabled={busyAction !== null}
                 aria-label="Restart gateway"
+                title={busyAction !== null ? "Gateway action in progress." : undefined}
               >
                 {busyAction === "restart" ? <Ico.refresh width="13" height="13" className="spin" /> : <Ico.rotate width="13" height="13" />}
                 Restart
@@ -4375,7 +4393,7 @@ export default function AgentHubPage() {
                     workerBusy={handoffBusy}
                     onRunQueuedWork={(agentId) => void runAgentWorker(agentId)}
                     onWakeAgent={(agentId) => void wakeAgentWorker(agentId)}
-                    onDeleteAgent={(targetAgent) => void deleteAgent(targetAgent)}
+                    onDeleteAgent={(targetAgent) => setDeleteTarget(targetAgent)}
                   />
                 );
               })}

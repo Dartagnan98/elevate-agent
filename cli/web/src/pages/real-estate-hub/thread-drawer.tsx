@@ -154,6 +154,7 @@ function ThreadDrawer({
     async (action: "approve" | "skip") => {
       if (!context?.pendingDraft) return;
       setSubmitting(true);
+      setError(null);
       try {
         const nextInbox = await api.updateSourceInboxDraft(
           context.pendingDraft.sourceId,
@@ -164,7 +165,7 @@ function ThreadDrawer({
         data.setSourceInbox(nextInbox);
         onClose();
       } catch (err) {
-        window.alert(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
+        setError(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setSubmitting(false);
       }
@@ -175,6 +176,7 @@ function ThreadDrawer({
   const restoreSkippedDraft = useCallback(async () => {
     if (!skippedDraft || restoring) return;
     setRestoring(true);
+    setError(null);
     try {
       const nextInbox = await api.updateSourceInboxDraft(
         skippedDraft.sourceId,
@@ -185,7 +187,7 @@ function ThreadDrawer({
       data.setSourceInbox(nextInbox);
       onClose();
     } catch (err) {
-      window.alert(`Failed to restore skipped draft: ${err instanceof Error ? err.message : String(err)}`);
+      setError(`Failed to restore skipped draft: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setRestoring(false);
     }
@@ -215,11 +217,12 @@ function ThreadDrawer({
         type="button"
         aria-label="Close thread"
         onClick={onClose}
-        className="absolute inset-0 z-0 bg-background/80"
+        className="absolute inset-0 z-0 bg-black/60"
       />
       <div
         role="dialog"
         aria-modal="true"
+        aria-label={context?.personName ? `Thread: ${context.personName}` : "Thread drawer"}
         className="relative z-10 flex h-full w-full flex-col bg-card shadow-[0_24px_90px_rgba(0,0,0,0.32)] sm:h-[calc(100vh-3rem)] sm:max-h-[calc(100vh-3rem)] sm:min-h-[640px] sm:w-full sm:max-w-[56rem] sm:rounded-md sm:border sm:border-border lg:max-w-[68rem] xl:max-w-[80rem]"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
@@ -283,8 +286,15 @@ function ThreadDrawer({
                 selectButtonClassName="h-8 px-2 text-xs"
               />
             )}
-            <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
-              <CloseIcon className="h-4 w-4" />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              aria-label="Close thread drawer"
+              title="Close"
+              className="text-foreground/75 hover:text-foreground"
+            >
+              <CloseIcon className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
         </div>

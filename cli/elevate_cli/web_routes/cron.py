@@ -221,6 +221,8 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
                     updates["skills"] = desired_skills
                 if lane.workdir is not None and existing_job.get("workdir") != lane.workdir:
                     updates["workdir"] = lane.workdir
+                if lane.agent is not None and existing_job.get("agent") != lane.agent:
+                    updates["agent"] = lane.agent
                 if updates:
                     try:
                         changed = update_job(existing_job["id"], updates)
@@ -380,7 +382,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.get("/api/cron/attention")
-    async def cron_attention():
+    def cron_attention():
         """Aggregate what's waiting on the operator.
 
         Returns counts the dashboard can surface as a "needs attention" banner:

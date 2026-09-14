@@ -88,6 +88,34 @@ _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 _PREVIOUS_SUMMARY_MAX_CHARS = 32_000
 _AUTO_SKILL_PAYLOAD_COMPACT_THRESHOLD_CHARS = 20_000
 
+# ----------------------------------------------------------------------
+# Anti-thrash (compaction-rs fixture 2026-06-15)
+# ----------------------------------------------------------------------
+# A compaction that nets <= this many removed messages is "structurally
+# ineffective" — it freed a little token slack but did not shrink the
+# conversation. The fixture showed 12 consecutive iteration-boundary
+# compactions each removing exactly 1 message while the tail grew 76->100.
+_LOW_YIELD_REMOVED_MESSAGES = 1
+# After a low-yield compaction, refuse another *auto* compaction until the
+# real prompt tokens have grown by at least this much beyond the level at
+# which compaction last failed to help. Stops the every-~65s refire. ~1.25x
+# the default tail budget — roughly one more big file-read worth of bulk.
+_LOW_YIELD_COOLDOWN_TOKEN_GROWTH = 16_000
+# Never let the cooldown block a compaction when we're this close to the
+# real context ceiling — overflow safety always wins (relief 1.6 invariant).
+_LOW_YIELD_COOLDOWN_CRITICAL_RATIO = 0.90
+# Emergency large-tool-result policy: a single tool result whose content
+# exceeds this many chars (~2K tokens) is "oversized" and may be truncated
+# even inside the protected tail — EXCEPT the most-recent ones (the agent's
+# in-flight reads). Only activates when the protected tail is actually
+# bloated, so normal small-tail sessions are untouched.
+_EMERGENCY_TAIL_TOOL_RESULT_CHARS = 8_000
+# Keep this many of the most-recent oversized tail tool-results intact.
+_EMERGENCY_TAIL_KEEP_RECENT = 1
+# Only run the emergency tail pass when the protected tail's estimated tokens
+# exceed this multiple of the tail budget (i.e. the tail is genuinely bloated).
+_EMERGENCY_TAIL_BLOAT_RATIO = 1.5
+
 
 def _auto_loaded_skill_names(content: Any) -> list[str]:
     """Return auto-loaded skill names embedded in a persisted skill payload."""
@@ -538,6 +566,9 @@ class ContextCompressor(ContextEngine):
         self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
+        self._consecutive_low_yield_compactions = 0
+        self._last_low_yield_tokens = 0
+        self._pending_compress_tokens = 0
         self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
         # Real-usage tracking so we don't re-compact off a schema-inflated
         # rough estimate after compaction already ran (the loop fix). See
@@ -619,6 +650,10 @@ class ContextCompressor(ContextEngine):
             config_context_length=config_context_length,
             provider=provider,
         )
+        # The summary request may run on a smaller auxiliary model than the
+        # main conversation model.  AIAgent's feasibility check updates this
+        # when it can resolve the auxiliary context window.
+        self.summary_context_length = self.context_length
         # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
         # the percentage would suggest a lower value.  This prevents premature
         # compression on large-context models at 50% while keeping the % sane
@@ -664,6 +699,16 @@ class ContextCompressor(ContextEngine):
         # Rate limit for the cheap prune_only pass (see should_prune_only)
         self._last_prune_attempt_tokens: int = 0
         self._ineffective_compression_count: int = 0
+        # Anti-thrash low-yield cooldown: how many consecutive compactions
+        # removed <= _LOW_YIELD_REMOVED_MESSAGES messages, and the token level
+        # at which the last such low-yield compaction ran. should_compress()
+        # uses these to suppress the every-~65s iteration-boundary refire.
+        self._consecutive_low_yield_compactions: int = 0
+        self._last_low_yield_tokens: int = 0
+        # Measured token level from the most recent should_compress() call, read
+        # back by compress() so the low-yield cooldown baseline uses the same
+        # units the cooldown comparison does (request-rough incl. tool schemas).
+        self._pending_compress_tokens: int = 0
         self._summary_failure_cooldown_until: float = 0.0
         self._last_summary_error: Optional[str] = None
         # When summary generation fails and a static fallback is inserted,
@@ -761,6 +806,46 @@ class ContextCompressor(ContextEngine):
                     self._ineffective_compression_count,
                 )
             return False
+        # Anti-thrash low-yield cooldown: the savings-% guard above is blind to
+        # the worst failure mode — a compaction that frees a little token slack
+        # (12-32% "savings", from prune oscillation) but removes ~0 messages and
+        # re-fires every ~65s while the tail keeps growing. After such a
+        # low-yield compaction, refuse another AUTO compaction until the context
+        # has genuinely grown past the level where compaction last failed to
+        # help. Overflow safety always wins: never block near the real ceiling,
+        # and manual /compress (force=True, via compress()) bypasses this path.
+        if self._consecutive_low_yield_compactions >= 1:
+            # Never block near the real ceiling — overflow safety wins. Keep the
+            # override strictly ABOVE the trigger threshold (else on small /
+            # floored-context models where threshold == 0.85*ctx hits the 64K
+            # floor and lands >= 0.9*ctx, the band would be empty and the
+            # cooldown silently dead). Also keep it below the ceiling so the
+            # override actually fires before overflow.
+            critical_tokens = max(
+                int(self.context_length * _LOW_YIELD_COOLDOWN_CRITICAL_RATIO),
+                min(self.threshold_tokens + _LOW_YIELD_COOLDOWN_TOKEN_GROWTH,
+                    int(self.context_length * 0.97)),
+            )
+            grew_enough = tokens >= self._last_low_yield_tokens + _LOW_YIELD_COOLDOWN_TOKEN_GROWTH
+            if tokens < critical_tokens and not grew_enough:
+                if not self.quiet_mode:
+                    logger.info(
+                        "Compression skipped — last %d compaction(s) removed <=%d "
+                        "message(s); waiting for context to grow past %d tokens "
+                        "(now %d) before re-compacting to avoid thrash.",
+                        self._consecutive_low_yield_compactions,
+                        _LOW_YIELD_REMOVED_MESSAGES,
+                        self._last_low_yield_tokens + _LOW_YIELD_COOLDOWN_TOKEN_GROWTH,
+                        tokens,
+                    )
+                return False
+        # A compaction is about to proceed: remember the level THIS trigger
+        # measured (request-rough, incl. tool schemas — ~20K above the
+        # messages-only display_tokens compress() sees) so compress() uses it as
+        # the low-yield cooldown baseline in consistent units. Captured only on
+        # the allow path so a blocked should_compress() never leaves a stale
+        # baseline for a later direct compress() (context-limit recovery).
+        self._pending_compress_tokens = tokens
         return True
 
     @staticmethod
@@ -971,6 +1056,42 @@ class ContextCompressor(ContextEngine):
             if modified:
                 result[i] = {**msg, "tool_calls": new_tcs}
 
+        # Pass 4: Emergency large-tool-result policy (compaction-rs fixture).
+        # Huge fresh tool-results (file reads) sitting in the PROTECTED tail are
+        # never touched by passes 1-3, so in an autonomous turn — where the only
+        # user message is the original task and the tail anchor protects the
+        # whole body — they pile up untouched and compaction re-fires every
+        # ~65s freeing nothing structural. When the protected tail is genuinely
+        # bloated, truncate oversized tool-results there too, keeping the most
+        # recent few intact (the agent's in-flight reads it hasn't summarized).
+        if protect_tail_tokens and protect_tail_tokens > 0 and prune_boundary < len(result):
+            tail = result[prune_boundary:]
+            tail_tokens = 0
+            for msg in tail:
+                tail_tokens += _content_length_for_budget(msg.get("content") or "") // _CHARS_PER_TOKEN + 10
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict):
+                        tail_tokens += len(tc.get("function", {}).get("arguments", "")) // _CHARS_PER_TOKEN
+            if tail_tokens > int(protect_tail_tokens * _EMERGENCY_TAIL_BLOAT_RATIO):
+                # Indices (in `result`) of oversized string tool-results in the tail.
+                oversized = [
+                    i for i in range(prune_boundary, len(result))
+                    if result[i].get("role") == "tool"
+                    and isinstance(result[i].get("content"), str)
+                    and len(result[i]["content"]) > _EMERGENCY_TAIL_TOOL_RESULT_CHARS
+                    and not result[i]["content"].startswith("[Duplicate tool output")
+                    and result[i]["content"] != _PRUNED_TOOL_PLACEHOLDER
+                ]
+                # Keep the most-recent few intact; truncate the older oversized ones.
+                to_truncate = oversized[:-_EMERGENCY_TAIL_KEEP_RECENT] if _EMERGENCY_TAIL_KEEP_RECENT else oversized
+                for i in to_truncate:
+                    msg = result[i]
+                    call_id = msg.get("tool_call_id", "")
+                    tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
+                    summary = _summarize_tool_result(tool_name, tool_args, msg["content"])
+                    result[i] = {**msg, "content": summary}
+                    pruned += 1
+
         return result, pruned
 
     # ------------------------------------------------------------------
@@ -1051,6 +1172,71 @@ class ContextCompressor(ContextEngine):
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
+
+    def _estimate_summary_input_tokens(self, turns: List[Dict[str, Any]]) -> int:
+        """Roughly estimate the serialized turns sent to the summary model."""
+        if not turns:
+            return 0
+        return (len(self._serialize_for_summary(turns)) + 3) // _CHARS_PER_TOKEN
+
+    def _summary_input_token_budget(self) -> int:
+        """Return a conservative token budget for turns in a summary request."""
+        window = int(
+            getattr(self, "summary_context_length", 0)
+            or self.context_length
+            or MINIMUM_CONTEXT_LENGTH
+        )
+        output_budget = min(
+            int(self.max_summary_tokens * 1.3),
+            max(1000, int(window * 0.25)),
+        )
+        prompt_overhead = min(12_000, max(6_000, int(window * 0.12)))
+        budget = int(window * 0.75) - output_budget - prompt_overhead
+        if self.threshold_tokens > 0:
+            budget = min(budget, int(self.threshold_tokens * 0.80))
+        return max(4_000, budget)
+
+    def _cap_summary_window(
+        self,
+        messages: List[Dict[str, Any]],
+        start: int,
+        end: int,
+    ) -> int:
+        """Shrink ``end`` until the summarizer input fits its context budget."""
+        start = max(0, start)
+        end = min(max(start, end), len(messages))
+        if end <= start:
+            return end
+
+        budget = self._summary_input_token_budget()
+        turns = messages[start:end]
+        if self._estimate_summary_input_tokens(turns) <= budget:
+            return end
+
+        original_end = end
+        while end > start:
+            span = end - start
+            next_end = start + max(1, int(span * 0.75))
+            next_end = self._align_boundary_backward(messages, next_end)
+            if next_end <= start or next_end >= end:
+                next_end = start + 1
+            end = next_end
+            if self._estimate_summary_input_tokens(messages[start:end]) <= budget:
+                if not self.quiet_mode:
+                    logger.warning(
+                        "Compaction summary window capped: turns %d-%d -> %d-%d "
+                        "to fit auxiliary summary budget (~%d tokens)",
+                        start,
+                        original_end,
+                        start,
+                        end,
+                        budget,
+                    )
+                return end
+            if end == start + 1:
+                break
+
+        return max(start + 1, end)
 
     def _fallback_to_main_for_compression(self, e: Exception, reason: str) -> None:
         """Switch from a separate ``summary_model`` back to the main model.
@@ -1655,7 +1841,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # active task is never lost to compression (fixes #10896).
         cut_idx = self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
 
-        return max(cut_idx, head_end + 1)
+        final_cut = max(cut_idx, head_end + 1)
+        return final_cut
 
     # ------------------------------------------------------------------
     # ContextEngine: manual /compress preflight
@@ -1726,6 +1913,196 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
         return pruned, True
 
+    def emergency_truncate_tool_results(
+        self, messages: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """LAST-RESORT context recovery: unconditionally truncate oversized
+        tool-result bodies in place so a turn that STILL overflows after a forced
+        compaction can fit, instead of failing with ``compression_exhausted``.
+
+        The cursor model keeps the transcript append-only for normal compaction —
+        the cursor just hides earlier turns from the payload. But when even the
+        cursor-trimmed payload exceeds the window (a single enormous tool result
+        in the kept tail), the cursor cannot help. This replaces every tool
+        result longer than ``_EMERGENCY_TAIL_TOOL_RESULT_CHARS`` — except the most
+        recent ``_EMERGENCY_TAIL_KEEP_RECENT`` — with a one-line summary. It edits
+        tool-result CONTENT only (never removes message rows, so the visible
+        transcript's row structure is preserved, same as ``prune_only``), and it
+        is the same truncation family as the gated emergency-tail pass in
+        ``_prune_old_tool_results`` but unconditional.
+
+        Mutates ``messages`` in place AND returns ``(messages, n_truncated)``.
+        """
+        if not messages:
+            return messages, 0
+
+        # tool_call_id -> (name, args) for nicer one-line summaries.
+        call_id_to_tool: dict[str, tuple] = {}
+        for m in messages:
+            for tc in m.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    cid = tc.get("id") or ""
+                    fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                    if cid:
+                        call_id_to_tool[cid] = (fn.get("name", "unknown"), fn.get("arguments", ""))
+
+        oversized = [
+            i for i, m in enumerate(messages)
+            if m.get("role") == "tool"
+            and isinstance(m.get("content"), str)
+            and len(m["content"]) > _EMERGENCY_TAIL_TOOL_RESULT_CHARS
+            and not m["content"].startswith("[Duplicate tool output")
+            and m["content"] != _PRUNED_TOOL_PLACEHOLDER
+        ]
+        to_truncate = (
+            oversized[:-_EMERGENCY_TAIL_KEEP_RECENT]
+            if _EMERGENCY_TAIL_KEEP_RECENT
+            else oversized
+        )
+        n = 0
+        for i in to_truncate:
+            msg = messages[i]
+            cid = msg.get("tool_call_id", "")
+            name, args = call_id_to_tool.get(cid, ("unknown", ""))
+            messages[i] = {**msg, "content": _summarize_tool_result(name, args, msg["content"])}
+            n += 1
+        if n:
+            if not self.quiet_mode:
+                logger.warning(
+                    "Emergency truncation: shortened %d oversized tool result(s) "
+                    "to fit the context window (last resort before turn failure).",
+                    n,
+                )
+        return messages, n
+
+    def summarize_to_cursor(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        prev_cursor: int = 0,
+        previous_summary: Optional[str] = None,
+        focus_topic: str = None,
+        force: bool = False,
+    ) -> Tuple[Optional[str], int]:
+        """Compaction-redesign core: compute ``(summary_text, compacted_idx)``
+        WITHOUT rewriting the transcript.
+
+        This is the cursor-model counterpart to :meth:`compress`.  It reuses the
+        exact same cutoff machinery (``_protect_head_size`` →
+        ``_align_boundary_forward`` → ``_find_tail_cut_by_tokens``, which itself
+        runs ``_align_boundary_backward`` + ``_ensure_last_user_message_in_tail``)
+        so the chosen index never splits a tool_call/result pair and always keeps
+        the most recent user turn in the live tail.  It then summarizes the newly
+        compacted region ``messages[prev_cursor:compacted_idx]`` via
+        ``_generate_summary`` — folding ``previous_summary`` in iteratively on
+        re-compaction — and returns the new cursor.
+
+        Crucially it ASSEMBLES NOTHING: ``messages`` is read, never mutated.  The
+        caller persists ``(summary_text, compacted_idx)`` as session metadata and
+        injects the summary only at payload-build time
+        (``AIAgent.messages_for_api``).  The visible transcript stays byte-for-byte
+        intact — no head/summary/tail rewrite, no session rotation.
+
+        Returns:
+            ``(summary_text, compacted_idx)`` on a successful compaction.
+            ``(None, prev_cursor)`` when there is nothing new to compact (the cut
+            did not advance past ``prev_cursor``) or summary generation aborted —
+            the same no-op/abort contract :meth:`compress` exposes via
+            ``_last_compress_aborted`` (set only for the abort case).
+        """
+        # Reset per-call summary failure state — callers inspect these fields
+        # after we return to decide whether to surface a warning.
+        self._last_summary_dropped_count = 0
+        self._last_summary_fallback_used = False
+        self._last_summary_error = None
+        self._last_aux_model_failure_error = None
+        self._last_aux_model_failure_model = None
+        self._last_compress_aborted = False
+
+        # Consume the should_compress() trigger measurement exactly once (mirrors
+        # compress()) so a later direct call can't reuse a stale baseline, and so
+        # the low-yield cooldown compares in the same request-rough units.
+        _measured_trigger = self._pending_compress_tokens
+        self._pending_compress_tokens = 0
+        # Manual /compress (force=True) must not arm the auto low-yield cooldown.
+        _track_low_yield = not force
+        if force and self._summary_failure_cooldown_until > 0.0:
+            self._summary_failure_cooldown_until = 0.0
+
+        prev_cursor = max(0, int(prev_cursor or 0))
+        n_messages = len(messages)
+
+        # Boundary computation — identical helpers to compress(). The transcript
+        # is NEVER pre-pruned here: hygiene (media strip / tool-result prune) is
+        # owned by prune_only and the emergency-truncation last resort. The
+        # cursor model must not mutate history, only choose where to cut.
+        compress_start = self._align_boundary_forward(
+            messages, self._protect_head_size(messages)
+        )
+        compacted_idx = self._find_tail_cut_by_tokens(messages, compress_start)
+
+
+        # Advance-only: a cut that does not move past the current cursor frees
+        # nothing. Count it as ineffective + low-yield so should_compress() backs
+        # off instead of re-entering on every iteration boundary (mirrors
+        # compress()'s no-compressible-window branch).
+        if compacted_idx <= prev_cursor:
+            self._last_compression_savings_pct = 0.0
+            if _track_low_yield:
+                self._ineffective_compression_count += 1
+                self._consecutive_low_yield_compactions += 1
+                self._last_low_yield_tokens = (
+                    _measured_trigger or estimate_messages_tokens_rough(messages)
+                )
+            return None, prev_cursor
+
+        # Region folded in this pass. First compaction (prev_cursor==0) summarizes
+        # the whole pre-cursor span; re-compaction adds only the delta since the
+        # last cursor to `previous_summary`.
+        compacted_idx = self._cap_summary_window(messages, prev_cursor, compacted_idx)
+        if compacted_idx <= prev_cursor:
+            return None, prev_cursor
+
+        turns_to_summarize = messages[prev_cursor:compacted_idx]
+        if not turns_to_summarize:
+            return None, prev_cursor
+
+        # Seed the iterative-summary base from the caller's persisted summary so a
+        # fresh compressor instance after a RESUME still folds rather than
+        # re-summarizing from scratch (compress() relied on finding the summary
+        # embedded in the transcript head; the cursor model keeps it in metadata).
+        if previous_summary:
+            self._previous_summary = self._clip_summary_for_rollup(previous_summary)
+
+        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        if not summary:
+            # Summary generation failed/aborted. Honour compress()'s abort
+            # contract: do NOT advance the cursor, let the caller warn + freeze.
+            self._last_compress_aborted = True
+            return None, prev_cursor
+
+        self.compression_count += 1
+
+        # Anti-thrash low-yield accounting in cursor terms: "removed messages" is
+        # the count newly hidden behind the cursor this pass. <=1 newly hidden is
+        # the low-yield pathology should_compress()'s cooldown suppresses.
+        removed_messages = compacted_idx - prev_cursor
+        low_yield = removed_messages <= _LOW_YIELD_REMOVED_MESSAGES
+        if _track_low_yield:
+            if low_yield:
+                self._consecutive_low_yield_compactions += 1
+                self._ineffective_compression_count += 1
+                self._last_low_yield_tokens = (
+                    _measured_trigger or estimate_messages_tokens_rough(messages)
+                )
+            else:
+                self._consecutive_low_yield_compactions = 0
+                self._ineffective_compression_count = 0
+                self._last_low_yield_tokens = 0
+        self._last_compression_savings_pct = 0.0 if low_yield else 100.0
+
+        return summary, compacted_idx
+
     def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
@@ -1756,6 +2133,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         self._last_aux_model_failure_error = None
         self._last_aux_model_failure_model = None
         self._last_compress_aborted = False
+
+        # Consume the should_compress() trigger measurement exactly once, here at
+        # the top, so EVERY exit path (too_short, summary-abort, no-op, success)
+        # starts clean and a later direct compress() (context-limit recovery,
+        # which never calls should_compress) can't reuse a stale, oversized
+        # baseline. Falsy → fall back to display_tokens at the use site.
+        _measured_trigger = self._pending_compress_tokens
+        self._pending_compress_tokens = 0
+        # Manual /compress (force=True) is user-initiated, not an auto trigger:
+        # it must not feed the auto low-yield cooldown heuristic (a forced
+        # compress on a pinned window often removes <=1 message, which would
+        # otherwise arm the cooldown against the next AUTOMATIC compaction).
+        _track_low_yield = not force
 
         # Manual /compress (force=True) bypasses the failure cooldown so the
         # user can retry immediately after an auto-compress abort.  Without
@@ -1804,6 +2194,35 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 
         if compress_start >= compress_end:
+            # No compressible middle window (whole transcript is head+tail).
+            # This is the degenerate floor of the thrash: count it as both
+            # ineffective and low-yield so should_compress() backs off instead
+            # of re-entering compress() on every iteration boundary. Skip for a
+            # manual /compress (force) — it must not arm the auto cooldown.
+            self._last_compression_savings_pct = 0.0
+            if _track_low_yield:
+                self._ineffective_compression_count += 1
+                self._consecutive_low_yield_compactions += 1
+                self._last_low_yield_tokens = _measured_trigger or display_tokens
+            if not self.quiet_mode:
+                logger.warning(
+                    "Compression skipped: no compressible window "
+                    "(compress_start=%d >= compress_end=%d); "
+                    "ineffective_compression_count=%d low_yield=%d",
+                    compress_start,
+                    compress_end,
+                    self._ineffective_compression_count,
+                    self._consecutive_low_yield_compactions,
+                )
+            return messages
+
+        compress_end = self._cap_summary_window(messages, compress_start, compress_end)
+        if compress_start >= compress_end:
+            self._last_compression_savings_pct = 0.0
+            if _track_low_yield:
+                self._ineffective_compression_count += 1
+                self._consecutive_low_yield_compactions += 1
+                self._last_low_yield_tokens = _measured_trigger or display_tokens
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
@@ -1941,6 +2360,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 "respond to the message below, not the summary above ---"
             )
 
+
         if not _merge_summary_into_tail:
             compressed.append({"role": summary_role, "content": summary})
 
@@ -1982,6 +2402,30 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._ineffective_compression_count += 1
         else:
             self._ineffective_compression_count = 0
+
+        # Anti-thrash low-yield tracking (compaction-rs fixture 2026-06-15).
+        # The savings-% signal above is blind to the real pathology: a
+        # compaction that frees token slack but removes ~0 messages. Track net
+        # message reduction so should_compress() can suppress the every-~65s
+        # iteration-boundary refire. The "context got BIGGER" check compares the
+        # SAME estimator on both sides (messages-rough before vs after summarize)
+        # — display_tokens may be real-prompt tokens incl. schemas, so using it
+        # here would mis-sign; n_pre_rough vs new_estimate is apples-to-apples.
+        removed_messages = n_messages - len(compressed)
+        n_pre_rough = estimate_messages_tokens_rough(messages)
+        grew_bigger = new_estimate > n_pre_rough
+        low_yield = removed_messages <= _LOW_YIELD_REMOVED_MESSAGES or grew_bigger
+        if _track_low_yield:
+            if low_yield:
+                self._consecutive_low_yield_compactions += 1
+                # Baseline = the level should_compress() measured (request-rough,
+                # incl. tool schemas) so the cooldown compares in consistent
+                # units; fall back to display_tokens for direct compress()
+                # callers (context-limit recovery) that never set it.
+                self._last_low_yield_tokens = _measured_trigger or display_tokens
+            else:
+                self._consecutive_low_yield_compactions = 0
+                self._last_low_yield_tokens = 0
 
         if not self.quiet_mode:
             logger.info(

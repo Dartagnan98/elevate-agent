@@ -30,23 +30,23 @@ const LISTING_STAGE_BADGE: Record<number, string> = {
 };
 
 const BUYER_STAGE_TO_PHASE: Record<number, string> = {
-  0: "offer",
-  1: "accepted",
-  2: "conditions",
+  0: "onboarding",
+  1: "offer",
+  2: "accepted",
   3: "conditions",
-  4: "closed",
-  5: "closed",
-  6: "closed",
-  7: "closed",
-  8: "closed",
-  9: "closed",
-  10: "closed",
+  4: "removed",
+  5: "removed",
+  6: "removed",
+  7: "removed",
+  8: "removed",
+  9: "removed",
+  10: "removed",
 };
 
 const BUYER_STAGE_BADGE: Record<number, string> = {
-  0: "Offer Prep",
-  1: "Accepted",
-  2: "Condition Removal",
+  0: "Client Onboarding",
+  1: "Offer Prep",
+  2: "Accepted Offer",
   3: "Condition Removal",
   4: "Closed",
   5: "Closed",
@@ -58,7 +58,7 @@ const BUYER_STAGE_BADGE: Record<number, string> = {
 };
 
 const LISTING_STAGE_NEXT: Record<number, string> = {
-  0: "Pre-CMA Google Form filled",
+  0: "Pre-CMA dashboard setup complete",
   1: "CMA PDF complete",
   2: "Listing docs ready",
   3: "SkySlope/Matrix prep complete",
@@ -72,17 +72,17 @@ const LISTING_STAGE_NEXT: Record<number, string> = {
 };
 
 const BUYER_STAGE_NEXT: Record<number, string> = {
-  0: "Offer package ready",
-  1: "Accepted-offer checked",
-  2: "Conditions tracked / removal pending",
-  3: "Conditions removed",
-  4: "File archived",
-  5: "File archived",
-  6: "File archived",
-  7: "File archived",
-  8: "File archived",
-  9: "File archived",
-  10: "File archived",
+  0: "Agency + disclosures signed",
+  1: "Offer package ready",
+  2: "Accepted-offer checked",
+  3: "Conditions tracked / removal pending",
+  4: "File archive / nurture",
+  5: "File archive / nurture",
+  6: "File archive / nurture",
+  7: "File archive / nurture",
+  8: "File archive / nurture",
+  9: "File archive / nurture",
+  10: "File archive / nurture",
 };
 
 function shortAddr(addr: string | null, fallback: string): string {
@@ -113,6 +113,14 @@ function top25Note(d: AdminDeal): string | undefined {
   );
 }
 
+function archivedNote(d: AdminDeal): string | undefined {
+  return (
+    stringToggle(d.extraToggles?.archivedNote) ??
+    stringToggle(d.extraToggles?.cancelNote) ??
+    stringToggle(d.extraToggles?.cancellationReason)
+  );
+}
+
 function clampStage(n: number): number {
   if (n < 0) return 0;
   if (n > 10) return 10;
@@ -131,6 +139,7 @@ export function adminDealToDeal(d: AdminDeal): Deal {
   const note = top25Note(d);
   return {
     id: d.id,
+    stage,
     phase,
     addr,
     line2,
@@ -140,26 +149,50 @@ export function adminDealToDeal(d: AdminDeal): Deal {
     mls: d.mlsNumber ?? undefined,
     primary: pinned,
     top25Note: note,
+    progress: d.progress ?? d.scorecard?.progress ?? undefined,
+    blocked: d.scorecard?.blocked ?? undefined,
+    canAdvance: d.scorecard?.canAdvance ?? undefined,
+    missingCount: d.scorecard?.missingCount ?? undefined,
+    activeRunCount: d.scorecard?.activeRunCount ?? undefined,
+    runningRunCount: d.scorecard?.runningRunCount ?? undefined,
+    waitingHumanCount: d.scorecard?.waitingHumanCount ?? undefined,
+    activeRunLabel: d.scorecard?.activeRunLabel ?? undefined,
+    activeRunStatus: d.scorecard?.activeRunStatus ?? undefined,
+    status: d.status ?? undefined,
+    archivedNote: archivedNote(d),
+    archivedAt: d.closedAt ?? d.updatedAt ?? undefined,
   };
 }
 
 export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
   const stage = clampStage(d.currentStage ?? 0);
-  const phase = BUYER_STAGE_TO_PHASE[stage] ?? "offer";
-  const badge = BUYER_STAGE_BADGE[stage] ?? "Offer Prep";
+  const phase = BUYER_STAGE_TO_PHASE[stage] ?? "onboarding";
+  const badge = BUYER_STAGE_BADGE[stage] ?? "Client Onboarding";
   const next = BUYER_STAGE_NEXT[stage] ?? "—";
   const title = d.title || "Buyer";
   const note = top25Note(d);
   return {
     id: d.id,
+    stage,
     side: "buyer",
     phase,
     addr: `${title} — buyer track`,
     line2: note ? `Looking: ${note}` : d.listingAddress || (d.province ? `Looking: ${d.province}` : "—"),
     badge,
-    progress: "0/3",
+    progress: d.progress ?? d.scorecard?.progress ?? undefined,
+    blocked: d.scorecard?.blocked ?? undefined,
+    canAdvance: d.scorecard?.canAdvance ?? undefined,
+    missingCount: d.scorecard?.missingCount ?? undefined,
+    activeRunCount: d.scorecard?.activeRunCount ?? undefined,
+    runningRunCount: d.scorecard?.runningRunCount ?? undefined,
+    waitingHumanCount: d.scorecard?.waitingHumanCount ?? undefined,
+    activeRunLabel: d.scorecard?.activeRunLabel ?? undefined,
+    activeRunStatus: d.scorecard?.activeRunStatus ?? undefined,
     next,
     primary: d.extraToggles?.pinnedTop25 === true || d.extraToggles?.top25 === true,
     top25Note: note,
+    status: d.status ?? undefined,
+    archivedNote: archivedNote(d),
+    archivedAt: d.closedAt ?? d.updatedAt ?? undefined,
   };
 }

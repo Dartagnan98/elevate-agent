@@ -42,10 +42,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import psycopg
-
-from elevate_cli.data import pg_server
-from elevate_cli.data.connection import _APP_DB_NAME, _Row
 from elevate_cli.data.paths import operational_db_path
 
 

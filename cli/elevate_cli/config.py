@@ -714,7 +714,7 @@ DEFAULT_CONFIG = {
 
     "compression": {
         "enabled": True,
-        "threshold": 0.50,            # compress when context usage exceeds this ratio
+        "threshold": 0.85,            # estimate-mode default; real usage can trigger at 0.90
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
 
@@ -1071,6 +1071,14 @@ DEFAULT_CONFIG = {
             "recent_turn_max_chars": 240,
             "default_trust": 0.5,
             "min_trust_threshold": 0.3,
+            # Trust ratchet: when False (default), the post-retrieval ranking
+            # outcome no longer mutates trust_score / helpful_count (only
+            # explicit fact_feedback does). Telemetry still records normally.
+            # True = byte-identical to legacy behavior.
+            "trust_from_ranking_enabled": False,
+            # Reserved "Must-Follow Rules" recall lane (critical/pinned facts).
+            "critical_tier_enabled": True,
+            "critical_recall_limit": 2,
             "temporal_decay_half_life": 0,
             "hrr_dim": 1024,
             "embedding_enabled": False,
@@ -4469,7 +4477,7 @@ def show_config():
     enabled = compression.get('enabled', True)
     print(f"  Enabled:      {'yes' if enabled else 'no'}")
     if enabled:
-        print(f"  Threshold:    {compression.get('threshold', 0.50) * 100:.0f}%")
+        print(f"  Threshold:    {compression.get('threshold', 0.85) * 100:.0f}%")
         print(f"  Target ratio: {compression.get('target_ratio', 0.20) * 100:.0f}% of threshold preserved")
         print(f"  Protect last: {compression.get('protect_last_n', 20)} messages")
         _aux_comp = config.get('auxiliary', {}).get('compression', {})

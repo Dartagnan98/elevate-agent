@@ -508,6 +508,7 @@ class TurnController {
       }
 
       const base: SubagentProgress = existing ?? {
+        childSessionId: p.child_session_id,
         depth: p.depth ?? 0,
         goal: p.goal,
         id,
@@ -517,6 +518,7 @@ class TurnController {
         parentId: p.parent_id ?? null,
         startedAt: Date.now(),
         status: 'running',
+        taskId: p.task_id ?? null,
         taskCount: p.task_count ?? 1,
         thinking: [],
         toolCount: p.tool_count ?? 0,
@@ -538,6 +540,7 @@ class TurnController {
       const next: SubagentProgress = {
         ...base,
         apiCalls: p.api_calls ?? base.apiCalls,
+        childSessionId: p.child_session_id ?? base.childSessionId,
         costUsd: p.cost_usd ?? base.costUsd,
         depth: p.depth ?? base.depth,
         filesRead: p.files_read ?? base.filesRead,
@@ -550,6 +553,7 @@ class TurnController {
         outputTokens: p.output_tokens ?? base.outputTokens,
         parentId: p.parent_id ?? base.parentId,
         reasoningTokens: p.reasoning_tokens ?? base.reasoningTokens,
+        taskId: p.task_id ?? base.taskId,
         taskCount: p.task_count ?? base.taskCount,
         toolCount: p.tool_count ?? base.toolCount,
         toolsets: p.toolsets ?? base.toolsets,

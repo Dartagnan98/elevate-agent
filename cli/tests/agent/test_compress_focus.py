@@ -23,6 +23,10 @@ def _make_compressor():
     compressor.compression_count = 0
     compressor.last_prompt_tokens = 0
     compressor._previous_summary = None
+    compressor._ineffective_compression_count = 0
+    compressor._consecutive_low_yield_compactions = 0
+    compressor._last_low_yield_tokens = 0
+    compressor._pending_compress_tokens = 0
     compressor._summary_failure_cooldown_until = 0.0
     compressor.summary_model = None
     compressor.model = "test-model"

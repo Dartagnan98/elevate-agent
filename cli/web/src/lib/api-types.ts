@@ -112,6 +112,11 @@ export interface SourceConnectorStatus {
   blocked: boolean;
   lastError: string | null;
   nextOperatorStep: string | null;
+  recoveryKind?: "ready" | "missing_config" | "operator_blocked" | "upstream_error" | "needs_operator" | string;
+  recoverySeverity?: "none" | "info" | "warning" | string;
+  recoveryOwner?: string;
+  recoveryAction?: string;
+  recoveryError?: string;
   lastCheckedAt: string | null;
   recordCounts: Record<string, number>;
   prompt: string;
@@ -358,6 +363,22 @@ export interface AdminProfilePromotionResponse {
   deal: AdminDeal;
 }
 
+export interface AdminDealScorecard {
+  progress: string | null;
+  completedChecklist: number;
+  totalChecklist: number;
+  canAdvance: boolean;
+  blocked: boolean;
+  missingCount: number;
+  stageName?: string | null;
+  nextStageName?: string | null;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
+}
+
 export interface AdminDeal {
   id: string;
   title: string;
@@ -425,6 +446,10 @@ export interface AdminDeal {
   offerAcceptedAt?: string | null;
   subjectsRemovedAt?: string | null;
   completedAt?: string | null;
+  // Server-computed card scorecard (checklist progress + gate state). Added by
+  // GET /api/admin/deals so the board shows progress without opening the modal.
+  progress?: string | null;
+  scorecard?: AdminDealScorecard | null;
 }
 
 export interface DealContactCreateRequest {
@@ -1344,6 +1369,73 @@ export interface ThreadContextResponse {
   activity: ThreadContextActivity[];
 }
 
+// ── CRM contact card ───────────────────────────────────────────────────
+// Payload for GET /api/admin/contacts/{id} (the redesigned contact card).
+// Mirrors the _row_to_contact serializer plus the top25 side-table flag.
+export interface AdminContactDetail {
+  id: string;
+  displayName: string | null;
+  primaryEmail: string | null;
+  primaryPhone: string | null;
+  address: string | null;
+  birthday: string | null;
+  type: string | null;
+  stage: string | null;
+  ownerNotes: string | null;
+  lastActivityAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  pipelineStatus: string | null;
+  pipelineStatusSetBy: string | null;
+  leadSource: string | null;
+  assignedAgent: string | null;
+  tagsJson: string | null;
+  segmentsJson: string | null;
+  buyingTimeFrame: string | null;
+  sellingTimeFrame: string | null;
+  preQualStatus: string | null;
+  cannotText: boolean;
+  cannotCall: boolean;
+  cannotEmail: boolean;
+  unsubscribed: boolean;
+  top25: boolean;
+  // Manual lead-temperature override; null when using the derived temperature.
+  temperature?: string | null;
+}
+
+// Note row from GET/POST /api/admin/contacts/{id}/notes (mirrors _row_to_note).
+export interface AdminContactNote {
+  id: string;
+  contactId: string;
+  body: string;
+  authorKind: string;
+  authorName: string | null;
+  pinned: boolean;
+  deleted: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface AdminContactNotesResponse {
+  items: AdminContactNote[];
+  count: number;
+}
+
+// Contact item (Tasks / Appointments / Family) from the .../items endpoints.
+export interface AdminContactItem {
+  id: string;
+  kind: "task" | "appointment" | "family";
+  title: string | null;
+  subtitle: string | null;
+  whenAt: string | null;
+  done: boolean;
+  createdAt: string | null;
+}
+
+export interface AdminContactItemsResponse {
+  items: AdminContactItem[];
+}
+
 export interface BuyerWatchlistEntry {
   id: string;
   contactId?: string | null;
@@ -1393,6 +1485,22 @@ export interface SourceInboxResponse {
   privateSearchBuyers?: BuyerWatchlistEntry[];
   leadSections?: Record<string, LeadSectionSummary>;
   appleMessages?: AppleMessagesDirections;
+  debug?: {
+    readPath: "db" | "jsonl" | string;
+    fallback: boolean;
+    fallbackError?: string;
+    fallbackErrorCode?: string;
+    counts: {
+      sources: number;
+      profiles: number;
+      threads: number;
+      drafts: number;
+      skippedDrafts: number;
+      privateSearchBuyers: number;
+      recordCounts: Record<string, number>;
+      hiddenCounts: Record<string, number>;
+    };
+  };
 }
 
 export interface AppleMessagesDirections {
@@ -2473,19 +2581,6 @@ export interface SessionPlanResponse {
   updated_at?: number | string | null;
 }
 
-export interface FileTreeNode {
-  name: string;
-  type: "dir" | "file";
-  path: string;
-  children?: FileTreeNode[];
-}
-
-export interface FilesTreeResponse {
-  root: string;
-  name: string;
-  tree: FileTreeNode[];
-}
-
 export interface SessionFileItem {
   path: string;
   name: string;
@@ -2712,6 +2807,7 @@ export interface SkillFileResponse {
 }
 
 export interface BlobResponse {
+  resolvedPath?: string;
   blob: Blob;
   contentType: string;
   fileName: string;
@@ -3159,4 +3255,76 @@ export interface SurfaceApproval {
   resolvedAt?: string | null;
   resolvedBy?: string | null;
   resolutionNote?: string | null;
+}
+
+// ── Reporting page ──────────────────────────────────────────────────────
+export interface ReportingKpi {
+  value: number;
+  delta: number | null;
+  thin?: boolean;
+}
+
+export interface ReportingKpis {
+  newLeads: ReportingKpi;
+  calls: ReportingKpi;
+  texts: ReportingKpi;
+  emails: ReportingKpi;
+  apptsBooked: ReportingKpi;
+  leadToClient: ReportingKpi;
+}
+
+export interface ReportingSourceCount {
+  source: string;
+  count: number;
+}
+
+export interface ReportingStageCount {
+  stage: string;
+  count: number;
+}
+
+export interface ReportingTemperatureCount {
+  label: string;
+  count: number;
+}
+
+export interface ReportingFunnelStep {
+  stage: string;
+  label: string;
+  count: number;
+}
+
+export interface ReportingMonthlyPoint {
+  month: string;
+  leads: number;
+  sales: number;
+}
+
+export interface ReportingYearPoint {
+  year: string;
+  leads: number;
+  sales: number;
+  ytd: boolean;
+}
+
+export interface ReportingGoals {
+  leadsGoal: number | null;
+  apptsGoal: number | null;
+  closingsGoal: number | null;
+  gciGoal: number | null;
+}
+
+export interface ReportingSummary {
+  window: number;
+  generatedAt: string;
+  kpis: ReportingKpis;
+  leadsBySource: ReportingSourceCount[];
+  leadsByStage: ReportingStageCount[];
+  leadsByTemperature: ReportingTemperatureCount[];
+  funnel: ReportingFunnelStep[];
+  closedBySource: ReportingSourceCount[];
+  gci: number;
+  trend: { monthly: ReportingMonthlyPoint[]; yoy: ReportingYearPoint[] };
+  marketingSpend: null;
+  goals: ReportingGoals;
 }

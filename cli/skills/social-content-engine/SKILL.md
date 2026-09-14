@@ -58,13 +58,19 @@ python3 scripts/facebook_insights.py --lookback 30
 python3 scripts/linkedin_insights.py --lookback 30
 ```
 
+The bare `python3` is fine: each script imports `_bootstrap` first, which
+re-execs into the bundled app Python if it was launched by an interpreter that
+can't load `elevate_cli`/`httpx`. (Without this, a system `python3` silently
+reported every platform as `not_configured` even when Composio was fully
+connected.)
+
 Each fetcher reads its OAuth token from Composio, pulls every post in the lookback window, and writes the full metric payload (one JSON line per post per pull) to:
 
 ```
 ~/.elevate/state/<workspace>/social-metrics.jsonl
 ```
 
-If a platform isn't connected, the fetcher exits 0 with a `not_configured` line — keep going.
+If a platform genuinely isn't connected, the fetcher exits 0 with a `not_configured` line — keep going. An environment/interpreter problem now prints a distinct `composio_client unavailable …` line to stderr instead of masquerading as `not_configured`.
 
 ### 2. Aggregate + rank
 

@@ -226,17 +226,28 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "toolsets": ["agent_bus", "agent_handoff", "agent_management", "memory", "todo", "skills", "deals_overview", "leads_overview", "lead_status"],
         "prompt": (
             "You are the Executive Assistant — the orchestrator and default agent for this Elevate "
-            "workspace. You coordinate the fleet; you do not do specialist work yourself. Route every "
-            "user directive to the agent that owns it (Admin/Transaction Coordinator, Outreach, "
-            "Marketing, Ads, Social Media, Analyst) and synthesize a single clear answer when work "
-            "crosses domains.\n\n"
+            "workspace. You carry every tool the specialists do, so you CAN act directly when that is "
+            "faster. Your default is still to route each user directive to the agent that owns it "
+            "(Admin/Transaction Coordinator, Outreach, Marketing, Ads, Social Media, Analyst) and "
+            "synthesize a single clear answer when work crosses domains.\n\n"
             "Operating doctrine:\n"
-            "- Route, don't execute. If a narrower agent owns the task, hand it off — doing specialist "
-            "work yourself breaks the fleet.\n"
-            "- When you delegate, WRITE A TIGHT TASK GOAL — one or two sentences of exactly what the "
-            "specialist must do and return. NEVER paste the user's whole message (and never the "
-            "instructions/test-notes around it) into the goal; distill it. The specialist gets only your "
-            "goal as its brief, so a bloated goal becomes a confusing first message in its thread.\n"
+            "- Prefer routing, but you are not blocked from acting. You can do any specialist action "
+            "yourself — especially quick single writes like ticking a scorecard cell, setting one deal "
+            "field, or labeling a lead. Do it inline when delegating would just add a hop. Hand off when "
+            "the work is heavy, parallel, multi-step, or genuinely a specialist's deep craft. Think of "
+            "it as: 'I can do this here, or pass it along so we keep moving' — pick whichever serves the "
+            "user fastest.\n"
+            "- When you delegate real work, use delegate_task(agent='<owner>') for the specialist that owns "
+            "the workflow. Do not send Admin/deal/SkySlope/WEBForms/MLC/signing/subject-removal/closing or "
+            "full Admin-board CMA work to a generic helper or Analyst; use agent='admin'. Analyst is for "
+            "market support and system/pipeline analysis, not Admin deal mutation or report attachment.\n"
+            "- Every delegate brief must be self-contained because the child has no conversation memory. "
+            "Write a tight goal, and put the exact operating context in context: selected deal title/id, "
+            "address/MLS/contact if known, skill or workflow name, test-vs-client-delivery mode, no-send or "
+            "approval constraints, fallback behavior, expected artifact paths/record updates, and what "
+            "counts as done. For Admin-board test runs, if the selected test deal lacks property identity, "
+            "instruct the specialist to choose a real non-mock board deal with sufficient data unless the "
+            "user explicitly required that exact deal.\n"
             "- Keep agents unblocked. A blocked or idle agent is your failure: unblock, re-route, or "
             "escalate to the human with what was tried, what failed, and what is needed.\n"
             "- Run the daily rhythm. Morning: cascade the day's goals to each agent and send a briefing. "
@@ -310,6 +321,8 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "admin-agent",
             "deal-matcher",
             "admin-result-writer",
+            "cma",
+            "cma-generator",
             "calendar-management",
             "email-triage",
             "gmail-doc-router",
@@ -376,6 +389,16 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "time/place with all parties, collect keys/access, send the wire-fraud / funds warning, and "
             "schedule the post-close follow-up.\n"
             "- Surface date risk and waiting-human items early; never let a condition lapse silently.\n\n"
+            "Admin-board CMA doctrine:\n"
+            "- A full CMA / Market Evaluation tied to an Admin deal is your workflow, not Analyst's. "
+            "Analyst may prepare market support, but Admin owns deal context, Admin attachments, checklist "
+            "closure, and result writing.\n"
+            "- For test CMA runs, use a real non-mock Admin listing with a property address or MLS number. "
+            "If the initially selected test deal has no usable property identity, choose another real board "
+            "deal with sufficient data instead of stopping at preflight, unless the user explicitly required "
+            "that exact deal.\n"
+            "- Never mark a CMA complete or attach a report unless the report file exists, is audited, and "
+            "the Admin deal record is updated with the draft/client-ready status.\n\n"
             "Document review (every contract, amendment, and addendum):\n"
             "1. Intake & classify — what document, which deal, which stage.\n"
             "2. Structural check — required fields, signatures, dates, and attachments present and "
@@ -392,7 +415,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "financial/legal actions, and credential changes require approval — drafts only."
         ),
         "routing": {
-            "owns": ["deal files", "province transaction guide", "critical deadlines", "condition tracking", "contract and amendment review", "financing-milestone coordination", "party coordination", "forms", "signatures", "subject removal", "closing prep", "compliance steps", "calendar conflicts", "admin callbacks"],
+            "owns": ["deal files", "province transaction guide", "critical deadlines", "condition tracking", "contract and amendment review", "financing-milestone coordination", "party coordination", "forms", "signatures", "subject removal", "closing prep", "compliance steps", "calendar conflicts", "admin callbacks", "Admin Hub CMA cards", "full CMA skill runs attached to Admin deals", "CMA report attachments"],
             "handoff_targets": ["executive-assistant", "outreach", "marketing"],
             "escalation_target": "executive-assistant",
             "default_priority": "normal",
@@ -685,7 +708,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "id": "analyst",
         "name": "Analyst",
         "role": "analyst",
-        "description": "Pipeline analytics and system signals PLUS external market intelligence: CMA support packets, neighborhood/market-stat digests, and pricing-trend briefs for listing appointments.",
+        "description": "Pipeline analytics and system signals PLUS external market intelligence: CMA support packets, neighborhood/market-stat digests, and pricing-trend briefs for listing appointments. Does not own full Admin-deal CMA execution or Admin attachments.",
         "enabled": True,
         "platforms": ["local"],
         "session_sources": ["cli", "cron"],
@@ -718,6 +741,9 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "External-market doctrine (CMA + pricing support):\n"
             "- Comps are evidence, not conclusions: gather, organize, annotate, and date comparable "
             "sales for CMA prep; never declare the price — the pricing opinion is always the realtor's.\n"
+            "- Full CMA execution tied to an Admin deal, Admin Hub card, report attachment, checklist, or "
+            "admin-result-writer closure belongs to Admin. Do market support only, then hand the full "
+            "workflow back to Admin with sources and gaps.\n"
             "- Maintain neighborhood and market-stat digests (inventory, days-on-market, list-to-sale "
             "ratios, price movement) and write one-page pricing-trend briefs the realtor can walk into "
             "a listing appointment with. Digest over dump.\n"
@@ -814,6 +840,28 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
 )
 
 
+# ── Executive Assistant = full-capability superset ───────────────────────────
+# The EA carries the union of every agent's toolsets, computed here so it never
+# drifts when a specialist gains a tool. It can perform any specialist action
+# itself and *chooses* to delegate (that's a behavioral preference in the EA
+# prompt, not a capability wall). Add a toolset to _EA_TOOLSET_DENYLIST only to
+# keep it out of base chat (e.g. to trim the tool schema for token budget).
+_EA_TOOLSET_DENYLIST: frozenset[str] = frozenset()
+_EA_TOOLSET_UNION: list[str] = sorted(
+    {
+        str(ts)
+        for _defn in DEFAULT_AGENT_DEFS
+        for ts in (_defn.get("toolsets") or [])
+        if str(ts).strip()
+    }
+    - _EA_TOOLSET_DENYLIST
+)
+for _ea_defn in DEFAULT_AGENT_DEFS:
+    if _ea_defn.get("id") == "executive-assistant":
+        _ea_defn["toolsets"] = list(_EA_TOOLSET_UNION)
+        break
+
+
 def _as_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -840,6 +888,34 @@ def _merge_unique(*values: Any) -> list[str]:
                 seen.add(item)
                 merged.append(item)
     return merged
+
+
+_AGENT_EFFECTIVE_SKILL_ALIASES: dict[str, dict[str, str]] = {
+    "admin": {
+        "admin-agent": "real-estate-admin/admin-agent",
+        "admin-result-writer": "real-estate-admin/admin-result-writer",
+        "closing-admin": "real-estate-admin/closing-admin",
+        "cma-generator": "real-estate-admin/cma-generator",
+        "deal-matcher": "real-estate-admin/deal-matcher",
+        "digisign": "real-estate-admin/digisign",
+        "gmail-doc-router": "real-estate-admin/gmail-doc-router",
+        "offer-review": "real-estate-admin/offer-review",
+        "signing-package": "real-estate-admin/signing-package",
+        "skyslope-sync": "real-estate-admin/skyslope-sync",
+        "subject-removal": "real-estate-admin/subject-removal",
+        "webforms": "real-estate-admin/webforms",
+    },
+}
+
+
+def _qualify_agent_effective_skill(agent_id: str, skill_name: str) -> str:
+    if "/" in skill_name:
+        return skill_name
+    return _AGENT_EFFECTIVE_SKILL_ALIASES.get(agent_id, {}).get(skill_name, skill_name)
+
+
+def _qualify_agent_effective_skills(agent_id: str, skills: list[str]) -> list[str]:
+    return _merge_unique([_qualify_agent_effective_skill(agent_id, skill) for skill in skills])
 
 
 def _model_summary(config: dict[str, Any]) -> dict[str, Any]:
@@ -2009,7 +2085,10 @@ def agent_effective_skills(
     agent = get_agent_def(agent_id, config=config)
     if not isinstance(agent, dict):
         return _merge_unique(extra_skills)
-    return _merge_unique(agent.get("skills"), extra_skills)
+    return _qualify_agent_effective_skills(
+        str(agent.get("id") or agent_id or ""),
+        _merge_unique(agent.get("skills"), extra_skills),
+    )
 
 
 def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> str:

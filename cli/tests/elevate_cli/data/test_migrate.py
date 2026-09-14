@@ -194,31 +194,41 @@ def test_backup_no_op_when_db_missing():
 
 
 def test_backup_then_restore_roundtrip():
-    # Cause the schema to materialize.
-    with connect() as conn:
-        conn.execute("INSERT INTO meta(key,value) VALUES ('test_marker','before')")
+    # This helper backs up the legacy SQLite operational.db file. The live
+    # store is PG now, so create an explicit legacy file for the roundtrip.
+    op_path = operational_db_path()
+    op_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(op_path)
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("INSERT INTO meta(key,value) VALUES ('test_marker','before')")
+        raw.commit()
+    finally:
+        raw.close()
 
     backup = backup_operational_db()
     assert backup.exists(), "backup file should exist after running backup"
 
     # Mutate the live DB.
-    _reset_schema_cache()
-    with connect() as conn:
-        conn.execute(
-            "UPDATE meta SET value='after' WHERE key='test_marker'"
-        )
-
-    with connect() as conn:
-        assert conn.execute(
+    raw = sqlite3.connect(op_path)
+    try:
+        raw.execute("UPDATE meta SET value='after' WHERE key='test_marker'")
+        raw.commit()
+        assert raw.execute(
             "SELECT value FROM meta WHERE key='test_marker'"
-        ).fetchone()["value"] == "after"
+        ).fetchone()[0] == "after"
+    finally:
+        raw.close()
 
     restore_from_backup(backup)
 
-    with connect() as conn:
-        assert conn.execute(
+    raw = sqlite3.connect(op_path)
+    try:
+        assert raw.execute(
             "SELECT value FROM meta WHERE key='test_marker'"
-        ).fetchone()["value"] == "before"
+        ).fetchone()[0] == "before"
+    finally:
+        raw.close()
 
 
 # ─── Backfill behavior ────────────────────────────────────────────────

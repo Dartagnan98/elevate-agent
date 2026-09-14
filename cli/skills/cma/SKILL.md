@@ -43,6 +43,7 @@ Ask for only the missing pieces:
 - Use market stats when they are configured, but never block the CMA only because a monthly market file is missing.
 - The deliverable should explain the price story. Do not expose internal scoring math as if it is a legal valuation.
 - Create a human approval prompt before delivering a client-facing PDF or email draft.
+- For Admin-board test runs, use a real non-mock listing with a usable address or MLS number. If the initially selected test deal lacks property identity, choose another real Admin board deal with enough data and continue the full workflow, unless the user explicitly required that exact deal.
 
 ## Handoff Contract
 

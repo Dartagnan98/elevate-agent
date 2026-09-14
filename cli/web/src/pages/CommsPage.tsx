@@ -8,6 +8,7 @@ import type { AgentCommsChannel, AgentCommsChannelResponse, AgentCommsMessage, A
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { ListSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -58,6 +59,23 @@ const PRIORITY_TONE: Record<string, string> = {
 };
 
 type AgentOption = { id: string; name: string };
+
+function normalizeCommsAgentId(value: string | null | undefined): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function normalizeCommsPair(pair: string | null | undefined): string | null {
+  const parts = String(pair ?? "").split("--");
+  if (parts.length !== 2) return null;
+  const a = normalizeCommsAgentId(parts[0]);
+  const b = normalizeCommsAgentId(parts[1]);
+  if (!a || !b || a === b) return null;
+  return [a, b].sort().join("--");
+}
 
 function HandoffRow({
   h,
@@ -220,6 +238,7 @@ function HandoffComposer({
       <input
         value={title}
         onChange={(event) => setTitle(event.target.value)}
+        aria-label="Handoff title"
         placeholder="Title"
         className="mt-2 h-8 w-full rounded-md border border-border bg-background px-2.5 text-xs text-foreground placeholder:text-muted-foreground/60"
       />
@@ -227,6 +246,7 @@ function HandoffComposer({
         value={task}
         onChange={(event) => setTask(event.target.value)}
         rows={3}
+        aria-label="Handoff task details"
         placeholder="Task details"
         className="mt-2 w-full resize-y rounded-md border border-border bg-background px-2.5 py-2 text-xs leading-5 text-foreground placeholder:text-muted-foreground/60"
       />
@@ -245,6 +265,7 @@ function HandoffComposer({
           <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <input
               type="checkbox"
+              aria-label="Run handoff now"
               checked={runNow}
               onChange={(event) => setRunNow(event.target.checked)}
               className="accent-foreground"
@@ -517,35 +538,34 @@ function CommsFeedList({
     <ul className="space-y-2">
       {messages.map((msg) => (
         <li key={msg.id}>
-          <button
-            type="button"
-            onClick={() => onOpenPair(msg.pair)}
-            className="w-full rounded-md border border-border bg-card/50 p-2.5 text-left transition-colors hover:border-foreground/20"
-          >
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
-              <span className="font-medium text-foreground/90">{nameOf(msg.from)}</span>
-              <ArrowRight className="h-3 w-3 text-muted-foreground" />
-              <span className="font-medium text-foreground/90">{nameOf(msg.to)}</span>
-              <Badge variant={statusVariant(msg.kind)}>{msg.kind.replace("_", " ")}</Badge>
-              <span className={cn("font-medium", PRIORITY_TONE[msg.priority])}>{msg.priority}</span>
-              <span className="ml-auto text-muted-foreground/70">{timeAgo(msg.timestamp)}</span>
-            </div>
-            {msg.title && <p className="mt-1 text-xs font-medium text-foreground/90">{msg.title}</p>}
-            <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{msg.text}</p>
+          <div className="rounded-md border border-border bg-card/50 p-2.5 transition-colors hover:border-foreground/20">
+            <button
+              type="button"
+              onClick={() => onOpenPair(msg.pair)}
+              className="block w-full text-left"
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                <span className="font-medium text-foreground/90">{nameOf(msg.from)}</span>
+                <ArrowRight className="h-3 w-3 text-muted-foreground" />
+                <span className="font-medium text-foreground/90">{nameOf(msg.to)}</span>
+                <Badge variant={statusVariant(msg.kind)}>{msg.kind.replace("_", " ")}</Badge>
+                <span className={cn("font-medium", PRIORITY_TONE[msg.priority])}>{msg.priority}</span>
+                <span className="ml-auto text-muted-foreground/70">{timeAgo(msg.timestamp)}</span>
+              </div>
+              {msg.title && <p className="mt-1 text-xs font-medium text-foreground/90">{msg.title}</p>}
+              <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{msg.text}</p>
+            </button>
             <div className="mt-2 flex justify-end">
               <Button
                 size="sm"
                 variant="ghost"
                 className="h-6 px-2 text-[10px]"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenHandoff(msg.handoffId);
-                }}
+                onClick={() => onOpenHandoff(msg.handoffId)}
               >
                 Thread
               </Button>
             </div>
-          </button>
+          </div>
         </li>
       ))}
     </ul>
@@ -620,6 +640,7 @@ function ChannelListPanel({
 
 function ChannelTranscript({
   conversation,
+  error,
   loading,
   sortOrder,
   nameOf,
@@ -628,6 +649,7 @@ function ChannelTranscript({
   onOpenHandoff,
 }: {
   conversation: AgentCommsChannelResponse | null;
+  error?: string | null;
   loading: boolean;
   sortOrder: "asc" | "desc";
   nameOf: (id: string) => string;
@@ -657,6 +679,13 @@ function ChannelTranscript({
     }
   };
 
+  if (error) {
+    return (
+      <div className="flex h-full min-h-[360px] items-center justify-center rounded-lg border border-destructive/40 bg-destructive/10 px-4 text-center text-sm text-destructive">
+        Could not load this channel: {error}
+      </div>
+    );
+  }
   if (!conversation) {
     return (
       <div className="flex h-full min-h-[360px] items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">
@@ -760,11 +789,13 @@ export default function CommsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const agentParam = searchParams.get("agent") ?? "";
   const pairParam = searchParams.get("pair") ?? "";
+  const safePairParam = normalizeCommsPair(pairParam);
   const [agentFilter, setAgentFilter] = useState<string>(agentParam);
-  const [selectedPair, setSelectedPair] = useState<string | null>(pairParam || null);
+  const [selectedPair, setSelectedPair] = useState<string | null>(safePairParam);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedHandoff, setSelectedHandoff] = useState<AgentHandoff | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [conversationError, setConversationError] = useState<string | null>(null);
 
   // Debounce the meeting search so typing doesn't refetch per keystroke.
   const [debouncedMeetingSearch, setDebouncedMeetingSearch] = useState(meetingSearch);
@@ -804,14 +835,21 @@ export default function CommsPage() {
   const agents: AgentOption[] = commsData?.agents ?? [];
   const names = commsData?.names ?? {};
   const error = cacheError ? String(cacheError) : null;
-
-  // Auto-select the first conversation pair once channels load.
-  useEffect(() => {
-    if (!selectedPair) {
-      const nextPair = pairParam || conversationChannels[0]?.pair || null;
-      if (nextPair) setSelectedPair(nextPair);
-    }
-  }, [conversationChannels, selectedPair, pairParam]);
+  const safeConversationChannels = useMemo(
+    () =>
+      conversationChannels
+        .map((channel) => {
+          const pair = normalizeCommsPair(channel.pair);
+          if (!pair) return null;
+          return {
+            ...channel,
+            pair,
+            agents: pair.split("--", 2),
+          };
+        })
+        .filter((channel): channel is AgentCommsChannel => Boolean(channel)),
+    [conversationChannels],
+  );
 
   useEffect(() => {
     setAgentFilter(agentParam);
@@ -835,24 +873,57 @@ export default function CommsPage() {
     [setSearchParams],
   );
 
+  // Auto-select the first valid conversation pair once channels load.
+  useEffect(() => {
+    if (pairParam && !safePairParam) {
+      setSelectedPair(null);
+      setConversation(null);
+      setConversationError("That Comms channel link is invalid.");
+      updateParams({ pair: null });
+      return;
+    }
+    if (!selectedPair) {
+      const nextPair = safePairParam || safeConversationChannels[0]?.pair || null;
+      if (nextPair) {
+        setSelectedPair(nextPair);
+        setConversationError(null);
+      }
+    }
+  }, [pairParam, safePairParam, safeConversationChannels, selectedPair, updateParams]);
+
   const selectAgentFilter = useCallback((agentId: string) => {
     setAgentFilter(agentId);
     updateParams({ agent: agentId });
   }, [updateParams]);
 
   const openPair = useCallback((pair: string) => {
-    setSelectedPair(pair);
-    updateParams({ pair });
+    const safePair = normalizeCommsPair(pair);
+    if (!safePair) {
+      setSelectedPair(null);
+      setConversation(null);
+      setConversationError("That Comms channel link is invalid.");
+      updateParams({ pair: null });
+      return;
+    }
+    setSelectedPair(safePair);
+    setConversationError(null);
+    updateParams({ pair: safePair });
   }, [updateParams]);
 
   const loadConversation = useCallback(async (pair: string | null) => {
-    if (!pair) {
+    const safePair = normalizeCommsPair(pair);
+    if (!safePair) {
       setConversation(null);
+      if (pair) setConversationError("That Comms channel link is invalid.");
       return;
     }
     setConversationLoading(true);
+    setConversationError(null);
     try {
-      setConversation(await api.getCommsChannel(pair, { limit: 250 }));
+      setConversation(await api.getCommsChannel(safePair, { limit: 250 }));
+    } catch (err) {
+      setConversation(null);
+      setConversationError(err instanceof Error ? err.message : "Could not load this Comms channel.");
     } finally {
       setConversationLoading(false);
     }
@@ -954,10 +1025,10 @@ export default function CommsPage() {
       </header>
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn't load comms: {error}
-        </div>
-      ) : (
+        <RouteLoadError title="Could not load comms" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !commsData ? null : (
         <Tabs defaultValue="meeting-room">
           {(active, setActive) => (
             <>
@@ -970,9 +1041,9 @@ export default function CommsPage() {
                   <TabsTrigger active={active === "channels"} value="channels" onClick={() => setActive("channels")}>
                     <Users className="mr-1 h-3.5 w-3.5" />
                     Active Channels
-                    {conversationChannels.length > 0 && (
+                    {safeConversationChannels.length > 0 && (
                       <span className="ml-1.5 rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">
-                        {conversationChannels.length}
+                        {safeConversationChannels.length}
                       </span>
                     )}
                   </TabsTrigger>
@@ -1023,6 +1094,7 @@ export default function CommsPage() {
                       <input
                         value={meetingSearch}
                         onChange={(event) => setMeetingSearch(event.target.value)}
+                        aria-label="Search messages"
                         placeholder="Search messages..."
                         className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
                       />
@@ -1089,6 +1161,7 @@ export default function CommsPage() {
                       <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                         <input
                           type="checkbox"
+                          aria-label="Show archived channels"
                           checked={showArchived}
                           onChange={(event) => setShowArchived(event.target.checked)}
                           className="accent-foreground"
@@ -1101,12 +1174,13 @@ export default function CommsPage() {
                       <input
                         value={channelSearch}
                         onChange={(event) => setChannelSearch(event.target.value)}
+                        aria-label="Filter channels"
                         placeholder="Filter channels..."
                         className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
                       />
                     </div>
                     <ChannelListPanel
-                      channels={conversationChannels}
+                      channels={safeConversationChannels}
                       loading={loading}
                       selectedPair={selectedPair}
                       query={channelSearch}
@@ -1116,6 +1190,7 @@ export default function CommsPage() {
                   </div>
                   <ChannelTranscript
                     conversation={conversation}
+                    error={conversationError}
                     loading={conversationLoading}
                     sortOrder={sortOrder}
                     nameOf={nameOf}

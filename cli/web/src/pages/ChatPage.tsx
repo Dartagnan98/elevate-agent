@@ -1,4 +1,5 @@
 import { Markdown } from "@/components/Markdown";
+import { mergePreviewArtifacts, prepareHtmlPreview } from "@/lib/artifactPreview";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import {
   SlashPopover,
@@ -13,11 +14,12 @@ import {
   FilesPanel,
   PlanPanel,
   SidePanelSelector,
+  StackedWorkPanels,
   type SidePanelMode,
+  type WorkPanelMode,
 } from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   api,
   type AgentHubAgent,
@@ -44,6 +46,19 @@ import {
   useTranscript,
   type TranscriptMessage,
 } from "@/lib/transcriptStore";
+import {
+  blankTrace,
+  dropForeignMessages,
+  hasPendingTurn,
+  isRawToolPayload,
+  markStreamingTurnsInterrupted,
+  mergeServerWithCache,
+  parseObjectPayload,
+  reconcileWithServerTruth,
+  repairOutOfOrderUserTurns,
+  shouldKeepTranscriptMessage,
+  type ChatTimelineRole,
+} from "@/lib/chatTimeline";
 import { cn } from "@/lib/utils";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import {
@@ -139,6 +154,7 @@ interface SessionCreateResponse {
   persisted_session_id?: string;
   resumed?: string;
   session_id: string;
+  show_reasoning?: boolean;
 }
 
 interface ResumeRunningTool {
@@ -148,11 +164,33 @@ interface ResumeRunningTool {
   started_at?: number;
 }
 
+interface LiveSubagentTarget {
+  child_session_id: string;
+  parent_session_id?: string | null;
+  subagent_id?: string | null;
+  task_id?: string | null;
+  task_index?: number;
+  goal?: string;
+}
+
+interface SubagentMessageResponse {
+  found?: boolean;
+  accepted?: number;
+  persisted?: number;
+  all_persisted?: boolean;
+  emitted?: number;
+  client_message_id?: string;
+  client_message_ids?: string[];
+  targets?: unknown[];
+}
+
 interface SessionResumeResponse extends SessionCreateResponse {
   messages?: GatewayTranscriptMessage[];
   running?: boolean;
   replay_events?: GatewayEvent[];
   replay_seq?: number;
+  /** Running child target this resume can message directly. */
+  live_subagent?: LiveSubagentTarget | null;
   /**
    * Snapshot of tools still executing on the gateway at resume time.
    * The event ring can rotate a long turn's tool.start frames out, so
@@ -161,7 +199,7 @@ interface SessionResumeResponse extends SessionCreateResponse {
   running_tools?: ResumeRunningTool[];
 }
 
-type ChatRole = "assistant" | "system" | "tool" | "user";
+type ChatRole = ChatTimelineRole;
 
 interface ChatMessageAttachment {
   name: string;
@@ -225,12 +263,43 @@ interface ArtifactEntry {
   title: string;
 }
 
+type ActiveSidePanelMode = Exclude<SidePanelMode, "none">;
+
+function SidePanelMotionSlot({
+  children,
+  mobile = false,
+  mode,
+}: {
+  children: ReactNode;
+  mobile?: boolean;
+  mode: ActiveSidePanelMode;
+}) {
+  return (
+    <div
+      className={cn(
+        "chat-side-panel-motion",
+        mobile && "chat-side-panel-motion--mobile",
+        mode === "preview" && "chat-side-panel-motion--preview",
+      )}
+      data-panel-mode={mode}
+    >
+      {children}
+    </div>
+  );
+}
+
 interface QueuedInput {
   agentId: string;
   createdAt: number;
   id: string;
   routedText: string;
   status: "queued" | "error" | "steering";
+  text: string;
+}
+
+interface HeldSteer {
+  id: string;
+  legacy?: boolean;
   text: string;
 }
 
@@ -349,11 +418,18 @@ interface SubagentEntry {
   thinkingTokens?: number;
   /** The subagent's own session id — open + message it via ?resume=. */
   child_session_id?: string;
+  /** Async task id from the delegate registry, when present. */
+  task_id?: string;
   /** The parent assistant turn this subagent ran under. */
   messageId?: string;
   /** Final summary from subagent.complete (the child's answer). */
   finalSummary?: string;
 }
+
+const EMPTY_ACTIVITY_TRACES: ActivityTrace[] = [];
+const EMPTY_ARTIFACTS: ArtifactEntry[] = [];
+const EMPTY_SUBAGENTS: SubagentEntry[] = [];
+const EMPTY_TOOLS: ToolEntry[] = [];
 
 interface UsageInfo {
   calls?: number;
@@ -837,6 +913,13 @@ const TRANSCRIPT_STORE_ENABLED = (() => {
   return false;
 })();
 
+// Per-session agent memory. The selected agent is a frontend overlay sent as
+// `agent_id` on every prompt; the backend keeps no durable record of which lane
+// a chat ran as. localStorage map (canonical persisted session id -> agent id)
+// so each chat remembers its own agent and the picker reflects it on switch,
+// instead of one global value leaking the last pick onto every other chat.
+const AGENT_BY_SESSION_STORAGE_KEY = "elevate.chat.agentBySession";
+
 // When the store is the source of truth, hydrated rows must carry the gateway's
 // stable id so a reload dedupes against the live-streamed copy instead of
 // duplicating it. Off-flag, keep the legacy random ids byte-for-byte.
@@ -848,70 +931,6 @@ function stableHydrateId(
     return serverId;
   }
   return id(fallbackPrefix);
-}
-
-function parseObjectPayload(text: string): Record<string, unknown> | null {
-  const clean = text.trim();
-  if (!clean || (!clean.startsWith("{") && !clean.startsWith("["))) return null;
-  try {
-    const parsed = JSON.parse(clean);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function isRawToolPayload(text: string): boolean {
-  const clean = text.trim();
-  if (!clean) return false;
-  const parsed = parseObjectPayload(clean);
-  if (parsed) {
-    return [
-      "content",
-      "duration_seconds",
-      "error",
-      "files",
-      "is_binary",
-      "matches",
-      "output",
-      "status",
-      "tool_calls_made",
-      "total_count",
-      "total_lines",
-    ].some((key) => key in parsed);
-  }
-  return clean.length > 420 && /^(?:\{|\[)/.test(clean);
-}
-
-function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
-  const clean = content.trim();
-  if (!clean) return false;
-  if (role === "tool") return false;
-  if (role !== "user" && isRawToolPayload(clean)) return false;
-  if (clean.startsWith("[CONTEXT COMPACTION")) return false;
-  if (role === "system") {
-    if (/^⚡\s*loaded skill:/i.test(clean)) return false;
-    if (/^session busy\b/i.test(clean)) return false;
-  }
-  if (role === "user") {
-    if (/^\[SYSTEM:/.test(clean)) {
-      // Skill invocations pass through — collapseSkillInvocation handles them
-      if (/^\[SYSTEM: (?:The user |The ")/.test(clean)) return true;
-      return false;
-    }
-    if (clean.startsWith("[System note:")) return false;
-    if (clean.startsWith("You've reached the maximum number of tool-calling iterations")) return false;
-    if (clean.startsWith("[Elevation Hub interface context]")) return false;
-    if (clean.startsWith("User follow-up received while you were already working:")) return false;
-    // Legacy async-delegation marker (pre-1.2.x): older installs persisted the
-    // result as a user-role "[Delegated task result …]" message that wrongly
-    // rendered as if the user typed it. Drop it from display. New installs use
-    // the ⟦subagent-result⟧ marker (kept + rendered as a completion card).
-    if (clean.startsWith("[Delegated task result")) return false;
-  }
-  return true;
 }
 
 const SUBAGENT_RESULT_PREFIX = "⟦subagent-result";
@@ -938,10 +957,12 @@ function SubagentResultCard({
   status,
   goal,
   summary,
+  createdAt,
 }: {
   status: "completed" | "error";
   goal: string;
   summary: string;
+  createdAt: number;
 }) {
   const [open, setOpen] = useState(false);
   const ok = status !== "error";
@@ -961,14 +982,17 @@ function SubagentResultCard({
           )}
         />
         <Bot className="h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)]" />
-        <span className="font-medium text-[var(--chat-muted-strong)]">
+        <span className="min-w-0 flex-1 truncate font-medium text-[var(--chat-muted-strong)]">
           {ok ? "Sub-agent completed" : "Sub-agent finished with issues"}
           {goal ? <span className="font-normal text-[var(--fg-faint)]"> · {goal}</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] tabular-nums text-[var(--fg-faint)]">
+          {nowLabel(createdAt)}
         </span>
         {summary ? (
           <ChevronDown
             className={cn(
-              "ml-auto h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)] transition-transform",
+              "h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)] transition-transform",
               open && "rotate-180",
             )}
           />
@@ -981,6 +1005,23 @@ function SubagentResultCard({
       ) : null}
     </div>
   );
+}
+
+function backgroundTaskDisplayTime(task: BackgroundTaskItem): number {
+  return task.status === "running"
+    ? task.startedAt ?? task.completedAt ?? 0
+    : task.completedAt ?? task.startedAt ?? 0;
+}
+
+function sortBackgroundTasksForDisplay(
+  items: BackgroundTaskItem[],
+): BackgroundTaskItem[] {
+  return [...items].sort((a, b) => {
+    const at = backgroundTaskDisplayTime(a);
+    const bt = backgroundTaskDisplayTime(b);
+    if (bt !== at) return bt - at;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 function hasActivitySnapshot(message: Partial<ChatMessage>): boolean {
@@ -1256,7 +1297,26 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 }
 
 export const __chatPageTestables = {
+  activeSnapshotAlreadyCompleted,
+  buildBreakdownSteps,
+  contextRingTitle,
+  defaultActivityDigestOpen,
+  describeToolGroup,
+  isCompactSlashCommand,
+  isOpenPreviewIntent,
+  messageRowPropsEqual,
+  mergeActiveTurnSnapshot,
+  mergeServerWithCache,
+  repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
+  resolveActivityDigestVisibility,
+  routePromptForAgent,
+  shouldClearUsageForStatus,
+  shouldClearUsageForStatusUpdate,
+  shouldHandlePreviewShortcut,
+  shouldKeepTranscriptMessage,
+  sortBackgroundTasksForDisplay,
+  toolTarget,
 };
 
 function readStoredTranscriptCache(): StoredTranscriptCache {
@@ -1548,12 +1608,63 @@ function activeAssistantMessage(messages: ChatMessage[], preferredId?: string | 
   return null;
 }
 
+function normalizedSnapshotText(value: string | null | undefined, max = 260): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, max);
+}
+
+function activityTraceFingerprint(traces: ActivityTrace[] | null | undefined): string {
+  const text = (traces ?? [])
+    .filter((trace) =>
+      trace.kind === "reasoning" ||
+      trace.kind === "thinking" ||
+      trace.kind === "interim",
+    )
+    .map((trace) => trace.text)
+    .join("\n");
+  return normalizedSnapshotText(text, 360);
+}
+
+function completedAssistantMatchesActiveSnapshot(
+  completed: ChatMessage,
+  active: ChatMessage,
+): boolean {
+  if (completed.role !== "assistant" || completed.status === "streaming") {
+    return false;
+  }
+  if (completed.id === active.id) return true;
+
+  const activeText = normalizedSnapshotText(active.content);
+  const completedText = normalizedSnapshotText(completed.content);
+  if (
+    activeText.length >= 160 &&
+    (completedText.startsWith(activeText) || activeText.startsWith(completedText))
+  ) {
+    return true;
+  }
+
+  const activeTrace = activityTraceFingerprint(active.traces);
+  const completedTrace = activityTraceFingerprint(completed.traces);
+  return Boolean(
+    activeTrace.length >= 80 &&
+    completedTrace.length >= 80 &&
+    activeTrace === completedTrace,
+  );
+}
+
+function activeSnapshotAlreadyCompleted(
+  messages: ChatMessage[],
+  active: ChatMessage,
+): boolean {
+  return messages.some((message) => completedAssistantMatchesActiveSnapshot(message, active));
+}
+
 function mergeActiveTurnSnapshot(
   messages: ChatMessage[],
   snapshot: ActiveTurnSnapshot | null,
 ): ChatMessage[] {
   if (!snapshot) return messages;
   const active = snapshot.message;
+  if (activeSnapshotAlreadyCompleted(messages, active)) return messages;
   const mergedActive: ChatMessage = {
     ...active,
     status: "streaming",
@@ -1659,6 +1770,9 @@ function restoreTranscript(sessionId: string): ChatMessage[] | null {
 
 function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
   if (!sessionId) return;
+  // Persistence is passive: it should snapshot the on-screen order, not repair
+  // or reshuffle it. Ordering repair happens only at explicit server/cache merge
+  // boundaries so a localStorage write can never create UI/cache churn.
   const cacheableMessages = messages.filter(shouldCacheTranscriptMessage);
   if (!cacheableMessages.length) return;
   SESSION_MESSAGE_CACHE.delete(sessionId);
@@ -1710,334 +1824,6 @@ function attachLiveActivitySnapshots(
     };
   });
 
-  return changed ? next : messages;
-}
-
-// Merge a fresh server transcript with whatever the client cached locally.
-// The server persists messages only when a turn completes, so a refresh that
-// happens mid-turn returns a transcript that's missing the user's just-sent
-// message. Anything in the cache whose id isn't in the server response is
-// almost certainly an in-flight message — keep it appended.
-//
-// Match by role+content fingerprint, not by id: server and client generate
-// independent random IDs for the same logical message, so id-based matching
-// incorrectly treats every cached message as "not on server" and appends the
-// entire cache as a duplicate tail.
-function mergeServerWithCache(
-  serverMessages: ChatMessage[],
-  cached: ChatMessage[] | null,
-  // When true the server transcript is AUTHORITATIVE and may legitimately be
-  // shorter than the cache (a compaction summarized older turns away). Only the
-  // contiguous unsynced tail is recovered then; compacted messages stay gone.
-  // When false (the default — plain resume/reconnect/rehydrate) the server may
-  // instead be STALE: a WS that dropped mid-turn never flushed the streamed
-  // answers, so the server can be missing MIDDLE turns. There we rebuild in
-  // cache order so nothing rendered is lost.
-  serverAuthoritative = false,
-): ChatMessage[] {
-  if (!cached?.length) return serverMessages;
-  // Fingerprint is whitespace-normalized: live-cached content vs
-  // server-rehydrated content can diverge by trailing newlines or
-  // doubled whitespace, and a raw slice(0,200) makes those two
-  // versions of the same message hash differently — which then sends
-  // the cached copy down the tail-walk path and renders the Q+A
-  // doubled in the chat panel.
-  const fp = (m: ChatMessage) => {
-    const c = (m.content ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
-    return `${m.role}:${c}`;
-  };
-  const serverFingerprints = new Set(serverMessages.map(fp));
-
-  // The server transcript doesn't carry tool/trace/token snapshots.
-  // Re-attach them from the cached counterpart so the activity digest
-  // renders on resumed turns. Match on the same fingerprint the tail
-  // logic uses.
-  const cachedByFp = new Map<string, ChatMessage>();
-  for (const msg of cached) cachedByFp.set(fp(msg), msg);
-  const enriched = serverMessages.map((msg) => {
-    const match = cachedByFp.get(fp(msg));
-    let next = msg;
-    // No-shrink rule: the fingerprint says these are the same logical message
-    // (same role + first 200 normalized chars). If the cached/rendered copy is
-    // LONGER, the server copy is a stale partial persisted mid-stream —
-    // keeping it visibly truncates an answer the user already read (the
-    // 945→417 shrink in blank-trace). The longer content wins.
-    if (
-      match &&
-      (match.content?.length ?? 0) > (next.content?.length ?? 0)
-    ) {
-      next = { ...next, content: match.content };
-    }
-    // The server transcript never stores attachment metadata. Re-attach
-    // it from the cache so a sent image still shows its chip on resume.
-    if (
-      msg.role === "user" &&
-      !msg.attachments?.length &&
-      match?.attachments?.length
-    ) {
-      next = { ...next, attachments: match.attachments };
-    }
-    const hasSnapshot =
-      !!next.tools?.length ||
-      !!next.traces?.length ||
-      typeof next.completedAt === "number" ||
-      typeof next.tokenCount === "number";
-    if (hasSnapshot) return next;
-    if (
-      match &&
-      (match.tools?.length ||
-        match.traces?.length ||
-        typeof match.tokenCount === "number" ||
-        typeof match.completedAt === "number")
-    ) {
-      return {
-        ...next,
-        // Preserve the cached START time, not just completedAt. The server
-        // stores a single timestamp per message (~completion), so keeping
-        // next.createdAt collapses the turn duration to ~0 ("Worked for 0s")
-        // on re-hydrate. The cached createdAt is the true turn-start captured
-        // live, so completedAt - createdAt stays the real elapsed time.
-        createdAt:
-          typeof match.createdAt === "number" ? match.createdAt : next.createdAt,
-        completedAt: match.completedAt,
-        tools: match.tools,
-        traces: match.traces,
-        tokenCount: match.tokenCount,
-      };
-    }
-    return next;
-  });
-
-  if (serverAuthoritative) {
-    // Compaction path: trust the server's (intentionally shorter) transcript and
-    // only re-append the contiguous tail of cached messages it doesn't yet have
-    // (a turn that streamed after the compaction snapshot). Walking from the end
-    // and breaking at the first server-known message keeps compacted-away turns
-    // gone — resurrecting them would make compaction visually do nothing.
-    const tail: ChatMessage[] = [];
-    for (let i = cached.length - 1; i >= 0; i--) {
-      if (serverFingerprints.has(fp(cached[i]))) break;
-      tail.unshift(cached[i]);
-    }
-    const merged = tail.length ? [...enriched, ...tail] : enriched;
-    if (merged.length < 2) return merged;
-    const seen = new Set<string>();
-    const out: ChatMessage[] = [];
-    for (const m of merged) {
-      const key = fp(m);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(m);
-    }
-    blankTraceIfDropped(cached, out, fp, serverMessages.length);
-    return out;
-  }
-
-  // Default (stale-server) path: the server can be missing MIDDLE turns, not
-  // just a clean suffix (the throttled persist never flushed them before the WS
-  // dropped). The old contiguous-tail recovery broke the instant it hit a
-  // server-known message — so a truncated server list that still ended on a
-  // cached message recovered NOTHING and silently dropped the gap (the 14->4
-  // vanish). Rebuild in CACHE order instead: emit the server-canonical copy
-  // where the server has it (enriched with cache snapshots), otherwise recover
-  // the cached copy verbatim. Nothing rendered is ever dropped.
-  const enrichedByFp = new Map<string, ChatMessage>();
-  for (const m of enriched) enrichedByFp.set(fp(m), m);
-  const seen = new Set<string>();
-  const out: ChatMessage[] = [];
-  for (const cm of cached) {
-    const key = fp(cm);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(enrichedByFp.get(key) ?? cm);
-  }
-  // Anything the server has that the cache never saw (a turn that completed
-  // server-side after the cache snapshot) — INSERT BY TIME, not blind-append.
-  // The user's own message persists only at turn flush: leave mid-turn and
-  // come back, and it arrives here as a server-only row AFTER the streamed
-  // answer already sits in the cache — appending pinned it below the answer
-  // it prompted. Sliding it in by createdAt puts it back where it was sent.
-  for (const sm of enriched) {
-    const key = fp(sm);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const at = typeof sm.createdAt === "number" ? sm.createdAt : Number.POSITIVE_INFINITY;
-    let idx = out.length;
-    while (idx > 0) {
-      const prev = out[idx - 1];
-      const prevAt = typeof prev.createdAt === "number" ? prev.createdAt : 0;
-      if (prevAt <= at) break;
-      idx--;
-    }
-    out.splice(idx, 0, sm);
-  }
-  blankTraceIfDropped(cached, out, fp, serverMessages.length);
-  return out;
-}
-
-// Shared whitespace-normalized fingerprint (same shape mergeServerWithCache
-// uses internally) for the server-truth reconciliation below.
-function messageFingerprint(m: ChatMessage): string {
-  const c = (m.content ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
-  return `${m.role}:${c}`;
-}
-
-// Tolerance window for optimistic/in-flight messages the server hasn't acked
-// yet (a just-sent user bubble, a queued follow-up). Anything older that the
-// server disowns is cross-chat cache pollution, not an unsynced send.
-const RECONCILE_RECENT_MS = 120_000;
-
-/**
- * SELF-HEALING HYDRATION (layer 1 of the cross-chat bleed fix). When the
- * server transcript for a session arrives, the server is CANONICAL for which
- * user/assistant messages belong to this chat. The on-screen/cached list can
- * carry messages leaked from ANOTHER chat (a late async write repainted old
- * state after a chat switch, then the polluted view was persisted into this
- * session's localStorage cache — surviving reload forever). Drop every
- * user/assistant message the server does not contain, tolerating:
- *  - the CURRENT streaming turn (status "streaming" / currentAssistantId),
- *  - very recent messages (optimistic sends the server hasn't acked yet),
- *  - messages TAGGED as belonging to one of this view's own session ids
- *    (an unsynced turn the throttled persist saved but a dropped WS never
- *    flushed server-side — legitimate content, keep it).
- * Count-aware: a fingerprint the server holds N times justifies at most N
- * non-streaming copies here, so an identical message duplicated by pollution
- * collapses back to the server's count. System/tool rows are client-local
- * and pass through untouched. Heals past AND future pollution on re-entry.
- */
-function reconcileWithServerTruth(
-  merged: ChatMessage[],
-  serverMessages: ChatMessage[],
-  ownedSessionIds: Set<string>,
-  currentAssistantId: string | null,
-): ChatMessage[] {
-  if (!merged.length || !serverMessages.length) return merged;
-  const counts = new Map<string, number>();
-  for (const sm of serverMessages) {
-    if (sm.role !== "user" && sm.role !== "assistant") continue;
-    const key = messageFingerprint(sm);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const now = Date.now();
-  const keep = new Array<boolean>(merged.length).fill(true);
-  // Walk newest-first so the latest copy of a duplicated bubble claims the
-  // server slot and the stale older duplicate is the one that drops.
-  for (let i = merged.length - 1; i >= 0; i--) {
-    const m = merged[i];
-    if (m.role !== "user" && m.role !== "assistant") continue;
-    if (m.status === "streaming" || (currentAssistantId && m.id === currentAssistantId)) {
-      continue;
-    }
-    const key = messageFingerprint(m);
-    const remaining = counts.get(key) ?? 0;
-    if (remaining > 0) {
-      counts.set(key, remaining - 1);
-      continue;
-    }
-    if (m.sessionKey) {
-      keep[i] = ownedSessionIds.has(m.sessionKey);
-      continue;
-    }
-    keep[i] = now - (m.createdAt ?? 0) < RECONCILE_RECENT_MS;
-  }
-  if (keep.every(Boolean)) return merged;
-  const out = merged.filter((_, i) => keep[i]);
-  blankTrace("reconciled transcript against server truth", {
-    droppedCount: merged.length - out.length,
-    mergedLen: merged.length,
-    serverLen: serverMessages.length,
-  });
-  return out;
-}
-
-/**
- * Layer-2 guard for every transcript-cache WRITE: a message tagged with a
- * foreign session id must never be persisted under this session's cache key
- * (that write is exactly how one chat's bubbles became permanent residents of
- * another chat's transcript). Untagged messages (pre-mint optimistic sends,
- * pre-fix cached rows) pass through — the hydrate reconciliation above owns
- * those.
- */
-function dropForeignMessages(
-  messages: ChatMessage[],
-  ownedSessionIds: Set<string>,
-): ChatMessage[] {
-  if (!messages.length || !ownedSessionIds.size) return messages;
-  const out = messages.filter(
-    (m) => !m.sessionKey || ownedSessionIds.has(m.sessionKey),
-  );
-  return out.length === messages.length ? messages : out;
-}
-
-// Debug tracer: forwarded to the gateway (debug.trace -> blank-trace.log) and
-// the console. Set window.__elevateBlankTraceSink from the component.
-function blankTrace(message: string, data: Record<string, unknown>): void {
-  try {
-    // eslint-disable-next-line no-console
-    console.error("[BLANK-TRACE]", message, data);
-    (window as unknown as {
-      __elevateBlankTraceSink?: (m: string, d: Record<string, unknown>) => void;
-    }).__elevateBlankTraceSink?.(message, data);
-  } catch {
-    /* tracing must never break the app */
-  }
-}
-
-// Flags when a substantial assistant message present in `cached` is absent from
-// the merge output `out` — i.e. the merge erased a rendered answer.
-function blankTraceIfDropped(
-  cached: ChatMessage[] | null,
-  out: ChatMessage[],
-  fp: (m: ChatMessage) => string,
-  serverLen: number,
-): void {
-  try {
-    const big = (m: ChatMessage) =>
-      m.role === "assistant" && (m.content ?? "").replace(/\s+/g, "").length > 80;
-    const outFps = new Set(out.map(fp));
-    const dropped = (cached ?? []).filter((m) => big(m) && !outFps.has(fp(m)));
-    if (dropped.length) {
-      blankTrace("merge dropped a rendered assistant answer", {
-        serverLen,
-        cachedLen: (cached ?? []).length,
-        outLen: out.length,
-        droppedLens: dropped.map((m) => (m.content ?? "").length),
-        stack: new Error().stack?.split("\n").slice(2, 7).join(" | "),
-      });
-    }
-  } catch {
-    /* never break merge */
-  }
-}
-
-// Detect whether the cached transcript ends with a user message that has no
-// following assistant reply — the telltale sign that a turn was in flight
-// when the user refreshed.
-function hasPendingTurn(messages: ChatMessage[]): boolean {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "assistant") return msg.status === "streaming";
-    if (msg.role === "user") return true;
-  }
-  return false;
-}
-
-function markStreamingTurnsInterrupted(
-  messages: ChatMessage[],
-  completedAt = Date.now(),
-): ChatMessage[] {
-  let changed = false;
-  const next = messages.map((message) => {
-    if (message.role !== "assistant" || message.status !== "streaming") {
-      return message;
-    }
-    changed = true;
-    return {
-      ...message,
-      completedAt: message.completedAt ?? completedAt,
-      status: "interrupted" as const,
-    };
-  });
   return changed ? next : messages;
 }
 
@@ -2525,17 +2311,27 @@ function eventString(ev: GatewayEvent, key: string): string {
   return typeof raw === "string" ? raw : "";
 }
 
+function eventStringArray(ev: GatewayEvent, key: string): string[] {
+  const payload = ev.payload;
+  if (!payload || typeof payload !== "object") return [];
+  const raw = (payload as Record<string, unknown>)[key];
+  return Array.isArray(raw)
+    ? raw.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+}
+
+function timeValueMs(v: number | string | null | undefined): number | undefined {
+  if (typeof v === "number" && v > 0) return v < 1e12 ? v * 1000 : v;
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : undefined;
+  }
+  return undefined;
+}
+
 function modelLabel(info: SessionInfo): string {
   const model = info.model || "model";
   return model.split("/").slice(-1)[0] || model;
-}
-
-function formatCompactNumber(value: number | null | undefined): string {
-  const n = Math.max(0, Number(value ?? 0));
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 10_000) return `${Math.round(n / 1_000)}K`;
-  return n.toLocaleString();
 }
 
 function formatPersonName(email: string | null | undefined): string {
@@ -2543,175 +2339,6 @@ function formatPersonName(email: string | null | undefined): string {
   const raw = email.split("@")[0]?.split(/[._-]/)[0] || "";
   if (!raw) return "there";
   return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-}
-
-function dayKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-const DAY_MS = 86_400_000;
-
-function parseAnalyticsDay(key: string): Date {
-  return new Date(`${key}T12:00:00`);
-}
-
-function addDays(date: Date, days: number): Date {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function formatAnalyticsDay(key: string): string {
-  return parseAnalyticsDay(key).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function formatAnalyticsDayShort(key: string): string {
-  return parseAnalyticsDay(key).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function analyticsRangeLabel(range: StartAnalyticsRange): string {
-  if (range === "7d") return "Last 7 days";
-  if (range === "30d") return "Last 30 days";
-  return "All time";
-}
-
-function dailyTokenTotal(day: AnalyticsResponse["daily"][number]): number {
-  return Math.max(
-    0,
-    (day.input_tokens ?? 0) +
-      (day.output_tokens ?? 0) +
-      (day.cache_read_tokens ?? 0) +
-      (day.reasoning_tokens ?? 0),
-  );
-}
-
-function activeDayCount(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  return analytics.daily.filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0).length;
-}
-
-function longestActivityStreak(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  const active = new Set(
-    analytics.daily
-      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
-      .map((day) => day.day),
-  );
-  let best = 0;
-  let current = 0;
-  for (const day of analytics.daily) {
-    if (active.has(day.day)) {
-      current += 1;
-      best = Math.max(best, current);
-    } else {
-      current = 0;
-    }
-  }
-  return best;
-}
-
-function currentActivityStreak(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  const active = new Set(
-    analytics.daily
-      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
-      .map((day) => day.day),
-  );
-  let count = 0;
-  const cursor = new Date();
-  for (let i = 0; i < 365; i += 1) {
-    const key = dayKey(cursor);
-    if (!active.has(key)) break;
-    count += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return count;
-}
-
-function favoriteModel(analytics: AnalyticsResponse | null): string {
-  const model = analytics?.by_model?.[0]?.model;
-  if (!model) return "pending";
-  return model.split("/").slice(-1)[0] || model;
-}
-
-function usageHeatmapDays(
-  analytics: AnalyticsResponse | null,
-  range: StartAnalyticsRange,
-): Array<{
-  apiCalls: number;
-  key: string;
-  level: number;
-  sessions: number;
-  tip: string;
-  tokens: number;
-}> {
-  const byDay = new Map(
-    (analytics?.daily ?? []).map((day) => [day.day, day]),
-  );
-  const maxTokens = Math.max(1, ...Array.from(byDay.values()).map(dailyTokenTotal));
-  const days: Array<{
-    apiCalls: number;
-    key: string;
-    level: number;
-    sessions: number;
-    tip: string;
-    tokens: number;
-  }> = [];
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
-  const sortedDays = analytics?.daily ?? [];
-  let count = range === "7d" ? 7 : range === "30d" ? 30 : 30;
-  let cursor = addDays(today, -(count - 1));
-  if (range === "all" && sortedDays.length > 0) {
-    const first = parseAnalyticsDay(sortedDays[0].day);
-    const last = parseAnalyticsDay(sortedDays[sortedDays.length - 1].day);
-    const totalDays = Math.max(1, Math.round((last.getTime() - first.getTime()) / DAY_MS) + 1);
-    count = Math.min(91, totalDays);
-    cursor = addDays(last, -(count - 1));
-  }
-  const rangeText = analyticsRangeLabel(range).toLowerCase();
-  for (let i = 0; i < count; i += 1) {
-    const key = dayKey(cursor);
-    const entry = byDay.get(key);
-    const tokens = entry ? dailyTokenTotal(entry) : 0;
-    const sessions = entry?.sessions ?? 0;
-    const apiCalls = entry?.api_calls ?? 0;
-    const level = tokens === 0 ? 0 : Math.max(1, Math.min(5, Math.ceil((tokens / maxTokens) * 5)));
-    const tip = [
-      `${formatAnalyticsDay(key)} · ${rangeText}`,
-      `${formatCompactNumber(tokens)} tokens`,
-      `${formatCompactNumber(sessions)} sessions · ${formatCompactNumber(apiCalls)} calls`,
-    ].join("\n");
-    days.push({ apiCalls, key, level, sessions, tip, tokens });
-    cursor = addDays(cursor, 1);
-  }
-  return days;
-}
-
-function heatmapWindowLabel(
-  analytics: AnalyticsResponse | null,
-  range: StartAnalyticsRange,
-  days: Array<{ key: string }>,
-): string {
-  if (!analytics || days.length === 0) return `${analyticsRangeLabel(range)} · loading`;
-  const first = days[0].key;
-  const last = days[days.length - 1].key;
-  const visibleRange = `${formatAnalyticsDayShort(first)}-${formatAnalyticsDayShort(last)}`;
-  if (range !== "all") return `${analyticsRangeLabel(range)} · ${visibleRange}`;
-  const dataFirst = analytics.daily[0]?.day;
-  const dataLast = analytics.daily[analytics.daily.length - 1]?.day;
-  if (!dataFirst || !dataLast) return `All time · ${visibleRange}`;
-  if (dataFirst !== first) {
-    return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)} · heatmap recent ${days.length}d`;
-  }
-  return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)}`;
 }
 
 function normalizeUsage(raw: unknown): UsageInfo | null {
@@ -2792,12 +2419,26 @@ const HUB_INTERFACE_CONTEXT = [
   ].join(" "),
 ].join("\n");
 
-function routePromptForAgent(text: string): string {
+function routePromptForAgent(
+  text: string,
+  options?: { previewAlreadyOpen?: boolean },
+): string {
   // The active agent lane is now applied server-side via the agent_id
   // param on prompt.submit, so the prompt itself only carries the Hub
   // interface context. No per-agent prompt prefix is injected here.
-  return [HUB_INTERFACE_CONTEXT, `User request: ${text}`].join("\n\n");
+  const previewState = options?.previewAlreadyOpen
+    ? [
+        "[Hub preview state]",
+        "The requested artifact is already open in the side preview.",
+        "Treat this message as a normal instruction for the agent; do not answer by saying the preview is open again.",
+      ].join("\n")
+    : "";
+  return [HUB_INTERFACE_CONTEXT, previewState, `User request: ${text}`]
+    .filter(Boolean)
+    .join("\n\n");
 }
+
+const PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS = 20_000;
 
 function nowLabel(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
@@ -2877,9 +2518,10 @@ function fileExtension(path: string): string {
   return dot >= 0 ? name.slice(dot) : "";
 }
 
-function previewKind(path: string, contentType: string): "html" | "image" | "office" | "pdf" | "text" | "unknown" {
+function previewKind(path: string, contentType: string): "html" | "image" | "video" | "office" | "pdf" | "text" | "unknown" {
   const ext = fileExtension(path);
   const type = contentType.toLowerCase();
+  if (type.startsWith("video/") || [".mp4", ".m4v", ".mov", ".webm"].includes(ext)) return "video";
   if (type.includes("pdf") || ext === ".pdf") return "pdf";
   if (type.startsWith("image/") || [".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"].includes(ext)) {
     return "image";
@@ -2939,7 +2581,7 @@ function makeArtifact(
 // (.jsonl/.log/.sh) that are pipeline internals, not deliverables. Realtors
 // see PDFs, docs, images, reports — not /private/var/folders/... shims.
 const INTERNAL_ARTIFACT_PATH_RE =
-  /^(?:\/private)?\/(?:var\/folders|tmp)\/|\/\.elevate\/(?:logs|state|scripts|sessions|cache|pgdata)\/|\/(?:elevate-cwd-|elevate-snap-)[^/]*$/;
+  /^(?:\/private)?\/(?:var\/folders|tmp)\/|\/\.elevate\/(?:logs|state|scripts|sessions|cache|pgdata|skill-backups|skill-quarantine)\/|\/provider-proof\/|\/(?:elevate-cwd-|elevate-snap-)[^/]*$/;
 
 function isInternalArtifactPath(path: string): boolean {
   return INTERNAL_ARTIFACT_PATH_RE.test(path);
@@ -2947,7 +2589,7 @@ function isInternalArtifactPath(path: string): boolean {
 
 function extractPathsFromText(text: string): string[] {
   const matches = text.match(
-    /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
+    /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|mp4|m4v|mov|webm|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
   );
   return Array.from(new Set(matches ?? []))
     // Drop bare single-segment root paths like "/coming-soon.html".
@@ -2986,15 +2628,15 @@ function artifactsFromMessages(messages: ChatMessage[]): ArtifactEntry[] {
 
 function artifactsFromServer(items: SessionArtifactItem[]): ArtifactEntry[] {
   return items
-    .filter((item) => item.path)
+    .filter((item) => item.path && !isInternalArtifactPath(item.path) && previewKind(item.path, item.mime_type || "") !== "unknown")
     .map((item) =>
-      makeArtifact({
+      ({ ...makeArtifact({
         detail: item.path,
         kind: "file",
         path: item.path,
         source: "session artifacts",
         title: item.name || fileName(item.path),
-      }),
+      }), createdAt: item.modified_at ? (Number(item.modified_at) * 1000 || Date.parse(String(item.modified_at)) || 0) : 0 }),
     );
 }
 
@@ -3047,6 +2689,36 @@ function looksLikePlanRequest(text: string): boolean {
   return false;
 }
 
+function isCompactSlashCommand(text: string): boolean {
+  return /^\/+compact(?:\s|$)/i.test(text.trim());
+}
+
+function shouldClearUsageForStatus(text: string): boolean {
+  return /compacting context|working through earlier context/i.test(text);
+}
+
+function shouldClearUsageForStatusUpdate(
+  kind: string | undefined,
+  text: string,
+): boolean {
+  return kind === "compacting_context" || shouldClearUsageForStatus(text);
+}
+
+function contextRingTitle(usage: UsageInfo | null): string {
+  if (usage?.context_percent === undefined) {
+    return "Context usage pending until the next model response.";
+  }
+
+  const used = Math.max(0, Math.min(100, usage.context_percent));
+  const left = Math.max(0, 100 - used);
+  const detail =
+    usage.context_used !== undefined && usage.context_max !== undefined
+      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(usage.context_max).toLocaleString()} tokens used`
+      : "Token counts pending";
+
+  return `Context left: ${Math.round(left)}%. ${Math.round(used)}% used. ${detail}`;
+}
+
 function isOpenPreviewIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksToOpen =
@@ -3057,6 +2729,21 @@ function isOpenPreviewIntent(text: string): boolean {
   return /\b(it|this|that|pdf|document|doc|file|artifact|report|output|result|local|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub)\b/.test(
     lower,
   );
+}
+
+function shouldHandlePreviewShortcut({
+  currentKey,
+  sidePanel,
+  targetKey,
+  text,
+}: {
+  currentKey: string | null;
+  sidePanel: SidePanelMode;
+  targetKey: string | null;
+  text: string;
+}): boolean {
+  if (!isOpenPreviewIntent(text) || !targetKey) return false;
+  return !(sidePanel === "preview" && currentKey === targetKey);
 }
 
 function artifactsFromToolComplete(
@@ -3166,17 +2853,10 @@ export default function ChatPage() {
   const seedKey = searchParams.get("seed");
   const draftChat = Boolean(newChatId && !resumeId && !seedKey);
   const seededRef = useRef(false);
-  // Auto-resume gate. When the user lands on /chat with no ?resume= and no
-  // ?new=, we look up the most-recent TUI session and redirect with
-  // ?resume=<id> instead of minting a fresh session. The bootstrap effect
-  // waits on this gate so it doesn't mint a session before the redirect
-  // lands. Initialized to true when the URL already disambiguates (resume
-  // or new) — no probe needed there.
+  // Auto-resume gate. Bare /chat opens a fresh draft on full page load; an
+  // explicit ?resume= or ?new= already disambiguates and must not be rewritten.
   const [autoResumeDecided, setAutoResumeDecided] = useState(
-    // On the very first mount of a fresh page load, keep the gate closed so the
-    // startup effect can force a new draft chat (even if the URL still carries a
-    // ?resume= from before the reload). After that, the URL disambiguates.
-    () => (forcedNewChatThisLoad ? Boolean(resumeId || newChatId) : false),
+    () => Boolean(resumeId || newChatId || seedKey),
   );
   const [version, setVersion] = useState(0);
   // The chat key (resume/new/seed) that the currently-displayed messages were
@@ -3313,7 +2993,7 @@ export default function ChatPage() {
   // Steered messages accepted by the gateway but not yet APPLIED. They stay
   // visible in the queue strip ("steering…") and only enter the timeline —
   // bubble + marker together — at the insertion point (steer.applied).
-  const heldSteersRef = useRef<string[]>([]);
+  const heldSteersRef = useRef<HeldSteer[]>([]);
   // display.busy_input_mode from config — what a plain send does while a turn
   // is busy: "queue" (chip, waits for next turn) or "interrupt"/"steer"
   // (soft mid-run injection via session.steer). Loaded once; default queue.
@@ -3332,6 +3012,7 @@ export default function ChatPage() {
   const turnOutputBaselineRef = useRef<number | null>(null);
 
   const [info, setInfo] = useState<SessionInfo>({});
+  const [showReasoning, setShowReasoning] = useState(false);
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [startAnalytics, setStartAnalytics] = useState<AnalyticsResponse | null>(null);
   const [startAnalyticsLoading, setStartAnalyticsLoading] = useState(false);
@@ -3339,6 +3020,8 @@ export default function ChatPage() {
   const [startView, setStartView] = useState<"overview" | "models">("overview");
   const [userName, setUserName] = useState("there");
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactLoadError, setArtifactLoadError] = useState<string | null>(null);
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
   const dismissedArtifactsRef = useRef<Set<string>>(new Set());
   const previewAutoOpenDisabledRef = useRef(false);
@@ -3371,25 +3054,39 @@ export default function ChatPage() {
   );
   const messages = TRANSCRIPT_STORE_ENABLED ? storeMessagesAsChat : messagesRaw;
 
+  useEffect(() => {
+    const current = currentAssistantRef.current;
+    if (current && !messages.some((message) => message.id === current)) {
+      currentAssistantRef.current = null;
+    }
+  }, [messages]);
+
   // Activate the store once when the flag is on (this is what authorizes the
   // legacy-cache purge + localStorage write-through).
   useEffect(() => {
     if (TRANSCRIPT_STORE_ENABLED) activateTranscriptStore();
   }, []);
 
-  // Resolve display.busy_input_mode once so busy sends can honor it. The
-  // config endpoint returns the nested config; tolerate a flat dotted key too.
+  // Resolve display flags once so chat behavior honors config before the
+  // gateway handshake arrives. The endpoint returns nested config; tolerate
+  // flat dotted keys too.
   useEffect(() => {
     void api
       .getConfig()
       .then((cfg) => {
-        const nested = (cfg as { display?: { busy_input_mode?: unknown } })
-          ?.display?.busy_input_mode;
+        const display = (cfg as { display?: Record<string, unknown> })?.display;
+        const nested = display?.busy_input_mode;
         const flat = (cfg as Record<string, unknown>)?.[
           "display.busy_input_mode"
         ];
         const mode = String(nested ?? flat ?? "").trim().toLowerCase();
         if (mode) busyInputModeRef.current = mode;
+        const reasoning =
+          display?.show_reasoning ??
+          (cfg as Record<string, unknown>)?.["display.show_reasoning"];
+        if (typeof reasoning === "boolean") {
+          setShowReasoning(reasoning);
+        }
       })
       .catch(() => {
         /* default "queue" stands */
@@ -3516,12 +3213,14 @@ export default function ChatPage() {
   // it ran as (so the badge names it dynamically, not a hardcoded label).
   const [subagentParentId, setSubagentParentId] = useState<string | null>(null);
   const [subagentAgentName, setSubagentAgentName] = useState<string | null>(null);
+  const [liveSubagent, setLiveSubagent] = useState<LiveSubagentTarget | null>(null);
   useEffect(() => {
     // New chat (no resume target) → clear resume-scoped state so a subagent
     // banner / past child sessions / usage don't bleed across chats.
     if (!resumeId) {
       setSessionKind(null);
       setChildSessions([]);
+      setLiveSubagent(null);
       setTurnUsage([]);
     }
   }, [resumeId]);
@@ -3618,6 +3317,8 @@ export default function ChatPage() {
   // looks frozen. Set on that status; cleared by the first resume signal
   // (delta/thinking/tool) and a !busy safety net below.
   const [compacting, setCompacting] = useState(false);
+  const manualCompactAssistantRef = useRef<string | null>(null);
+  const manualCompactRequestInFlightRef = useRef(false);
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
@@ -3681,6 +3382,68 @@ export default function ChatPage() {
     () => messages.some((message) => message.role === "user"),
     [messages],
   );
+
+  // ── Per-session agent memory ─────────────────────────────────────────────
+  // selectedAgentId is one component-level value; without keying it to the
+  // conversation, picking an agent in a new chat flips the picker button on
+  // every other chat too (and on switch-back). The backend has no durable
+  // record of a chat's agent (it's resent as agent_id each prompt), so the
+  // map lives client-side: written on send, restored when the chat changes.
+  const agentBySessionRef = useRef<Record<string, string> | null>(null);
+  const lastAppliedAgentChatKeyRef = useRef<string | null>(null);
+
+  const readAgentBySession = useCallback((): Record<string, string> => {
+    if (agentBySessionRef.current) return agentBySessionRef.current;
+    let map: Record<string, string> = {};
+    try {
+      const raw = window.localStorage?.getItem(AGENT_BY_SESSION_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          map = parsed as Record<string, string>;
+        }
+      }
+    } catch {
+      map = {};
+    }
+    agentBySessionRef.current = map;
+    return map;
+  }, []);
+
+  const rememberSessionAgent = useCallback(
+    (sid: string | null | undefined, agentId: string | null | undefined) => {
+      const key = (sid ?? "").trim();
+      const value = (agentId ?? "").trim();
+      if (!key || !value) return;
+      const map = readAgentBySession();
+      if (map[key] === value) return;
+      map[key] = value;
+      try {
+        window.localStorage?.setItem(
+          AGENT_BY_SESSION_STORAGE_KEY,
+          JSON.stringify(map),
+        );
+      } catch {
+        /* private mode / quota — in-memory map still serves this tab */
+      }
+    },
+    [readAgentBySession],
+  );
+
+  // Restore the chat's own agent whenever the conversation identity changes
+  // (switch chat, resume, reload). Guarded on chatKey so a deliberate pick on
+  // the current chat — which never changes chatKey — is never clobbered. A
+  // brand-new chat (no stored entry) resets to the Executive Assistant.
+  useEffect(() => {
+    if (lastAppliedAgentChatKeyRef.current === chatKey) return;
+    lastAppliedAgentChatKeyRef.current = chatKey;
+    // chatKey IS the canonical id for a resumed chat (resumeId) and is what
+    // send() keys the map by once a draft mints. A fresh draft has no entry,
+    // so it falls to the default — deliberately NOT reading the previous
+    // chat's persisted id, which would leak its agent onto the new chat.
+    const saved = readAgentBySession()[chatKey];
+    setSelectedAgentId(saved || "executive-assistant");
+  }, [chatKey, readAgentBySession]);
 
   const appendMessage = useCallback(
     (role: ChatRole, content: string, extras: Partial<ChatMessage> = {}) => {
@@ -3766,6 +3529,61 @@ export default function ChatPage() {
       });
     },
     [ensureAssistant],
+  );
+
+  const completeManualCompactAssistant = useCallback(
+    (text: string) => {
+      const messageId = manualCompactAssistantRef.current;
+      const completedAt = Date.now();
+      if (messageId) {
+        const traces = activityTraceRef.current
+          .filter((trace) => !trace.messageId || trace.messageId === messageId)
+          .map((trace) => ({ ...trace, messageId }));
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === messageId
+              ? {
+                  ...message,
+                  completedAt,
+                  content: text,
+                  status: "complete" as const,
+                  traces: traces.length ? traces : message.traces,
+                }
+              : message,
+          ),
+        );
+      } else {
+        appendMessage("assistant", text, { completedAt, status: "complete" });
+      }
+      if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
+      manualCompactAssistantRef.current = null;
+      manualCompactRequestInFlightRef.current = false;
+      setTools([]);
+      setActivityTrace([]);
+      setBusy(false);
+      setCompacting(false);
+      setStatusText("Ready");
+    },
+    [appendMessage],
+  );
+
+  const cancelManualCompactAssistant = useCallback(
+    (text: string) => {
+      const messageId = manualCompactAssistantRef.current;
+      if (messageId) {
+        setMessages((prev) => prev.filter((message) => message.id !== messageId));
+      }
+      if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
+      manualCompactAssistantRef.current = null;
+      manualCompactRequestInFlightRef.current = false;
+      setTools([]);
+      setActivityTrace([]);
+      setBusy(false);
+      setCompacting(false);
+      setStatusText("Ready");
+      appendMessage("system", text);
+    },
+    [appendMessage],
   );
 
   // On unmount, if a turn is still in flight, tell the sidebar the row is no
@@ -3858,18 +3676,7 @@ export default function ChatPage() {
     if (!entries.length) return;
     const previewCandidate = bestSidePreviewArtifact(entries);
 
-    setArtifacts((prev) => {
-      const seen = new Set(prev.map((entry) => entry.key));
-      const next = [...prev];
-
-      for (const entry of entries) {
-        if (seen.has(entry.key)) continue;
-        seen.add(entry.key);
-        next.push(entry);
-      }
-
-      return next.slice(-ARTIFACT_LIMIT);
-    });
+    setArtifacts((prev) => mergePreviewArtifacts(prev, entries, ARTIFACT_LIMIT));
 
     if (
       previewCandidate &&
@@ -3880,7 +3687,8 @@ export default function ChatPage() {
       // auto-open the right panel — artifacts no longer take over the right
       // side. They live in the Artifacts tab (the button); tap one to open it
       // here in Preview.
-      setPreviewArtifact(previewCandidate);
+      // Refreshing the inventory must not replace a draft the user selected.
+      setPreviewArtifact((current) => current ?? previewCandidate);
     }
   }, []);
 
@@ -3988,6 +3796,14 @@ export default function ChatPage() {
     [closeSidePanel, setSearchParams],
   );
 
+  const handleMessageSubagent = useCallback(
+    (task: BackgroundTaskItem) => {
+      if (!task.child_session_id) return;
+      handleOpenSubagent(task.child_session_id);
+    },
+    [handleOpenSubagent],
+  );
+
   // Kill switch for a running background task: interrupts the subagent (by
   // registry id when we have it from live events, else by its session id)
   // and marks it errored locally so the card settles immediately — the
@@ -4048,6 +3864,12 @@ export default function ChatPage() {
       });
     },
     [openArtifactPreview],
+  );
+  const handleOpenPath = useCallback(
+    (path: string) => {
+      openFileInPreview(path, path.replace(/\/+$/, "").split("/").pop() || path);
+    },
+    [openFileInPreview],
   );
 
   const startPreviewResize = useCallback(
@@ -4587,7 +4409,7 @@ export default function ChatPage() {
   // catches the rest (errors, stop, interrupt, disconnect) so a stale
   // "Compacting…" banner can't get stuck on screen.
   useEffect(() => {
-    if (!busy && compacting) setCompacting(false);
+    if (!busy && compacting && !manualCompactAssistantRef.current) setCompacting(false);
   }, [busy, compacting]);
 
   useEffect(() => {
@@ -4596,29 +4418,26 @@ export default function ChatPage() {
     writeQueue(persisted, queuedInputs);
   }, [queuedInputs, sessionId]);
 
-  // Startup behavior: on every full page load (app launch / reload) open a
-  // fresh draft chat — ready to type — instead of reopening the last session.
-  // It mints no row (a draft only persists once you send) and the sidebar still
-  // lets you reopen prior chats by hand. The module-level guard fires this once
-  // per page load, so client-side navigations (sidebar clicks -> ?resume=) are
-  // untouched.
+  // Startup behavior: bare /chat opens a fresh draft. Reloading a concrete
+  // ?resume= must keep that session; otherwise users land on a blank new chat
+  // and have to re-enter the session to see the answer/reasoning again.
   useEffect(() => {
     if (autoResumeDecided) return;
-    if (!forcedNewChatThisLoad) {
-      // First load of this page → force a fresh draft chat (drop any resume).
-      forcedNewChatThisLoad = true;
-      if (!newChatId) {
-        const next = new URLSearchParams();
-        next.set("new", String(Date.now()));
-        setSearchParams(next, { replace: true });
-      }
+    if (resumeId || newChatId || seedKey) {
       setAutoResumeDecided(true);
       return;
     }
-    // A later bare /chat (no resume / no new): just release the gate so the
-    // bootstrap mints a fresh session instead of auto-resuming.
+    if (!forcedNewChatThisLoad) {
+      // First bare /chat load → force a fresh draft chat.
+      forcedNewChatThisLoad = true;
+      const next = new URLSearchParams();
+      next.set("new", String(Date.now()));
+      setSearchParams(next, { replace: true });
+      setAutoResumeDecided(true);
+      return;
+    }
     setAutoResumeDecided(true);
-  }, [autoResumeDecided, newChatId, searchParams, setSearchParams]);
+  }, [autoResumeDecided, newChatId, resumeId, seedKey, setSearchParams]);
 
   useEffect(() => {
     if (!autoResumeDecided) return;
@@ -4694,6 +4513,7 @@ export default function ChatPage() {
       setSubagents([]);
       setSubagentParentId(null);
       setSubagentAgentName(null);
+      setLiveSubagent(null);
       setActivityTrace(activeTurnSnapshot?.traces ?? []);
       lastToolActivityAtRef.current = 0;
       setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
@@ -5140,6 +4960,10 @@ export default function ChatPage() {
         typeof payload.child_session_id === "string" && payload.child_session_id
           ? payload.child_session_id
           : undefined;
+      const taskId =
+        typeof payload.task_id === "string" && payload.task_id
+          ? payload.task_id
+          : undefined;
       const parentMessageId = currentAssistantRef.current ?? undefined;
       const finalSummary =
         ev.type === "subagent.complete"
@@ -5165,6 +4989,7 @@ export default function ChatPage() {
                         : subagent.toolCount,
                     thinkingTokens: (subagent.thinkingTokens ?? 0) + thinkingDelta,
                     child_session_id: childSessionId ?? subagent.child_session_id,
+                    task_id: taskId ?? subagent.task_id,
                     messageId: subagent.messageId ?? parentMessageId,
                     finalSummary: finalSummary ?? subagent.finalSummary,
                   }
@@ -5188,6 +5013,7 @@ export default function ChatPage() {
               typeof payload.tool_count === "number" ? payload.tool_count : undefined,
             thinkingTokens: thinkingDelta || undefined,
             child_session_id: childSessionId,
+            task_id: taskId,
             messageId: parentMessageId,
             finalSummary,
           },
@@ -5195,6 +5021,14 @@ export default function ChatPage() {
       });
 
       if (ev.type === "subagent.complete") {
+        setLiveSubagent((current) => {
+          if (!current) return current;
+          const matches =
+            (childSessionId && current.child_session_id === childSessionId) ||
+            (taskId && current.task_id === taskId) ||
+            (subagentId && current.subagent_id === subagentId);
+          return matches ? null : current;
+        });
         addArtifacts(
           artifactsFromSubagentEvent(payload, currentAssistantRef.current ?? undefined),
         );
@@ -5506,15 +5340,31 @@ export default function ChatPage() {
         const text = eventString(ev, "text");
         if (text) {
           const at = eventMillis(ev);
+          const payload = compactToolPayload(ev.payload);
+          const kind = typeof payload.kind === "string" ? payload.kind : undefined;
+          const reason = typeof payload.reason === "string" ? payload.reason : "";
+          const source = typeof payload.source === "string" ? payload.source : "";
+          const manualCompactStatus =
+            reason === "manual_compact" || source === "manual";
+          const manualCompactInFlight =
+            manualCompactStatus && manualCompactRequestInFlightRef.current;
           setStatusText(displayStatusText(text));
           addActivityTrace("status", text, at);
           // Compaction is the one status that maps to a long blocking stall.
-          // Latch the banner on; "Session compacted" (manual /compress end) or
-          // a resume signal clears it. \bcompacted\b only matches the done
-          // status, never the in-progress "Compacting context".
-          if (/compacting context/i.test(text)) setCompacting(true);
-          else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text))
+          // Latch the banner on while compaction is blocking. Completion
+          // statuses clear the spinner only; manual /compact finishes through
+          // the slash callback so the transcript gets the real result text.
+          if (shouldClearUsageForStatusUpdate(kind, text)) {
+            setCompacting(true);
+            setUsage(null);
+            if (manualCompactInFlight) {
+              const messageId = ensureAssistant(at);
+              manualCompactAssistantRef.current = messageId;
+              setBusy(true);
+            }
+          } else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text)) {
             setCompacting(false);
+          }
         }
       }),
     );
@@ -5553,6 +5403,7 @@ export default function ChatPage() {
     // Child reasoning — without this a delegation that thinks before its
     // first tool call shows NOTHING in the chat for the whole stretch.
     unsubs.push(gw.on("subagent.thinking", trackSubagent));
+    unsubs.push(gw.on("subagent.message", trackSubagent));
     unsubs.push(gw.on("subagent.complete", trackSubagent));
 
     // ── Subagent DRILL-IN live feed ─────────────────────────────────────
@@ -5676,6 +5527,9 @@ export default function ChatPage() {
         const at = eventMillis(ev);
         const summary = compactLine(String(payload.summary ?? ""));
         const failed = /error|fail/i.test(String(payload.status ?? ""));
+        setLiveSubagent((current) =>
+          current && current.child_session_id === resumeId ? null : current,
+        );
         setTools((prev) =>
           prev.map((tool) =>
             tool.status === "running"
@@ -5745,7 +5599,8 @@ export default function ChatPage() {
       // relayed from inside a running delegation). Flip the chip on the
       // steered bubble(s) from "steering…" to "applied".
       gw.on("steer.queued", (ev) => {
-        if (!accepts(ev)) return;
+        const childPayload = childPayloadFor(ev);
+        if (!childPayload && !accepts(ev)) return;
         // The gateway accepted a steer. It does NOT enter the timeline yet —
         // it inserts at the point it actually APPLIES (steer.applied), never
         // above thinking the user was watching when they sent it. Until
@@ -5753,19 +5608,27 @@ export default function ChatPage() {
         // driven so a reattach mid-wait restores the same state.
         const text = eventString(ev, "text");
         if (!text) return;
-        if (!heldSteersRef.current.includes(text)) {
-          heldSteersRef.current.push(text);
+        const clientMessageId = eventString(ev, "client_message_id");
+        const steerId = clientMessageId || id("steering");
+        const alreadyHeld = heldSteersRef.current.some((item) =>
+          clientMessageId ? item.id === clientMessageId : item.text === text,
+        );
+        if (!alreadyHeld) {
+          heldSteersRef.current.push({ id: steerId, legacy: !clientMessageId, text });
           pendingSteerCountRef.current = heldSteersRef.current.length;
         }
         setQueuedInputs((prev) =>
-          prev.some((q) => q.status === "steering" && q.text === text)
+          prev.some((q) =>
+            q.status === "steering" &&
+            (clientMessageId ? q.id === clientMessageId : q.text === text),
+          )
             ? prev
             : [
                 ...prev,
                 {
                   agentId: "",
                   createdAt: eventMillis(ev),
-                  id: id("steering"),
+                  id: steerId,
                   routedText: text,
                   status: "steering" as const,
                   text,
@@ -5776,10 +5639,11 @@ export default function ChatPage() {
     );
     unsubs.push(
       gw.on("steer.applied", (ev) => {
-        if (!accepts(ev)) return;
+        const childPayload = childPayloadFor(ev);
+        if (!childPayload && !accepts(ev)) return;
         // The run itself is untouched — same bubble, same status, same
         // timer. The steered message moves into the timeline as a marker.
-        consumeAppliedSteers(eventMillis(ev));
+        consumeAppliedSteers(eventMillis(ev), eventStringArray(ev, "client_message_ids"));
       }),
     );
     unsubs.push(
@@ -6039,6 +5903,12 @@ export default function ChatPage() {
         }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
+        setShowReasoning(Boolean(created.show_reasoning));
+        setLiveSubagent(
+          "live_subagent" in created
+            ? (created as SessionResumeResponse).live_subagent ?? null
+            : null,
+        );
         if (resumeWarning) {
           setBanner(resumeWarning);
         } else if (created.info?.credential_warning || created.info?.config_warning) {
@@ -6605,6 +6475,7 @@ export default function ChatPage() {
         }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
+        setShowReasoning(Boolean(created.show_reasoning));
         if (created.info?.credential_warning || created.info?.config_warning) {
           setBanner(
             created.info.credential_warning ?? created.info.config_warning ?? null,
@@ -6690,6 +6561,7 @@ export default function ChatPage() {
       setStatusText(status);
 
       try {
+        await gw.connect();
         for (const att of readyAttachments) {
           if (!att.path) continue;
           try {
@@ -6713,13 +6585,19 @@ export default function ChatPage() {
         if (agentId) {
           payload.agent_id = agentId;
         }
+        // Bind this chat to the agent it actually ran, keyed by the canonical
+        // persisted id (what ?resume= uses) so a later switch-back restores it.
+        rememberSessionAgent(
+          persistedSessionIdRef.current ?? resumeId ?? effectiveSessionId,
+          agentId,
+        );
         // Persist the on-screen bubble's id so a reload hydrates the same id
         // (store dedup). Gateway validates [A-Za-z0-9._-]{1,64} else mints.
         if (TRANSCRIPT_STORE_ENABLED && effectiveUserMessageId) {
           payload.user_message_id = effectiveUserMessageId;
         }
 
-        await gw.request("prompt.submit", payload);
+        await gw.request("prompt.submit", payload, PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS);
         setAttachments([]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -6728,7 +6606,84 @@ export default function ChatPage() {
         setStatusText("Error");
       }
     },
-    [appendMessage, attachments, gw, sessionId],
+    [appendMessage, attachments, gw, rememberSessionAgent, resumeId, sessionId],
+  );
+
+  const submitLiveSubagentMessage = useCallback(
+    async (text: string) => {
+      const body = text.trim();
+      if (!body) {
+        setBanner("Add text before messaging a running subagent.");
+        setStatusText("Message blocked");
+        return false;
+      }
+      const target = liveSubagent;
+      if (!target?.child_session_id || !sessionId) return false;
+      const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
+      const stillUploading = attachments.some((item) => item.status === "uploading");
+      if (stillUploading || readyAttachments.length) {
+        setBanner("Attachments cannot be added to a running subagent message yet.");
+        setStatusText("Attachment blocked");
+        return false;
+      }
+      setStatusText("Messaging subagent...");
+      steerInFlightRef.current += 1;
+      try {
+        const response = await gw.request<SubagentMessageResponse>(
+          "subagent.message",
+          {
+            child_session_id: target.child_session_id,
+            display_text: body,
+            session_id: sessionId,
+            subagent_id: target.subagent_id ?? "",
+            task_id: target.task_id ?? "",
+            text: body,
+          },
+          30_000,
+        );
+        const found = response?.found !== false;
+        const accepted = Number(response?.accepted ?? 0);
+        if (!found) {
+          setLiveSubagent(null);
+          setBusy(false);
+          setStatusText("Ready");
+          appendMessage("system", "That subagent is no longer running.", {
+            status: "error",
+          });
+          return false;
+        }
+        if (accepted <= 0) {
+          setStatusText("Message not accepted");
+          appendMessage("system", "The subagent did not accept the message.", {
+            status: "error",
+          });
+          return false;
+        }
+        const persisted = Number(response?.persisted ?? 0);
+        const allPersisted = response?.all_persisted === true;
+        if (!allPersisted || persisted < accepted) {
+          setStatusText("Message not saved");
+          appendMessage(
+            "system",
+            "The subagent accepted the message, but Elevate could not save it for app reopen.",
+            { status: "error" },
+          );
+          return true;
+        }
+        setStatusText("Message sent to subagent");
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendMessage("system", `Subagent message failed: ${message}`, {
+          status: "error",
+        });
+        setStatusText("Message failed");
+        return false;
+      } finally {
+        steerInFlightRef.current = Math.max(0, steerInFlightRef.current - 1);
+      }
+    },
+    [appendMessage, attachments, gw, liveSubagent, sessionId],
   );
 
   // Skill slash commands (/cma-audit) load the full SKILL.md into the model's
@@ -6901,11 +6856,22 @@ export default function ChatPage() {
   //      AT the insertion point (never above thinking the user watched);
   //   3. the "Conversation steered" marker lands right after it.
   const consumeAppliedSteers = useCallback(
-    (at: number) => {
+    (at: number, clientMessageIds: string[] = []) => {
       const held = heldSteersRef.current;
       const ids = pendingSteerIdsRef.current;
-      if (!held.length && !ids.length) return;
-      heldSteersRef.current = [];
+      const scopedIds = clientMessageIds.filter(Boolean);
+      const applyAll = scopedIds.length === 0;
+      let appliedHeld = applyAll
+        ? held
+        : held.filter((item) => scopedIds.includes(item.id));
+      if (!applyAll && appliedHeld.length === 0) {
+        appliedHeld = held.filter((item) => item.legacy);
+      }
+      const appliedIds = new Set(appliedHeld.map((item) => item.id));
+      if (!appliedHeld.length && !ids.length) return;
+      heldSteersRef.current = applyAll
+        ? []
+        : held.filter((item) => !appliedIds.has(item.id));
       pendingSteerCountRef.current = 0;
       flushAssistantDelta();
       let interim = "";
@@ -6923,8 +6889,9 @@ export default function ChatPage() {
         );
       }
       contentStartRef.current = 0;
-      for (const text of held) {
-        addActivityTrace("steer", text, at);
+      pendingSteerCountRef.current = heldSteersRef.current.length;
+      for (const item of appliedHeld) {
+        addActivityTrace("steer", item.text, at);
       }
       addActivityTrace("marker", "Conversation steered", at + 1);
       stretchStartRef.current = at + 2;
@@ -6940,7 +6907,13 @@ export default function ChatPage() {
         );
       }
       // the strip items for these steers are done
-      setQueuedInputs((prev) => prev.filter((q) => q.status !== "steering"));
+      setQueuedInputs((prev) =>
+        prev.filter(
+          (q) =>
+            q.status !== "steering" ||
+            (!applyAll && !appliedIds.has(q.id)),
+        ),
+      );
     },
     [addActivityTrace, flushAssistantDelta, updateAssistant],
   );
@@ -7078,6 +7051,7 @@ export default function ChatPage() {
   // (~8s), force `busy` off so the queue drains live without a remount.
   useEffect(() => {
     if (!busy || state !== "open") return;
+    if (manualCompactAssistantRef.current) return;
     const sid = activeSessionRef.current;
     if (!sid) return;
     let misses = 0;
@@ -7178,14 +7152,31 @@ export default function ChatPage() {
             children.filter((c) => c.ended_at).map((c) => c.id),
           );
           if (!endedIds.size) return;
+          const endedById = new Map(
+            children.filter((c) => c.ended_at).map((c) => [c.id, c]),
+          );
           setSubagents((prev) =>
-            prev.map((s) =>
-              s.status === "running" &&
-              s.child_session_id &&
-              endedIds.has(s.child_session_id)
-                ? { ...s, status: "done", completedAt: s.completedAt ?? Date.now() }
-                : s,
-            ),
+            prev.map((s) => {
+              if (
+                s.status !== "running" ||
+                !s.child_session_id ||
+                !endedIds.has(s.child_session_id)
+              ) {
+                return s;
+              }
+              const child = endedById.get(s.child_session_id);
+              const failed =
+                !!child?.end_reason && child.end_reason !== "delegation_complete";
+              return {
+                ...s,
+                status: failed ? "error" : "done",
+                completedAt:
+                  timeValueMs(child?.ended_at) ?? s.completedAt ?? Date.now(),
+                finalSummary: failed
+                  ? (child?.end_reason ?? s.finalSummary)
+                  : s.finalSummary,
+              };
+            }),
           );
         })
         .catch(() => {
@@ -7197,6 +7188,66 @@ export default function ChatPage() {
       window.clearInterval(iv);
     };
   }, [busy, sessionKind]);
+
+  const runningSubagentCount = useMemo(
+    () => subagents.filter((subagent) => subagent.status === "running").length,
+    [subagents],
+  );
+
+  // Async subagents can keep running after the parent turn has already ended.
+  // Keep reconciling from the durable child rows so completed/reaped children do
+  // not stay stuck as "running" until the user navigates away or restarts.
+  useEffect(() => {
+    if (sessionKind === "subagent" || runningSubagentCount <= 0) return;
+    let cancelled = false;
+
+    const refreshChildren = () => {
+      const pid = persistedSessionIdRef.current ?? resumeId ?? sessionId;
+      if (!pid) return;
+      void api
+        .getSessionChildren(pid)
+        .then((childResp) => {
+          if (cancelled) return;
+          const children = (childResp.children ?? []).filter(
+            (c) => c.session_kind === "subagent",
+          );
+          setChildSessions(children);
+          const endedById = new Map(
+            children.filter((c) => c.ended_at).map((c) => [c.id, c]),
+          );
+          if (!endedById.size) return;
+          setSubagents((prev) =>
+            prev.map((s) => {
+              const child = s.child_session_id
+                ? endedById.get(s.child_session_id)
+                : undefined;
+              if (s.status !== "running" || !child) return s;
+              const failed =
+                !!child.end_reason && child.end_reason !== "delegation_complete";
+              return {
+                ...s,
+                status: failed ? "error" : "done",
+                completedAt:
+                  timeValueMs(child.ended_at) ?? s.completedAt ?? Date.now(),
+                finalSummary: failed
+                  ? (child.end_reason ?? s.finalSummary)
+                  : s.finalSummary,
+              };
+            }),
+          );
+        })
+        .catch(() => {
+          /* additive — the next poll or navigation hydrate will reconcile */
+        });
+    };
+
+    refreshChildren();
+    const iv = window.setInterval(refreshChildren, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(iv);
+    };
+  }, [resumeId, runningSubagentCount, sessionId, sessionKind]);
 
   const hasReadyAttachment = attachments.some(
     (item) => item.status === "ready" && !!item.path,
@@ -7235,7 +7286,6 @@ export default function ChatPage() {
       };
 
       const isSlashCommand = trimmed.startsWith("/");
-      const previewIntent = !!trimmed && isOpenPreviewIntent(trimmed);
       const stillUploading = attachments.some((item) => item.status === "uploading");
       if (!isSlashCommand && stillUploading) {
         setBanner("Wait for attachments to finish uploading before sending.");
@@ -7251,6 +7301,22 @@ export default function ChatPage() {
           previewUrl: att.previewUrl,
         }),
       );
+      const rawPreviewIntent = !!trimmed && isOpenPreviewIntent(trimmed);
+      const historyArtifacts = rawPreviewIntent && !artifacts.length ? artifactsFromMessages(messages) : [];
+      const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
+      const previewTarget = rawPreviewIntent ? bestSidePreviewArtifact(availableArtifacts) : null;
+      const previewAlreadyOpen = Boolean(
+        previewTarget &&
+          sidePanel === "preview" &&
+          previewArtifact &&
+          artifactDismissKey(previewArtifact) === artifactDismissKey(previewTarget),
+      );
+      const previewIntent = shouldHandlePreviewShortcut({
+        currentKey: previewArtifact ? artifactDismissKey(previewArtifact) : null,
+        sidePanel,
+        targetKey: previewTarget ? artifactDismissKey(previewTarget) : null,
+        text: trimmed,
+      });
       const showedUserMessage = !isSlashCommand && !previewIntent && !busy && !!trimmed;
 
       // Capture the optimistic bubble's id so the gateway persists the SAME id
@@ -7283,10 +7349,7 @@ export default function ChatPage() {
         }),
       );
 
-      const historyArtifacts = previewIntent && !artifacts.length ? artifactsFromMessages(messages) : [];
-      const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
-      const previewTarget = previewIntent ? bestSidePreviewArtifact(availableArtifacts) : null;
-      if (previewTarget) {
+      if (previewIntent && previewTarget) {
         if (historyArtifacts.length) {
           addArtifacts(historyArtifacts);
         }
@@ -7311,22 +7374,81 @@ export default function ChatPage() {
           setStatusText("Connecting...");
           return;
         }
-        appendMessage("user", trimmed);
-        await executeSlash({
-          callbacks: {
-            send: submitPrompt,
-            sendSkill: submitSkillInvocation,
-            sys: (body) => appendMessage("system", body),
-          },
-          command: trimmed,
-          gw,
-          sessionId: targetSessionId,
-        });
+        const manualCompact = isCompactSlashCommand(trimmed);
+        const slashUserMessageId = appendMessage("user", trimmed);
+        if (manualCompact) {
+          manualCompactRequestInFlightRef.current = true;
+        }
+        let slashResult: Awaited<ReturnType<typeof executeSlash>>;
+        try {
+          slashResult = await executeSlash({
+            callbacks: {
+              compactDone: (body) => completeManualCompactAssistant(body),
+              compactFailed: (body) => cancelManualCompactAssistant(body),
+              send: submitPrompt,
+              sendSkill: submitSkillInvocation,
+              sys: (body) =>
+                manualCompact && manualCompactAssistantRef.current
+                  ? cancelManualCompactAssistant(body)
+                  : appendMessage("system", body),
+            },
+            command: trimmed,
+            gw,
+            sessionId: targetSessionId,
+          });
+        } finally {
+          if (manualCompact) {
+            manualCompactRequestInFlightRef.current = false;
+          }
+        }
+        if (slashResult === "transport-error") {
+          const manualCompactAssistantId = manualCompact
+            ? manualCompactAssistantRef.current
+            : null;
+          setMessages((prev) =>
+            prev.filter(
+              (message) =>
+                message.id !== slashUserMessageId &&
+                (!manualCompactAssistantId || message.id !== manualCompactAssistantId),
+            ),
+          );
+          if (currentAssistantRef.current === manualCompactAssistantId) {
+            currentAssistantRef.current = null;
+          }
+          if (manualCompactAssistantRef.current === manualCompactAssistantId) {
+            manualCompactAssistantRef.current = null;
+          }
+          setTools([]);
+          setActivityTrace([]);
+          setBusy(false);
+          setCompacting(false);
+          setInput(trimmed);
+          setCaretIndex(trimmed.length);
+          setStatusText("Reconnecting...");
+          const sidebarSessionId =
+            persistedSessionIdRef.current ?? activeSessionRef.current ?? targetSessionId;
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId },
+            }),
+          );
+          reconnect();
+          return;
+        }
+        if (slashResult !== "sent") {
+          const sidebarSessionId =
+            persistedSessionIdRef.current ?? activeSessionRef.current ?? targetSessionId;
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId },
+            }),
+          );
+        }
         if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
         return;
       }
 
-      const routedText = routePromptForAgent(trimmed);
+      const routedText = routePromptForAgent(trimmed, { previewAlreadyOpen });
       let targetSessionId = sessionId;
 
       // New-chat cold start: creating the session takes a few seconds, so the
@@ -7391,6 +7513,11 @@ export default function ChatPage() {
         }
       }
 
+      if (busy && sessionKind === "subagent" && liveSubagent?.child_session_id) {
+        await submitLiveSubagentMessage(trimmed);
+        return;
+      }
+
       if (busy) {
         // Honor display.busy_input_mode for plain sends during a busy turn:
         // "interrupt"/"steer" → soft mid-run injection (session.steer →
@@ -7447,7 +7574,7 @@ export default function ChatPage() {
       );
       if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, attachments, busy, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, attachments, busy, cancelManualCompactAssistant, completeManualCompactAssistant, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, liveSubagent, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, previewArtifact, selectedAgent, sessionId, sessionKind, sidePanel, state, submitGatewayPrompt, submitLiveSubagentMessage, submitSkillInvocation],
   );
 
   // Claude-Code-style plan approval: leave plan mode and immediately execute the
@@ -7544,7 +7671,10 @@ export default function ChatPage() {
       const now = Date.now();
       const dropped = state === "closed" || state === "error";
       const stalledMidTurn =
-        busy && state === "open" && now - lastFrameAtRef.current > STALL_MS;
+        busy &&
+        !manualCompactAssistantRef.current &&
+        state === "open" &&
+        now - lastFrameAtRef.current > STALL_MS;
       if (!dropped && !stalledMidTurn) return;
       const cooldown = dropped ? DROP_COOLDOWN_MS : STALL_MS;
       if (now - stallReconnectAtRef.current < cooldown) return;
@@ -7974,23 +8104,40 @@ export default function ChatPage() {
       if (child.id && typeof child.output_tokens === "number" && child.output_tokens > 0)
         childTokens.set(child.id, child.output_tokens);
     }
+    const childById = new Map(
+      childSessions
+        .filter((child) => child.id)
+        .map((child) => [child.id, child] as const),
+    );
     for (const s of subagents) {
+      const child = s.child_session_id ? childById.get(s.child_session_id) : undefined;
+      const childEnded = Boolean(child?.ended_at);
+      const childFailed =
+        childEnded &&
+        !!child?.end_reason &&
+        child.end_reason !== "delegation_complete";
+      const effectiveStatus: BackgroundTaskItem["status"] = childEnded
+        ? childFailed
+          ? "error"
+          : "done"
+        : s.status;
       const realTokens =
-        s.status !== "running" && s.child_session_id
+        effectiveStatus !== "running" && s.child_session_id
           ? childTokens.get(s.child_session_id)
           : undefined;
       items.push({
         id: s.id,
         kind: "subagent",
         label: s.goal || "Subagent",
-        status: s.status,
-        detail: s.finalSummary || s.preview,
+        status: effectiveStatus,
+        detail: childFailed ? child?.end_reason ?? "Interrupted" : s.finalSummary || s.preview,
         model: s.model,
         toolCount: s.toolCount,
         tokens: realTokens ?? s.thinkingTokens,
         startedAt: s.startedAt,
-        completedAt: s.completedAt,
+        completedAt: childEnded ? timeValueMs(child?.ended_at) : s.completedAt,
         child_session_id: s.child_session_id,
+        task_id: s.task_id,
         subagent_id: s.subagent_id,
       });
     }
@@ -8023,33 +8170,29 @@ export default function ChatPage() {
     const liveChildIds = new Set(
       items.map((i) => i.child_session_id).filter(Boolean) as string[],
     );
-    const tsMs = (v: number | string | null | undefined): number | undefined => {
-      if (typeof v === "number" && v > 0) return v < 1e12 ? v * 1000 : v;
-      if (typeof v === "string") {
-        const t = Date.parse(v);
-        return Number.isFinite(t) ? t : undefined;
-      }
-      return undefined;
-    };
     for (const child of childSessions) {
       if (!child.id || liveChildIds.has(child.id)) continue;
-      const startedAt = tsMs(child.started_at);
+      const startedAt = timeValueMs(child.started_at);
       // Derive status from whether the child session actually ENDED — not a
       // blanket "done". A child still running has no ended_at; hardcoding
       // "done" made the panel flip running→done→running on navigation (the
       // persisted row briefly replaced the live "running" entry after a
       // remount, then the next live event flipped it back).
       const ended = Boolean(child.ended_at);
+      const failed =
+        ended &&
+        !!child.end_reason &&
+        child.end_reason !== "delegation_complete";
       items.push({
         id: `child-${child.id}`,
         kind: "subagent",
         label: child.title?.trim() || "Subagent",
-        status: ended ? "done" : "running",
-        detail: child.model ?? undefined,
+        status: failed ? "error" : ended ? "done" : "running",
+        detail: failed ? child.end_reason ?? "Interrupted" : child.model ?? undefined,
         toolCount: child.tool_call_count ?? undefined,
         tokens: childTokens.get(child.id),
         startedAt,
-        completedAt: ended ? tsMs(child.ended_at) : undefined,
+        completedAt: ended ? timeValueMs(child.ended_at) : undefined,
         child_session_id: child.id,
       });
     }
@@ -8071,7 +8214,7 @@ export default function ChatPage() {
             ),
         )
       : items;
-    return deduped.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    return sortBackgroundTasksForDisplay(deduped);
   }, [subagents, tools, childSessions]);
   const runningBackgroundTasks = useMemo(
     () => backgroundTasks.filter((task) => task.status === "running").length,
@@ -8088,6 +8231,39 @@ export default function ChatPage() {
       setSidePanel("tasks");
     }
   }, [runningBackgroundTasks, sidePanel]);
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      const mod = event.metaKey || event.ctrlKey;
+      if (!mod || event.altKey) return;
+      const key = event.key.toLowerCase();
+
+      if (key === "\\") {
+        event.preventDefault();
+        if (sidePanel === "plan" || sidePanel === "tasks") {
+          closeSidePanel();
+          return;
+        }
+        openSidePanel(backgroundTasks.length > 0 ? "tasks" : "plan");
+        return;
+      }
+
+      if (!event.shiftKey) return;
+      if (key === "p") {
+        event.preventDefault();
+        setSidePanel("preview");
+      } else if (key === "b") {
+        event.preventDefault();
+        openSidePanel("tasks");
+      } else if (key === "o") {
+        event.preventDefault();
+        openSidePanel("plan");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [backgroundTasks.length, closeSidePanel, openSidePanel, sidePanel]);
+
   const tracesByMessage = useMemo(() => {
     const grouped = new Map<string, ActivityTrace[]>();
     for (const trace of activityTrace) {
@@ -8275,6 +8451,11 @@ export default function ChatPage() {
   // Files / Background tasks are just breakdowns (lists) — they get a compact
   // fixed width and no resize handle.
   const isPreviewPanel = sidePanel === "preview";
+  const activeSidePanelMode = sidePanel === "none" ? null : sidePanel;
+  const sidePanelMotionKey =
+    sidePanel === "preview"
+      ? `preview:${previewArtifact?.id ?? previewArtifact?.path ?? "empty"}`
+      : sidePanel;
   const previewPanelLayoutStyle = {
     // Every side panel (Preview / Plan / Files / Tasks / Artifacts) shares the
     // same drag-resizable width var, so they're all resizable, not just Preview.
@@ -8286,7 +8467,60 @@ export default function ChatPage() {
   // freshly minted id with no history yet. This is the same id artifacts and
   // dismissals key on.
   const dataSessionId = artifactStateSessionId();
+  const requestedArtifactPath = searchParams.get("artifact");
+  // File discovery must not depend on the gateway's transcript hydration
+  // finishing: reconnects can cancel that continuation after messages appear.
+  // Opening either file surface explicitly refreshes its server inventory.
+  useEffect(() => {
+    if (!dataSessionId || (!requestedArtifactPath && !["artifacts", "preview"].includes(sidePanel))) return;
+    let cancelled = false;
+    setArtifactLoading(true);
+    setArtifactLoadError(null);
+    void api.getSessionArtifacts(dataSessionId).then(response => {
+      if (!cancelled) addArtifacts(artifactsFromServer(response.artifacts));
+    }).catch((error: Error) => {
+      if (!cancelled) setArtifactLoadError(error.message);
+    }).finally(() => {
+      if (!cancelled) setArtifactLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [dataSessionId, sidePanel, addArtifacts, requestedArtifactPath]);
+  const openedArtifactLink = useRef<string | null>(null);
+  useEffect(() => {
+    if (!requestedArtifactPath || !dataSessionId) { openedArtifactLink.current = null; return; }
+    const key = `${dataSessionId}:${requestedArtifactPath}`;
+    if (openedArtifactLink.current === key) return;
+    const target = artifacts.find(item => item.path === requestedArtifactPath);
+    if (!target) return;
+    openedArtifactLink.current = key;
+    openArtifactPreview(target);
+  }, [requestedArtifactPath, dataSessionId, artifacts, openArtifactPreview]);
+
   const renderSidePanel = () => {
+    const renderPlanPanel = () => (
+      <PlanPanel
+        sessionId={dataSessionId ?? ""}
+        refreshSignal={planRefreshSignal}
+        onClose={closeSidePanel}
+      />
+    );
+    const renderTasksPanel = () => (
+      <BackgroundTasksPanel
+        sessionId={dataSessionId ?? ""}
+        tasks={backgroundTasks}
+        onClose={closeSidePanel}
+        onDrillIn={handleOpenSubagent}
+        onMessage={handleMessageSubagent}
+        onStop={handleStopBackgroundTask}
+      />
+    );
+    const isWorkPanel = sidePanel === "plan" || sidePanel === "tasks";
+    const shouldStackWork =
+      isWorkPanel &&
+      ((sidePanel === "plan" && backgroundTasks.length > 0) ||
+        (sidePanel === "tasks" &&
+          (planReadyForApproval || permissionModeId === "plan")));
+
     switch (sidePanel) {
       case "preview":
         return previewArtifact ? (
@@ -8298,27 +8532,24 @@ export default function ChatPage() {
         return (
           <ArtifactsPanel
             artifacts={artifacts}
+            loading={artifactLoading}
+            error={artifactLoadError}
             onOpen={openArtifactPreview}
             onClose={closeSidePanel}
           />
         );
       case "plan":
-        return (
-          <PlanPanel
-            sessionId={dataSessionId ?? ""}
-            refreshSignal={planRefreshSignal}
-            onClose={closeSidePanel}
-          />
-        );
       case "tasks":
-        return (
-          <BackgroundTasksPanel
-            tasks={backgroundTasks}
-            onClose={closeSidePanel}
-            onDrillIn={handleOpenSubagent}
-            onStop={handleStopBackgroundTask}
-          />
-        );
+        if (shouldStackWork) {
+          return (
+            <StackedWorkPanels
+              primary={sidePanel as WorkPanelMode}
+              plan={renderPlanPanel()}
+              tasks={renderTasksPanel()}
+            />
+          );
+        }
+        return sidePanel === "plan" ? renderPlanPanel() : renderTasksPanel();
       case "files":
         return (
           <FilesPanel
@@ -8388,12 +8619,20 @@ export default function ChatPage() {
       <>
         <button
           aria-label="Close panel"
-          className="fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm"
+          className="chat-side-panel-backdrop fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm"
           onClick={sidePanel === "preview" ? dismissPreviewArtifact : closeSidePanel}
           type="button"
         />
-        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70] animate-in fade-in slide-in-from-bottom-4 duration-200">
-          {renderSidePanel()}
+        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70]">
+          {activeSidePanelMode ? (
+            <SidePanelMotionSlot
+              key={`mobile:${sidePanelMotionKey}`}
+              mode={activeSidePanelMode}
+              mobile
+            >
+              {renderSidePanel()}
+            </SidePanelMotionSlot>
+          ) : null}
         </aside>
       </>,
       portalRoot,
@@ -8518,6 +8757,7 @@ export default function ChatPage() {
                       return (
                         <SubagentResultCard
                           key={message.id}
+                          createdAt={message.createdAt}
                           status={sub.status}
                           goal={sub.goal}
                           summary={sub.summary}
@@ -8544,7 +8784,7 @@ export default function ChatPage() {
                     <MemoMessageRow
                       key={message.id}
                       activityTrace={turnTraces}
-                      artifacts={turnArtifacts ?? []}
+                      artifacts={turnArtifacts ?? EMPTY_ARTIFACTS}
                       busy={isStreaming && busy}
                       compacting={isStreaming && compacting}
                       liveInput={
@@ -8555,13 +8795,9 @@ export default function ChatPage() {
                       message={message}
                       onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
-                      onOpenPath={(p) =>
-                        openFileInPreview(
-                          p,
-                          p.replace(/\/+$/, "").split("/").pop() || p,
-                        )
-                      }
+                      onOpenPath={handleOpenPath}
                       onOpenSubagent={handleOpenSubagent}
+                      showReasoning={showReasoning}
                       subagents={turnSubagents}
                       tools={turnTools}
                       turnArtifacts={turnArtifacts}
@@ -8646,23 +8882,23 @@ export default function ChatPage() {
                 <span className="h-16 w-1 rounded-full bg-transparent" />
               </button>
               {permissionModeId === "plan" && !busy && planReadyForApproval && (
-                  <div className="mb-2 flex items-center gap-3 rounded-[10px] border border-[color-mix(in_srgb,var(--chat-accent)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-bg))] px-3 py-2">
-                    <Eye className="h-4 w-4 shrink-0 text-[var(--chat-accent)]" />
-                    <div className="min-w-0 flex-1 text-[12.5px] leading-snug text-[var(--chat-text)]">
-                      <span className="font-medium">Plan ready.</span>{" "}
-                      <span className="text-[var(--chat-muted-strong)]">
-                        Reply to refine it, or approve to run.
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void approvePlanAndRun()}
-                      className="shrink-0 rounded-[7px] bg-[var(--chat-accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--chat-bg)] transition-opacity hover:opacity-90"
-                    >
-                      Approve &amp; run
-                    </button>
+                <div className="plan-approval-bar flex items-center gap-3 rounded-[10px] border border-[color-mix(in_srgb,var(--chat-accent)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-bg))] px-3 py-2">
+                  <Eye className="h-4 w-4 shrink-0 text-[var(--chat-accent)]" />
+                  <div className="min-w-0 flex-1 text-[12.5px] leading-snug text-[var(--chat-text)]">
+                    <span className="font-medium">Plan ready.</span>{" "}
+                    <span className="text-[var(--chat-muted-strong)]">
+                      Reply to refine it, or approve to run.
+                    </span>
                   </div>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => void approvePlanAndRun()}
+                    className="shrink-0 rounded-[7px] bg-[var(--chat-accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--chat-bg)] transition-opacity hover:opacity-90"
+                  >
+                    Approve &amp; run
+                  </button>
+                </div>
+              )}
               {queuedInputs.length ? (
                 <QueuedInputStrip
                   busy={busy}
@@ -8862,7 +9098,14 @@ export default function ChatPage() {
             {/* Activity card removed per request — the right area only shows a
                 side panel (Preview / Artifacts / Files / Background tasks / Plan)
                 when one is open; otherwise nothing. */}
-            {wideOpen ? renderSidePanel() : null}
+            {wideOpen && activeSidePanelMode ? (
+              <SidePanelMotionSlot
+                key={`desktop:${sidePanelMotionKey}`}
+                mode={activeSidePanelMode}
+              >
+                {renderSidePanel()}
+              </SidePanelMotionSlot>
+            ) : null}
           </div>
         </aside>
       </div>
@@ -8893,14 +9136,8 @@ export default function ChatPage() {
 }
 
 function EmptyState({
-  analytics,
-  loading,
-  onRangeChange,
-  onViewChange,
-  range,
   state,
   userName,
-  view,
 }: {
   analytics: AnalyticsResponse | null;
   loading: boolean;
@@ -8911,140 +9148,21 @@ function EmptyState({
   userName: string;
   view: "overview" | "models";
 }) {
-  const totalTokens =
-    (analytics?.totals.total_input ?? 0) +
-    (analytics?.totals.total_output ?? 0) +
-    (analytics?.totals.total_cache_read ?? 0) +
-    (analytics?.totals.total_reasoning ?? 0);
-  const mostActiveDay = (analytics?.daily ?? []).reduce<AnalyticsResponse["daily"][number] | null>(
-    (best, day) => {
-      const tokens = day.input_tokens + day.output_tokens + day.reasoning_tokens;
-      const bestTokens = best
-        ? best.input_tokens + best.output_tokens + best.reasoning_tokens
-        : -1;
-      return tokens > bestTokens ? day : best;
-    },
-    null,
-  );
-  const metrics = [
-    { label: "Sessions", value: formatCompactNumber(analytics?.totals.total_sessions) },
-    { label: "Calls", value: formatCompactNumber(analytics?.totals.total_api_calls) },
-    { label: "Total tokens", value: formatCompactNumber(totalTokens) },
-    { label: "Active days", value: formatCompactNumber(activeDayCount(analytics)) },
-    { label: "Current streak", value: `${currentActivityStreak(analytics)}d` },
-    { label: "Longest streak", value: `${longestActivityStreak(analytics)}d` },
-    {
-      label: "Peak day",
-      value: mostActiveDay
-        ? new Date(`${mostActiveDay.day}T12:00:00`).toLocaleDateString([], {
-            month: "short",
-            day: "numeric",
-          })
-        : "pending",
-    },
-    { label: "Favorite model", value: favoriteModel(analytics) },
-  ];
-  const heatmapDays = usageHeatmapDays(analytics, range);
-  const heatmapWindow = heatmapWindowLabel(analytics, range, heatmapDays);
-  const modelRows = analytics?.by_model?.slice(0, 6) ?? [];
-
+  const who = userName && userName.trim() ? `, ${userName.trim()}` : "";
   return (
     <div className="chat-start">
-      <div className="chat-start-title">
-        <span className="chat-start-mark" aria-hidden="true">
-          {state === "connecting" ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : (
-            <Sparkles className="h-5 w-5" />
-          )}
-        </span>
-        <h2>{`What's up next, ${userName}?`}</h2>
-      </div>
-      <section className="chat-start-card" aria-label="Usage overview">
-        <div className="chat-start-toolbar">
-          <div className="chat-start-tabs" role="tablist" aria-label="Start view">
-            {(["overview", "models"] as const).map((item) => (
-              <button
-                key={item}
-                aria-pressed={view === item}
-                className={cn("chat-start-tab", view === item && "active")}
-                onClick={() => onViewChange(item)}
-                type="button"
-              >
-                {item === "overview" ? "Overview" : "Models"}
-              </button>
-            ))}
-          </div>
-          <div className="chat-start-tabs compact" aria-label="Usage range">
-            {([
-              ["all", "All"],
-              ["30d", "30d"],
-              ["7d", "7d"],
-            ] as const).map(([key, label]) => (
-              <button
-                key={key}
-                aria-pressed={range === key}
-                className={cn("chat-start-tab", range === key && "active")}
-                onClick={() => onRangeChange(key)}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+      <div className="ozzie-greeting">
+        <div className="ozzie-bubble">
+          <p className="ozzie-bubble-lead">Hi! I'm Ozzie, your executive assistant.</p>
+          <p>Need a hand? Or eight? What are we working on today{who}?</p>
         </div>
-        {view === "overview" ? (
-          <>
-            <div className="chat-start-window">{heatmapWindow}</div>
-            <div className="chat-start-metrics">
-              {metrics.map((metric) => (
-                <div className="chat-start-metric" key={metric.label}>
-                  <span>{metric.label}</span>
-                  {loading ? <Skeleton className="h-5 w-12" /> : <strong>{metric.value}</strong>}
-                </div>
-              ))}
-            </div>
-            <div className="chat-start-heatmap" aria-label="Recent activity">
-              {heatmapDays.map((day) => (
-                <span
-                  aria-label={day.tip.replace(/\n/g, ", ")}
-                  className={`chat-start-heat heat-${day.level}`}
-                  data-tip={day.tip}
-                  key={day.key}
-                  tabIndex={0}
-                  title={day.tip}
-                />
-              ))}
-            </div>
-            <div className="chat-start-note">
-              {loading ? (
-                <Skeleton className="h-4 w-48" />
-              ) : (
-                `${formatCompactNumber(totalTokens)} tokens in ${analyticsRangeLabel(range).toLowerCase()}.`
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="chat-start-models">
-            {modelRows.length ? (
-              modelRows.map((model) => {
-                const tokens = model.input_tokens + model.output_tokens;
-                return (
-                  <div className="chat-start-model" key={model.model}>
-                    <span className="model-name">{model.model.split("/").slice(-1)[0] || model.model}</span>
-                    <span>{formatCompactNumber(tokens)} tokens</span>
-                    <span>{formatCompactNumber(model.sessions)} sessions</span>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="chat-start-empty-models">
-                {loading ? <Skeleton className="h-5 w-40" /> : "No model activity yet"}
-              </div>
-            )}
-          </div>
-        )}
-      </section>
+        <img
+          className={cn("ozzie-img", state === "connecting" && "thinking")}
+          src="/octo-loader.png"
+          alt="Ozzie, your octopus executive assistant"
+          draggable={false}
+        />
+      </div>
     </div>
   );
 }
@@ -9406,15 +9524,11 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
   const circumference = 2 * Math.PI * 9;
   const stroke = left === null ? 0 : (left / 100) * circumference;
   const label = left === null ? "--" : `${Math.round(left)}%`;
-  const detail =
-    usage?.context_used && usage?.context_max
-      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(usage.context_max).toLocaleString()} tokens used`
-      : "Context usage pending";
 
   return (
     <span
       className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[color-mix(in_srgb,var(--chat-text)_4%,transparent)] px-2.5 text-[var(--chat-muted-strong)]"
-      title={`Context left: ${label}. ${detail}`}
+      title={contextRingTitle(usage)}
     >
       <svg
         aria-hidden="true"
@@ -9600,7 +9714,6 @@ function ComposerActionBar({
             title={`Permission mode: ${permissionMode.label}`}
             aria-label="Choose permission mode"
           >
-            {permissionMode.id === "bypassPermissions" && <span className="pill-dot" />}
             <permissionMode.icon className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">{permissionMode.short}</span>
             <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />
@@ -9744,6 +9857,24 @@ function ComposerActionBar({
   );
 }
 
+interface MessageRowProps {
+  activityTrace?: ActivityTrace[];
+  artifacts: ArtifactEntry[];
+  busy?: boolean;
+  compacting?: boolean;
+  liveInput?: number;
+  onOpenPath?(path: string): void;
+  message: ChatMessage;
+  onEditMessage?(message: ChatMessage): void;
+  onOpenArtifact(artifact: ArtifactEntry): void;
+  onOpenSubagent?(childSessionId: string): void;
+  showReasoning?: boolean;
+  subagents?: SubagentEntry[];
+  tools?: ToolEntry[];
+  turnArtifacts?: ArtifactEntry[];
+  turnUsage?: TurnUsageEntry;
+}
+
 function MessageRow({
   activityTrace,
   artifacts,
@@ -9755,26 +9886,12 @@ function MessageRow({
   onOpenArtifact,
   onOpenPath,
   onOpenSubagent,
+  showReasoning,
   subagents,
   tools,
   turnArtifacts,
   turnUsage,
-}: {
-  activityTrace?: ActivityTrace[];
-  artifacts: ArtifactEntry[];
-  busy?: boolean;
-  compacting?: boolean;
-  liveInput?: number;
-  onOpenPath?(path: string): void;
-  message: ChatMessage;
-  onEditMessage?(message: ChatMessage): void;
-  onOpenArtifact(artifact: ArtifactEntry): void;
-  onOpenSubagent?(childSessionId: string): void;
-  subagents?: SubagentEntry[];
-  tools?: ToolEntry[];
-  turnArtifacts?: ArtifactEntry[];
-  turnUsage?: TurnUsageEntry;
-}) {
+}: MessageRowProps) {
   const { copied, copy } = useCopyToClipboard();
   const [menuOpen, setMenuOpen] = useState(false);
   const [pinned, setPinned] = useState(() => readPinnedMessageIds().has(message.id));
@@ -9876,18 +9993,19 @@ function MessageRow({
       >
         {showDigest ? (
           <ChatActivityDigest
-            activityTrace={activityTrace ?? []}
-            artifacts={turnArtifacts ?? []}
+            activityTrace={activityTrace ?? EMPTY_ACTIVITY_TRACES}
+            artifacts={turnArtifacts ?? EMPTY_ARTIFACTS}
             busy={!!busy}
             compacting={!!compacting}
             completedAt={message.completedAt}
             liveInput={liveInput}
             liveTokens={liveTokens}
             onOpenSubagent={onOpenSubagent}
+            showReasoning={!!showReasoning}
             startedAt={message.createdAt}
-            subagents={subagents}
+            subagents={subagents ?? EMPTY_SUBAGENTS}
             tokenCount={message.tokenCount}
-            tools={tools ?? []}
+            tools={tools ?? EMPTY_TOOLS}
           />
         ) : null}
         <div
@@ -10002,52 +10120,57 @@ function MessageRow({
         {isUser ? (
           <div className="user-actions">
             <button
+              aria-label={copied ? "Copied message" : "Copy message"}
               className="icon-btn sm"
               onClick={() => copy(copyText)}
               title={copied ? "Copied" : "Copy"}
               type="button"
             >
-              {copied ? <CheckCircle2 /> : <Clipboard />}
+              {copied ? <CheckCircle2 aria-hidden="true" /> : <Clipboard aria-hidden="true" />}
             </button>
             <button
+              aria-label="Edit message"
               className="icon-btn sm"
               disabled={!message.content.trim()}
               onClick={() => onEditMessage?.(message)}
               title="Edit"
               type="button"
             >
-              <FilePen />
+              <FilePen aria-hidden="true" />
             </button>
           </div>
         ) : isAssistant && message.content ? (
           <div className={cn("asst-actions", pinned && "pinned")}>
             <button
+              aria-label={copied ? "Copied message" : "Copy message"}
               className="icon-btn sm"
               onClick={() => copy(copyText)}
               title={copied ? "Copied" : "Copy"}
               type="button"
             >
-              {copied ? <CheckCircle2 /> : <Clipboard />}
+              {copied ? <CheckCircle2 aria-hidden="true" /> : <Clipboard aria-hidden="true" />}
             </button>
             <button
+              aria-label={pinned ? "Unpin message" : "Pin message"}
               aria-pressed={pinned}
               className={cn("icon-btn sm", pinned && "message-action-active")}
               onClick={togglePinned}
               title={pinned ? "Unpin" : "Pin"}
               type="button"
             >
-              <Pin />
+              <Pin aria-hidden="true" />
             </button>
             <div className="message-action-wrap" ref={menuRef}>
               <button
                 aria-expanded={menuOpen}
                 aria-haspopup="menu"
+                aria-label="Open message actions"
                 className={cn("icon-btn sm", menuOpen && "message-action-active")}
                 onClick={() => setMenuOpen((open) => !open)}
                 title="More"
                 type="button"
               >
-                <MoreHorizontal />
+                <MoreHorizontal aria-hidden="true" />
               </button>
               {menuOpen && (
                 <div className="message-actions-menu" role="menu">
@@ -10103,7 +10226,32 @@ function MessageRow({
   );
 }
 
-const MemoMessageRow = memo(MessageRow);
+function sameOptionalArray<T>(a?: T[], b?: T[]): boolean {
+  if (a === b) return true;
+  return (a?.length ?? 0) === 0 && (b?.length ?? 0) === 0;
+}
+
+function messageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
+  return (
+    prev.message === next.message &&
+    prev.busy === next.busy &&
+    prev.compacting === next.compacting &&
+    prev.liveInput === next.liveInput &&
+    prev.turnUsage === next.turnUsage &&
+    prev.onEditMessage === next.onEditMessage &&
+    prev.onOpenArtifact === next.onOpenArtifact &&
+    prev.onOpenPath === next.onOpenPath &&
+    prev.onOpenSubagent === next.onOpenSubagent &&
+    prev.showReasoning === next.showReasoning &&
+    sameOptionalArray(prev.activityTrace, next.activityTrace) &&
+    sameOptionalArray(prev.artifacts, next.artifacts) &&
+    sameOptionalArray(prev.subagents, next.subagents) &&
+    sameOptionalArray(prev.tools, next.tools) &&
+    sameOptionalArray(prev.turnArtifacts, next.turnArtifacts)
+  );
+}
+
+const MemoMessageRow = memo(MessageRow, messageRowPropsEqual);
 
 /**
  * One row in the per-turn breakdown dropdown — either an individual tool
@@ -10143,15 +10291,25 @@ function toolCategory(name: string): ToolCategory {
   return "other";
 }
 
-// Pull the most label-worthy bit of a tool — a filename/skill/query — for the
-// "Read App.tsx" style single-item summary.
+function looksLikeCommandPreview(value: string): boolean {
+  return /(^|\s)(set\s+-[a-z]|npm|pnpm|yarn|bun|git|mkdir|rm|cp|mv|curl|ssh|rsync)\s/i.test(value) ||
+    /[$][(]|&&|\|\||;\s*/.test(value);
+}
+
+// Pull the most label-worthy, customer-safe bit of a tool — usually a
+// filename or skill name. Shell commands/search strings stay in the explicit
+// debug expansion instead of leaking into the normal live timeline.
 function toolTarget(tool: ToolStep, max = 44): string {
+  const category = toolCategory(tool.name);
+  if (category === "command" || category === "search" || category === "other") {
+    return "";
+  }
   const raw = (tool.context || "").trim();
   if (!raw) return "";
   let subject = "";
-  // Tool args usually arrive as JSON ({"command":…}, {"path":…}, {"query":…}).
-  // Pull the canonical field so the label reads "ran npm run build" / "edited
-  // App.tsx" / "searched psycopg" instead of a mangled JSON first-token.
+  // Tool args usually arrive as JSON ({"path":…}, {"file":…}, {"skill":…}).
+  // Pull the canonical field so safe labels read "edited App.tsx" instead of
+  // a mangled JSON first-token.
   if (raw.startsWith("{")) {
     try {
       const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -10165,6 +10323,7 @@ function toolTarget(tool: ToolStep, max = 44): string {
   }
   if (!subject) subject = raw;
   subject = subject.replace(/\s+/g, " ").trim();
+  if (looksLikeCommandPreview(subject)) return "";
   // Path-like single token → show the basename ("/a/b/App.tsx" → "App.tsx").
   if (!subject.includes(" ") && /[/\\]/.test(subject)) {
     subject = subject.split(/[/\\]/).pop() || subject;
@@ -10177,9 +10336,13 @@ function toolTarget(tool: ToolStep, max = 44): string {
 const TOOL_NAME_LABELS: Record<string, string> = {
   delegate: "Delegated a task",
   delegate_task: "Delegated a task",
+  exec_command: "Checked workspace",
   mixture_of_agents: "Ran a mixture of agents",
   agent_handoff: "Handed off to an agent",
+  read_file: "Read file",
   subagent: "Ran a subagent",
+  terminal: "Checked workspace",
+  todo: "Updated task list",
 };
 function humanizeToolName(name: string): string {
   const key = name.toLowerCase();
@@ -10189,8 +10352,21 @@ function humanizeToolName(name: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+function friendlyToolName(name: string): string {
+  const key = name.toLowerCase();
+  if (TOOL_NAME_LABELS[key]) return TOOL_NAME_LABELS[key];
+  switch (toolCategory(name)) {
+    case "command": return "Checked workspace";
+    case "search": return "Searched workspace";
+    case "edit": return "Edited file";
+    case "read": return "Read file";
+    case "skill": return "Loaded skill";
+    default: return humanizeToolName(name);
+  }
+}
+
 // Natural-language summary for a run of consecutive tool calls, e.g.
-// "Ran 2 commands", "Read App.tsx", "Ran a command, read a file".
+// "Checked workspace", "Read App.tsx", "Updated task list, read 5 files".
 function describeToolGroup(tools: ToolStep[]): string {
   const order: ToolCategory[] = [];
   const byCat = new Map<ToolCategory, ToolStep[]>();
@@ -10207,14 +10383,14 @@ function describeToolGroup(tools: ToolStep[]): string {
     const one = n === 1;
     const target = one ? toolTarget(items[0]) : "";
     switch (cat) {
-      case "command": return one ? (target ? `ran ${target}` : "ran a command") : `ran ${n} commands`;
-      case "search": return one ? (target ? `searched ${target}` : "ran a search") : `ran ${n} searches`;
+      case "command": return "checked workspace";
+      case "search": return one ? "searched workspace" : `searched ${n} times`;
       case "edit": return one ? (target ? `edited ${target}` : "edited a file") : `edited ${n} files`;
       case "read": return one ? (target ? `read ${target}` : "read a file") : `read ${n} files`;
       case "skill": return one ? (target ? `loaded ${target}` : "loaded a skill") : `loaded ${n} skills`;
       // For uncategorized tools, surface the actual tool name (e.g.
       // "delegate_task" → "Delegated a task") instead of a vague "ran a step".
-      default: return one ? humanizeToolName(items[0].name) : `ran ${n} steps`;
+      default: return one ? friendlyToolName(items[0].name) : `completed ${n} steps`;
     }
   };
   const parts = order.map((cat) => phrase(cat, byCat.get(cat)!));
@@ -10223,7 +10399,7 @@ function describeToolGroup(tools: ToolStep[]): string {
 }
 
 // Collapse runs of consecutive tool steps into a single labelled group, the
-// way image-2 shows "Ran 2 commands" instead of a row per call. Reasoning
+// way image-2 shows one compact activity row instead of a row per call. Reasoning
 // (trace) steps break a run and stay on their own line.
 function groupConsecutiveTools(steps: BreakdownStep[]): BreakdownStep[] {
   const out: BreakdownStep[] = [];
@@ -10277,8 +10453,10 @@ function truncatePreview(value: string | undefined, max = 48): string {
 function buildBreakdownSteps(
   tools: ToolEntry[],
   activityTrace: ActivityTrace[],
+  options: { showReasoning?: boolean } = {},
 ): BreakdownStep[] {
   const raw: BreakdownStep[] = [];
+  const showReasoning = options.showReasoning ?? true;
 
   for (const tool of tools) {
     if (tool.name.toLowerCase() === "memory") continue;
@@ -10326,13 +10504,14 @@ function buildBreakdownSteps(
       continue;
     }
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
-    const text = compactLine(trace.text);
+    if (!showReasoning) continue;
+    const text = trace.text.trim();
     if (!text) continue;
     // Drop transient single-word pills ("brainstorming", "Working...", etc.) —
     // they belong on the rotating header pill, not as permanent rows. Uses the
     // non-mangling check so real reasoning prose (which mentions "thinking"/
     // "reasoning") is kept intact.
-    if (isTransientStatus(text)) continue;
+    if (isTransientStatus(trace.text)) continue;
     raw.push({ type: "trace", id: trace.id, at: trace.createdAt || 0, text });
   }
 
@@ -10412,6 +10591,7 @@ function splitReasoningSections(text: string): ReasoningSection[] {
 // is shown inline.
 function GroupToolDetail({ tool }: { tool: ToolStep }) {
   const Icon = breakdownToolIcon(tool.name);
+  const target = toolTarget(tool);
   const body = [
     tool.context && `context\n${tool.context}`,
     tool.preview && `streaming\n${tool.preview}`,
@@ -10432,8 +10612,8 @@ function GroupToolDetail({ tool }: { tool: ToolStep }) {
             tool.status === "running" && "animate-pulse",
           )}
         />
-        <span className="name">{tool.name}</span>
-        {tool.context && <span className="target">· {truncatePreview(tool.context)}</span>}
+        <span className="name">{friendlyToolName(tool.name)}</span>
+        {target && <span className="target">· {truncatePreview(target)}</span>}
         {tool.count > 1 && <span className="duration">×{tool.count}</span>}
       </div>
       {body && <div className="tool-body">{body}</div>}
@@ -10536,7 +10716,7 @@ function BreakdownRow({
           <span className={cn("name", running && "tool-shimmer")}>{step.label}</span>
         </button>
         {open && (
-          <div className="ml-4 border-l border-[var(--border-faint,rgba(255,255,255,0.08))] pl-2">
+          <div className="ml-4 space-y-0.5 pl-2">
             {step.tools.map((t) => (
               <GroupToolDetail key={t.id} tool={t} />
             ))}
@@ -10559,6 +10739,7 @@ function BreakdownRow({
   const hasBody = Boolean(toolBody);
   const open = userOpen ?? step.status === "error";
   const Icon = breakdownToolIcon(step.name);
+  const target = toolTarget(step);
   return (
     <div>
       <button
@@ -10577,11 +10758,11 @@ function BreakdownRow({
           )}
         />
         <span className={cn("name", step.status === "running" && "tool-shimmer")}>
-          {step.name}
+          {friendlyToolName(step.name)}
         </span>
-        {step.context && (
+        {target && (
           <span className="target">
-            · {truncatePreview(step.context)}
+            · {truncatePreview(target)}
           </span>
         )}
         {step.count > 1 && (
@@ -10734,12 +10915,45 @@ function useRotatingVerb(busy: boolean): string {
   return verb;
 }
 
+function defaultActivityDigestOpen({
+  busy,
+  hasErroredStep,
+  hasSteps,
+}: {
+  busy: boolean;
+  hasErroredStep: boolean;
+  hasSteps: boolean;
+}): boolean {
+  return hasErroredStep || hasSteps || busy;
+}
+
+function resolveActivityDigestVisibility({
+  busy,
+  hasErroredStep,
+  hasSteps,
+  userOpen,
+}: {
+  busy: boolean;
+  hasErroredStep: boolean;
+  hasSteps: boolean;
+  userOpen: boolean | null;
+}): {
+  expanded: boolean;
+  showSteps: boolean;
+} {
+  const expanded =
+    userOpen ?? defaultActivityDigestOpen({ busy, hasErroredStep, hasSteps });
+  return {
+    expanded,
+    showSteps: expanded && hasSteps,
+  };
+}
+
 // Working/worked digest. While a turn streams, the header is the live
 // meter: pulsing accent mark + a cycling thinking verb + elapsed + running
 // token count, and the breakdown is expanded by default so reasoning (grey)
 // and tool calls scroll in chronologically as they happen. Once the turn
-// completes the same header collapses into "Worked for ..." with the real
-// token count, and the breakdown defaults to collapsed.
+// completes, the same full breakdown stays open unless the user closes it.
 function ChatActivityDigest({
   activityTrace,
   busy,
@@ -10748,6 +10962,7 @@ function ChatActivityDigest({
   liveInput,
   liveTokens,
   onOpenSubagent,
+  showReasoning,
   startedAt,
   subagents,
   tokenCount,
@@ -10761,6 +10976,7 @@ function ChatActivityDigest({
   liveInput?: number;
   liveTokens?: number;
   onOpenSubagent?(childSessionId: string): void;
+  showReasoning: boolean;
   startedAt?: number;
   subagents?: SubagentEntry[];
   tokenCount?: number;
@@ -10780,8 +10996,8 @@ function ChatActivityDigest({
   }, [busy]);
 
   const steps = useMemo(
-    () => buildBreakdownSteps(tools, activityTrace),
-    [tools, activityTrace],
+    () => buildBreakdownSteps(tools, activityTrace, { showReasoning }),
+    [tools, activityTrace, showReasoning],
   );
   const memoryTools = useMemo(
     () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
@@ -10825,7 +11041,18 @@ function ChatActivityDigest({
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
   const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
-  const expanded = open ?? true;
+  const hasErroredStep = steps.some((step) =>
+    step.type === "tool"
+      ? step.status === "error"
+      : step.type === "group" && step.tools.some((tool) => tool.status === "error"),
+  );
+  const visibility = resolveActivityDigestVisibility({
+    busy,
+    hasErroredStep,
+    hasSteps: steps.length > 0,
+    userOpen: open,
+  });
+  const { expanded } = visibility;
   // While a delegation runs, the parent streams nothing — without folding in
   // the children's relayed activity the pill reads "Planning · 0 out" for the
   // whole wait and looks hung.
@@ -10975,26 +11202,11 @@ function ChatActivityDigest({
         )}
       </button>
 
-      {expanded && steps.length > 0 && (
+      {visibility.showSteps && (
         <div className="processing-body mt-1.5 space-y-1">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} turnStartAt={start} />
           ))}
-        </div>
-      )}
-      {busy && steps.length === 0 && (
-        <div className="processing-body mt-1.5">
-          {/* Nothing has streamed yet (big prompt, model still ingesting) —
-              show a live thinking row immediately so the wait reads as
-              progress, not a frozen turn. Replaced by real reasoning the
-              moment the first delta lands. */}
-          <div className="reasoning-message flex items-center gap-1.5 animate-pulse">
-            <Sparkles className="h-3.5 w-3.5 shrink-0" />
-            <span>
-              Thinking
-              <span className="processing-ellipsis" aria-hidden="true" />
-            </span>
-          </div>
         </div>
       )}
     </section>
@@ -11131,14 +11343,23 @@ function ArtifactPreviewPane({
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
   const pathForKind = artifact.path ?? artifact.title;
   const kind = artifact.path ? previewKind(pathForKind, contentType) : "text";
+  const [missingAssets, setMissingAssets] = useState(0);
+  const videoPreviewUrl = kind === "video" && artifact.path ? api.previewFileUrl(artifact.path) : null;
+  const openPreviewHref = videoPreviewUrl || blobUrl;
+  const pdfFrameSrc =
+    kind === "pdf" && blobUrl
+      ? `${blobUrl}#navpanes=0&view=FitH`
+      : null;
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
+    const controller = new AbortController();
 
     setBlobUrl(null);
     setContentType("");
     setError(null);
+    setMissingAssets(0);
     setTextPreview(artifact.content ?? null);
 
     if (!artifact.path) {
@@ -11146,17 +11367,40 @@ function ArtifactPreviewPane({
       return () => {};
     }
 
+    // Native media requests use the dashboard's HttpOnly session cookie and
+    // byte ranges. Keep a full video Blob out of React/browser heap memory.
+    if (previewKind(artifact.path, "") === "video") {
+      setContentType("video/mp4");
+      setLoading(false);
+      return () => { controller.abort(); };
+    }
     setLoading(true);
     void api
-      .previewFile(artifact.path)
+      .previewFile(artifact.path, controller.signal)
       .then(async (response) => {
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(response.blob);
         const nextKind = previewKind(artifact.path ?? artifact.title, response.contentType);
+        let previewBlob =
+          nextKind === "pdf" && response.blob.type !== "application/pdf"
+            ? new Blob([response.blob], {
+                type: response.contentType || "application/pdf",
+              })
+            : response.blob;
+        if (nextKind === "html") {
+          const prepared = await prepareHtmlPreview(await previewBlob.text(), response.resolvedPath || artifact.path!, async (path) => {
+            const asset = await api.previewFile(path, controller.signal);
+            return asset.blob;
+          });
+          if (cancelled) return;
+          previewBlob = new Blob([prepared.html], { type: "text/html" });
+          setMissingAssets(prepared.missingAssets);
+        }
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(previewBlob);
         setBlobUrl(objectUrl);
         setContentType(response.contentType);
         if (nextKind === "text") {
-          const text = await response.blob.text();
+          const text = await previewBlob.text();
           if (!cancelled) setTextPreview(text.slice(0, 250_000));
         }
       })
@@ -11169,13 +11413,14 @@ function ArtifactPreviewPane({
 
     return () => {
       cancelled = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [artifact]);
 
   const openExternal = () => {
-    if (!blobUrl) return;
-    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    if (!openPreviewHref) return;
+    window.open(openPreviewHref, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -11201,7 +11446,7 @@ function ArtifactPreviewPane({
           <Button
             aria-label="Open preview externally"
             className="hidden h-7 w-7 rounded-[7px] p-0 @[20rem]:inline-flex @[24rem]:h-8 @[24rem]:w-8"
-            disabled={!blobUrl}
+            disabled={!openPreviewHref}
             onClick={openExternal}
             size="sm"
             title="Open"
@@ -11253,6 +11498,12 @@ function ArtifactPreviewPane({
         </div>
       </header>
 
+      {missingAssets > 0 && !loading && !error && (
+        <p className="shrink-0 px-4 pb-3 text-xs text-[var(--chat-muted)]" role="status">
+          The draft is open, but {missingAssets} supporting image or style file{missingAssets === 1 ? " is" : "s are"} unavailable.
+        </p>
+      )}
+
       {collapsed ? null : (
       <div className="min-h-0 flex-1 border-t border-[var(--chat-border)] bg-[var(--chat-surface-soft)]">
         {loading ? (
@@ -11286,11 +11537,11 @@ function ArtifactPreviewPane({
               <div className="mt-1 break-words text-xs opacity-90">{error}</div>
             </div>
           </div>
-        ) : kind === "pdf" && blobUrl ? (
+        ) : pdfFrameSrc ? (
           <div className="relative h-full w-full">
             <iframe
               className="absolute inset-0 h-full w-full bg-[var(--chat-bg)]"
-              src={`${blobUrl}#navpanes=0&view=FitH`}
+              src={pdfFrameSrc}
               title={artifact.title}
             />
             <noscript>
@@ -11302,10 +11553,12 @@ function ArtifactPreviewPane({
         ) : kind === "html" && blobUrl ? (
           <iframe
             className="h-full w-full bg-white"
-            sandbox="allow-scripts allow-same-origin"
+            sandbox=""
             src={blobUrl}
             title={artifact.title}
           />
+        ) : kind === "video" && videoPreviewUrl ? (
+          <video key={videoPreviewUrl} className="h-full w-full bg-black object-contain" src={videoPreviewUrl} controls playsInline preload="metadata" aria-label={artifact.title} onError={() => setError("The video could not load. Reopen this preview to retry.")} />
         ) : kind === "image" && blobUrl ? (
           <div className="flex h-full items-center justify-center overflow-auto p-4">
             <img
@@ -11333,7 +11586,7 @@ function ArtifactPreviewPane({
               </p>
               <div className="mt-4 flex justify-center gap-2">
                 <Button
-                  disabled={!blobUrl}
+                  disabled={!openPreviewHref}
                   onClick={openExternal}
                   size="sm"
                   type="button"
@@ -11584,10 +11837,6 @@ function ActivityPanel({
             <span className="ap-live-dot" />
             {state === "open" ? "live" : STATE_LABEL[state]}
           </span>
-        </div>
-        <div className="ap-meta">
-          <button className="icon-btn sm" title="Pin panel" type="button"><Pin /></button>
-          <button className="icon-btn sm" title="More" type="button"><ChevronDown /></button>
         </div>
       </div>
 

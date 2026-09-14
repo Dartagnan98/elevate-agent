@@ -1,1 +1,0 @@
-import{r as o}from"./vendor-react-hYjLGG_g.js";function s(e,t=!0){const n=o.useRef(e);n.current=e,o.useEffect(()=>{if(!t||typeof window>"u")return;const r=()=>{n.current()};return window.addEventListener("elevate:agent-turn-complete",r),()=>{window.removeEventListener("elevate:agent-turn-complete",r)}},[t])}export{s as u};

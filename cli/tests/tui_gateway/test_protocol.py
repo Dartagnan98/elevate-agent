@@ -5,6 +5,7 @@ import json
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,7 +22,9 @@ def _restore_stdout():
 @pytest.fixture()
 def server():
     with patch.dict("sys.modules", {
-        "elevate_constants": MagicMock(get_elevate_home=MagicMock(return_value="/tmp/elevate_test")),
+        "elevate_constants": MagicMock(
+            get_elevate_home=MagicMock(return_value=Path("/tmp/elevate_test"))
+        ),
         "elevate_cli.env_loader": MagicMock(),
         "elevate_cli.banner": MagicMock(),
         "elevate_state": MagicMock(),
@@ -106,6 +109,56 @@ def test_emit_without_payload(capture):
     assert isinstance(params["ts"], float)
 
 
+def test_event_ring_coalesces_thinking_deltas_for_resume(server):
+    ring = []
+
+    server._ring_append(
+        ring, {"type": "thinking.delta", "text": "first "}, "thinking.delta"
+    )
+    server._ring_append(
+        ring, {"type": "thinking.delta", "text": "second"}, "thinking.delta"
+    )
+    server._ring_append(
+        ring, {"type": "message.delta", "payload": {"text": "answer"}}, "message.delta"
+    )
+    server._ring_append(
+        ring, {"type": "thinking.delta", "text": "later"}, "thinking.delta"
+    )
+
+    assert ring == [
+        {"type": "thinking.delta", "text": "first second", "_coalesced": True},
+        {"type": "message.delta", "payload": {"text": "answer"}},
+        {"type": "thinking.delta", "text": "later", "_coalesced": True},
+    ]
+
+
+def test_event_ring_clears_only_terminal_complete(server):
+    server._sessions["live"] = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "transport": None,
+    }
+    try:
+        server._emit("message.start", "live", {"message_id": "m1"})
+        assert [event["type"] for event in server._sessions["live"]["events"]] == [
+            "message.start"
+        ]
+
+        server._emit(
+            "message.complete", "live", {"message_id": "m1", "followup": True}
+        )
+        assert [event["type"] for event in server._sessions["live"]["events"]] == [
+            "message.start",
+            "message.complete",
+        ]
+
+        server._emit("message.complete", "live", {"message_id": "m1"})
+        assert list(server._sessions["live"]["events"]) == []
+    finally:
+        server._sessions.pop("live", None)
+
+
 # ── Blocking prompt round-trip ───────────────────────────────────────
 
 
@@ -161,6 +214,17 @@ def test_sess_found(server):
 # ── session.resume payload ────────────────────────────────────────────
 
 
+def _disable_background_session_build(server, monkeypatch):
+    class _NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server.threading, "Thread", _NoopThread)
+
+
 def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     class _DB:
         def get_session(self, _sid):
@@ -185,7 +249,9 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    _disable_background_session_build(server, monkeypatch)
 
     resp = server.handle_request(
         {
@@ -273,6 +339,314 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
         }
     ]
     assert resp["result"]["messages"] == [{"role": "user", "text": "keep going"}]
+
+
+def test_session_resume_replays_running_subagent_events_from_parent(server, monkeypatch):
+    """A child drill-in opens by child session id, but live progress is relayed
+    through the parent gateway sid. Resume must replay the parent's child-scoped
+    subagent frames and attach to that parent stream for future events."""
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    class _T:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    class _DB:
+        def resolve_session_id(self, value):
+            return value
+
+        def get_session(self, sid):
+            assert sid == "child-1"
+            return {
+                "id": "child-1",
+                "parent_session_id": "parent-1",
+                "ended_at": None,
+            }
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_messages_as_conversation(self, _sid):
+            return [{"role": "user", "content": "child goal"}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    _disable_background_session_build(server, monkeypatch)
+
+    lock = threading.Lock()
+    parent_session = {
+        "agent": object(),
+        "events": [
+            {
+                "type": "subagent.start",
+                "session_id": "parent-gw",
+                "ts": 1.0,
+                "payload": {"child_session_id": "child-1", "goal": "pricing"},
+            },
+            {
+                "type": "subagent.thinking",
+                "session_id": "parent-gw",
+                "ts": 2.0,
+                "payload": {"child_session_id": "child-2", "text": "wrong child"},
+            },
+            {
+                "type": "subagent.thinking",
+                "session_id": "parent-gw",
+                "ts": 3.0,
+                "payload": {"child_session_id": "child-1", "text": "checking comps"},
+            },
+            {
+                "type": "subagent.tool",
+                "session_id": "parent-gw",
+                "ts": 4.0,
+                "payload": {
+                    "child_session_id": "child-1",
+                    "tool_name": "read",
+                    "tool_preview": "opened listing notes",
+                },
+            },
+        ],
+        "events_lock": lock,
+        "events_seq": 4,
+        "history": [],
+        "history_lock": lock,
+        # Async delegations can continue after the parent turn is idle.
+        "running": False,
+        "session_key": "parent-1",
+    }
+    server._sessions["parent-gw"] = parent_session
+
+    transport = _T()
+    token = bind_transport(transport)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r-child",
+                "method": "session.resume",
+                "params": {"session_id": "child-1", "include_messages": False},
+            }
+        )
+    finally:
+        reset_transport(token)
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["persisted_session_id"] == "child-1"
+    assert result["running"] is True
+    assert result["live_subagent"] == {
+        "child_session_id": "child-1",
+        "parent_session_id": "parent-1",
+    }
+    assert [event["type"] for event in result["replay_events"]] == [
+        "subagent.start",
+        "subagent.thinking",
+        "subagent.tool",
+    ]
+    assert {
+        event["payload"]["child_session_id"] for event in result["replay_events"]
+    } == {"child-1"}
+    assert transport in parent_session["transports"]
+
+    server._emit(
+        "subagent.thinking",
+        "parent-gw",
+        {"child_session_id": "child-1", "text": "future frame"},
+    )
+    assert transport.frames[-1]["params"]["payload"]["text"] == "future frame"
+
+
+def test_session_resume_attaches_running_subagent_when_parent_ring_is_empty(server, monkeypatch):
+    """If the parent message.complete already cleared the ring, a running child
+    still needs the drill-in transport attached so future subagent frames land."""
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    class _T:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    class _DB:
+        def resolve_session_id(self, value):
+            return value
+
+        def get_session(self, sid):
+            assert sid == "child-empty"
+            return {
+                "id": "child-empty",
+                "parent_session_id": "parent-1",
+                "ended_at": None,
+            }
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_messages_as_conversation(self, _sid):
+            return [{"role": "user", "content": "child goal"}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    _disable_background_session_build(server, monkeypatch)
+
+    parent_session = {
+        "agent": object(),
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "parent-1",
+    }
+    server._sessions["parent-gw"] = parent_session
+
+    transport = _T()
+    token = bind_transport(transport)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r-child-empty",
+                "method": "session.resume",
+                "params": {"session_id": "child-empty", "include_messages": False},
+            }
+        )
+    finally:
+        reset_transport(token)
+
+    assert "error" not in resp
+    assert resp["result"]["running"] is True
+    assert resp["result"]["live_subagent"] == {
+        "child_session_id": "child-empty",
+        "parent_session_id": "parent-1",
+    }
+    assert resp["result"]["replay_events"] == []
+    assert transport in parent_session["transports"]
+
+    server._emit(
+        "subagent.tool",
+        "parent-gw",
+        {"child_session_id": "child-empty", "tool_name": "search"},
+    )
+    assert transport.frames[-1]["params"]["type"] == "subagent.tool"
+
+
+def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkeypatch):
+    class _T:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    import tools.delegate_tool as delegate_tool
+
+    def fake_message_subagent(text, **kwargs):
+        assert text == "model sees this"
+        assert kwargs["child_session_id"] == "child-1"
+        assert kwargs["source"] == "dashboard_steer"
+        assert kwargs["client_message_id"].startswith("steer.")
+        return {
+            "found": True,
+            "accepted": 1,
+            "persisted": 1,
+            "all_persisted": True,
+            "targets": [
+                {
+                    "subagent_id": "sa-1",
+                    "child_session_id": "child-1",
+                    "task_id": "dt-1",
+                    "parent_session_id": "parent-1",
+                    "goal": "Assess pricing",
+                    "task_index": 3,
+                    "client_message_id": kwargs["client_message_id"],
+                    "persisted": True,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(delegate_tool, "message_subagent", fake_message_subagent)
+    transport = _T()
+    parent_session = {
+        "agent": object(),
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "parent-1",
+        "transports": [transport],
+    }
+    server._sessions["parent-gw"] = parent_session
+
+    resp = server.handle_request(
+        {
+            "id": "sub-msg",
+            "method": "subagent.message",
+            "params": {
+                "child_session_id": "child-1",
+                "display_text": "UI shows this",
+                "session_id": "child-gw",
+                "text": "model sees this",
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["found"] is True
+    assert resp["result"]["accepted"] == 1
+    assert resp["result"]["persisted"] == 1
+    assert resp["result"]["all_persisted"] is True
+    assert resp["result"]["emitted"] == 1
+    assert resp["result"]["client_message_id"].startswith("steer.")
+    assert resp["result"]["client_message_ids"] == [resp["result"]["client_message_id"]]
+    assert [event["type"] for event in parent_session["events"][-2:]] == [
+        "steer.queued",
+        "subagent.message",
+    ]
+    queued_payload = parent_session["events"][-2]["payload"]
+    assert queued_payload["text"] == "UI shows this"
+    assert queued_payload["child_session_id"] == "child-1"
+    assert queued_payload["subagent_id"] == "sa-1"
+    assert queued_payload["task_id"] == "dt-1"
+    assert queued_payload["task_index"] == 3
+    assert queued_payload["client_message_id"] == resp["result"]["client_message_id"]
+    assert queued_payload["persisted"] is True
+    payload = parent_session["events"][-1]["payload"]
+    assert payload["text"] == "UI shows this"
+    assert payload["child_session_id"] == "child-1"
+    assert payload["subagent_id"] == "sa-1"
+    assert payload["task_id"] == "dt-1"
+    assert payload["task_index"] == 3
+    assert payload["client_message_id"] == resp["result"]["client_message_id"]
+    assert payload["persisted"] is True
+    assert transport.frames[-1]["params"]["type"] == "subagent.message"
 
 
 def test_session_resume_multicasts_events_to_all_attached_transports(server, monkeypatch):

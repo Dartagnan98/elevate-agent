@@ -152,7 +152,6 @@ export function SidebarUserPill() {
             </button>
           </div>
 
-          {/* Tools — moved here from the sidebar's Tools section. */}
           <div className="user-menu-section">
             <button
               type="button"

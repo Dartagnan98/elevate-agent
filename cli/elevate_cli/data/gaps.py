@@ -126,13 +126,14 @@ def _no_template_fit_gaps(
               WHERE outb.conversation_id = inb.conversation_id
                 AND outb.kind = 'outbound'
                 AND outb.template_id IS NOT NULL
-                AND outb.ts > inb.ts
-                AND outb.ts <= datetime(inb.ts, ?)
+                AND outb.ts::timestamptz > inb.ts::timestamptz
+                AND outb.ts::timestamptz <= (
+                    inb.ts::timestamptz + (CAST(? AS text) || ' hours')::interval
+                )
           )
         ORDER BY inb.ts DESC
     """
-    inbound_offset = f"+{response_window_hours} hours"
-    rows = conn.execute(sql, (_iso(cutoff), inbound_offset)).fetchall()
+    rows = conn.execute(sql, (_iso(cutoff), response_window_hours)).fetchall()
 
     grouped: dict[tuple[str | None, str | None], list[sqlite3.Row]] = {}
     for r in rows:

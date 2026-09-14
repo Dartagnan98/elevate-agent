@@ -71,13 +71,14 @@ function routeHas(pathname: string, segment: string): boolean {
   return pathname === segment || pathname.startsWith(`${segment}/`);
 }
 
-function flagsForPath(pathname: string): HubRequestFlags {
+export function flagsForPath(pathname: string): HubRequestFlags {
   const includeMemoryGraph = routeHas(pathname, "/memory");
   const includeWorkflowData =
     pathname === "/" ||
     routeHas(pathname, "/today") ||
     routeHas(pathname, "/leads") ||
-    routeHas(pathname, "/admin");
+    routeHas(pathname, "/admin") ||
+    routeHas(pathname, "/social-media");
   const includeSourceInbox =
     pathname === "/" ||
     routeHas(pathname, "/today") ||
@@ -243,7 +244,7 @@ async function loadHubData(flags: HubRequestFlags, force = false): Promise<HubLo
       api.getStatus({ refresh: force }),
       flags.includeWorkflowData ? api.getSessions(36, 0, { includeTotal: false }) : Promise.resolve(null),
       flags.includeWorkflowData ? api.getCronJobs({ compact: true }) : Promise.resolve(null),
-      flags.includeSourceInbox ? api.getSourceInbox(SOURCE_INBOX_REFRESH_LIMIT) : Promise.resolve(null),
+      flags.includeSourceInbox ? api.getSourceInbox(SOURCE_INBOX_REFRESH_LIMIT, { debug: true }) : Promise.resolve(null),
       flags.includeAdminTaskData ? api.getAdminDealTasks({ status: "open", limit: 200 }) : Promise.resolve(null),
       flags.includeAdminTaskData ? api.getAdminActionRuns({ limit: 200 }) : Promise.resolve(null),
     ]);
@@ -446,7 +447,13 @@ export function useHubHeader(
       </span>,
     );
     setEnd(
-      <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={isRefreshing}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="min-h-[40px]"
+        onClick={() => void refresh()}
+        disabled={isRefreshing}
+      >
         <RefreshCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} />
         Refresh
       </Button>,

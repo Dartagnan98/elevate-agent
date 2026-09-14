@@ -152,6 +152,12 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
     : "Initialize this source to create the connector files.";
 }
 
+function connectorRecoveryClass(connector: SourceConnectorStatus): string {
+  return connector.recoverySeverity === "warning"
+    ? "border-warning/40 bg-warning/5 text-foreground"
+    : "border-border bg-muted/20 text-foreground";
+}
+
 const TOOLKIT_PAGE_SIZE = 24;
 
 function toolkitLogo(tk: ComposioToolkit | undefined): string | undefined {
@@ -682,7 +688,7 @@ function ComposioPanel() {
         )}
       {customAuthState && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
           onClick={() => !customAuthState.submitting && setCustomAuthState(null)}
         >
           <div
@@ -782,6 +788,7 @@ function SourceConnectorSettingsPanel() {
   const [loading, setLoading] = useState(true);
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
   const [runResults, setRunResults] = useState<Record<string, { kind: string; message: string }>>({});
+  const [copyStatus, setCopyStatus] = useState<Record<string, { kind: "success" | "error"; message: string }>>({});
   const [composioAccounts, setComposioAccounts] = useState<ComposioConnectedAccount[]>([]);
   const [composioReady, setComposioReady] = useState<boolean>(false);
   const [fbPages, setFbPages] = useState<Array<{
@@ -925,9 +932,20 @@ function SourceConnectorSettingsPanel() {
 
   const copyPromptText = async (connector: SourceConnectorStatus) => {
     try {
-      await navigator.clipboard.writeText(await promptForConnector(connector));
-    } catch {
-      // clipboard not available — silently skip; primary path is run.
+      const prompt = await promptForConnector(connector);
+      await navigator.clipboard.writeText(prompt);
+      setCopyStatus((prev) => ({
+        ...prev,
+        [connector.id]: { kind: "success", message: "Prompt copied." },
+      }));
+    } catch (err) {
+      setCopyStatus((prev) => ({
+        ...prev,
+        [connector.id]: {
+          kind: "error",
+          message: err instanceof Error ? err.message : "Could not copy prompt.",
+        },
+      }));
     }
   };
 
@@ -1013,9 +1031,23 @@ function SourceConnectorSettingsPanel() {
               </div>
               <Badge variant="outline">{connectorRecordTotal(connector)} records</Badge>
             </div>
-            {connector.nextOperatorStep && (
-              <div className="mt-3 text-sm leading-6 text-muted-foreground">
-                {connector.nextOperatorStep}
+            {connector.recoveryAction && connector.recoverySeverity !== "none" && (
+              <div className={`mt-3 rounded-md border px-3 py-2 text-xs leading-5 ${connectorRecoveryClass(connector)}`}>
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div>{connector.recoveryAction}</div>
+                    <div className="mt-1 text-muted-foreground">
+                      Owner: {connector.recoveryOwner || connector.ownerAgent}
+                      {connector.recoveryKind ? ` · ${connector.recoveryKind.replace(/_/g, " ")}` : ""}
+                    </div>
+                    {connector.recoveryError && (
+                      <div className="mt-1 break-words text-warning">
+                        Error: {connector.recoveryError}
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
             {connector.initializeBehavior === "composio_social_setup" && (
@@ -1155,6 +1187,17 @@ function SourceConnectorSettingsPanel() {
                 <Copy className="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
             </div>
+            {copyStatus[connector.id] && (
+              <p
+                className={`mt-2 text-xs ${
+                  copyStatus[connector.id].kind === "error"
+                    ? "text-destructive"
+                    : "text-muted-foreground"
+                }`}
+              >
+                {copyStatus[connector.id].message}
+              </p>
+            )}
           </li>
                 ))}
               </ul>
@@ -1959,12 +2002,12 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Enable curated memory</span>
-          <Switch checked={memoryEnabled} onCheckedChange={(v) => set("memory.memory_enabled", v)} />
+          <Switch checked={memoryEnabled} onCheckedChange={(v) => set("memory.memory_enabled", v)} aria-label="Enable curated memory" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Include user profile</span>
-          <Switch checked={userProfileEnabled} onCheckedChange={(v) => set("memory.user_profile_enabled", v)} />
+          <Switch checked={userProfileEnabled} onCheckedChange={(v) => set("memory.user_profile_enabled", v)} aria-label="Include user profile" />
         </label>
 
         <div className="grid grid-cols-2 gap-3">
@@ -2014,32 +2057,32 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Auto-extract facts from each turn</span>
-          <Switch checked={autoExtract} onCheckedChange={(v) => set("plugins.elevate-memory-store.auto_extract", v)} />
+          <Switch checked={autoExtract} onCheckedChange={(v) => set("plugins.elevate-memory-store.auto_extract", v)} aria-label="Auto-extract facts from each turn" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Turn-by-turn journal</span>
-          <Switch checked={turnJournal} onCheckedChange={(v) => set("plugins.elevate-memory-store.turn_journal_enabled", v)} />
+          <Switch checked={turnJournal} onCheckedChange={(v) => set("plugins.elevate-memory-store.turn_journal_enabled", v)} aria-label="Turn-by-turn journal" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Daily organize (compress + cluster)</span>
-          <Switch checked={dailyOrganize} onCheckedChange={(v) => set("plugins.elevate-memory-store.daily_organize_enabled", v)} />
+          <Switch checked={dailyOrganize} onCheckedChange={(v) => set("plugins.elevate-memory-store.daily_organize_enabled", v)} aria-label="Daily organize memory" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Recent recall (last few turns)</span>
-          <Switch checked={recentRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.recent_recall_enabled", v)} />
+          <Switch checked={recentRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.recent_recall_enabled", v)} aria-label="Recent recall" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Graph recall (concept neighbors)</span>
-          <Switch checked={graphRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.graph_recall_enabled", v)} />
+          <Switch checked={graphRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.graph_recall_enabled", v)} aria-label="Graph recall" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Embedding-based recall</span>
-          <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} />
+          <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} aria-label="Embedding-based recall" />
         </label>
       </div>
     </section>
@@ -2573,7 +2616,7 @@ export default function ConfigPage() {
       {/* Mobile drawer scrim */}
       {mobileNavOpen && (
         <div
-          className="fixed inset-0 z-40 bg-background/80 md:hidden"
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
           onClick={() => setMobileNavOpen(false)}
           aria-hidden="true"
         />

@@ -1307,18 +1307,7 @@ install_node_deps() {
     if [ "$DISTRO" = "termux" ]; then
         log_info "Skipping automatic Node/browser dependency setup on Termux"
         log_info "Browser Use cloud workflows are still available without local browser tooling."
-        log_info "If you want to experiment manually later, run: cd $INSTALL_DIR && npm install"
         return 0
-    fi
-
-    if [ -f "$INSTALL_DIR/package.json" ]; then
-        log_info "Installing optional Node.js dependencies..."
-        cd "$INSTALL_DIR"
-        npm install --silent 2>/dev/null || {
-            log_warn "npm install failed (optional Node tooling may not work)"
-        }
-        log_success "Node.js dependencies installed"
-        log_info "Playwright/Chromium is intentionally not installed by Elevate."
     fi
 
     # Install TUI dependencies
