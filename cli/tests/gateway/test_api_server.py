@@ -5,7 +5,7 @@ Tests cover:
 - Chat Completions endpoint (request parsing, response format)
 - Responses API endpoint (request parsing, response format)
 - previous_response_id chaining (store/retrieve)
-- Auth (valid key, invalid key, no key configured)
+- Auth (configured and generated keys, invalid/missing authorization)
 - /v1/models endpoint
 - /health endpoint
 - System prompt extraction
@@ -225,8 +225,17 @@ class TestAdapterInit:
         adapter = APIServerAdapter(config)
         assert adapter._host == "127.0.0.1"
         assert adapter._port == 8642
-        assert adapter._api_key == ""
+        assert adapter._api_key
         assert adapter.platform == Platform.API_SERVER
+
+    def test_generated_key_is_persisted_and_reused(self):
+        from elevate_constants import get_elevate_home
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        key_path = get_elevate_home() / "api_server_key"
+        assert key_path.read_text().strip() == adapter._api_key
+        assert key_path.stat().st_mode & 0o777 == 0o600
+        assert APIServerAdapter(PlatformConfig(enabled=True))._api_key == adapter._api_key
 
     def test_custom_config_from_extra(self):
         config = PlatformConfig(
@@ -272,11 +281,13 @@ class TestAdapterInit:
 
 
 class TestAuth:
-    def test_no_key_configured_allows_all(self):
+    def test_generated_key_requires_auth(self):
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         mock_request = MagicMock()
         mock_request.headers = {}
+        assert adapter._check_auth(mock_request).status == 401
+        mock_request.headers = {"Authorization": f"Bearer {adapter._api_key}"}
         assert adapter._check_auth(mock_request) is None
 
     def test_valid_key_passes(self):
@@ -351,9 +362,9 @@ def adapter():
     return _make_adapter()
 
 
-@pytest.fixture
-def auth_adapter():
-    return _make_adapter(api_key="sk-secret")
+@pytest.fixture(params=["sk-secret", ""])
+def auth_adapter(request):
+    return _make_adapter(api_key=request.param)
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +466,7 @@ class TestModelsEndpoint:
     @pytest.mark.asyncio
     async def test_models_returns_elevate_agent(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.get("/v1/models")
             assert resp.status == 200
             data = await resp.json()
@@ -470,7 +481,7 @@ class TestModelsEndpoint:
         with patch("gateway.platforms.api_server.APIServerAdapter._resolve_model_name", return_value="lucas"):
             adapter = _make_adapter()
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.get("/v1/models")
             assert resp.status == 200
             data = await resp.json()
@@ -511,7 +522,7 @@ class TestModelsEndpoint:
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.get(
                 "/v1/models",
-                headers={"Authorization": "Bearer sk-secret"},
+                headers={"Authorization": f"Bearer {auth_adapter._api_key}"},
             )
             assert resp.status == 200
 
@@ -525,7 +536,7 @@ class TestChatCompletionsEndpoint:
     @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post(
                 "/v1/chat/completions",
                 data="not json",
@@ -538,7 +549,7 @@ class TestChatCompletionsEndpoint:
     @pytest.mark.asyncio
     async def test_missing_messages_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post("/v1/chat/completions", json={"model": "test"})
             assert resp.status == 400
             data = await resp.json()
@@ -547,7 +558,7 @@ class TestChatCompletionsEndpoint:
     @pytest.mark.asyncio
     async def test_empty_messages_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post("/v1/chat/completions", json={"model": "test", "messages": []})
             assert resp.status == 400
 
@@ -555,7 +566,7 @@ class TestChatCompletionsEndpoint:
     async def test_stream_true_returns_sse(self, adapter):
         """stream=true returns SSE format with the full response."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 # Simulate streaming: invoke stream_delta_callback with tokens
                 cb = kwargs.get("stream_delta_callback")
@@ -591,7 +602,7 @@ class TestChatCompletionsEndpoint:
         import gateway.platforms.api_server as api_server_mod
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 cb = kwargs.get("stream_delta_callback")
                 if cb:
@@ -634,7 +645,7 @@ class TestChatCompletionsEndpoint:
         import asyncio
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 cb = kwargs.get("stream_delta_callback")
                 if cb:
@@ -676,7 +687,7 @@ class TestChatCompletionsEndpoint:
         import asyncio
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 cb = kwargs.get("stream_delta_callback")
                 tp_cb = kwargs.get("tool_progress_callback")
@@ -732,7 +743,7 @@ class TestChatCompletionsEndpoint:
         import asyncio
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 cb = kwargs.get("stream_delta_callback")
                 tp_cb = kwargs.get("tool_progress_callback")
@@ -768,7 +779,7 @@ class TestChatCompletionsEndpoint:
     @pytest.mark.asyncio
     async def test_no_user_message_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post(
                 "/v1/chat/completions",
                 json={
@@ -788,7 +799,7 @@ class TestChatCompletionsEndpoint:
         }
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -820,7 +831,7 @@ class TestChatCompletionsEndpoint:
         }
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -846,7 +857,7 @@ class TestChatCompletionsEndpoint:
         mock_result = {"final_response": "3", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -872,7 +883,7 @@ class TestChatCompletionsEndpoint:
     async def test_agent_error_returns_500(self, adapter):
         """Agent exception returns 500."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.side_effect = RuntimeError("Provider failed")
                 resp = await cli.post(
@@ -894,7 +905,7 @@ class TestChatCompletionsEndpoint:
 
         app = _create_app(adapter)
         session_ids = []
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             # Turn 1: single user message
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
@@ -933,7 +944,7 @@ class TestChatCompletionsEndpoint:
 
         app = _create_app(adapter)
         session_ids = []
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             for first_msg in ["Hello", "Goodbye"]:
                 with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                     mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
@@ -989,7 +1000,7 @@ class TestResponsesEndpoint:
     @pytest.mark.asyncio
     async def test_missing_input_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post("/v1/responses", json={"model": "test"})
             assert resp.status == 400
             data = await resp.json()
@@ -998,7 +1009,7 @@ class TestResponsesEndpoint:
     @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post(
                 "/v1/responses",
                 data="not json",
@@ -1016,7 +1027,7 @@ class TestResponsesEndpoint:
         }
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1043,7 +1054,7 @@ class TestResponsesEndpoint:
         mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1069,7 +1080,7 @@ class TestResponsesEndpoint:
         mock_result = {"final_response": "Ahoy!", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1095,7 +1106,7 @@ class TestResponsesEndpoint:
         }
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             # First request
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result_1, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
@@ -1143,7 +1154,7 @@ class TestResponsesEndpoint:
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             # First request — establishes a session
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, usage)
@@ -1176,7 +1187,7 @@ class TestResponsesEndpoint:
     @pytest.mark.asyncio
     async def test_invalid_previous_response_id_returns_404(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post(
                 "/v1/responses",
                 json={
@@ -1193,7 +1204,7 @@ class TestResponsesEndpoint:
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1216,7 +1227,7 @@ class TestResponsesEndpoint:
         mock_result = {"final_response": "Ahoy!", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             # First request with instructions
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
@@ -1251,7 +1262,7 @@ class TestResponsesEndpoint:
     @pytest.mark.asyncio
     async def test_agent_error_returns_500(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.side_effect = RuntimeError("Boom")
                 resp = await cli.post(
@@ -1264,7 +1275,7 @@ class TestResponsesEndpoint:
     @pytest.mark.asyncio
     async def test_invalid_input_type_returns_400(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post(
                 "/v1/responses",
                 json={"model": "elevate", "input": 42},
@@ -1276,7 +1287,7 @@ class TestResponsesStreaming:
     @pytest.mark.asyncio
     async def test_stream_true_returns_responses_sse(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 cb = kwargs.get("stream_delta_callback")
                 if cb:
@@ -1307,7 +1318,7 @@ class TestResponsesStreaming:
     @pytest.mark.asyncio
     async def test_stream_emits_function_call_and_output_items(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 start_cb = kwargs.get("tool_start_callback")
                 complete_cb = kwargs.get("tool_complete_callback")
@@ -1364,7 +1375,7 @@ class TestResponsesStreaming:
     @pytest.mark.asyncio
     async def test_streamed_response_is_stored_for_get(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             async def _mock_run_agent(**kwargs):
                 cb = kwargs.get("stream_delta_callback")
                 if cb:
@@ -1510,7 +1521,7 @@ class TestMultipleSystemMessages:
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1559,7 +1570,7 @@ class TestGetResponse:
         mock_result = {"final_response": "Hello!", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             # Create a response first
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
@@ -1583,7 +1594,7 @@ class TestGetResponse:
     @pytest.mark.asyncio
     async def test_get_not_found(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.get("/v1/responses/resp_nonexistent")
             assert resp.status == 404
 
@@ -1607,7 +1618,7 @@ class TestDeleteResponse:
         mock_result = {"final_response": "Hello!", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1633,7 +1644,7 @@ class TestDeleteResponse:
     @pytest.mark.asyncio
     async def test_delete_not_found(self, adapter):
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.delete("/v1/responses/resp_nonexistent")
             assert resp.status == 404
 
@@ -1684,7 +1695,7 @@ class TestToolCallsInOutput:
         }
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1714,7 +1725,7 @@ class TestToolCallsInOutput:
         mock_result = {"final_response": "Hello!", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1741,7 +1752,7 @@ class TestUsageCounting:
         usage = {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, usage)
                 resp = await cli.post(
@@ -1762,7 +1773,7 @@ class TestUsageCounting:
         usage = {"input_tokens": 200, "output_tokens": 80, "total_tokens": 280}
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, usage)
                 resp = await cli.post(
@@ -1800,7 +1811,7 @@ class TestTruncation:
         })
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1831,7 +1842,7 @@ class TestTruncation:
         })
 
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
@@ -1891,7 +1902,7 @@ class TestCORS:
     async def test_browser_origin_rejected_by_default(self, adapter):
         """Browser-originated requests are rejected unless explicitly allowed."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.get("/health", headers={"Origin": "http://evil.example"})
             assert resp.status == 403
             assert resp.headers.get("Access-Control-Allow-Origin") is None
@@ -1992,7 +2003,7 @@ class TestConversationParameter:
     async def test_conversation_creates_new(self, adapter):
         """First request with a conversation name works (new conversation)."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (
                     {"final_response": "Hello!", "messages": [], "api_calls": 1},
@@ -2012,7 +2023,7 @@ class TestConversationParameter:
     async def test_conversation_chains_automatically(self, adapter):
         """Second request with same conversation name chains to first."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (
                     {"final_response": "First response", "messages": [], "api_calls": 1},
@@ -2050,7 +2061,7 @@ class TestConversationParameter:
     async def test_conversation_and_previous_response_id_conflict(self, adapter):
         """Cannot use both conversation and previous_response_id."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             resp = await cli.post("/v1/responses", json={
                 "input": "hi",
                 "conversation": "my-chat",
@@ -2064,7 +2075,7 @@ class TestConversationParameter:
     async def test_separate_conversations_are_isolated(self, adapter):
         """Different conversation names have independent histories."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (
                     {"final_response": "Response A", "messages": [], "api_calls": 1},
@@ -2086,7 +2097,7 @@ class TestConversationParameter:
     async def test_conversation_store_false_no_mapping(self, adapter):
         """If store=false, conversation mapping is not updated."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (
                     {"final_response": "Ephemeral", "messages": [], "api_calls": 1},
@@ -2118,7 +2129,7 @@ class TestSessionIdHeader:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    headers={"Authorization": "Bearer sk-secret"},
+                    headers={"Authorization": f"Bearer {auth_adapter._api_key}"},
                     json={"model": "elevate", "messages": [{"role": "user", "content": "Hi"}]},
                 )
             assert resp.status == 200
@@ -2141,7 +2152,7 @@ class TestSessionIdHeader:
 
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    headers={"X-Elevate-Session-Id": "my-session-123", "Authorization": "Bearer sk-secret"},
+                    headers={"X-Elevate-Session-Id": "my-session-123", "Authorization": f"Bearer {auth_adapter._api_key}"},
                     json={"model": "elevate", "messages": [{"role": "user", "content": "Continue"}]},
                 )
 
@@ -2168,7 +2179,7 @@ class TestSessionIdHeader:
 
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    headers={"X-Elevate-Session-Id": "existing-session", "Authorization": "Bearer sk-secret"},
+                    headers={"X-Elevate-Session-Id": "existing-session", "Authorization": f"Bearer {auth_adapter._api_key}"},
                     # Request body has different history — should be ignored
                     json={
                         "model": "elevate",
@@ -2200,7 +2211,7 @@ class TestSessionIdHeader:
 
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    headers={"X-Elevate-Session-Id": "some-session", "Authorization": "Bearer sk-secret"},
+                    headers={"X-Elevate-Session-Id": "some-session", "Authorization": f"Bearer {auth_adapter._api_key}"},
                     json={"model": "elevate", "messages": [{"role": "user", "content": "Hi"}]},
                 )
 

@@ -23,8 +23,8 @@ def test_deal_card_gate_reports_progress_and_gate():
         row = get_deal(conn, deal["id"])
         card = deal_card_gate(conn, row)
     assert card["totalChecklist"] >= 1
-    assert card["completedChecklist"] == 0
-    assert card["progress"] == f"0/{card['totalChecklist']}"
+    assert card["completedChecklist"] == 1  # Creating the card completes dashboard setup.
+    assert card["progress"] == f"1/{card['totalChecklist']}"
     # Open cells on a fresh deal -> cannot advance, work remains.
     assert card["canAdvance"] is False
     assert card["missingCount"] >= 1

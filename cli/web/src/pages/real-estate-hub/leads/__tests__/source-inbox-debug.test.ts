@@ -66,8 +66,8 @@ describe("source inbox profile status labels", () => {
   it("maps profile menu labels to persisted source inbox statuses", () => {
     expect(sourceInboxProfileStatusForLabel("No status")).toBeNull();
     expect(sourceInboxProfileStatusForLabel("New Lead")).toBe("new_lead");
-    expect(sourceInboxProfileStatusForLabel("Follow up")).toBe("follow_up");
-    expect(sourceInboxProfileStatusForLabel("Closed Seller")).toBe("closed_seller");
+    expect(sourceInboxProfileStatusForLabel("Follow up")).toBe("attempted");
+    expect(sourceInboxProfileStatusForLabel("Closed Seller")).toBe("closed");
     expect(sourceInboxProfileStatusForLabel("not a menu item")).toBeUndefined();
   });
 });

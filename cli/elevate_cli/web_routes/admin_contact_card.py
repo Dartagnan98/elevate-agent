@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from elevate_cli.data.contacts import update_contact_fields
+
 
 class _TagsBody(BaseModel):
     tags: List[str] = []
@@ -223,10 +225,7 @@ def create_admin_contact_card_router(
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                conn.execute(
-                    "UPDATE contacts SET tags_json=?, updated_at=? WHERE id=?",
-                    (tags_json, now_iso(), contact_id),
-                )
+                update_contact_fields(conn, contact_id, {"tags_json": tags_json})
                 lock_contact_fields(conn, contact_id, ["tags_json"], actor=web_actor)
                 return get_contact(conn, contact_id)
         except HTTPException:
@@ -249,10 +248,7 @@ def create_admin_contact_card_router(
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                conn.execute(
-                    "UPDATE contacts SET segments_json=?, updated_at=? WHERE id=?",
-                    (segments_json, now_iso(), contact_id),
-                )
+                update_contact_fields(conn, contact_id, {"segments_json": segments_json})
                 lock_contact_fields(conn, contact_id, ["segments_json"], actor=web_actor)
                 return get_contact(conn, contact_id)
         except HTTPException:
@@ -301,11 +297,11 @@ def create_admin_contact_card_router(
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                conn.execute(
-                    "UPDATE contacts SET cannot_call=?, cannot_text=?, cannot_email=?, "
-                    "updated_at=? WHERE id=?",
-                    (cannot_call, cannot_text, cannot_email, now_iso(), contact_id),
-                )
+                update_contact_fields(conn, contact_id, {
+                    "cannot_call": cannot_call,
+                    "cannot_text": cannot_text,
+                    "cannot_email": cannot_email,
+                })
                 # Consent is a compliance decision she made here. The CRM must
                 # never be able to re-open a channel she closed.
                 lock_contact_fields(
@@ -583,10 +579,7 @@ def create_admin_contact_card_router(
                             else:  # add
                                 merged = set(existing) | set(values)
                             new_json = json.dumps(sorted(t for t in merged if t))
-                            conn.execute(
-                                f"UPDATE contacts SET {column}=?, updated_at=? WHERE id=?",
-                                (new_json, now_iso(), cid),
-                            )
+                            update_contact_fields(conn, cid, {column: new_json})
                         updated += 1
                     except Exception as exc:  # per-contact guard, never abort the batch
                         _log.warning("bulk update failed for contact %s: %s", cid, exc)
@@ -605,29 +598,16 @@ def create_admin_contact_card_router(
             from elevate_cli.data._util import now_iso
 
             provided = body.model_dump(exclude_unset=True)
-            sets: List[str] = []
-            params: List[Any] = []
-            touched: List[str] = []
-            for key, column in _EDIT_COLUMNS.items():
-                if key in provided:
-                    sets.append(f"{column}=?")
-                    params.append(provided[key])
-                    touched.append(column)
+            fields = {column: provided[key] for key, column in _EDIT_COLUMNS.items() if key in provided}
             with connect() as conn:
                 if get_contact(conn, contact_id) is None:
                     raise HTTPException(
                         status_code=404, detail=f"contact {contact_id!r} not found"
                     )
-                if sets:
-                    sets.append("updated_at=?")
-                    params.append(now_iso())
-                    params.append(contact_id)
-                    conn.execute(
-                        f"UPDATE contacts SET {', '.join(sets)} WHERE id=?",
-                        tuple(params),
-                    )
+                if fields:
+                    update_contact_fields(conn, contact_id, fields)
                     # Hand-edited here => the CRM sync must stop overwriting it.
-                    lock_contact_fields(conn, contact_id, touched, actor=web_actor)
+                    lock_contact_fields(conn, contact_id, list(fields), actor=web_actor)
                 contact = get_contact(conn, contact_id)
                 contact["top25"] = _is_top25(conn, contact_id)
                 contact["temperature"] = _get_temperature(conn, contact_id)

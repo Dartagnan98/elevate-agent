@@ -262,10 +262,19 @@ class VercelSandboxEnvironment(BaseEnvironment):
         self._sync_manager: FileSyncManager | None = None
         self._create_params = self._build_create_params(cpu=cpu, memory=memory, disk=disk)
 
-        self._sandbox = self._create_sandbox()
-        self._configure_attached_sandbox(requested_cwd=requested_cwd)
-        self._sync_manager.sync(force=True)
-        self.init_session()
+        try:
+            self._sandbox = self._create_sandbox()
+            self._configure_attached_sandbox(requested_cwd=requested_cwd)
+            self._sync_manager.sync(force=True)
+            self.init_session()
+        except BaseException:
+            # A failed startup must release its sandbox immediately. Do not
+            # snapshot an incomplete environment from a later __del__ call.
+            sandbox, self._sandbox = self._sandbox, None
+            self._sync_manager = None
+            self._stop_sandbox(sandbox)
+            self._close_sandbox_client(sandbox)
+            raise
 
     def _build_create_params(self, *, cpu: float, memory: int, disk: int) -> _SandboxCreateParams:
         if disk not in {0, _DEFAULT_CONTAINER_DISK_MB}:

@@ -200,10 +200,8 @@ class TestCmdUpdateBranchFallback:
             if call.args and call.args[0][0] == "/usr/bin/npm"
         ]
 
-        # cmd_update runs npm commands in three locations:
-        #   1. repo root  — slash-command / TUI bridge deps
-        #   2. ui-tui/    — Ink TUI deps
-        #   3. web/       — install + "npm run build" for the web frontend
+        # The Ink TUI and web frontend own their package manifests;
+        # the repository root no longer has a package.json.
         full_flags = [
             "/usr/bin/npm",
             "install",
@@ -213,7 +211,6 @@ class TestCmdUpdateBranchFallback:
             "--progress=false",
         ]
         assert npm_calls == [
-            (full_flags, PROJECT_ROOT),
             (full_flags, PROJECT_ROOT / "ui-tui"),
             (["/usr/bin/npm", "install", "--silent"], PROJECT_ROOT / "web"),
             (["/usr/bin/npm", "run", "build"], PROJECT_ROOT / "web"),

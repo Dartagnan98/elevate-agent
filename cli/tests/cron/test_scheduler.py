@@ -1995,7 +1995,7 @@ class TestRunJobSkillBacked:
         assert "Instructions for maps." in prompt_arg
         assert "Combine the results." in prompt_arg
 
-    def test_build_job_prompt_inherits_agent_and_job_skills(self):
+    def test_build_job_prompt_loads_job_skills_and_indexes_agent_skills(self):
         calls: list[str] = []
 
         def _skill_view(name: str) -> str:
@@ -2024,11 +2024,10 @@ class TestRunJobSkillBacked:
         assert "AGENT HUB CONTEXT" in result
         assert "You are running as agent: Admin · Transaction Coordinator (admin)." in result
         assert "outside this agent's specialization" in result
-        assert "Instructions for tasks." in result
-        assert "Instructions for nano-pdf." in result
-        assert "Instructions for real-estate-admin/admin-agent." in result
+        assert "ADDITIONAL SKILLS AVAILABLE ON DEMAND" in result
+        assert "admin-agent" in result
         assert "Instructions for heartbeat-specific." in result
-        assert calls.index("tasks") < calls.index("real-estate-admin/admin-agent") < calls.index("heartbeat-specific")
+        assert calls == ["heartbeat-specific"]
 
 
 class TestSilentDelivery:

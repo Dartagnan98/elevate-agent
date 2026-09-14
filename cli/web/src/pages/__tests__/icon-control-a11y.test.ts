@@ -29,10 +29,13 @@ function relative(file: string): string {
   return path.relative(srcRoot, file);
 }
 
-function hexVar(source: string, name: string): string {
-  const match = source.match(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6})`));
-  expect(match).not.toBeNull();
-  return match![1];
+function hexVar(source: string, name: string, inherited = "", seen = new Set<string>()): string {
+  if (seen.has(name)) throw new Error(`Circular color alias: ${name}`);
+  seen.add(name);
+  const pattern = new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6}|var\\((--[\\w-]+)\\))`);
+  const match = source.match(pattern) ?? inherited.match(pattern);
+  expect(match, `Missing color token ${name}`).not.toBeNull();
+  return match![2] ? hexVar(source, match![2], inherited, seen) : match![1];
 }
 
 function contrastRatio(foreground: string, background: string): number {
@@ -248,10 +251,14 @@ describe("icon-only control accessibility", () => {
       "pages/real-estate-hub/social/social.css",
     ];
 
+    const designSystem = read("elevate-design-system.css");
+    const darkTokens = designSystem.match(/html\[data-app-theme="dark"\]\s*\{([^}]+)\}/)?.[1];
+    expect(darkTokens).toBeTruthy();
+    const inherited = darkTokens + read("index.css");
     for (const file of tokenFiles) {
       const source = read(file);
       for (const token of ["--fg-muted", "--fg-faint", "--fg-dim"]) {
-        expect(contrastRatio(hexVar(source, token), "#202020"), `${file} ${token}`).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(hexVar(source, token, inherited), "#202020"), `${file} ${token}`).toBeGreaterThanOrEqual(4.5);
       }
     }
   });

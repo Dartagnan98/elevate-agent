@@ -1,3 +1,4 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useDeskResource } from "../use-desk-resource";
@@ -24,6 +25,7 @@ const individualReview = (item: AItem) => !!(item.humanPrompt?.documentReview ||
  *  /api/admin/action-runs/{id}/approve handler; never a new approval path.
  *  Stays neutral with a blue count pill (sign-off pressure), never red. */
 export default function ApprovalsQueue({ onOpenDeal, refreshKey, onChanged }: { onOpenDeal: (dealId: string) => void; refreshKey?: unknown; onChanged?: () => void | Promise<void> }) {
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
   const { data, loading, error, load } = useDeskResource<AResp>("/api/admin/approvals-queue", refreshKey);
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState<Set<string>>(new Set());
@@ -53,7 +55,7 @@ export default function ApprovalsQueue({ onOpenDeal, refreshKey, onChanged }: { 
     const msg = outbound.length
       ? `Approve ${ids.length} item${ids.length > 1 ? "s" : ""}? ${outbound.length} of these will SEND to a client. Continue?`
       : `Approve ${ids.length} item${ids.length > 1 ? "s" : ""}?`;
-    if (!window.confirm(msg)) return;
+    if (!(await confirmAction(msg))) return;
     setBusy(true); setErr(null);
     let failed = 0;
     for (const id of ids) {
@@ -111,7 +113,7 @@ export default function ApprovalsQueue({ onOpenDeal, refreshKey, onChanged }: { 
     </div>
   );
 
-  return (
+  return <>{confirmationDialog}{(
     <DeskBar
       tone="info"
       leftIcon={<ListChecks />}
@@ -164,5 +166,5 @@ export default function ApprovalsQueue({ onOpenDeal, refreshKey, onChanged }: { 
         </>
       )}
     </DeskBar>
-  );
+  )}</>;
 }

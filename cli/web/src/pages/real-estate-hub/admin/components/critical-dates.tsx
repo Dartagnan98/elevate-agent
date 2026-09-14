@@ -1,3 +1,4 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 import { useCallback, useEffect, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { Clock, AlertTriangle } from "../icons";
@@ -37,6 +38,7 @@ function fmtDate(iso: string): string {
 
 /** Critical dates — collapsible deadline bar between the KPI block and board. */
 export default function CriticalDates({ onOpenDeal, refreshKey, onChanged }: { onOpenDeal: (dealId: string) => void; refreshKey?: unknown; onChanged?: () => void | Promise<void> }) {
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
   const { data, loading, error, load } = useDeskResource<CDResp>("/api/admin/critical-dates", refreshKey);
   const [actionError, setActionError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -73,7 +75,7 @@ export default function CriticalDates({ onOpenDeal, refreshKey, onChanged }: { o
       `This marks ${addrs.length} deal${addrs.length > 1 ? "s" : ""} CLOSED and clears all their dates:\n` +
       addrs.map((a) => `  • ${a}`).join("\n") +
       `\n\nThey come off the active board. Continue?`;
-    if (!window.confirm(msg)) return;
+    if (!(await confirmAction(msg))) return;
     setBusy(true);
     setActionError(null);
     try {
@@ -91,7 +93,7 @@ export default function CriticalDates({ onOpenDeal, refreshKey, onChanged }: { o
     }
   }, [items, busy, loading, error, load, onChanged]);
 
-  return (
+  return <>{confirmationDialog}{(
     <DeskBar
       tone={alert || error ? "alert" : "neutral"}
       leftIcon={alert ? <AlertTriangle /> : <Clock />}
@@ -141,5 +143,5 @@ export default function CriticalDates({ onOpenDeal, refreshKey, onChanged }: { o
         })
       )}
     </DeskBar>
-  );
+  )}</>;
 }

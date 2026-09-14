@@ -91,6 +91,7 @@ class TestPreToolCheck:
         # Create a minimal mock agent with _interrupt_requested = True
         agent = MagicMock()
         agent._interrupt_requested = True
+        agent.context_compressor.context_length = 200_000
         agent.log_prefix = ""
         agent._persist_session = MagicMock()
 

@@ -871,6 +871,7 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
 
 
 def test_prompt_submit_forwards_persist_user_message(monkeypatch):
+    monkeypatch.setattr("elevate_cli.agent_hub.agent_recent_activity_digest", lambda *a, **k: "")
     captured = {}
 
     class _Agent:

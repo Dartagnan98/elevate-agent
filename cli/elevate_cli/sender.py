@@ -877,10 +877,8 @@ def _log_outbound_to_crm(row: dict[str, Any], pmid: str, channel: str) -> None:
                 daily_cap=False,
             )
             now = _now()
-            conn.execute(
-                "UPDATE contacts SET last_activity_at=?, updated_at=? WHERE id=?",
-                (now, now, str(contact_id)),
-            )
+            from elevate_cli.data.contacts import touch_last_activity
+            touch_last_activity(conn, str(contact_id), now)
             conn.commit()
     except Exception:
         _log.exception("sender: outbound CRM sync failed for contact %s", contact_id)

@@ -77,7 +77,9 @@ def test_expected_tables_exist_after_init():
     assert expected.issubset(names), f"missing: {expected - names}"
 
 
-def test_second_connect_is_noop():
+def test_second_connect_is_noop(monkeypatch):
+    # This test reopens the same database, even in ephemeral test runs.
+    monkeypatch.setenv("ELEVATE_PG_CLEANUP", "stop")
     with connect() as conn:
         conn.execute(
             "INSERT INTO contacts(id, type, stage, created_at, updated_at) "
@@ -92,7 +94,9 @@ def test_second_connect_is_noop():
         assert c == 1, "second open dropped data"
 
 
-def test_drift_detection_raises():
+def test_drift_detection_raises(monkeypatch):
+    # Preserve the corrupted ledger across the deliberate server restart.
+    monkeypatch.setenv("ELEVATE_PG_CLEANUP", "stop")
     with connect() as conn:
         conn.execute(
             "UPDATE _schema_migrations SET sha256='deadbeef' WHERE version='0001'"

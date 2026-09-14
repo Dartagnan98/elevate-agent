@@ -755,7 +755,13 @@ class MemoryStore:
                 returned = cur.fetchone()
                 self._conn.commit()
                 fact_id = int(returned["fact_id"])
-            except psycopg.errors.UniqueViolation:
+            except (psycopg.errors.UniqueViolation, sqlite3.IntegrityError) as exc:
+                # The operational-store shim wraps psycopg integrity errors.
+                # Only a uniqueness violation can be handled as a duplicate.
+                if isinstance(exc, sqlite3.IntegrityError) and not isinstance(
+                    exc.__cause__, psycopg.errors.UniqueViolation
+                ):
+                    raise
                 # Duplicate content — return existing id
                 self._conn.rollback()
                 row = self._conn.execute(
@@ -2787,7 +2793,7 @@ class MemoryStore:
                     "first_created_at": row["first_created_at"],
                     "latest_created_at": row["latest_created_at"],
                 }
-                for row in session_rows
+                for row in map(self._row_to_dict, session_rows)
             ]
             unique_sessions = {entry["session_id"] for entry in sessions}
             return {
@@ -2795,7 +2801,7 @@ class MemoryStore:
                 "pending": counts.get("pending", 0),
                 "processed": counts.get("processed", 0),
                 "failed": counts.get("failed", 0),
-                "latest_created_at": latest["latest"] if latest else None,
+                "latest_created_at": self._row_to_dict(latest)["latest"] if latest else None,
                 "active_session_count": len(unique_sessions),
                 "session_segment_count": len(sessions),
                 "sessions": sessions,
@@ -5002,8 +5008,11 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        """Convert a sqlite3.Row to a plain dict."""
-        return dict(row)
+        """Return JSON-ready values for SQLite rows and Postgres timestamps."""
+        return {
+            key: value.isoformat(sep=" ") if isinstance(value, datetime) else value
+            for key, value in dict(row).items()
+        }
 
     @staticmethod
     def _trim_journal_text(text: str, max_chars: int) -> str:

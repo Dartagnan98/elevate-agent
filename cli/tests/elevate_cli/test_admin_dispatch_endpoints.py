@@ -371,7 +371,7 @@ def test_stale_running_action_runs_fail_with_visible_error():
             """,
             (stale_at, stale_at, run_id),
         )
-        recovered = mark_stale_action_runs(conn, max_running_minutes=120, actor="test-worker")
+        recovered = mark_stale_action_runs(conn, max_running_minutes=120, actor="test-worker", requeue=False)
 
     assert len(recovered) == 1
     assert recovered[0]["status"] == "failed"
@@ -535,11 +535,11 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     buyer_cps = created_names["Buyer Offer Prep: Prepare CPS draft"]
     assert buyer_cps["skill"] == "real-estate-admin/webforms"
     assert buyer_cps["side"] == "buyer"
-    assert buyer_cps["toStage"] == 0
+    assert buyer_cps["toStage"] == 1
     assert buyer_cps["approvalRequired"] is True
     assert buyer_cps["skillArgs"] == {"mode": "draft", "sendPolicy": "draft_only"}
-    # Buyer pipeline is wired across all four buyer stages.
-    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {0, 1, 2, 3}
+    # Buyer actions start at Offer Prep and cover Accepted, Conditions, and Subjects Off.
+    assert {item["toStage"] for item in body["created"] if item["side"] == "buyer"} == {1, 2, 3, 4}
     assert created_names["Buyer Accepted: Review offer package"]["skill"] == "real-estate-admin/offer-review"
     assert created_names["Buyer Subjects Off: Run closing admin"]["skill"] == "real-estate-admin/closing-admin"
     assert "gmail-doc-router" not in created_skills
@@ -605,7 +605,7 @@ def test_seeded_defaults_launch_matrix_and_buyer_stages():
 
     with connect() as conn:
         buyer = create_deal(conn, title="Buyer deal", side="buyer", actor="human:test", current_stage=0)
-        move_deal_stage(conn, buyer["id"], to_stage=1, actor="human:test", force=True)
+        move_deal_stage(conn, buyer["id"], to_stage=2, actor="human:test", force=True)
         buyer_runs = list_action_runs(conn, deal_id=buyer["id"])
     assert any(run["skill"] == "real-estate-admin/offer-review" for run in buyer_runs)
 
@@ -613,7 +613,7 @@ def test_seeded_defaults_launch_matrix_and_buyer_stages():
 def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
     # A skill invoked in a live session finalizes the deal through the admin_deal
     # tool, mirroring the background run-result callback: the kanban card syncs
-    # (fields + checklist + artifact) and the stage advances.
+    # (fields + checklist + artifact); moving the stage remains explicit.
     import json
 
     monkeypatch.setattr("elevate_cli.access.is_entitlement_active", lambda *a, **k: True)
@@ -647,8 +647,9 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
         "artifacts": [{"kind": "cma_report", "file_path": "/tmp/cma.pdf", "summary": "CMA"}],
     }))
     assert done["completedRun"]
-    # The blocking run cleared and the card advanced CMA (1) -> Listing Intake (2).
-    assert done["gate"]["stage"] == 2
+    # Completion clears the gate; the agent must not move the card.
+    assert done["gate"]["stage"] == 1
+    assert done["gate"]["canAdvance"] is True
 
     with connect() as conn:
         runs = list_action_runs(conn, deal_id=did)

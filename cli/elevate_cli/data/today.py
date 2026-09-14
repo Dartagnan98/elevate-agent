@@ -114,13 +114,12 @@ def _tone_for_response(minutes: int | None) -> str:
     return "good"
 
 
-def _waiting_threads_count(conn: sqlite3.Connection) -> int:
+def _waiting_threads_count(conn: sqlite3.Connection, *, now: datetime) -> int:
     # Scoped to the last 7 days: the unbounded count read 5,305, which is not a
     # number anyone can act on. Cutoff is computed here and bound as a parameter
     # because this runs on Postgres in production (SQLite's datetime('now', ...)
     # does not exist there and 500s the whole Today page).
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-    cutoff = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
+    cutoff = (now - timedelta(days=7)).isoformat()
     row = conn.execute(
         """
         SELECT COUNT(*) AS c
@@ -257,7 +256,7 @@ def build_today_activity(
         if bucket:
             bucket["dealsAdvanced"] += 1
 
-    waiting_threads = _waiting_threads_count(conn)
+    waiting_threads = _waiting_threads_count(conn, now=now)
     median_response_today = (
         int(round(median(response_samples_today))) if response_samples_today else None
     )

@@ -204,14 +204,14 @@ def update_source_thread_state(
             "archived" if normalized == "archive" else "done"
         )
         with connect() as conn:
-            conn.execute(
-                """
-                UPDATE conversations
-                SET status = ?, updated_at = ?
-                WHERE source_id = ? AND thread_key = ?
-                """,
-                (db_status, source_connectors._now(), source_id, db_thread_id),
-            )
+            from elevate_cli.data.conversations import update_conversation_status
+            rows = conn.execute(
+                "SELECT id FROM conversations WHERE source_id=? AND thread_key=?",
+                (source_id, db_thread_id),
+            ).fetchall()
+            for row in rows:
+                update_conversation_status(conn, row["id"], db_status)
+
     except Exception:
         # Keep the legacy UI-state write available for rows that have not
         # been merged into operational DB yet. DB-primary routes will still

@@ -1060,3 +1060,24 @@ def set_pipeline_status(
         payload={"pipelineStatus": norm, "setBy": set_by},
     )
     return get_contact(conn, contact_id) or contact
+
+
+_CONTACT_EDIT_COLUMNS = frozenset({
+    "display_name", "primary_email", "primary_phone", "buying_time_frame",
+    "pre_qual_status", "address", "birthday", "tags_json", "segments_json",
+    "cannot_call", "cannot_text", "cannot_email",
+})
+
+
+def update_contact_fields(conn, contact_id: str, fields: dict) -> None:
+    """Update editable card fields within the caller's transaction."""
+    unknown = fields.keys() - _CONTACT_EDIT_COLUMNS
+    if unknown:
+        raise ValueError(f"Unsupported contact fields: {sorted(unknown)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{column}=?" for column in fields)
+    conn.execute(
+        f"UPDATE contacts SET {assignments}, updated_at=? WHERE id=?",
+        (*fields.values(), now_iso(), contact_id),
+    )

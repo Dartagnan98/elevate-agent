@@ -79,7 +79,7 @@ def register_agent_config_routes(
             raise HTTPException(status_code=500, detail=f"Agent update failed: {exc}")
 
     @router.delete("/api/agent-hub/agents/{agent_id}/install-artifacts")
-    async def cleanup_agent_install_artifacts(
+    def cleanup_agent_install_artifacts(
         agent_id: str,
         delete_agent: bool = True,
         force: bool = False,

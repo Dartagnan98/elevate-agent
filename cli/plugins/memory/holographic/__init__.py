@@ -24,6 +24,8 @@ Config in $ELEVATE_HOME/config.yaml (profile-scoped):
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
 import logging
 import re
 import threading
@@ -245,6 +247,20 @@ def _parse_int(value: object, default: int, *, minimum: int = 0) -> int:
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
+
+def _tool_result_json(value):
+    """Serialize Postgres values without hiding unsupported result types."""
+    def encode(item):
+        if isinstance(item, datetime):
+            return item.isoformat(sep=" ")
+        if isinstance(item, date):
+            return item.isoformat()
+        if isinstance(item, Decimal):
+            return float(item)
+        raise TypeError(f"Object of type {type(item).__name__} is not JSON serializable")
+
+    return json.dumps(value, default=encode)
+
 
 class HolographicMemoryProvider(MemoryProvider):
     """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
@@ -733,7 +749,7 @@ class HolographicMemoryProvider(MemoryProvider):
             retriever = self._retriever
 
             def dump(payload: object) -> str:
-                return json.dumps(payload, default=str)
+                return _tool_result_json(payload)
 
             if action == "add":
                 # Tool adds are explicit saves: the durability gate downgrades
@@ -772,7 +788,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     payload["warning"] = result["warning"]
                 if result.get("merged_with_similarity") is not None:
                     payload["merged_with_similarity"] = result["merged_with_similarity"]
-                return json.dumps(payload)
+                return _tool_result_json(payload)
 
             elif action == "search":
                 results = retriever.search(
@@ -826,7 +842,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 return dump({"results": results, "count": len(results)})
 
             elif action == "embedding_status":
-                return json.dumps(store.embedding_status())
+                return _tool_result_json(store.embedding_status())
 
             elif action == "embedding_backfill":
                 limit = args.get("limit")
@@ -849,7 +865,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     status="done" if result.get("enabled") else "skipped",
                     data=result,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "chunk_embedding_backfill":
                 limit = args.get("limit")
@@ -876,10 +892,10 @@ class HolographicMemoryProvider(MemoryProvider):
                     status="done" if result.get("enabled") else "skipped",
                     data=result,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "journal_status":
-                return json.dumps(
+                return _tool_result_json(
                     store.journal_status(
                         session_id=args.get("session_id"),
                         session_day=args.get("session_day"),
@@ -892,7 +908,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     session_day=args.get("session_day"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "recent":
                 turns = store.recent_turns(
@@ -902,14 +918,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args.get("limit", self._recent_recall_limit)),
                     include_assistant=bool(args.get("include_assistant", False)),
                 )
-                return json.dumps({"turns": turns, "count": len(turns)})
+                return _tool_result_json({"turns": turns, "count": len(turns)})
 
             elif action == "wiki":
                 result = store.entity_wiki(
                     args.get("entity") or args.get("query") or "",
                     limit=int(args.get("limit", 8)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "layered_recall":
                 query = args.get("query") or args.get("content") or ""
@@ -917,7 +933,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     query,
                     session_id=args.get("session_id") or self._session_id,
                 )
-                return json.dumps({"context": context, "empty": not bool(context.strip())})
+                return _tool_result_json({"context": context, "empty": not bool(context.strip())})
 
             elif action == "rag_query":
                 query = args.get("query") or args.get("content") or ""
@@ -934,23 +950,23 @@ class HolographicMemoryProvider(MemoryProvider):
                     only_need_context=bool(args.get("only_need_context", False)),
                     only_need_prompt=bool(args.get("only_need_prompt", False)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "community_reports":
                 cluster_id = args.get("cluster_id") or args.get("entity") or ""
                 query = args.get("query") or args.get("content") or ""
                 if cluster_id:
                     result = store.build_community_report(cluster_id, session_id=args.get("session_id") or self._session_id)
-                    return json.dumps(result)
+                    return _tool_result_json(result)
                 results = store.search_community_reports(query, limit=int(args.get("limit", 5)))
-                return json.dumps({"results": results, "count": len(results)})
+                return _tool_result_json({"results": results, "count": len(results)})
 
             elif action == "relation_backfill":
                 result = store.backfill_graph_relations(
                     source_type=args.get("source_type"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "backfill_critical":
                 # Dry-run by default; pass dry_run=false to apply.
@@ -958,7 +974,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     dry_run=parse_bool(args.get("dry_run"), default=True),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result, default=str)
+                return _tool_result_json(result)
 
             elif action == "graph_reprocess":
                 result = store.reprocess_memory_graph(
@@ -967,12 +983,12 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                     dry_run=bool(args.get("dry_run", False)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "recall_route":
                 query = args.get("query") or args.get("content") or ""
                 result = self._recall_route(query, session_id=args.get("session_id") or self._session_id)
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "document_add":
                 source_uri = args.get("source_uri") or args.get("path") or args.get("title") or ""
@@ -987,7 +1003,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     metadata=args.get("metadata") or {},
                     modal_assets=args.get("modal_assets") or args.get("assets") or [],
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "document_search":
                 results = store.document_search(
@@ -995,7 +1011,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_type=args.get("source_type"),
                     limit=int(args.get("limit", 8)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return _tool_result_json({"results": results, "count": len(results)})
 
             elif action == "document_status":
                 result = store.document_status(
@@ -1004,21 +1020,21 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_type=args.get("source_type"),
                     limit=int(args.get("limit", 20)),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "document_delete":
                 result = store.delete_document(
                     document_id=int(args["document_id"]) if args.get("document_id") is not None else None,
                     source_uri=args.get("source_uri") or args.get("path"),
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "import_plaud_archive":
                 result = self._import_plaud_archive(
                     path=args.get("path"),
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
-                return json.dumps(result)
+                return _tool_result_json(result)
 
             elif action == "hygiene":
                 report = store.memory_hygiene_report(limit=int(args.get("limit", 20)))
@@ -1026,23 +1042,23 @@ class HolographicMemoryProvider(MemoryProvider):
                     report["contradictions"] = retriever.contradict(limit=int(args.get("limit", 20)))
                 except Exception:
                     report["contradictions"] = []
-                return json.dumps(report)
+                return _tool_result_json(report)
 
             elif action == "memory_events":
                 events = store.recent_memory_events(
                     session_id=args.get("session_id"),
                     limit=int(args.get("limit", 50)),
                 )
-                return json.dumps({"events": events, "count": len(events)})
+                return _tool_result_json({"events": events, "count": len(events)})
 
             elif action == "memory_replay":
-                return json.dumps(store.memory_replay(
+                return _tool_result_json(store.memory_replay(
                     session_id=args.get("session_id") or self._session_id,
                     limit=int(args.get("limit", 50)),
                 ))
 
             elif action == "memory_profile":
-                return json.dumps(store.memory_profile(
+                return _tool_result_json(store.memory_profile(
                     session_id=args.get("session_id") or self._session_id,
                 ))
 
@@ -1050,7 +1066,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 fact_ids = args.get("fact_ids") or args.get("entities") or []
                 if isinstance(fact_ids, str):
                     fact_ids = [x.strip() for x in fact_ids.split(",") if x.strip()]
-                return json.dumps(store.refine_memory_clusters(
+                return _tool_result_json(store.refine_memory_clusters(
                     fact_ids=fact_ids,
                     query=args.get("query") or args.get("content") or "",
                     session_id=args.get("session_id") or self._session_id,
@@ -1060,7 +1076,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 fact_ids = args.get("fact_ids") or []
                 if isinstance(fact_ids, str):
                     fact_ids = [x.strip() for x in fact_ids.split(",") if x.strip()]
-                return json.dumps(store.infer_tags_for_facts(
+                return _tool_result_json(store.infer_tags_for_facts(
                     fact_ids=fact_ids,
                     limit=int(args.get("limit", 50)),
                 ))
@@ -1072,14 +1088,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     verified_ids = [x.strip() for x in verified_ids.split(",") if x.strip()]
                 if isinstance(rejected_ids, str):
                     rejected_ids = [x.strip() for x in rejected_ids.split(",") if x.strip()]
-                return json.dumps(store.confidence_maintenance(
+                return _tool_result_json(store.confidence_maintenance(
                     verified_ids=verified_ids,
                     rejected_ids=rejected_ids,
                     prune=str(args.get("prune", "true")).lower() not in ("false", "0", "no"),
                 ))
 
             elif action == "prune_logs":
-                return json.dumps(store.prune_memory_logs(
+                return _tool_result_json(store.prune_memory_logs(
                     retention_days=int(args.get("retention_days", args.get("limit", 30))),
                 ))
 
@@ -1087,12 +1103,12 @@ class HolographicMemoryProvider(MemoryProvider):
                 queries = args.get("queries") or args.get("entities") or []
                 if isinstance(queries, str):
                     queries = [q.strip() for q in queries.split("||") if q.strip()]
-                return json.dumps(store.memory_benchmark(queries=queries, limit=int(args.get("limit", 5))))
+                return _tool_result_json(store.memory_benchmark(queries=queries, limit=int(args.get("limit", 5))))
 
             elif action == "supersede":
                 old_id = int(args.get("old_fact_id") or args.get("fact_id"))
                 new_id = int(args.get("new_fact_id"))
-                return json.dumps({"superseded": store.supersede_fact(old_id, new_id)})
+                return _tool_result_json({"superseded": store.supersede_fact(old_id, new_id)})
 
             elif action == "update":
                 updated = store.update_fact(
@@ -1107,11 +1123,11 @@ class HolographicMemoryProvider(MemoryProvider):
                     observed_at=args.get("observed_at"),
                     memory_space=args.get("memory_space"),
                 )
-                return json.dumps({"updated": updated})
+                return _tool_result_json({"updated": updated})
 
             elif action == "remove":
                 removed = store.remove_fact(int(args["fact_id"]))
-                return json.dumps({"removed": removed})
+                return _tool_result_json({"removed": removed})
 
             elif action == "list":
                 facts = store.list_facts(
@@ -1134,7 +1150,7 @@ class HolographicMemoryProvider(MemoryProvider):
             fact_id = int(args["fact_id"])
             helpful = args["action"] == "helpful"
             result = self._store.record_feedback(fact_id, helpful=helpful)
-            return json.dumps(result)
+            return _tool_result_json(result)
         except KeyError as exc:
             return tool_error(f"Missing required argument: {exc}")
         except Exception as exc:

@@ -5,6 +5,7 @@ import { defineConfig } from "vitest/config";
 // plugin chain + dev-token middleware, none of which the pure-module store
 // tests need (and the plugins slow cold starts). Same "@" alias.
 export default defineConfig({
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

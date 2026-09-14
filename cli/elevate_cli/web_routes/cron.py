@@ -382,7 +382,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.get("/api/cron/attention")
-    async def cron_attention():
+    def cron_attention():
         """Aggregate what's waiting on the operator.
 
         Returns counts the dashboard can surface as a "needs attention" banner:

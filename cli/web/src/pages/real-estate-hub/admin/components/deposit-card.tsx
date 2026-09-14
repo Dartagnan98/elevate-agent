@@ -1,3 +1,4 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import "./deposit-card.css";
@@ -102,6 +103,8 @@ export default function DepositCard({
   subjectRemovalStage?: number;
   onUpdate?: () => void;
 }) {
+  const [actionError, setActionError] = useState<string | null>(null);
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
   const dep = deriveDeposit(deal, toggles);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -114,6 +117,7 @@ export default function DepositCard({
   });
 
   const save = async (extra?: Record<string, unknown>) => {
+    setActionError(null);
     setBusy(true);
     const writes: Record<string, unknown> = {
       depositAmount: form.amount.trim() || null,
@@ -127,7 +131,11 @@ export default function DepositCard({
       for (const [field, value] of Object.entries(writes)) {
         await api.setAdminDealToggle(dealId, field, value as never);
       }
-    } catch { /* surfaced by reload */ }
+    } catch {
+      setActionError("Could not save the deposit. Try again.");
+      setBusy(false);
+      return;
+    }
     setBusy(false);
     setEditing(false);
     onUpdate?.();
@@ -135,7 +143,7 @@ export default function DepositCard({
 
   const markReceived = async () => {
     if (dep.amount == null && !form.amount.trim()) {
-      window.alert("Enter the deposit amount before marking it received.");
+      setActionError("Enter the deposit amount before marking it received.");
       setEditing(true);
       return;
     }
@@ -143,12 +151,15 @@ export default function DepositCard({
   };
 
   const undoReceived = async () => {
-    if (!window.confirm("Mark this deposit as not received again?")) return;
+    if (!(await confirmAction("Mark this deposit as not received again?"))) return;
+    setActionError(null);
     setBusy(true);
     try {
       await api.setAdminDealToggle(dealId, "depositStatus", "outstanding" as never);
       await api.setAdminDealToggle(dealId, "depositReceivedDate", null as never);
-    } catch { /* */ }
+    } catch {
+      setActionError("Could not update the deposit. Try again.");
+    }
     setBusy(false);
     onUpdate?.();
   };
@@ -163,7 +174,7 @@ export default function DepositCard({
         ? <span className="dep-pill outstanding">Outstanding</span>
         : <span className="dep-pill notdue">Not due yet</span>;
 
-  return (
+  return <>{confirmationDialog}{actionError && <div className="dsk-err" role="alert">{actionError}</div>}{(
     <section className="dep-card">
       <header className="dep-head">
         <span className="dep-title">Deposit</span>
@@ -228,5 +239,5 @@ export default function DepositCard({
         </div>
       )}
     </section>
-  );
+  )}</>;
 }

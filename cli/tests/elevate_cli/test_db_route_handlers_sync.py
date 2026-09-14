@@ -17,15 +17,24 @@ import inspect
 from elevate_cli import web_server
 
 
+def _endpoints(router):
+    for route in router.routes:
+        nested = getattr(route, "original_router", None)
+        if nested is not None:
+            yield from _endpoints(nested)
+        elif getattr(route, "endpoint", None) is not None:
+            yield route
+
+
 def test_db_bound_route_handlers_do_not_block_event_loop():
     offenders = []
     sync_db_handlers = 0
-    for route in web_server.app.routes:
+    for route in _endpoints(web_server.app):
         ep = getattr(route, "endpoint", None)
         if ep is None:
             continue
         src_file = inspect.getsourcefile(ep) or ""
-        if "web_server.py" not in src_file:
+        if "web_server.py" not in src_file and "/web_routes/" not in src_file:
             continue
         try:
             body = inspect.getsource(ep)

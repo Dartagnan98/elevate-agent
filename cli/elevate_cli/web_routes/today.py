@@ -429,7 +429,7 @@ def create_today_router(*, log: logging.Logger | None = None) -> APIRouter:
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/today")
-    async def get_today(source_limit: int = 160):
+    def get_today(source_limit: int = 160):
         try:
             from elevate_cli.data import connect, list_action_runs, list_deal_tasks
             from elevate_cli.data.today import build_today_activity

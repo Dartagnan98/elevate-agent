@@ -57,6 +57,7 @@ _ALLOWLIST: dict[str, str] = {
     # id/source_id/source_native_id). Connectors get refactored to
     # route through elevate_cli.data helpers in Sprint 2 after the
     # backfill in Sprint 1E proves out.
+    "source_connector_modules/apple_messages.py": "extracted legacy connector index; migrate cache writes with source_connectors in Sprint 2",
     "source_connectors.py": "legacy connector writes, refactored in Sprint 2",
     # One-shot Apple Contacts backfill that seeds identities/contacts
     # from macOS AddressBook + chat.db. Routes through elevate_cli.data

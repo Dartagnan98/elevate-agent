@@ -1,3 +1,4 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
@@ -485,6 +486,7 @@ function Top25Deals({
   onOpenDeal: (deal: Deal) => void;
   onRefresh?: () => void | Promise<void>;
 }) {
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [formName, setFormName] = useState("");
   const [formTimeline, setFormTimeline] = useState("");
@@ -497,6 +499,7 @@ function Top25Deals({
   const [formSide, setFormSide] = useState<"buyer" | "seller">(mode === "buyer" ? "buyer" : "seller");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const nameRef = useRef<HTMLInputElement | null>(null);
@@ -507,15 +510,16 @@ function Top25Deals({
   const handleRemove = async (deal: Deal) => {
     if (removingId) return;
     const name = (deal.addr || "this lead").replace(/\s*[—-]\s*buyer track$/i, "");
-    if (!window.confirm(`Take ${name} off the board?\n\nIt moves to the Archived tab — you can restore it later if their timeline picks back up.`)) {
+    if (!(await confirmAction(`Take ${name} off the board?\n\nIt moves to the Archived tab — you can restore it later if their timeline picks back up.`))) {
       return;
     }
+    setRemoveError(null);
     setRemovingId(deal.id);
     try {
       await api.setAdminDealStatus(deal.id, "archived");
       onRefresh?.();
     } catch {
-      window.alert("Could not remove that lead. Try again.");
+      setRemoveError("Could not remove that lead. Try again.");
     } finally {
       setRemovingId(null);
     }
@@ -605,7 +609,7 @@ function Top25Deals({
   const label = mode === "buyer" ? "Top 25 buyers" : "Top 25 sellers";
   const subEmpty = "No hot leads pinned yet — open a card and tap 'Add to Top 25'.";
 
-  return (
+  return <>{confirmationDialog}{removeError && <div className="dsk-err" role="alert">{removeError}</div>}{(
     <section className="ab-top25">
       <header className="ab-top25-head">
         <div className="ab-top25-title-block">
@@ -757,7 +761,7 @@ function Top25Deals({
         </div>
       )}
     </section>
-  );
+  )}</>;
 }
 
 /* ─────────────────────────────────────────────────────────────────

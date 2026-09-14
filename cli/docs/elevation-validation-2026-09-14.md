@@ -1,77 +1,67 @@
 # Elevation validation — September 14, 2026
 
-This review covers the accumulated Elevation source branch and the latest update
-snapshot, `49d2d7fa`. Its preceding snapshot is `40121931`. The fork's `main`
-(`3028ae9e`) is an ancestor, 420 commits behind the update snapshot, so the pull
-request includes earlier accumulated work as well as the 156-file September
-update. The separate validation checkout preserves newer work in the live source
-folder.
+This review covers the accumulated Elevation branch, including the September
+update snapshot `49d2d7fa` and the validation fixes that follow it. The fork's
+`main` at `3028ae9e` predates the update snapshot by 420 commits, so the pull
+request includes earlier branch history as well as the 156-file September update.
+Work was isolated from the live source checkout.
 
-## Validation fixes
+## Application fixes
 
-- Telegram conflict tests previously replaced every `asyncio.sleep` with an
-  immediate mock. The background agent refresh loop could then run forever
-  without yielding. The tests now skip only retry backoff, preserve normal
-  cooperative waits, await the actual scheduled retry, verify polling restarted,
-  and disconnect the mock adapter. Six tests finish in under a second.
-- Two new listing-preview tests failed before reaching preview generation because
-  their deliberately minimal database mock did not provide title-preparation
-  facts. These preview tests now begin at the prepared-listing boundary. The
-  separate real endpoint test still verifies that missing title evidence blocks
-  signature preparation. All 34 kit, MLC handoff, and title checks pass.
+- Postgres memory results now serialize timestamps and numeric aggregates
+  correctly. Duplicate facts handle the operational-store shim's wrapped
+  uniqueness error without hiding unrelated integrity errors.
+- Contact edits, deletion, outbound activity updates, and conversation status
+  changes use the operational data layer. Real Postgres endpoint tests verify
+  contact edits, deletion cascades, and preservation of unrelated contacts.
+- Database-bound dashboard handlers run in FastAPI's worker threads instead of
+  blocking its event loop. The route guard now follows nested routers, so it
+  checks the actual mounted endpoints.
+- The Today activity summary uses one reference time for its calculations.
+- Dashboard actions use the existing accessible confirmation dialog. Pending
+  confirmations cancel on navigation, and deposit/save/scheduling errors appear
+  in the page instead of browser alerts or silent failures.
+- Failed Vercel sandbox startup immediately stops and closes the sandbox without
+  snapshotting an incomplete environment. Regression tests cover both startup
+  timeouts and initial file-sync failure.
 
-No application behavior was changed by these validation fixes.
+## Test repairs
 
-## Baseline comparison
+API tests now exercise the generated-key authentication contract while retaining
+missing/invalid-key rejection and bind-address checks. Gateway fixtures initialize
+the current runner state, use canonical commands, and explicitly opt into automatic
+tool selection where that behavior is under test.
 
-The initial full backend attempt stopped at 96% with 189 failures and a collection
-error. Of those failures, 187 tests also exist in `40121931`: 180 failures reproduced
-there, while seven passed in the focused baseline run. The two tests introduced by
-the latest snapshot were the listing-preview fixtures repaired above.
+Workflow tests preserve explicit human stage movement: clearing a gate makes a
+deal eligible to advance without automatically moving it. Other stale expectations
+were aligned with the current buyer stages, free-search fallback, and dashboard
+design tokens. Operational-store tests use isolated accounts and Postgres-returned
+IDs. File-tool fixtures write to temporary paths outside the protected checkout.
 
-The seven differing results were checked again on the current snapshot. Six pass
-when run in isolation. The remaining file-patch hint test also fails when run alone
-on the baseline: its relative path resolves inside the protected source checkout.
-These outcomes point to test order/environment sensitivity, rather than a new
-application regression in the September update.
+The earlier Telegram retry hang and listing-preview fixture failures are also
+repaired. Route and caller inventories have been regenerated.
 
-The MCP collection error also reproduces on the baseline. The existing Python
-environment lacks `mcp`, which is already declared in the development dependencies.
-Installing only missing test packages in an isolated import path resolves MCP
-collection and its focused tests without changing the application's environment.
+## Validation
 
-The prior frontend run passed 198 tests and failed four. All four failure names
-also reproduce on `40121931`; the targeted baseline frontend run had seven failures
-across those same four test files. The production TypeScript/Vite build passed.
+- Frontend: **205 tests passed across 41 files**.
+- Production TypeScript/Vite build: **passed**.
+- Contact write/delete regression tests: **3 passed**.
+- Sandbox and migration persistence checks: **27 passed**.
+- Full backend: **18,354 passed, 0 failed, 0 errors, 271 skipped** in 9 minutes 5 seconds.
 
-## Full backend follow-up
+The backend runs use the canonical `scripts/run_tests.sh` wrapper with four
+workers, isolated startup/test directories, credential variables removed, UTC,
+and a 120-second per-test timeout. Missing declared development packages were
+provided through a separate import path; the live application's Python
+environment was not modified.
 
-The canonical `scripts/run_tests.sh` wrapper completed in 10 minutes 19 seconds:
-**18,132 passed, 187 failed, 272 skipped**, with no collection error or suite hang.
-It used four workers, a separate startup `ELEVATE_HOME`, disposable test
-directories, the missing MCP dependency, a 120-second per-test timeout, and JUnit
-output. All 238 focused MCP/OAuth tests also pass.
+The final full run sets `ELEVATE_PG_CLEANUP=delete` for disposable test databases.
+The two tests that deliberately restart Postgres to check persistence explicitly
+use `stop` so their data remains available. Earlier attempts exhausted disk space
+or were stopped before exhausting it; they are not counted as successful full
+runs. Test logs and JUnit reports are retained outside the source tree.
 
-Of the 187 full-run failures, 179 were already confirmed on the baseline. The
-remaining eight tests were run on both snapshots with the same dependencies and
-ordering: both produced five failures and three passes. This brings the total to
-184 failures reproduced on the baseline. The three that fail in the full suite
-but pass in the focused comparison on both snapshots are:
-
-- `tests/gateway/test_usage_ledger.py::test_recent_turns_tie_breaks_by_newest_id`
-- `tests/test_tui_gateway_server.py::test_prompt_submit_forwards_persist_user_message`
-- `tests/tools/test_vercel_sandbox_environment.py::TestSnapshotPersistence::test_cleanup_stops_when_snapshot_fails_without_storing_metadata`
-
-Those three remain unresolved full-suite/state-isolation issues. One reproduced
-MCP image assertion is specific to macOS `/tmp` versus `/private/tmp` path spelling.
-No remaining failure was reproducible only on the latest snapshot in these
-comparisons; this does not establish that the branch is free of regressions.
-
-## Merge status
-
-Draft review is appropriate while the full-branch failures remain unresolved.
-Confirmed older failures span API authentication expectations, gateway session and
-prompt handling, memory/Postgres behavior, admin stage expectations, route
-inventory, and tool behavior. Reproducing a failure on the baseline does not make
-it acceptable or prove that it is only a test issue. The branch has not been merged
-into `main`.
+The wrapper excludes integration/E2E directories and tests marked integration.
+Optional dependency and platform skips do not establish coverage of those
+features. This validation does not include a live deployment or external-service
+end-to-end checks.

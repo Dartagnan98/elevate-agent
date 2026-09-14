@@ -366,7 +366,7 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     Queueing is always wrong for a recognized slash command because the
     safety net in gateway.run discards any command text that reaches
     the pending queue — which meant a mid-run /model (or /reasoning,
-    /voice, /insights, /title, /resume, /retry, /undo, /compress,
+    /voice, /insights, /title, /resume, /retry, /undo, /compact,
     /usage, /reload-mcp, /sethome, /reset) would silently
     interrupt the agent AND get discarded, producing a zero-char
     response. See issue #5057 / PRs #6252, #10370, #4665.

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 
+import uuid
+
 import pytest
 
 from plugins.memory.holographic import HolographicMemoryProvider
@@ -23,6 +25,13 @@ from plugins.memory.holographic.quality import (
     token_jaccard,
 )
 from plugins.memory.holographic.store import DAILY_MAINTENANCE_TOKEN
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    """Use a distinct Postgres account database for each test."""
+    key = f"acct_t{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr("elevate_cli.data.connection.get_account_key", lambda: key)
 
 
 def _provider(tmp_path, **overrides):

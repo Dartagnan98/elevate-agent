@@ -1,3 +1,4 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -126,6 +127,7 @@ export function CrmContactCard({
   onDeleted?: () => void;
   onStatusChange?: (profile: LeadsProfile, value: string) => void;
 }) {
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
   const contactId = profile.contactIds && profile.contactIds.length > 0 ? profile.contactIds[0] : "";
   const sourceId = profile.sourceId || "";
   const threadId = profile.threadId || "";
@@ -240,9 +242,7 @@ export function CrmContactCard({
   const [deleting, setDeleting] = useState(false);
   const handleDelete = async () => {
     if (!contactId || deleting) return;
-    if (!window.confirm(
-      `Permanently delete ${name} and all their history (messages, notes, activity)?\n\nThis cannot be undone.`,
-    )) return;
+    if (!(await confirmAction(`Permanently delete ${name} and all their history (messages, notes, activity)?\n\nThis cannot be undone.`))) return;
     setDeleting(true);
     setError(null);
     try {
@@ -514,7 +514,7 @@ export function CrmContactCard({
 
   const stop = (e: React.MouseEvent) => e.stopPropagation();
 
-  return createPortal(
+  return <>{confirmationDialog}{createPortal(
     <div className="crmcard">
       <div className="crmcard-backdrop" onClick={onClose}>
         <div className="crmcard-shellwrap" onClick={stop} role="dialog" aria-modal="true" aria-label={`Contact: ${name}`}>
@@ -950,5 +950,5 @@ export function CrmContactCard({
       )}
     </div>,
     document.body,
-  );
+  )}</>;
 }

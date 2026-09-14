@@ -1,3 +1,4 @@
+import { useConfirmation } from "@/hooks/useConfirmation";
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useDialogFocus } from "@/components/ui/use-dialog-focus";
@@ -600,6 +601,7 @@ function splitAddress(address: string, provinceFallback: string) {
 // ---------------------------------------------------------------------------
 
 export default function DealDetailModal({ deal, onClose }: DealDetailModalProps) {
+  const { confirm: confirmAction, dialog: confirmationDialog } = useConfirmation();
   const isBuyer      = deal.side === "buyer";
   // Listing-side lead still at Pre-CMA: show the trimmed prospect view until
   // it moves forward into the CMA stage.
@@ -737,9 +739,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const fireSkill = useCallback(
     async (skill: string, label: string) => {
       if (
-        !window.confirm(
-          `Run "${label}" on this listing?\n\nThis kicks off the ${skill} workflow — it preps what it needs and asks you before anything is sent.`,
-        )
+        !(await confirmAction(`Run "${label}" on this listing?\n\nThis kicks off the ${skill} workflow — it preps what it needs and asks you before anything is sent.`))
       )
         return;
       setFiringSkill(skill);
@@ -1062,7 +1062,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const Calendar  = Clock;
   const ChevDown  = Chevron;
 
-  return createPortal(
+  return <>{confirmationDialog}{createPortal(
     <div className="ab-modal-backdrop" onClick={onClose}>
       <div
         className="ab-modal"
@@ -1776,5 +1776,5 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       )}
     </div>,
     document.body,
-  );
+  )}</>;
 }

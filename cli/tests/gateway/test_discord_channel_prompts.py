@@ -6,6 +6,8 @@ import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import threading
+
 import pytest
 
 
@@ -68,6 +70,10 @@ def _make_adapter():
 
 def _make_runner():
     runner = object.__new__(gateway_run.GatewayRunner)
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
     runner.adapters = {}
     runner._ephemeral_system_prompt = "Global prompt"
     runner._prefill_messages = []

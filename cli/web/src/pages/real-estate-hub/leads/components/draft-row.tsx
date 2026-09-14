@@ -25,6 +25,7 @@ export function DraftRow({
   // Approve & Schedule: when open, show a date/time picker; on confirm the
   // chosen local time is sent to the backend as UTC so the send is held.
   const [scheduling, setScheduling] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [whenLocal, setWhenLocal] = useState("");
   // Channel switch (email<->text) state: error surfaces inline when the target
   // has no usable recipient (backend guard returns 400).
@@ -178,15 +179,17 @@ export function DraftRow({
               if (!whenLocal) return;
               const when = new Date(whenLocal);
               if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
-                window.alert("Pick a date and time in the future.");
+                setScheduleError("Pick a date and time in the future.");
                 return;
               }
               onAction?.("approve", editedDraft, when.toISOString());
+              setScheduleError(null);
               setScheduling(false);
             }}
           >
             {busy ? "…" : "Schedule"}
           </button>
+          {scheduleError && <span role="alert">{scheduleError}</span>}
         </div>
       ) : (
         <div className="lb-draft-actions">

@@ -38,7 +38,7 @@ async def test_orchestration_snapshot_and_health(tmp_path):
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
-    async with TestClient(TestServer(app)) as cli:
+    async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
         snapshot_resp = await cli.get("/api/orchestration")
         assert snapshot_resp.status == 200
         snapshot = await snapshot_resp.json()
@@ -57,7 +57,7 @@ async def test_tools_snapshot_exposes_code_profile(tmp_path, monkeypatch):
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
-    async with TestClient(TestServer(app)) as cli:
+    async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
         resp = await cli.get(
             "/api/tools",
             params={
@@ -87,7 +87,7 @@ async def test_agent_run_crud_and_events(tmp_path):
     adapter = _make_adapter(tmp_path)
     app = _create_app(adapter)
 
-    async with TestClient(TestServer(app)) as cli:
+    async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
         create_resp = await cli.post(
             "/api/agent-runs",
             json={"agent_id": "outreach", "task": "Follow up with buyer lead", "status": "running"},

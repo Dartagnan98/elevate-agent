@@ -274,6 +274,26 @@ class TestStartup:
         with pytest.raises(RuntimeError, match="Sandbox did not reach running state"):
             make_env()
 
+        assert len(sandbox.stop_calls) == 1
+        assert sandbox.closed == 1
+        assert sandbox.snapshot_calls == []
+
+    def test_initial_sync_failure_closes_sandbox_without_snapshot(
+        self, make_env, vercel_module, vercel_sdk, monkeypatch
+    ):
+        def fail_sync(self, *, force=False):
+            raise RuntimeError("initial sync failed")
+
+        monkeypatch.setattr(vercel_module.FileSyncManager, "sync", fail_sync)
+
+        with pytest.raises(RuntimeError, match="initial sync failed"):
+            make_env()
+
+        sandbox = vercel_sdk.current
+        assert len(sandbox.stop_calls) == 1
+        assert sandbox.closed == 1
+        assert sandbox.snapshot_calls == []
+
 
 class TestFileSync:
     def test_initial_sync_uploads_managed_files_under_remote_home(

@@ -94,7 +94,7 @@ def test_today_activity_counts_events_and_actual_response_time():
     assert pulse["Leads in today"]["rawValue"] == 2
     assert pulse["Replies out today"]["rawValue"] == 1
     assert pulse["Drafts waiting"]["rawValue"] == 2
-    assert pulse["Threads waiting on you"]["rawValue"] == 1
+    assert pulse["Waiting on you · 7 days"]["rawValue"] == 1
     assert pulse["Median response"]["value"] == "25m"
 
     current_day = activity["dayBuckets"][-1]

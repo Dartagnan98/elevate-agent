@@ -509,7 +509,8 @@ def test_journal_status_segments_sessions_by_day(tmp_path):
 
 
 def test_concurrent_session_writes_and_organization(tmp_path):
-    provider = _provider(tmp_path)
+    # Count independent writes here; near-duplicate merging has separate tests.
+    provider = _provider(tmp_path, dedup_enabled="false")
     total_turns = 64
 
     def write_turn(i):

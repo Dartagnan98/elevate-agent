@@ -70,9 +70,9 @@ def adapter():
     return _make_adapter()
 
 
-@pytest.fixture
-def auth_adapter():
-    return _make_adapter(api_key="sk-secret")
+@pytest.fixture(params=["sk-secret", ""])
+def auth_adapter(request):
+    return _make_adapter(api_key=request.param)
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class TestListJobs:
     async def test_list_jobs(self, adapter):
         """GET /api/jobs returns job list."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -105,7 +105,7 @@ class TestListJobs:
         """GET /api/jobs?include_disabled=true passes the flag."""
         app = _create_app(adapter)
         mock_list = MagicMock(return_value=[SAMPLE_JOB])
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -120,7 +120,7 @@ class TestListJobs:
         """GET /api/jobs without flag passes include_disabled=False."""
         app = _create_app(adapter)
         mock_list = MagicMock(return_value=[])
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -141,7 +141,7 @@ class TestCreateJob:
         """POST /api/jobs with valid body returns created job."""
         app = _create_app(adapter)
         mock_create = MagicMock(return_value=SAMPLE_JOB)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -165,7 +165,7 @@ class TestCreateJob:
     async def test_create_job_missing_name(self, adapter):
         """POST /api/jobs without name returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.post("/api/jobs", json={
                     "schedule": "*/5 * * * *",
@@ -179,7 +179,7 @@ class TestCreateJob:
     async def test_create_job_name_too_long(self, adapter):
         """POST /api/jobs with name > 200 chars returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.post("/api/jobs", json={
                     "name": "x" * 201,
@@ -193,7 +193,7 @@ class TestCreateJob:
     async def test_create_job_prompt_too_long(self, adapter):
         """POST /api/jobs with prompt > 5000 chars returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.post("/api/jobs", json={
                     "name": "test-job",
@@ -208,7 +208,7 @@ class TestCreateJob:
     async def test_create_job_invalid_repeat(self, adapter):
         """POST /api/jobs with repeat=0 returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.post("/api/jobs", json={
                     "name": "test-job",
@@ -223,7 +223,7 @@ class TestCreateJob:
     async def test_create_job_missing_schedule(self, adapter):
         """POST /api/jobs without schedule returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.post("/api/jobs", json={
                     "name": "test-job",
@@ -243,7 +243,7 @@ class TestGetJob:
         """GET /api/jobs/{id} returns job."""
         app = _create_app(adapter)
         mock_get = MagicMock(return_value=SAMPLE_JOB)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -260,7 +260,7 @@ class TestGetJob:
         """GET /api/jobs/{id} returns 404 when job doesn't exist."""
         app = _create_app(adapter)
         mock_get = MagicMock(return_value=None)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -273,7 +273,7 @@ class TestGetJob:
     async def test_get_job_invalid_id(self, adapter):
         """GET /api/jobs/{id} with non-hex id returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.get("/api/jobs/not-a-valid-hex!")
                 assert resp.status == 400
@@ -292,7 +292,7 @@ class TestUpdateJob:
         app = _create_app(adapter)
         updated_job = {**SAMPLE_JOB, "name": "updated-name"}
         mock_update = MagicMock(return_value=updated_job)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -318,7 +318,7 @@ class TestUpdateJob:
         app = _create_app(adapter)
         updated_job = {**SAMPLE_JOB, "name": "new-name"}
         mock_update = MagicMock(return_value=updated_job)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -343,7 +343,7 @@ class TestUpdateJob:
     async def test_update_job_no_valid_fields(self, adapter):
         """PATCH /api/jobs/{id} with only unknown fields returns 400."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True):
                 resp = await cli.patch(
                     f"/api/jobs/{VALID_JOB_ID}",
@@ -364,7 +364,7 @@ class TestDeleteJob:
         """DELETE /api/jobs/{id} returns ok."""
         app = _create_app(adapter)
         mock_remove = MagicMock(return_value=True)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -381,7 +381,7 @@ class TestDeleteJob:
         """DELETE /api/jobs/{id} returns 404 when job doesn't exist."""
         app = _create_app(adapter)
         mock_remove = MagicMock(return_value=False)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -402,7 +402,7 @@ class TestPauseJob:
         app = _create_app(adapter)
         paused_job = {**SAMPLE_JOB, "enabled": False}
         mock_pause = MagicMock(return_value=paused_job)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -427,7 +427,7 @@ class TestResumeJob:
         app = _create_app(adapter)
         resumed_job = {**SAMPLE_JOB, "enabled": True}
         mock_resume = MagicMock(return_value=resumed_job)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -452,7 +452,7 @@ class TestRunJob:
         app = _create_app(adapter)
         triggered_job = {**SAMPLE_JOB, "last_run": "2025-01-01T00:00:00Z"}
         mock_trigger = MagicMock(return_value=triggered_job)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(
                 f"{_MOD}._CRON_AVAILABLE", True
             ), patch(
@@ -521,7 +521,7 @@ class TestAuthRequired:
             ):
                 resp = await cli.get(
                     "/api/jobs",
-                    headers={"Authorization": "Bearer sk-secret"},
+                    headers={"Authorization": f"Bearer {auth_adapter._api_key}"},
                 )
                 assert resp.status == 200
 
@@ -535,7 +535,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_list(self, adapter):
         """GET /api/jobs returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.get("/api/jobs")
                 assert resp.status == 501
@@ -552,7 +552,7 @@ class TestCronUnavailable:
             captured["job_id"] = job_id
             return SAMPLE_JOB
 
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
                 f"{_MOD}._cron_pause", _plain_pause
             ):
@@ -572,7 +572,7 @@ class TestCronUnavailable:
             captured["include_disabled"] = include_disabled
             return [SAMPLE_JOB]
 
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
                 f"{_MOD}._cron_list", _plain_list
             ):
@@ -594,7 +594,7 @@ class TestCronUnavailable:
             captured["updates"] = updates
             return updated_job
 
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
                 f"{_MOD}._cron_update", _plain_update
             ):
@@ -612,7 +612,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_create(self, adapter):
         """POST /api/jobs returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.post("/api/jobs", json={
                     "name": "test", "schedule": "* * * * *",
@@ -623,7 +623,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_get(self, adapter):
         """GET /api/jobs/{id} returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.get(f"/api/jobs/{VALID_JOB_ID}")
                 assert resp.status == 501
@@ -632,7 +632,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_delete(self, adapter):
         """DELETE /api/jobs/{id} returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.delete(f"/api/jobs/{VALID_JOB_ID}")
                 assert resp.status == 501
@@ -641,7 +641,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_pause(self, adapter):
         """POST /api/jobs/{id}/pause returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.post(f"/api/jobs/{VALID_JOB_ID}/pause")
                 assert resp.status == 501
@@ -650,7 +650,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_resume(self, adapter):
         """POST /api/jobs/{id}/resume returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.post(f"/api/jobs/{VALID_JOB_ID}/resume")
                 assert resp.status == 501
@@ -659,7 +659,7 @@ class TestCronUnavailable:
     async def test_cron_unavailable_run(self, adapter):
         """POST /api/jobs/{id}/run returns 501 when _CRON_AVAILABLE is False."""
         app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
+        async with TestClient(TestServer(app), headers={"Authorization": f"Bearer {adapter._api_key}"}) as cli:
             with patch(f"{_MOD}._CRON_AVAILABLE", False):
                 resp = await cli.post(f"/api/jobs/{VALID_JOB_ID}/run")
                 assert resp.status == 501

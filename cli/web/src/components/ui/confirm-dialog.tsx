@@ -11,6 +11,7 @@ export function ConfirmDialog({
   description,
   destructive = false,
   loading = false,
+  overlayClassName,
   onCancel,
   onConfirm,
   open,
@@ -42,6 +43,7 @@ export function ConfirmDialog({
         "fixed inset-0 z-50 flex items-center justify-center",
         "bg-black/60",
         "animate-[fade-in_150ms_ease-out]",
+        overlayClassName,
       )}
     >
       <div
@@ -113,6 +115,7 @@ interface ConfirmDialogProps {
   description?: string;
   destructive?: boolean;
   loading?: boolean;
+  overlayClassName?: string;
   onCancel: () => void;
   onConfirm: () => void;
   open: boolean;

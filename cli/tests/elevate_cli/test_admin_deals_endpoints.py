@@ -719,7 +719,7 @@ def _clear_stage_four_gate(client, deal_id: str):
     assert attached.status_code == 200, attached.text
 
 
-def test_current_workflow_stage_complete_advances_when_gate_is_clear(client):
+def test_current_workflow_stage_complete_keeps_stage_until_explicit_move(client):
     deal = _create(title="Gate clear stage four", current_stage=4)
     _clear_stage_four_gate(client, deal["id"])
 
@@ -729,12 +729,10 @@ def test_current_workflow_stage_complete_advances_when_gate_is_clear(client):
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["currentStage"] == 5
+    assert resp.json()["currentStage"] == 4
     with connect() as conn:
         events = list_deal_events(conn, deal["id"])
-    transition = next(event for event in events if event["kind"] == "stage_transition")
-    assert transition["fromStage"] == 4
-    assert transition["toStage"] == 5
+    assert not any(event["kind"] == "stage_transition" for event in events)
 
 
 def test_non_current_workflow_stage_complete_does_not_jump_deal(client):
@@ -1205,6 +1203,9 @@ def test_advance_endpoint_blocks_until_package_gate_is_clear(client):
         ok = client.post(f"/api/admin/deals/{deal['id']}/toggle", json={"field": field, "value": value})
         assert ok.status_code == 200, ok.text
 
+    advanced = client.post(f"/api/deals/{deal['id']}/advance", json={})
+    assert advanced.status_code == 200, advanced.text
+
     context = client.get(f"/api/deals/{deal['id']}/context")
     assert context.status_code == 200, context.text
     body = context.json()
@@ -1489,10 +1490,9 @@ def test_run_result_stage_complete_update_requires_human_not_skill_callback(clie
     assert "workflow_stage_1_complete" not in context.json()["checklist"]
 
 
-def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(client):
-    # A CMA run that clears the CMA / Evaluation gate (stage 1) advances the deal
-    # to Listing Intake (stage 2) without any explicit stage-complete toggle.
-    deal = _create(title="Gate clear auto move", current_stage=1)
+def test_run_result_clearing_phase_gate_keeps_stage_until_explicit_move(client):
+    # A completed CMA run clears the gate; moving the deal remains explicit.
+    deal = _create(title="Gate clear explicit move", current_stage=1)
     priced = client.post(
         f"/api/deals/{deal['id']}/fields",
         json={"fields": {"listPrice": 799000}},
@@ -1537,7 +1537,8 @@ def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(cli
     context = client.get(f"/api/deals/{deal['id']}/context")
     assert context.status_code == 200, context.text
     body = context.json()
-    assert body["deal"]["currentStage"] == 2
+    assert body["deal"]["currentStage"] == 1
+    assert body["dealFlow"]["gate"]["canAdvance"] is True
     assert "workflow_stage_0_complete" not in body["checklist"]
 
 

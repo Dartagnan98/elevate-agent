@@ -267,7 +267,8 @@ class TestBuildSkillsSystemPrompt:
         assert "available_skills" in result
         assert "Skills (selective)" in result
         assert "status checks" in result
-        assert "Proceed without loading a skill" in result
+        assert "Do NOT load a skill for status checks" in result
+        assert "BEFORE you act" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))

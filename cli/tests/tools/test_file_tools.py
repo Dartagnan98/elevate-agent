@@ -274,7 +274,7 @@ class TestPatchHints:
     """Patch tool should hint when old_string is not found."""
 
     @patch("tools.file_tools._get_file_ops")
-    def test_no_match_includes_hint(self, mock_get):
+    def test_no_match_includes_hint(self, mock_get, tmp_path):
         mock_ops = MagicMock()
         result_obj = MagicMock()
         result_obj.to_dict.return_value = {
@@ -284,14 +284,14 @@ class TestPatchHints:
         mock_get.return_value = mock_ops
 
         from tools.file_tools import patch_tool
-        raw = patch_tool(mode="replace", path="foo.py", old_string="x", new_string="y")
+        raw = patch_tool(mode="replace", path=str(tmp_path / "foo.py"), old_string="x", new_string="y")
         # patch_tool surfaces the hint as a structured "_hint" field on the
         # JSON error payload (not an inline "[Hint: ..." tail).
         assert "_hint" in raw
         assert "read_file" in raw
 
     @patch("tools.file_tools._get_file_ops")
-    def test_success_no_hint(self, mock_get):
+    def test_success_no_hint(self, mock_get, tmp_path):
         mock_ops = MagicMock()
         result_obj = MagicMock()
         result_obj.to_dict.return_value = {"success": True, "diff": "--- a\n+++ b"}
@@ -299,7 +299,7 @@ class TestPatchHints:
         mock_get.return_value = mock_ops
 
         from tools.file_tools import patch_tool
-        raw = patch_tool(mode="replace", path="foo.py", old_string="x", new_string="y")
+        raw = patch_tool(mode="replace", path=str(tmp_path / "foo.py"), old_string="x", new_string="y")
         assert "_hint" not in raw
 
 

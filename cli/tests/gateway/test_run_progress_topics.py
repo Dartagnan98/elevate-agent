@@ -7,6 +7,8 @@ import time
 import types
 from types import SimpleNamespace
 
+import threading
+
 import pytest
 
 from gateway.config import Platform, PlatformConfig, StreamingConfig
@@ -132,6 +134,10 @@ def _make_runner(adapter):
     GatewayRunner = gateway_run.GatewayRunner
 
     runner = object.__new__(GatewayRunner)
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
     runner.adapters = {adapter.platform: adapter}
     runner._voice_mode = {}
     runner._prefill_messages = []

@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
+
+import pytest
+
+from elevate_cli.data.connection import connect as operational_connect
 
 from elevate_state import SessionDB
 from gateway import usage_ledger
 
 
-def test_record_gateway_turn_writes_program_specific_row_to_state_db(tmp_path, monkeypatch):
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    key = f"acct_t{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr("elevate_cli.data.connection.get_account_key", lambda: key)
+
+
+def test_record_gateway_turn_writes_program_specific_row_to_postgres(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     session_db = SessionDB(db_path=db_path)
     session_db.create_session("session-1", source="telegram", model="gpt-5.5")
@@ -48,9 +59,9 @@ def test_record_gateway_turn_writes_program_specific_row_to_state_db(tmp_path, m
         session_db.close()
 
     assert row_id == 1
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with operational_connect() as conn:
         row = conn.execute("SELECT * FROM turn_usage").fetchone()
+    with sqlite3.connect(db_path) as conn:
         session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
 
     assert session_count == 1
@@ -115,7 +126,7 @@ def test_duplicate_platform_event_is_not_double_counted(tmp_path, monkeypatch):
     finally:
         session_db.close()
 
-    with sqlite3.connect(db_path) as conn:
+    with operational_connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM turn_usage").fetchone()[0]
 
     assert count == 1
@@ -173,8 +184,7 @@ def test_failed_turn_records_status_without_message_content(tmp_path, monkeypatc
     finally:
         session_db.close()
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with operational_connect() as conn:
         row = conn.execute("SELECT * FROM turn_usage").fetchone()
 
     assert row["status"] == "failed"

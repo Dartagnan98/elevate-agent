@@ -7,16 +7,24 @@ Covers ISSUE #6 (memory_store.db bloat from memory_relations):
   - the destructive method is UNREACHABLE from the recall/hot path
   - it only fires from the daily-gated maintenance entrypoint
 
-All tests use a temp-file SQLite DB via the provider config — never the
-live ~/.elevate/memory_store.db.
+All tests use an isolated Postgres account database.
 """
 
 from __future__ import annotations
+
+import uuid
 
 import pytest
 
 from plugins.memory.holographic import HolographicMemoryProvider
 from plugins.memory.holographic.store import DAILY_MAINTENANCE_TOKEN
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    """Use a distinct Postgres account database for each test."""
+    key = f"acct_t{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr("elevate_cli.data.connection.get_account_key", lambda: key)
 
 
 def _store(tmp_path):
@@ -38,9 +46,9 @@ def _mk_entities(store, n):
     with store._lock:
         for i in range(n):
             cur = store._conn.execute(
-                "INSERT INTO entities (name) VALUES (?)", (f"ent-{i}",)
+                "INSERT INTO entities (name) VALUES (?) RETURNING entity_id", (f"ent-{i}",)
             )
-            ids.append(int(cur.lastrowid))
+            ids.append(int(cur.fetchone()[0]))
         store._conn.commit()
     return ids
 
@@ -58,16 +66,16 @@ def _mk_real_chunk(store):
     with store._lock:
         doc_id = int(
             store._conn.execute(
-                "INSERT INTO memory_documents (source_uri, title) VALUES (?,?)",
+                "INSERT INTO memory_documents (source_uri, title) VALUES (?,?) RETURNING document_id",
                 ("doc://t", "t"),
-            ).lastrowid
+            ).fetchone()[0]
         )
         chunk_id = int(
             store._conn.execute(
                 "INSERT INTO memory_chunks "
-                "(document_id, chunk_index, content) VALUES (?,?,?)",
+                "(document_id, chunk_index, content) VALUES (?,?,?) RETURNING chunk_id",
                 (doc_id, 0, "real chunk body"),
-            ).lastrowid
+            ).fetchone()[0]
         )
         store._conn.commit()
     return chunk_id
