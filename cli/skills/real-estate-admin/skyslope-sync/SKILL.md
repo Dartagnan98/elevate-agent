@@ -8,6 +8,11 @@ metadata:
       result_writer: admin-result-writer
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Compliance Platform Sync
 
 Use after MLC/listing paperwork begins and during closeout.

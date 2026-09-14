@@ -51,6 +51,8 @@ export interface LeadsDraft {
   heat: LeadsHeat | "warm" | "hot" | "cold";
   sourceId?: string;
   taskId?: string;
+  contactId?: string | null;
+  threadId?: string;
 }
 
 export type LeadsDraftAction = "approve" | "skip" | "restore" | "edit" | "channel";
@@ -108,6 +110,7 @@ export interface LeadsProfile {
   sourceId?: string;
   threadId?: string;
   contactIds?: string[];
+  threadIds?: string[];
   favorite?: boolean;
   favoritedAt?: string | null;
   // Redesigned Leads table dimensions (carried by mapLeadsProfiles).

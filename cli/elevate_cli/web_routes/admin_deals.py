@@ -11,12 +11,21 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from elevate_cli.data.deals import DealPhaseGateBlocked
+from elevate_cli.web_routes import kit_state, kit_preferences, kit_pdf
 
 _module_log = logging.getLogger(__name__)
 
 
 RequireReady = Callable[[], None]
 AdminJurisdictionConfig = Callable[[], Dict[str, str]]
+
+
+class _KitSignBody(BaseModel):
+    docIds: List[str] = Field(default_factory=list)
+
+
+class _KitPreferencesBody(BaseModel):
+    values: Dict[str, str] = Field(default_factory=dict)
 
 
 class _DealCreateBody(BaseModel):
@@ -49,6 +58,12 @@ class _ProfilePromotionBody(BaseModel):
     verifiers: List[Dict[str, Any]] = Field(default_factory=list)
     fields: Dict[str, Any] = Field(default_factory=dict)
     dispatchInitialStage: bool = True
+
+
+class _ListingTriggerBody(BaseModel):
+    trigger: str
+    evidence: Dict[str, Any]
+    toStage: Optional[int] = None
 
 
 class _DealMoveBody(BaseModel):
@@ -161,6 +176,27 @@ class _CmaNoteBody(BaseModel):
     kind: str = "sold"
     raw: Optional[str] = None
     voiced: Optional[str] = None
+    # post_cma_note has always read body.position, but the field was never
+    # declared -- so Pydantic dropped it off the request and the attribute access
+    # raised AttributeError, 500ing EVERY save through this endpoint. The UI sends
+    # it (setCmaNote passes pos as the 6th arg), so the value was there all along
+    # and only the model was missing it. Skyleigh 2026-08-31: "it is saying it
+    # cannot save the note."
+    position: Optional[str] = None
+
+
+class _CmaExpiredBody(BaseModel):
+    # The address key of one expired group (street number + first street word).
+    key: str
+
+
+class _CmaPricePageBody(BaseModel):
+    # The four boxes of the approved design's "How We Got to the Price" page.
+    # Each is a list of one-sentence bullets. An empty list drops that box.
+    pricingStrategy: Optional[List[str]] = None
+    valueDrivers: Optional[List[str]] = None
+    buyerQuestions: Optional[List[str]] = None
+    prepNextSteps: Optional[List[str]] = None
 
 
 class _CmaPositionBody(BaseModel):
@@ -1393,7 +1429,29 @@ def create_admin_deals_router(
     log: logging.Logger | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    def pdf_field_label(name):
+        direct, _dates = _fill_engine_maps()
+        key = direct.get(re.sub(r"[^a-z0-9_]", "", name.lower()))
+        labels = {f["key"]: f["label"] for f in _CARD_FIELD_CATALOG}
+        return labels.get(key) or _humanise_field(key or name)
+    kit_pdf.register_routes(router, pdf_field_label)
     _log = log or logging.getLogger(__name__)
+
+    @router.get("/api/admin/kit-preferences")
+    def get_kit_preferences():
+        try:
+            return {"values": kit_preferences.read_preferences()}
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    @router.put("/api/admin/kit-preferences")
+    def put_kit_preferences(body: _KitPreferencesBody):
+        try:
+            return {"values": kit_preferences.write_preferences(body.values)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save preferences: {exc}")
 
     @router.get("/api/admin/deals")
     def get_admin_deals(
@@ -1610,6 +1668,25 @@ def create_admin_deals_router(
             _log.exception("POST /api/admin/profile-promotions failed")
             raise HTTPException(status_code=500, detail=f"Promote profile failed: {exc}")
 
+    @router.post("/api/admin/deals/{deal_id}/trigger")
+    def post_listing_trigger(deal_id: str, body: _ListingTriggerBody):
+        try:
+            require_admin_setup_ready_for_launch()
+            from elevate_cli.data import connect
+            from elevate_cli.listing_triggers import apply_listing_trigger
+            with connect() as conn:
+                return apply_listing_trigger(conn, deal_id, trigger=body.trigger,
+                    evidence=body.evidence, to_stage=body.toStage, actor=web_actor)
+        except HTTPException:
+            raise
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except Exception:
+            _log.exception("Listing trigger failed; transaction rolled back")
+            raise HTTPException(status_code=500, detail="Listing trigger failed; card unchanged. Retry the same request.")
+
     @router.post("/api/admin/deals/{deal_id}/move")
     def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
         try:
@@ -1617,6 +1694,17 @@ def create_admin_deals_router(
             from elevate_cli.data import connect, move_deal_stage
 
             with connect() as conn:
+                from elevate_cli.data.deals import get_deal
+                from elevate_cli.listing_triggers import apply_listing_trigger
+                from uuid import uuid4
+                deal = get_deal(conn, deal_id)
+                if (deal and deal.get("side") == "listing"
+                        and str(deal.get("province") or "").lower() == "bc"
+                        and int(deal.get("currentStage") or 0) <= body.toStage <= 7):
+                    return apply_listing_trigger(conn, deal_id, trigger="manual_stage_move",
+                        to_stage=body.toStage, actor=web_actor,
+                        evidence={"sourceId": str(uuid4()), "matchConfirmed": True,
+                                  "userRequested": True, "requestText": "Manual board stage move"})["deal"]
                 return move_deal_stage(
                     conn,
                     deal_id,
@@ -1697,13 +1785,13 @@ def create_admin_deals_router(
             from elevate_cli.data import connect, set_deal_toggle
 
             with connect() as conn:
-                return set_deal_toggle(
-                    conn,
-                    deal_id,
-                    field=body.field,
-                    value=body.value,
-                    actor=web_actor,
-                )
+                before = _listing_toggles(conn, deal_id)
+                result = set_deal_toggle(conn, deal_id, field=body.field, value=body.value, actor=web_actor)
+                after = _listing_toggles(conn, deal_id)
+                if kit_state.source_hash(before) != kit_state.source_hash(after):
+                    kit_state.invalidate(after)
+                    _listing_save(conn, deal_id, after)
+                return result
         except HTTPException:
             raise
         except PermissionError as exc:
@@ -1952,7 +2040,7 @@ def create_admin_deals_router(
                 "property": facts.get("listingAddress") or t("listingAddress") or "",
                 "price": t("cpsPurchasePrice", "acceptedOffer.purchasePrice") or str(facts.get("purchasePrice") or ""),
                 "deposit": t("cpsDeposit", "acceptedOffer.depositAmount"),
-                "depositHolder": t("acceptedOffer.depositHolder") or "Listing Brokerage in trust",
+                "depositHolder": t("cpsDepositHolder") or t("acceptedOffer.depositHolder") or "",
                 "depositDue": t("cpsDepositTerms", "acceptedOffer.depositDue"),
                 "completionDate": t("completionDate", "acceptedOffer.completionDate"),
                 "possessionDate": t("possessionDate", "acceptedOffer.possessionDate"),
@@ -2058,6 +2146,8 @@ def create_admin_deals_router(
                         flds = d.get("fields") or {}
                         flds[body.key] = body.value or ""
                         d["fields"] = flds
+                        d.setdefault("fieldOverrides", {})[body.key] = body.value or ""
+                        d["status"] = "draft"
                         # Marks the PDF on disk as out of date until it is rebuilt.
                         d["editedAt"] = _dt3.datetime.utcnow().isoformat()
                         found = True
@@ -2065,6 +2155,8 @@ def create_admin_deals_router(
                 if not found:
                     raise HTTPException(status_code=404, detail="kit document not found")
                 toggles["offerKit"] = kit
+                if doc_id == "cps-residential":
+                    kit_state.invalidate(toggles)
                 conn.execute(
                     "UPDATE deals SET extra_toggles_json=? WHERE id=?",
                     (_json.dumps(toggles), deal_id),
@@ -2087,6 +2179,8 @@ def create_admin_deals_router(
             import tempfile
             from elevate_cli.data import connect
 
+            # Refresh automatic terms even when only one document is redrafted.
+            post_admin_deal_build_offer_kit(deal_id)
             FORMS = _FORMS_DIR
             ENGINE = f"{FORMS}/fill-form-generic.py"
             TEMPLATES = _TEMPLATES
@@ -2123,6 +2217,7 @@ def create_admin_deals_router(
                 doc = next((d for d in docs if d.get("id") == doc_id), None)
                 if not doc:
                     raise HTTPException(status_code=404, detail="kit document not found")
+                generation_hash = kit_state.input_hash(toggles, doc)
             if doc_id not in TEMPLATES:
                 raise HTTPException(status_code=400, detail="no template wired for this document yet")
             umbrella = (toggles.get("cpsUmbrella") or "residential").strip().lower()
@@ -2155,6 +2250,8 @@ def create_admin_deals_router(
             _cf_raw = cps.get("fields") or {}
 
             def _cf_get(key, *fallbacks, default=""):
+                if key in (doc.get("fieldOverrides") or {}):
+                    return str(doc["fieldOverrides"][key] or "").strip()
                 own = str(_own_raw.get(key) or "").strip()
                 if own:
                     return own
@@ -2177,9 +2274,9 @@ def create_admin_deals_router(
                 "buyer2": _fact_buyers[1] if len(_fact_buyers) > 1 else "",
                 "buyer3": _fact_buyers[2] if len(_fact_buyers) > 2 else "",
                 "property": _facts.get("listingAddress") or "",
-                "price": toggles.get("cpsPurchasePrice") or toggles.get("acceptedOffer.purchasePrice") or _facts.get("purchasePrice") or "",
+                "price": toggles.get("cpsPurchasePrice") or toggles.get("acceptedOffer.purchasePrice") or _facts.get("purchasePrice") or _facts.get("price") or "",
                 "deposit": toggles.get("cpsDeposit") or toggles.get("acceptedOffer.depositAmount") or "",
-                "depositHolder": toggles.get("acceptedOffer.depositHolder") or "Listing Brokerage in trust",
+                "depositHolder": toggles.get("cpsDepositHolder") or toggles.get("acceptedOffer.depositHolder") or "",
                 "depositDue": toggles.get("cpsDepositTerms") or toggles.get("acceptedOffer.depositDue") or "",
                 "completionDate": toggles.get("completionDate") or toggles.get("acceptedOffer.completionDate") or "",
                 "possessionDate": toggles.get("possessionDate") or toggles.get("acceptedOffer.possessionDate") or "",
@@ -2189,34 +2286,25 @@ def create_admin_deals_router(
                 "contractDate": toggles.get("acceptedOffer.acceptedDate") or toggles.get("offerDate") or "",
             }
             cf = _CF()
-            pp = [x.strip() for x in str(cf.get("property", "")).split(",")]
-            pnum = pstreet = pcity = pstate = pzip = ""
-            if pp and pp[0]:
-                sp = pp[0].split(" ", 1)
-                if sp and sp[0].isdigit():
-                    pnum, pstreet = sp[0], (sp[1] if len(sp) > 1 else "")
-                else:
-                    pstreet = pp[0]
-            if len(pp) >= 2:
-                pcity = pp[1]
-            if len(pp) >= 3:
-                ps = pp[2].split(" ", 1)
-                pstate, pzip = ps[0], (ps[1] if len(ps) > 1 else "")
             sellers = [x.strip() for x in str(toggles.get("sellerNames") or "").split(",") if x.strip()]
             if not sellers:
                 sellers = _fact_sellers
             import datetime as _dt
             today = _dt.date.today().isoformat()
+            from elevate_cli.web_routes import kit_context, kit_preferences
+            primary_agent, second_agent = kit_context.agents(toggles, kit_preferences.read_preferences())
+            address_parts = kit_context.property_parts(cf.get("property", ""), toggles, _facts)
+            offer_time = kit_context.clock_time(cf.get("offerOpenTime") or toggles.get("offerOpenTime", ""))
             context = {
                 "buyer1": cf.get("buyer1", ""), "buyer2": cf.get("buyer2", ""), "buyer3": cf.get("buyer3", ""),
                 "seller1": sellers[0] if len(sellers) > 0 else "",
                 "seller2": sellers[1] if len(sellers) > 1 else "",
-                "p_streetnum": pnum, "p_street": pstreet, "p_city": pcity, "p_state": pstate, "p_zip": pzip,
-                "p_unit": (cf.get("p_unit") or toggles.get("mhParkPad") or ""),
+                **address_parts,
+                "p_unit": (cf.get("p_unit") or address_parts["p_unit"] or toggles.get("mhParkPad") or ""),
                 "legal": (cf.get("legal") or deal_legal or toggles.get("legalDescription") or ""),
                 "pid": (cf.get("pid") or toggles.get("pid") or ""),
                 "otherPids": (cf.get("otherPids") or toggles.get("otherPids") or ""),
-                "possessionTime": (cf.get("possessionTime") or toggles.get("acceptedOffer.possessionTime") or ""),
+                "possessionTime": (cf.get("possessionTime") or toggles.get("possessionTime") or toggles.get("acceptedOffer.possessionTime") or ""),
                 "mls": str(toggles.get("mlsNumber") or toggles.get("mls") or ""),
                 # Brokerage/agent identity — the licensed brokerage on a BCREA CPS
                 # is eXp Realty (Forever Real Estate Group is the team brand, not
@@ -2224,7 +2312,17 @@ def create_admin_deals_router(
                 # blank template so the filler writes them explicitly (rather than
                 # relying on the template, which the contamination-clearing pass
                 # would otherwise wipe when the context omitted them).
-                "agentName": "Skyleigh McCallum PREC*",
+                "agentName": primary_agent,
+                "buyerAgent": primary_agent, "buyerAgent2": second_agent,
+                "teamName": " & ".join(n for n in (primary_agent, second_agent) if n),
+                "listingAgent": toggles.get("listingAgentName", "") if doc_id == "cps-residential" else primary_agent,
+                "coAgent": toggles.get("listingAgent2", "") if doc_id == "cps-residential" else second_agent,
+                "listingBrokerage": toggles.get("listingBrokerage", "") if doc_id == "cps-residential" else "eXp Realty (Kelowna)",
+                "sellingBrokerage": "eXp Realty (Kelowna)",
+                "viewedDate": cf.get("viewedDate") or toggles.get("viewedDate", ""),
+                "offerOpenDate": cf.get("offerOpenDate") or toggles.get("offerOpenDate", ""),
+                "offerOpenTime": offer_time.rsplit(" ", 1)[0] if offer_time.endswith((" AM", " PM")) else offer_time,
+                "offerOpenPeriod": "p." if offer_time.endswith(" PM") else "a." if offer_time.endswith(" AM") else "",
                 "officeName": "eXp Realty (Kelowna)",
                 "officeAddress": "1631 Dickson Ave, Suite 1100",
                 "officeCity": "Kelowna", "officeState": "BC", "officeZip": "V1Y0B5",
@@ -2366,6 +2464,7 @@ def create_admin_deals_router(
             out_path = doc.get("filePath") or (
                 f"/Users/admin/.elevate/cache/documents/admin_artifacts/offer-kits/{deal_id}-{doc_id}.pdf"
             )
+            out_path = kit_pdf.version_path(out_path)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             # Per-widget overrides typed on the card. The card now shows every
             # field the document actually has, and most of those (the compliance
@@ -2417,9 +2516,14 @@ def create_admin_deals_router(
                     required["subjects/conditions"] = context.get("conditions", "")
                 warnings = [f"{label} is blank" for label, val in required.items() if not str(val).strip()]
             warnings = warnings + asm_warnings
+            if doc_id in {"cps-residential", "cps-mobile-addendum"} and not context.get("preserveSchedule"):
+                from elevate_cli.web_routes import kit_terms
+                kit_terms.reflow(out_path, template_path=template)
+            kit_pdf.reapply_edits(out_path, doc)
+
             with connect() as conn:
                 row = conn.execute(
-                    "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
+                    "SELECT extra_toggles_json FROM deals WHERE id=? FOR UPDATE", (deal_id,)
                 ).fetchone()
                 raw = row["extra_toggles_json"]
                 toggles = raw if isinstance(raw, dict) else (_json.loads(raw) if raw and str(raw).strip() else {})
@@ -2427,6 +2531,9 @@ def create_admin_deals_router(
                 import datetime as _dt4
                 for d in (kit.get("documents") or []):
                     if d.get("id") == doc_id:
+                        if kit_state.input_hash(toggles, d) != generation_hash:
+                            raise HTTPException(status_code=409, detail="Document inputs changed during generation. Redraft before review.")
+                        d["generatedInputHash"] = generation_hash
                         d["filePath"] = out_path
                         d["ready"] = True
                         d["status"] = "draft"
@@ -2487,7 +2594,7 @@ def create_admin_deals_router(
                     "price": term("cpsPurchasePrice", "purchasePrice"),
                     "priceWords": "",
                     "deposit": term("cpsDeposit", "depositAmount"),
-                    "depositHolder": ao("depositHolder") or "Listing Brokerage in trust",
+                    "depositHolder": term("cpsDepositHolder", "depositHolder"),
                     "depositDue": term("cpsDepositTerms", "depositDue"),
                     "completionDate": term("completionDate", "completionDate"),
                     "possessionDate": term("possessionDate", "possessionDate"),
@@ -2548,20 +2655,27 @@ def create_admin_deals_router(
                     # keep any operator edits.
                     fields = None
                     if sid in ("cps-residential", "cps-mobile-addendum"):
-                        fields = dict(seeded)
-                        for k, v in (prev.get("fields") or {}).items():
-                            if v:
-                                fields[k] = v
+                        try:
+                            fields, seed, overrides = kit_state.seed_fields(prev, seeded)
+                        except ValueError as exc:
+                            raise HTTPException(status_code=409, detail=str(exc))
                     doc = {
+                        **prev,
                         "id": sid,
                         "name": sname,
                         "status": prev.get("status", "draft"),
                         "fillable": True,
-                        "ready": bool(prev.get("ready", True)),
-                        "filePath": prev.get("filePath") or f"{KITDIR}/{deal_id}-{sid}.pdf",
+                        "ready": bool(prev.get("filePath")) and os.path.isfile(str(prev.get("filePath") or "")),
+                        "filePath": prev.get("filePath") or "",
                     }
                     if fields is not None:
+                        if fields != prev.get("fields") and prev.get("filePath"):
+                            import datetime
+                            doc["editedAt"] = datetime.datetime.utcnow().isoformat()
+                            doc["status"] = "draft"
                         doc["fields"] = fields
+                        doc["seededFields"] = seed
+                        doc["fieldOverrides"] = overrides
                     documents.append(doc)
 
                 # Preserve any custom / uploaded documents (ids outside the six
@@ -2787,6 +2901,8 @@ def create_admin_deals_router(
             "UPDATE deals SET extra_toggles_json=? WHERE id=?",
             (_json.dumps(toggles), deal_id),
         )
+        from elevate_cli.mlc_handoff import refresh_document_reviews
+        refresh_document_reviews(conn, deal_id)
 
     @router.post("/api/admin/deals/{deal_id}/listing-kit/build")
     def post_admin_deal_build_listing_kit(deal_id: str):
@@ -2815,6 +2931,7 @@ def create_admin_deals_router(
                         continue
                     prev = ex_by_id.get(sid) or {}
                     documents.append({
+                        **prev,
                         "id": sid,
                         "name": sname,
                         "status": prev.get("status", "draft"),
@@ -2864,6 +2981,8 @@ def create_admin_deals_router(
                 toggles = _listing_toggles(conn, deal_id)
             docs = ((toggles.get("listingKit") or {}).get("documents") or [])
             doc = next((d for d in docs if d.get("id") == doc_id), None)
+            if doc_id == 'title':
+                doc = toggles.get('listingTitleVerification') or None
             if not doc:
                 raise HTTPException(status_code=404, detail="listing kit document not found")
             file_path = doc.get("filePath")
@@ -2927,15 +3046,18 @@ def create_admin_deals_router(
                 sellers = [s.strip() for s in str(toggles.get("sellerNames") or "").split(",") if s.strip()]
             t = lambda *keys: next((str(toggles.get(k) or "").strip() for k in keys
                                     if str(toggles.get(k) or "").strip()), "")
+            from elevate_cli.web_routes.kit_context import listing_terms, retained_commission
+            listing_values = listing_terms(toggles, facts)
             deal_side = {
                 "seller1": sellers[0] if len(sellers) > 0 else "",
                 "seller2": sellers[1] if len(sellers) > 1 else "",
                 "property": facts.get("listingAddress") or t("listingAddress") or "",
-                "listPrice": t("listPrice"),
-                "listPriceWords": _amount_in_words(t("listPrice")),
+                "listPrice": str(listing_values["listPrice"] or ""),
+                "listPriceWords": _amount_in_words(listing_values["listPrice"]),
                 "listingCommission": t("listingCommission"),
                 "buyerAgencyComp": t("buyerAgencyComp"),
-                "listingDate": t("listingDate"),
+                "commissionRetained": retained_commission(toggles),
+                "listingDate": str(listing_values["listDate"] or ""),
                 "expiryDate": t("expiryDate"),
                 "designatedAgency": t("designatedAgency") or "Skyleigh McCallum",
                 "pid": t("pid"),
@@ -3022,6 +3144,8 @@ def create_admin_deals_router(
                         flds = d.get("fields") or {}
                         flds[body.key] = body.value or ""
                         d["fields"] = flds
+                        d.setdefault("fieldOverrides", {})[body.key] = body.value or ""
+                        d["status"] = "draft"
                         d["editedAt"] = _dt5.datetime.utcnow().isoformat()
                         found = True
                         break
@@ -3055,6 +3179,7 @@ def create_admin_deals_router(
             doc = next((d for d in docs if d.get("id") == doc_id), None)
             if not doc:
                 raise HTTPException(status_code=404, detail="listing kit document not found")
+            generation_hash = kit_state.input_hash(toggles, doc)
             if doc_id not in LISTING_WIRED:
                 raise HTTPException(
                     status_code=400,
@@ -3077,6 +3202,7 @@ def create_admin_deals_router(
 
             os.makedirs(LISTING_KITDIR, exist_ok=True)
             out_path = doc.get("filePath") or f"{LISTING_KITDIR}/{deal_id}-{doc_id}.pdf"
+            out_path = kit_pdf.version_path(out_path)
             warnings: List[str] = []
 
             if doc_id == "mlc":
@@ -3107,6 +3233,10 @@ def create_admin_deals_router(
                 p_zip = pc_m.group(0).upper() if pc_m else ""
                 city = _re4.sub(r"[A-Za-z]\d[A-Za-z]\s*\d[A-Za-z]\d", "", addr_parts[1] if len(addr_parts) > 1 else "")
                 city = _re4.sub(r"\b(BC|B\.C\.|British Columbia)\b", "", city, flags=_re4.I).strip(" ,")
+                from elevate_cli.web_routes import kit_context, kit_preferences
+                listing_values = kit_context.listing_terms(toggles, facts)
+                agent, second_agent = kit_context.agents(toggles, kit_preferences.read_preferences())
+                property_values = kit_context.property_parts(address, toggles, facts)
                 total = _commission_text(toggles.get("listingCommission"))
                 coop = _commission_text(toggles.get("buyerAgencyComp"))
                 import datetime as _dt2
@@ -3118,15 +3248,16 @@ def create_admin_deals_router(
                     "pid": toggles.get("pid") or "",
                     "otherPids": toggles.get("otherPids") or "",
                     "mls": toggles.get("mlsNumber") or "",
-                    "listPrice": toggles.get("listPrice") or "",
-                    "listDate": toggles.get("listingDate") or "",
+                    "listPrice": listing_values["listPrice"] or "",
+                    "listDate": listing_values["listDate"] or "",
                     "expiryDate": toggles.get("expiryDate") or "",
-                    "listingTerms": toggles.get("listingTerms") or "Cash to new mortgage",
+                    "listingTerms": toggles.get("listingTerms") or "",
                     "commissionTotal": total,
                     "commissionCoop": coop,
+                    "commissionRetained": _commission_text(kit_context.retained_commission(toggles)),
                     "commissionNoCoop": total,
                     "conditions": _schedule_a_text(toggles),
-                    "signDate": _dt2.date.today().isoformat(),
+                    "signDate": "",
                     "today": _dt2.date.today().isoformat(),
                     "listingAgent": toggles.get("designatedAgency") or "Skyleigh McCallum Personal Real Estate Corporation",
                     "coAgent": "Antonia Gujinovic",
@@ -3135,9 +3266,20 @@ def create_admin_deals_router(
                     "officeAddress": "1631 Dickson Ave, Suite 1100",
                     "officeCity": "Kelowna", "officeState": "BC",
                     "officeZip": "V1Y 0B5", "officePhone": "(833) 817-6506",
+                    "__widgets__": {"txtSellUnit": ""},  # This misleading template name is the brokerage unit, not the seller's.
                 }
+                ctx.update(property_values, listingAgent=agent, coAgent=second_agent)
+                ctx.update(kit_context.seller_mailing_parts(toggles))
+                ctx["p_streetType"] = ""  # property_parts includes the street suffix
+                if isinstance(ctx['listPrice'], (int, float)):
+                    ctx['listPrice'] = f"{ctx['listPrice']:,.2f}"
+                seller_contact = (toggles.get('onboardingSellers') or [{}])[0]
+                if isinstance(seller_contact, dict):
+                    ctx['sellerPhone'] = seller_contact.get('phone') or ''
                 for i, s in enumerate(sellers[:3], start=1):
                     ctx[f"seller{i}"] = s
+                if "listingDate" in (doc.get("fields") or {}):
+                    ctx["listDate"] = doc["fields"]["listingDate"]
                 for k, v in (doc.get("fields") or {}).items():
                     if v:
                         ctx[k] = v
@@ -3146,7 +3288,7 @@ def create_admin_deals_router(
                     _w = {k[1:]: v for k, v in (doc.get("fields") or {}).items()
                           if isinstance(k, str) and k.startswith("@") and v is not None}
                     if _w:
-                        ctx["__widgets__"] = _w
+                        ctx.setdefault("__widgets__", {}).update(_w)
                     _json.dump(ctx, f)
                 r = _sp.run(["/usr/bin/python3", engine, cf, template, out_path],
                             capture_output=True, text=True, timeout=180, env=_user_site_env())
@@ -3155,18 +3297,18 @@ def create_admin_deals_router(
                 for label, val in (
                     ("sellers", ", ".join(sellers)),
                     ("property address", address),
-                    ("list price", toggles.get("listPrice")),
+                    ("list price", ctx.get("listPrice")),
                     ("listing commission", toggles.get("listingCommission")),
                     ("buyer agency compensation", toggles.get("buyerAgencyComp")),
-                    ("effective date", toggles.get("listingDate")),
+                    ("effective date", ctx.get("listDate")),
                     ("expiry date", toggles.get("expiryDate")),
                     ("PID", toggles.get("pid")),
+                    ("sale terms", ctx.get("listingTerms")),
+                    ("seller mailing address", ctx.get("sellerStreet")),
+                    ("listing brokerage retained commission (Section 5 D(ii))", ctx.get("commissionRetained")),
                 ):
                     if not str(val or "").strip():
                         warnings.append(f"{label} is blank")
-                # The MLC's "Listing Brokerage will retain" line cannot be derived
-                # from two split-rate strings, so it is never auto-filled.
-                warnings.append("listing brokerage's retained share (Section 5 D(ii)) needs filling by hand")
             elif doc_id.startswith("pds") or doc_id in LISTING_DISCLOSURES:
                 # PDS. The seller answers the disclosure questions themselves —
                 # those are not form fields and we must never pre-answer them.
@@ -3223,8 +3365,8 @@ def create_admin_deals_router(
                 # rule: designated agent in full, and the team field carries BOTH
                 # licensees. Blank here is a compliance gap, not a cosmetic one.
                 ctx.update({
-                    "agentName": "Skyleigh McCallum Personal Real Estate Corporation",
-                    "listingAgent": "Skyleigh McCallum Personal Real Estate Corporation",
+                    "agentName": toggles.get("designatedAgency") or "Skyleigh McCallum Personal Real Estate Corporation",
+                    "listingAgent": toggles.get("designatedAgency") or "Skyleigh McCallum Personal Real Estate Corporation",
                     "coAgent": "Antonia Gujinovic",
                     "teamName": "Forever Real Estate Group — Skyleigh McCallum, Antonia Gujinovic",
                     "listingBrokerage": "eXp Realty",
@@ -3236,6 +3378,22 @@ def create_admin_deals_router(
                     "officePhone": "(833) 817-6506",
                     "pid": toggles.get("pid") or "",
                 })
+                from elevate_cli.web_routes import kit_context, kit_preferences
+                agent, second_agent = kit_context.agents(toggles, kit_preferences.read_preferences())
+                ctx.update(kit_context.property_parts(address, toggles, facts))
+                ctx.update(agentName=agent, listingAgent=agent, coAgent=second_agent,
+                           teamName=" & ".join(n for n in (agent, second_agent) if n))
+                # DORTS/PNC label their client fields buyer1/2 even for sellers.
+                if doc_id in {"dorts", "pnc"}:
+                    for i, seller in enumerate(sellers[:3], start=1):
+                        ctx[f"buyer{i}"] = seller
+                if doc_id == 'dorts':
+                    # This widget is the actual professional's signature line.
+                    ctx['__widgets__'] = {'txtSignerSig': ''}
+                if doc_id.startswith('pds'):
+                    # Disclosure date belongs to the seller's completed answers.
+                    ctx['today'] = toggles.get('sellerDisclosureDate') or ''
+                ctx.update({k: v for k, v in (doc.get("fields") or {}).items() if not k.startswith("@")})
                 if doc_id == "mlc-amendment":
                     # Old price = what the listing is at now; new price only if the
                     # card already carries one. Never invent the new figure — a
@@ -3252,7 +3410,7 @@ def create_admin_deals_router(
                     _w = {k[1:]: v for k, v in (doc.get("fields") or {}).items()
                           if isinstance(k, str) and k.startswith("@") and v is not None}
                     if _w:
-                        ctx["__widgets__"] = _w
+                        ctx.setdefault("__widgets__", {}).update(_w)
                     _json.dump(ctx, f)
                 r = _sp.run(["/usr/bin/python3", engine, cf, template, out_path],
                             capture_output=True, text=True, timeout=120, env=_user_site_env())
@@ -3295,12 +3453,23 @@ def create_admin_deals_router(
             if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
                 raise HTTPException(status_code=500, detail="fill produced no usable PDF")
 
+            kit_pdf.reapply_edits(out_path, doc)
+            kit_pdf.fit_listing_text(out_path)
+            if (toggles.get('listingPropertyProvenance') or {}).get('sourceType') == 'historical MLS':
+                warnings.append('Property identity is from historical MLS; current title and ownership verification are pending.')
+            if doc_id.startswith('pds'):
+                warnings.append('Seller disclosure answers and disclosure date are blank for the seller to complete.')
+
             with connect() as conn:
+                conn.execute("SELECT id FROM deals WHERE id=? FOR UPDATE", (deal_id,)).fetchone()
                 toggles = _listing_toggles(conn, deal_id)
                 kit = toggles.get("listingKit") or {}
                 import datetime as _dt4
                 for d in (kit.get("documents") or []):
                     if d.get("id") == doc_id:
+                        if kit_state.input_hash(toggles, d) != generation_hash:
+                            raise HTTPException(status_code=409, detail="Document inputs changed during generation. Redraft before review.")
+                        d["generatedInputHash"] = generation_hash
                         d["filePath"] = out_path
                         d["ready"] = True
                         d["status"] = "draft"
@@ -3309,6 +3478,10 @@ def create_admin_deals_router(
                         d.pop("editedAt", None)
                 toggles["listingKit"] = kit
                 _listing_save(conn, deal_id, toggles)
+                from elevate_cli.data.deals import add_deal_attachment
+                add_deal_attachment(conn, deal_id, kind=f"listing-draft:{doc_id}",
+                                    file_path=out_path, summary=f"{doc.get('name') or doc_id} - draft for review",
+                                    actor="dashboard:listing-kit")
             return {"id": doc_id, "generated": True, "warnings": warnings}
         except HTTPException:
             raise
@@ -3394,7 +3567,7 @@ def create_admin_deals_router(
             raise HTTPException(status_code=500, detail=f"Add form failed: {exc}")
 
     @router.post("/api/admin/deals/{deal_id}/listing-sign")
-    def post_admin_deal_listing_sign(deal_id: str):
+    def post_admin_deal_listing_sign(deal_id: str, body: _KitSignBody):
         """Draft-first send of the listing package to the sellers. Merges the
         approved listing documents into one preview and parks a Review & approve
         card carrying it, so nothing reaches the sellers before Skyleigh has seen
@@ -3409,23 +3582,22 @@ def create_admin_deals_router(
             facts = _cps_deal_facts(deal_id) or {}
             with connect() as conn:
                 toggles = _listing_toggles(conn, deal_id)
+                from elevate_cli.mlc_handoff import listing_preparation_issues
+                issues = listing_preparation_issues(conn, deal_id)
+                if issues:
+                    raise HTTPException(status_code=409, detail='Before preparing signatures: ' + '; '.join(issues))
             docs = ((toggles.get("listingKit") or {}).get("documents") or [])
-            chosen = [
-                d for d in docs
-                if d.get("status") == "approved"
-                and d.get("filePath") and os.path.exists(str(d.get("filePath")))
-            ]
-            if not chosen:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Nothing to send yet — generate and approve at least one listing document first.",
-                )
+            try:
+                chosen = kit_state.selected_documents(toggles, "listingKit", body.docIds)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
 
             preview_pdf = None
             try:
                 pv_dir = os.path.expanduser("~/.elevate/uploads/listing-previews")
                 os.makedirs(pv_dir, exist_ok=True)
                 preview_path = f"{pv_dir}/{deal_id}-listing-preview.pdf"
+                preview_path = kit_pdf.version_path(preview_path)
                 merge_src = (
                     "import sys\n"
                     "from pypdf import PdfReader, PdfWriter\n"
@@ -3446,6 +3618,9 @@ def create_admin_deals_router(
                 _log.exception("listing preview merge failed; parking without a preview")
                 preview_pdf = None
 
+            if not preview_pdf:
+                raise HTTPException(status_code=503, detail="Could not create the review PDF. Nothing was dispatched. Retry after checking the selected PDFs.")
+
             sellers = [s for s in (facts.get("sellers") or []) if s]
             who = ", ".join(sellers) or "the seller(s)"
             payload = {
@@ -3463,7 +3638,7 @@ def create_admin_deals_router(
                 run = queue_action_run(
                     conn, deal_id=deal_id, skill="real-estate-admin/signing-package",
                     name="Send listing package for signatures", payload=payload,
-                    create_cron_job=not preview_pdf, actor="dashboard:listing-kit")
+                    create_cron_job=False, actor="dashboard:listing-kit")
                 rid = run.get("id") if isinstance(run, dict) else None
                 if preview_pdf:
                     prompt = {
@@ -3886,13 +4061,19 @@ def create_admin_deals_router(
             if isinstance(bse, dict):
                 commission = str(bse.get("cooperatingCommission") or "").strip()
             commission = commission or str(chk.get("cooperatingCommission") or "").strip()
+            from elevate_cli.web_routes import kit_context, kit_preferences
+            agent, agent2 = kit_context.agents(chk, kit_preferences.read_preferences())
             return {
+                "agentName": agent,
+                "teamName": " & ".join(n for n in (agent, agent2) if n),
                 "listingAddress": d.get("listingAddress"),
+                "province": d.get("province"),
                 "side": d.get("side"),
                 "buyers": buyers, "sellers": sellers,
                 "buyerAddress": chk.get("mailingAddress"),
                 "sellerAddress": chk.get("sellerMailingAddress") or chk.get("seller_mailing_address"),
                 "price": card_price or d.get("offerPrice") or d.get("listPrice"),
+                "listPrice": d.get("listPrice"),
                 "depositAmount": card_deposit or d.get("depositAmount"),
                 "depositTerms": card_deposit_terms or None,
                 "mlsNumber": d.get("mlsNumber"),
@@ -5026,7 +5207,7 @@ def create_admin_deals_router(
                     elif doc_id == "pds":
                         sub, _raw, _warn = _pds_subtype(toggles)
                         tpl = PDS_BY_SUBTYPE.get(sub, "") if sub else ""
-                    return tpl, (doc.get("fields") or {}), (doc.get("name") or doc_id)
+                    return tpl, {**(doc.get("fields") or {}), **{"@" + k: v for k, v in (doc.get("pdfWidgetOverrides") or {}).items()}}, (doc.get("name") or doc_id)
                 if side == "onboarding":
                     form = doc_id.strip().lower()
                     names = {"agency": "Buyer Agency Agreement",
@@ -5041,7 +5222,7 @@ def create_admin_deals_router(
                 doc = next((d for d in docs if d.get("id") == doc_id), {}) or {}
                 umbrella = str(toggles.get("cpsUmbrella") or "residential").strip().lower()
                 tpl_id = "cps-mobile" if (doc_id == "cps-residential" and umbrella == "mobile") else doc_id
-                return (_TEMPLATES.get(tpl_id, ""), (doc.get("fields") or {}),
+                return (_TEMPLATES.get(tpl_id, ""), {**(doc.get("fields") or {}), **{"@" + k: v for k, v in (doc.get("pdfWidgetOverrides") or {}).items()}},
                         (doc.get("name") or doc_id))
 
             out: List[Dict[str, Any]] = []
@@ -5079,10 +5260,6 @@ def create_admin_deals_router(
             _log.exception("POST /api/admin/deals/%s/kit-send-check failed", deal_id)
             return {"documents": [], "error": str(exc)}
 
-    class _KitSignBody(BaseModel):
-        # Which offer-kit documents to draft into the DigiSign envelope.
-        docIds: List[str] = []
-
     @router.post("/api/admin/deals/{deal_id}/offer-kit/draft-signatures")
     def post_offer_kit_draft_signatures(deal_id: str, body: _KitSignBody):
         """Draft-first: create a SkySlope DigiSign DRAFT envelope from the
@@ -5108,32 +5285,18 @@ def create_admin_deals_router(
                 raw = row["extra_toggles_json"]
                 toggles = raw if isinstance(raw, dict) else (_json.loads(raw) if raw and str(raw).strip() else {})
             docs = ((toggles.get("offerKit") or {}).get("documents") or [])
-            want = set(body.docIds or [])
-            chosen = []
-            stale: List[str] = []
-            for d in docs:
-                if want and d.get("id") not in want:
-                    continue
-                fp = d.get("filePath")
-                if not (fp and os.path.exists(fp)):
-                    continue
-                if _doc_is_stale(d):
-                    stale.append(d.get("name") or d.get("id"))
-                    continue
-                chosen.append({"form": d.get("id"), "name": d.get("name") or d.get("id"), "pdf": fp})
-            if stale:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Redraft before sending — edited since last drafted: {', '.join(stale)}",
-                )
-            if not chosen:
-                raise HTTPException(status_code=400, detail="No drafted documents selected. Draft them first, then send for signatures.")
+            try:
+                selected = kit_state.selected_documents(toggles, "offerKit", body.docIds)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            chosen = [{"form": d["id"], "name": d.get("name") or d["id"], "pdf": d["filePath"]} for d in selected]
 
             preview_pdf = None
             try:
                 pv_dir = os.path.expanduser("~/.elevate/uploads/offer-kit-sign-previews")
                 os.makedirs(pv_dir, exist_ok=True)
                 preview_path = f"{pv_dir}/{deal_id}-offer-kit-sign-preview.pdf"
+                preview_path = kit_pdf.version_path(preview_path)
                 merge_src = (
                     "import sys\n"
                     "from pypdf import PdfReader, PdfWriter\n"
@@ -5153,6 +5316,9 @@ def create_admin_deals_router(
                 _log.exception("offer-kit sign preview merge failed")
                 preview_pdf = None
 
+            if not preview_pdf:
+                raise HTTPException(status_code=503, detail="Could not create the review PDF. Nothing was dispatched. Retry after checking the selected PDFs.")
+
             buyers = [b for b in (facts.get("buyers") or []) if b]
             who = ", ".join(buyers) or "the buyer(s)"
             doc_names = [c["name"] for c in chosen]
@@ -5163,7 +5329,7 @@ def create_admin_deals_router(
                 "prefilledDocs": [{"form": c["form"], "pdf": c["pdf"]} for c in chosen],
                 "previewPdf": preview_pdf or "",
                 "note": (
-                    "These offer-kit documents are ALREADY filled + approved (local paths in "
+                    "These offer-kit documents are ALREADY filled, awaiting package review (local paths in "
                     "prefilledDocs). After the user approves, upload EXACTLY those PDFs to SkySlope "
                     "DigiSign, add the buyer(s) as signers and place the signature/initial blocks, "
                     "and create the envelope as a DRAFT. DO NOT SEND — leave it as a draft in "
@@ -5180,7 +5346,7 @@ def create_admin_deals_router(
                 prompt = {
                     "title": "Review & approve: draft for signatures",
                     "message": (
-                        f"{len(chosen)} approved document(s) for {who} are ready to draft into a "
+                        f"{len(chosen)} drafted document(s) for {who} are ready to draft into a "
                         "SkySlope DigiSign envelope. Open the Preview to review, then approve to "
                         "create the DRAFT envelope (nothing is sent — you send it from DigiSign)."
                     ),
@@ -5227,16 +5393,41 @@ def create_admin_deals_router(
                     capture_output=True, text=True, timeout=timeout, env=_user_site_env())
         for line in reversed((r.stdout or "").strip().splitlines()):
             try:
-                return _json.loads(line)
-            except Exception:
+                result = _json.loads(line)
+            except ValueError:
                 continue
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise HTTPException(status_code=409, detail=result.get("error") or result.get("message") or "This CMA action is not ready.")
+            return result
         _log.warning("cma-runner no JSON (%s): %s | %s", args, (r.stdout or "")[-200:], (r.stderr or "")[-200:])
         return {}
+
+    def _cma_detach_log(addr, argv):
+        """Open the per-address dispatch log for a detached CMA runner spawn.
+
+        These spawns used stdout=stderr=DEVNULL, which made a child that died
+        on startup indistinguishable from one that never spawned -- that
+        pattern hid two real failures (render button 2026-07, photos Continue
+        2026-08-29). Every detached spawn now logs its argv + output here."""
+        slug = re.sub(r"[^a-z0-9]+", "-", str(addr or "cma").lower()).strip("-") or "cma"
+        path = os.path.expanduser("~/skyleigh-tools/output/cma-score-%s.log" % slug)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        f = open(path, "ab")
+        f.write(("\n--- dispatch %s | %s ---\n" % (
+            datetime.now(timezone.utc).isoformat(), " ".join(argv))).encode())
+        f.flush()
+        return f
 
     def _cma_photos_url(deal_id):
         """The seller's subject-photos Drive folder link saved on the deal (or "").
         Read straight from the deal's extra_toggles_json, same as the offerKit read
         elsewhere in this module."""
+        # Local on purpose: this closure has no _json in scope (every other
+        # nested route imports it locally), and the bare `except` below turned
+        # the resulting NameError into "" for every deal -- so /cma/phases
+        # reported photosUrlSet:false and /cma/score-photos 400'd "no photos
+        # link" against deals that HAD one (2026-08-29, 426 Gleneagles).
+        import json as _json
         try:
             from elevate_cli.data import connect
             with connect() as conn:
@@ -5292,9 +5483,13 @@ def create_admin_deals_router(
                 _need = ", ".join(_lbl.get(d, d) for d in chk["unmet"])
                 raise HTTPException(status_code=409,
                                     detail=f"Can't run {body.phase} yet — capture {_need} first.")
-            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--phase", body.phase],
-                      env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                      start_new_session=True)
+            argv = ["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--phase", body.phase]
+            logf = _cma_detach_log(addr, argv)
+            try:
+                _sp.Popen(argv, env=_user_site_env(), stdout=logf, stderr=logf,
+                          start_new_session=True)
+            finally:
+                logf.close()
             return {"ok": True, "started": True, "phase": body.phase}
         except HTTPException:
             raise
@@ -5332,14 +5527,22 @@ def create_admin_deals_router(
             addr = _cma_addr(deal_id)
             if not addr:
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
+            _cma_call(addr, ["--phase", "photos", "--can-run"], timeout=30)
             url = _cma_photos_url(deal_id)
-            if not url:
-                raise HTTPException(status_code=400, detail="No photos Drive link saved on this deal")
+            import glob as _glob
+            if _glob.glob(os.path.join(_cma_upload_dir(deal_id), "subject-photo-*.jpg")):
+                url = ""  # Explicit uploads take precedence over an older saved Drive folder.
+            if not url and not _glob.glob(os.path.join(_cma_upload_dir(deal_id), "subject-photo-*.jpg")):
+                raise HTTPException(status_code=400, detail="Add subject photos or choose No photos first.")
             import subprocess as _sp
-            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr,
-                       "--score-photos", "--folder", url],
-                      env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                      start_new_session=True)
+            argv = ["/usr/bin/python3", _CMA_RUNNER, "--address", addr,
+                    "--score-photos", "--folder", url]
+            logf = _cma_detach_log(addr, argv)
+            try:
+                _sp.Popen(argv, env=_user_site_env(), stdout=logf, stderr=logf,
+                          start_new_session=True)
+            finally:
+                logf.close()
             return {"ok": True, "started": True, "photosUrl": url}
         except HTTPException:
             raise
@@ -5379,8 +5582,12 @@ def create_admin_deals_router(
             env["CMA_MAX_COMPS"] = "10"
             _sp.run(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--reset-downstream"],
                     env=env, capture_output=True, timeout=30)
-            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--phase", "collect"],
-                      env=env, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+            argv = ["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--phase", "collect"]
+            logf = _cma_detach_log(addr, argv)
+            try:
+                _sp.Popen(argv, env=env, stdout=logf, stderr=logf, start_new_session=True)
+            finally:
+                logf.close()
             return {"ok": True, "started": True, "areas": env.get("CMA_AREAS"),
                     "anchor": env.get("CMA_VALUE_ANCHOR"), "instructions": text}
         except HTTPException:
@@ -5394,7 +5601,9 @@ def create_admin_deals_router(
         """Serve a comp's first captured photo (comp-N-photo-00.jpg) for the
         Comparables-step thumbnail. 404 if that comp has no photo (placeholder)."""
         import glob as _glob
-        base = os.path.join(os.path.dirname(_CMA_RUNNER), "screenshots", "comp-photos")
+        if not _cma_photo_owner_ok(deal_id):
+            raise HTTPException(status_code=409, detail="Photos for this property are not available yet.")
+        base = _cma_photo_dir(deal_id)
         cand = os.path.join(base, f"comp-{comp_num}-photo-00.jpg")
         if not os.path.exists(cand):
             hits = sorted(_glob.glob(os.path.join(base, f"comp-{comp_num}-photo-*.jpg")))
@@ -5410,7 +5619,43 @@ def create_admin_deals_router(
     # logging back into Xposure. These two endpoints expose the rest.
     # Read-only; they serve files that already exist on disk.
 
-    def _cma_photo_dir() -> str:
+    def _cma_identity(address):
+        import re
+        text = str(address or '').lower().split(',')[0]
+        unit = re.search(r'\b(?:unit|apt|suite)[\s-]*#?([a-z0-9]+)\b', text)
+        if unit:
+            text = text[:unit.start()] + text[unit.end():]
+        words = re.findall(r'[a-z0-9]+', text)
+        aliases = {'road':'rd', 'street':'st', 'avenue':'ave', 'drive':'dr', 'court':'ct',
+                   'place':'pl', 'crescent':'cres', 'boulevard':'blvd', 'lane':'ln'}
+        words = [aliases.get(w, w) for w in words]
+        for i in range(2, len(words)):
+            if words[i] in aliases.values():
+                end = i + 1
+                if end < len(words) and words[end] in ('nw','ne','sw','se','n','s','e','w','north','south','east','west'):
+                    end += 1
+                words = words[:end]
+                break
+        if unit:
+            words.insert(0, unit.group(1))
+        return '-'.join(words)
+
+    def _cma_run_dir(deal_id):
+        import re as _re
+        addr = _cma_addr(deal_id)
+        if not addr:
+            raise HTTPException(status_code=400, detail="No listing address on this deal")
+        slug = _re.sub(r"[^a-z0-9]+", "-", addr.lower()).strip("-")[:60]
+        return os.path.join(os.path.dirname(_CMA_RUNNER), "output", "cma-runs", slug)
+
+    def _cma_upload_dir(deal_id):
+        return os.path.join(_cma_run_dir(deal_id), "subject-uploads")
+
+    def _cma_photo_dir(deal_id=None) -> str:
+        if deal_id:
+            scoped = os.path.join(_cma_run_dir(deal_id), "photos")
+            if os.path.isfile(os.path.join(scoped, "manifest.json")):
+                return scoped
         return os.path.join(os.path.dirname(_CMA_RUNNER), "screenshots", "comp-photos")
 
     def _cma_photo_owner_ok(deal_id: str) -> bool:
@@ -5432,6 +5677,8 @@ def create_admin_deals_router(
         def _norm(s):
             return _re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
+        if os.path.isfile(os.path.join(_cma_run_dir(deal_id), "photos", "manifest.json")):
+            return True
         want = _norm(_cma_addr(deal_id))
         if not want:
             return False
@@ -5443,7 +5690,7 @@ def create_admin_deals_router(
             return False
         if not have:
             return False
-        return want == have or want.startswith(have) or have.startswith(want)
+        return want == have
 
     def _cma_photo_prefix(kind: str, num: int) -> str:
         # Whitelist the prefix. `num` is already an int via the path signature,
@@ -5471,7 +5718,7 @@ def create_admin_deals_router(
             raise HTTPException(
                 status_code=409,
                 detail="The stored photos belong to a different property. Re-run the comp pull for this deal.")
-        base = _cma_photo_dir()
+        base = _cma_photo_dir(deal_id)
         prefix = _cma_photo_prefix(kind, comp_num)
         hits = sorted(_glob.glob(os.path.join(base, f"{prefix}*.jpg")))
         indices = []
@@ -5515,7 +5762,7 @@ def create_admin_deals_router(
             raise HTTPException(
                 status_code=409,
                 detail="The stored photos belong to a different property. Re-run the comp pull for this deal.")
-        base = _cma_photo_dir()
+        base = _cma_photo_dir(deal_id)
         prefix = _cma_photo_prefix(kind, comp_num)
         cand = os.path.join(base, f"{prefix}{photo_idx:02d}.jpg")
         if not os.path.exists(cand):
@@ -5577,7 +5824,8 @@ def create_admin_deals_router(
                 raise HTTPException(status_code=400, detail="Pick an active listing first")
             import os as _os, subprocess as _sp
             script = _os.path.join(_os.path.dirname(_CMA_RUNNER), "capture-prospecting.sh")
-            _sp.Popen(["/bin/bash", script, body.mls, addr],
+            _cma_call(addr, ["--phase", "prospecting", "--can-run"], timeout=30)
+            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--capture", body.mls],
                       env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
             return {"ok": True, "started": True, "mls": body.mls}
         except HTTPException:
@@ -5585,6 +5833,83 @@ def create_admin_deals_router(
         except Exception as exc:
             _log.exception("cma capture-prospecting failed")
             raise HTTPException(status_code=500, detail=f"CMA capture-prospecting failed: {exc}")
+
+    class _CmaFlipBody(BaseModel):
+        comp: str
+        category: str
+        verdict: str = ""
+
+    class _CmaRewriteBody(BaseModel):
+        mls: str
+        kind: str = "sold"
+        text: str = ""
+        position: str | None = None
+
+    @router.get("/api/admin/deals/{deal_id}/cma/finish-grid")
+    def get_cma_finish_grid(deal_id: str):
+        """The finish flip-table (Kitchen/Bath/Floor/Cond/Features/Curb) as data:
+        the auto call, Skyleigh's override and the effective value per cell."""
+        require_admin_setup_ready_for_launch()
+        addr = _cma_addr(deal_id)
+        if not addr:
+            raise HTTPException(status_code=400, detail="No listing address on this deal")
+        return _cma_call(addr, ["--finish-grid"], timeout=60)
+
+    @router.post("/api/admin/deals/{deal_id}/cma/finish-flip")
+    def post_cma_finish_flip(deal_id: str, body: _CmaFlipBody):
+        """Record her call on ONE finish cell. Stored in finish-flips.json as a
+        presentation overlay -- it never moves a finish SCORE, because that score
+        also feeds the pricing adjustment."""
+        require_admin_setup_ready_for_launch()
+        addr = _cma_addr(deal_id)
+        if not addr:
+            raise HTTPException(status_code=400, detail="No listing address on this deal")
+        import json as _json
+        return _cma_call(addr, ["--set-finish-flip", _json.dumps(
+            {"comp": body.comp, "category": body.category, "verdict": body.verdict})], timeout=60)
+
+    @router.post("/api/admin/deals/{deal_id}/cma/save-draft")
+    def post_cma_save_draft(deal_id: str, body: _CmaRewriteBody):
+        """Persist what she has TYPED, as she types. Touches `raw` only -- never
+        the published wording, the position, or the report. The textarea used to
+        hold her words in browser state until she pressed rewrite, while the
+        Better/Worse toggle an inch away saved on tap."""
+        require_admin_setup_ready_for_launch()
+        addr = _cma_addr(deal_id)
+        if not addr:
+            raise HTTPException(status_code=400, detail="No listing address on this deal")
+        import json as _json
+        return _cma_call(addr, ["--save-draft", _json.dumps(
+            {"mls": body.mls, "kind": body.kind, "raw": body.text})], timeout=60)
+
+    @router.post("/api/admin/deals/{deal_id}/cma/rewrite-note")
+    def post_cma_rewrite_note(deal_id: str, body: _CmaRewriteBody):
+        """Save her words FIRST, then rewrite in the background.
+
+        The old path called /cma/voice (a synchronous ~12-120s rewrite that saves
+        NOTHING) and only persisted when she clicked save afterwards, so leaving the
+        page mid-rewrite lost the note entirely. This returns as soon as the raw
+        text is on disk; the UI polls /cma/rewrite-status for the voiced version."""
+        require_admin_setup_ready_for_launch()
+        addr = _cma_addr(deal_id)
+        if not addr:
+            raise HTTPException(status_code=400, detail="No listing address on this deal")
+        import json as _json
+        return _cma_call(addr, ["--rewrite-note", _json.dumps(
+            {"mls": body.mls, "kind": body.kind, "text": body.text,
+             "position": body.position})], timeout=60)
+
+    @router.get("/api/admin/deals/{deal_id}/cma/rewrite-status")
+    def get_cma_rewrite_status(deal_id: str, mls: str = "", kind: str = "sold"):
+        """Poll an in-flight background rewrite (queued/running/done/failed)."""
+        require_admin_setup_ready_for_launch()
+        addr = _cma_addr(deal_id)
+        if not addr:
+            raise HTTPException(status_code=400, detail="No listing address on this deal")
+        args = ["--rewrite-status"]
+        if mls:
+            args += ["--mls", mls, "--kind", kind]
+        return _cma_call(addr, args, timeout=60)
 
     @router.get("/api/admin/deals/{deal_id}/cma/comps")
     def get_cma_comps(deal_id: str):
@@ -5623,13 +5948,11 @@ def create_admin_deals_router(
         """
         try:
             require_admin_setup_ready_for_launch()
-            if not _cma_photo_owner_ok(deal_id):
-                raise HTTPException(
-                    status_code=409,
-                    detail="The staged photos belong to another property right now. "
-                           "Run the pull for this one first, then clear.")
             import glob as _glob
-            base = os.path.join(os.path.dirname(_CMA_RUNNER), "screenshots", "comp-photos")
+            base = _cma_upload_dir(deal_id)
+            _cma_call(_cma_addr(deal_id), ["--reset-downstream"], timeout=30)
+            os.makedirs(base, exist_ok=True)
+            open(os.path.join(base, ".selected"), "a").close()
             removed = 0
             for p in _glob.glob(os.path.join(base, "subject-photo-*.jpg")):
                 try:
@@ -5657,11 +5980,6 @@ def create_admin_deals_router(
         """
         try:
             require_admin_setup_ready_for_launch()
-            if not _cma_photo_owner_ok(deal_id):
-                raise HTTPException(
-                    status_code=409,
-                    detail="The photo staging area belongs to another property right now. "
-                           "Run the pull for this one first, then add photos.")
             import base64 as _b64
             if body.index < 0 or body.index > 499:
                 raise HTTPException(status_code=400, detail="photo index out of range")
@@ -5676,14 +5994,31 @@ def create_admin_deals_router(
                 raise HTTPException(status_code=400, detail="photo was empty")
             if len(blob) > 25 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail="photo is larger than 25MB")
-            base = os.path.join(os.path.dirname(_CMA_RUNNER), "screenshots", "comp-photos")
+            base = _cma_upload_dir(deal_id)
             os.makedirs(base, exist_ok=True)
             # Filename is fully derived from an int, so nothing user-controlled
             # reaches the path. Extension is forced regardless of what was dropped;
             # the scorer only ever globs subject-photo-*.jpg.
             dest = os.path.join(base, f"subject-photo-{body.index:02d}.jpg")
-            with open(dest, "wb") as fh:
-                fh.write(blob)
+            _cma_call(_cma_addr(deal_id), ["--reset-downstream"], timeout=30)
+            from PIL import Image, ImageOps
+            import io as _io
+            try:
+                image = ImageOps.exif_transpose(Image.open(_io.BytesIO(blob))).convert("RGB")
+                image.thumbnail((2400, 2400))
+                image.save(dest, "JPEG", quality=90)
+                open(os.path.join(base, ".selected"), "a").close()
+            except Exception:
+                import tempfile as _tf, subprocess as _sp
+                with _tf.NamedTemporaryFile(suffix=".heic") as raw_photo:
+                    raw_photo.write(blob); raw_photo.flush()
+                    converted = _sp.run(["/usr/bin/sips", "-s", "format", "jpeg", raw_photo.name, "--out", dest],
+                                        capture_output=True, timeout=30)
+                if converted.returncode != 0:
+                    raise HTTPException(status_code=400, detail="This image could not be decoded. Try a JPEG or PNG copy.")
+                image = ImageOps.exif_transpose(Image.open(dest)).convert("RGB")
+                image.thumbnail((2400, 2400)); image.save(dest, "JPEG", quality=90)
+                open(os.path.join(base, ".selected"), "a").close()
             return {"ok": True, "index": body.index, "bytes": len(blob),
                     "path": os.path.basename(dest)}
         except HTTPException:
@@ -5705,9 +6040,7 @@ def create_admin_deals_router(
         try:
             require_admin_setup_ready_for_launch()
             import glob as _glob
-            if not _cma_photo_owner_ok(deal_id):
-                return {"ok": True, "count": 0, "names": [], "foreign": True}
-            base = os.path.join(os.path.dirname(_CMA_RUNNER), "screenshots", "comp-photos")
+            base = _cma_upload_dir(deal_id)
             hits = sorted(_glob.glob(os.path.join(base, "subject-photo-*.jpg")))
             return {"ok": True, "count": len(hits), "foreign": False,
                     "names": [os.path.basename(h) for h in hits[:60]]}
@@ -6196,7 +6529,8 @@ def create_admin_deals_router(
             logdir = os.path.expanduser("~/skyleigh-tools/output")
             os.makedirs(logdir, exist_ok=True)
             logf = open(os.path.join(logdir, "cma-saved-list.log"), "ab")
-            _sp.Popen([node_bin, script, "--address", addr, "--list", name],
+            _cma_call(addr, ["--phase", "collect", "--can-run"], timeout=30)
+            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--saved-list", name],
                       env=env, stdout=logf, stderr=logf,
                       start_new_session=True,
                       cwd=os.path.expanduser("~/skyleigh-tools"))
@@ -6361,6 +6695,7 @@ def create_admin_deals_router(
             addr = _cma_addr(deal_id)
             if not addr:
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
+            _cma_call(addr, ["--report-ready"], timeout=30)
             import json as _json
             to, name = "", ""
             try:
@@ -6456,6 +6791,112 @@ def create_admin_deals_router(
             _log.exception("cma summarize failed")
             raise HTTPException(status_code=500, detail=f"CMA summary failed: {exc}")
 
+    @router.get("/api/admin/deals/{deal_id}/cma/expired-select")
+    def get_cma_expired_select(deal_id: str):
+        """Every expired address the pull found, with her include/exclude state.
+
+        NOT /cma/expired: that path already exists further down this file and feeds
+        the comp review's candidate list. Registering a second handler on the same
+        path would have shadowed it silently, because FastAPI matches the first one
+        registered and the older route is declared later.
+
+        The "what was tried and didn't sell" band had NO set-aside: sold and active
+        comps have had one since the review screen was built, so every expired
+        address the search returned went straight into the seller's report.
+        Skyleigh 2026-09-06: "a number of them are outside the range for the pricing
+        so it doesn't make sense to include them, but I can't seem to delete them."
+        """
+        try:
+            require_admin_setup_ready_for_launch()
+            addr = _cma_addr(deal_id)
+            if not addr:
+                return {"ok": True, "available": False, "expired": []}
+            return _cma_call(addr, ["--expired-list"], timeout=60)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("cma expired list failed")
+            raise HTTPException(status_code=500, detail=f"CMA expired list failed: {exc}")
+
+    @router.post("/api/admin/deals/{deal_id}/cma/expired-select/toggle")
+    def post_cma_expired_toggle(deal_id: str, body: _CmaExpiredBody):
+        """Include/exclude one expired address. Returns the whole refreshed list so
+        the screen never has to guess which six the report will now carry."""
+        try:
+            require_admin_setup_ready_for_launch()
+            addr = _cma_addr(deal_id)
+            if not addr:
+                raise HTTPException(status_code=400, detail="No listing address on this deal")
+            return _cma_call(addr, ["--toggle-expired", body.key], timeout=60)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("cma expired toggle failed")
+            raise HTTPException(status_code=500, detail=f"CMA expired toggle failed: {exc}")
+
+    @router.get("/api/admin/deals/{deal_id}/cma/price-page")
+    def get_cma_price_page(deal_id: str):
+        """The approved design's "How We Got to the Price" page for this property:
+        what is saved, whether it is actually in the report, and what a draft would
+        have to work from.
+
+        This page is part of the approved template and cma-visual-qa.py hard-fails
+        A7 without it, but nothing in the wizard ever wrote it, so every wizard-built
+        CMA since the rebuild shipped without it (426 Gleneagles, measured
+        2026-09-06). `inReport` is the honest answer to "is it in there".
+        """
+        try:
+            require_admin_setup_ready_for_launch()
+            addr = _cma_addr(deal_id)
+            if not addr:
+                return {"ok": True, "quads": {}, "inReport": False, "sources": []}
+            return _cma_call(addr, ["--price-page"], timeout=60)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("cma price page read failed")
+            raise HTTPException(status_code=500, detail=f"CMA price page failed: {exc}")
+
+    @router.post("/api/admin/deals/{deal_id}/cma/price-page/draft")
+    def post_cma_price_page_draft(deal_id: str):
+        """Draft the four boxes from her comp notes, her positioning, the buyer-demand
+        number and her walkthrough read. Saves NOTHING: the wizard shows it, she edits
+        it, and a separate save puts it in the report. Runs the headless claude CLI,
+        so the timeout is generous and the UI shows a pending state."""
+        try:
+            require_admin_setup_ready_for_launch()
+            addr = _cma_addr(deal_id)
+            if not addr:
+                raise HTTPException(status_code=400, detail="No listing address on this deal")
+            return _cma_call(addr, ["--draft-price-page"], timeout=300)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("cma price page draft failed")
+            raise HTTPException(status_code=500, detail=f"CMA price page draft failed: {exc}")
+
+    @router.post("/api/admin/deals/{deal_id}/cma/price-page")
+    def post_cma_price_page(deal_id: str, body: _CmaPricePageBody):
+        """Approve the page onto the report. The runner writes the four keys into
+        _strategy.json, which is what generate-cma-pdf-v2.js reads."""
+        try:
+            require_admin_setup_ready_for_launch()
+            addr = _cma_addr(deal_id)
+            if not addr:
+                raise HTTPException(status_code=400, detail="No listing address on this deal")
+            import json as _j
+            return _cma_call(addr, ["--set-price-page", _j.dumps({
+                "pricingStrategy": body.pricingStrategy or [],
+                "valueDrivers": body.valueDrivers or [],
+                "buyerQuestions": body.buyerQuestions or [],
+                "prepNextSteps": body.prepNextSteps or [],
+            })], timeout=60)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log.exception("cma price page save failed")
+            raise HTTPException(status_code=500, detail=f"CMA price page save failed: {exc}")
+
     @router.post("/api/admin/deals/{deal_id}/cma/overview")
     def post_cma_overview(deal_id: str, body: _CmaOverviewBody):
         try:
@@ -6501,8 +6942,9 @@ def create_admin_deals_router(
         if not addr:
             return None, None
         slug = _re.sub(r"[^a-z0-9]+", "-", addr.lower()).strip("-")[:60]
-        d = os.path.expanduser(f"~/skyleigh-tools/scripts/output/cma-runs/{slug}")
-        hits = [f for f in _g.glob(os.path.join(d, "*.pdf"))]
+        d = _cma_run_dir(deal_id)
+        hits = [f for f in _g.glob(os.path.join(d, "*cma-report*.pdf"))
+                if _cma_identity(os.path.basename(f).split("-cma-report")[0]) == _cma_identity(addr)]
         if not hits:
             return None, d
         return max(hits, key=lambda f: os.path.getmtime(f)), d
@@ -6523,7 +6965,7 @@ def create_admin_deals_router(
             # Re-render when the PDF is newer than the images, so she is never
             # looking at the previous render of the same property.
             fresh = (os.path.isfile(stamp)
-                     and open(stamp).read().strip() == f"{os.path.basename(pdf)}:{int(os.path.getmtime(pdf))}")
+                     and open(stamp).read().strip() == f"{os.path.basename(pdf)}:{os.stat(pdf).st_mtime_ns}")
             if not fresh:
                 try:
                     import fitz
@@ -6534,7 +6976,7 @@ def create_admin_deals_router(
                             doc.load_page(i).get_pixmap(dpi=100).save(
                                 os.path.join(pages_dir, f"page-{i + 1:02d}.png"))
                     with open(stamp, "w") as fh:
-                        fh.write(f"{os.path.basename(pdf)}:{int(os.path.getmtime(pdf))}")
+                        fh.write(f"{os.path.basename(pdf)}:{os.stat(pdf).st_mtime_ns}")
                 except Exception:
                     _log.warning("report page render failed", exc_info=True)
             n = len(_g.glob(os.path.join(pages_dir, "page-*.png")))

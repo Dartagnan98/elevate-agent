@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useCallback } from "react";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
 import { createPortal } from "react-dom";
 import {
   Home,
@@ -15,12 +16,13 @@ import {
 } from "../admin-data";
 import { api } from "@/lib/api";
 import type { DealContext, AdminDeal } from "@/lib/api-types";
-import OfferKitWizard from "./offer-kit-wizard";
-import ListingKitWizard from "./listing-kit-wizard";
+import KitSurface from "./kit-surface";
+
 import DocumentsPanel from "./documents-panel";
 import OnboardingPanel from "./onboarding-panel";
 import CmaSurface from "./cma-surface";
 import WaitingCard from "./waiting-card";
+import ListingIntakeDocuments from "./listing-intake-documents";
 import OzzieChatPanel from "./ozzie-chat-panel";
 import DepositCard, { deriveDeposit } from "./deposit-card";
 import "./stage-rail.css";
@@ -559,6 +561,15 @@ function stringValue(value: unknown): string {
   return "";
 }
 
+// The scorecard and Listing Kit edit the same intake facts.
+const LISTING_INTAKE_KEYS: Record<string, string> = {
+  "seller.mailingAddress": "sellerMailingAddress",
+  "mlc.listingPrice": "listPrice", "mlc.commissionTerms": "listingCommission",
+  "mlc.cooperatingBrokerageCommission": "buyerAgencyComp",
+  "mlc.contractEffectiveDate": "contractEffectiveDate", "mlc.expiryDate": "expiryDate",
+  "mlc.plannedMlsLiveDate": "listingDate",
+};
+
 const MONTHS_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function fmtMoney(n: number): string {
   return "$" + Math.round(n).toLocaleString();
@@ -595,13 +606,15 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const isSellerProspect = !isBuyer && deal.phase === "pre-cma";
   const pipeline      = isBuyer ? ADMIN_BUYER_PIPELINE      : ADMIN_PIPELINE;
   const phaseDetails  = isBuyer ? ADMIN_BUYER_PHASE_DETAILS  : ADMIN_PHASE_DETAILS;
-  const sideCrumb     = isBuyer ? "BUYER ADMIN ADMIN"        : "LISTING ADMIN ADMIN";
+  const sideCrumb     = isBuyer ? "BUYER ADMIN"        : "LISTING ADMIN";
 
   // Completed + upcoming stages collapse to a one-line summary; the current
   // stage auto-expands (see the effect below). Starts empty so nothing flashes
   // open before the real current stage is known.
   const [openPhases, setOpenPhases] = useState<Set<string>>(() => new Set());
   const [cmaOpen, setCmaOpen] = useState(false);
+  const [kitOpen, setKitOpen] = useState(false);
+  const [kitInitialStep, setKitInitialStep] = useState(1);
   const userToggledPhasesRef = React.useRef(false);
   // Manual checklist checks live in the DB at extra.checklistManual (array of
   // itemKeys). Seeded from contextDeal once it loads; toggles write back through
@@ -675,7 +688,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
     // inline response so it OPENS in the viewer instead of downloading.
     window.open(
       `${externalOrigin}/api/admin/deals/${deal.id}/cma-pdf?token=${encodeURIComponent(token)}&v=${Date.now()}`,
-      "_blank",
+      "_blank", "noopener,noreferrer",
     );
   }, [deal.id]);
   // Same shell constraints as openCmaPdf above. Opens the listing's latest
@@ -692,7 +705,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       : origin.replace("localhost", "127.0.0.1");
     window.open(
       `${externalOrigin}/api/admin/deals/${deal.id}/seller-update-pdf?token=${encodeURIComponent(token)}&v=${Date.now()}`,
-      "_blank",
+      "_blank", "noopener,noreferrer",
     );
   }, [deal.id]);
   // Approve & Send the weekly seller-update Gmail draft (PDF attached) the
@@ -769,6 +782,8 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const buyerPhonesAuto = joinValues(buyerContacts.map((c) => c.primaryPhone));
 
   const autoInfoValue = (key: string): string => {
+    const intakeKey = LISTING_INTAKE_KEYS[key];
+    if (intakeKey && Object.prototype.hasOwnProperty.call(extra, intakeKey)) return stringValue(extra[intakeKey]);
     const saved = stringValue(extra[key]);
     if (saved) return saved;
     switch (key) {
@@ -926,7 +941,8 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       // it turned seller.emails / buyer.emails / prospect.emails all into a bare
       // "emails" that collided and matched no getter, so contact email/phone
       // edits vanished on reload.
-      await api.setAdminDealToggle(deal.id, key, value.trim() || null);
+      await api.setAdminDealToggle(deal.id, LISTING_INTAKE_KEYS[key] || key, value.trim() || null);
+      reloadCtx();
     } finally {
       setSavingInfoKey(null);
     }
@@ -939,13 +955,8 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       return next;
     });
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const dialogRef = React.useRef<HTMLDivElement>(null);
+  useDialogFocus({ dialogRef, onEscape: onClose });
 
   const currentPhase = pipeline.find((p) => p.id === deal.phase) || pipeline[0];
   const currentIdx   = pipeline.indexOf(currentPhase);
@@ -978,6 +989,15 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   React.useEffect(() => {
     if (userToggledPhasesRef.current) return;
     setOpenPhases(new Set(currentPhase ? [currentPhase.id] : []));
+    if (!isBuyer && currentIdx === 2) {
+      if (!ctx) return;
+      const frame = requestAnimationFrame(() => {
+        const target = document.getElementById(`abm-listing-kit-${deal.id}`);
+        const scroll = target?.closest<HTMLElement>(".ab-modal-scroll");
+        if (target && scroll) scroll.scrollTo({ top: scroll.scrollTop + target.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 12, behavior: "instant" });
+      });
+      return () => cancelAnimationFrame(frame);
+    }
     if (currentIdx > 0) {
       requestAnimationFrame(() => {
         document.getElementById(`abm-phase-${currentPhase?.id}`)
@@ -985,7 +1005,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPhase?.id, currentIdx]);
+  }, [currentPhase?.id, currentIdx, ctx?.deal?.id, deal.id, isBuyer]);
 
   const itemKey = (phaseId: string, item: string, idx: number) => `${phaseId}:${idx}:${item}`;
 
@@ -1046,6 +1066,10 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
     <div className="ab-modal-backdrop" onClick={onClose}>
       <div
         className="ab-modal"
+        ref={dialogRef}
+        tabIndex={-1}
+        aria-modal="true"
+        aria-label={`Deal: ${deal.addr}`}
         onClick={(e: React.MouseEvent) => e.stopPropagation()}
         role="dialog"
       >
@@ -1137,8 +1161,6 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
         </header>
 
         <div className="abm-actionbar">
-          <button className="abm-btn primary" type="button">Advance phase</button>
-          <button className="abm-btn ghost" type="button">Force advance</button>
           <button
             className="abm-btn collapse-sale"
             type="button"
@@ -1387,17 +1409,7 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
               fieldValue={infoFieldValue} saveField={saveInfoField} />
           )}
 
-          {((contextDeal?.side || (deal as unknown as { side?: string }).side) !== "buyer") && (
-            <ListingKitWizard
-              dealId={deal.id}
-              extra={extra}
-              address={(contextDeal as unknown as { listingAddress?: string })?.listingAddress ?? (deal as unknown as { listingAddress?: string; address?: string })?.listingAddress ?? (deal as unknown as { address?: string })?.address}
-              sellerName={(extra as unknown as { sellerNames?: string }).sellerNames}
-              dealTitle={(contextDeal as unknown as { title?: string })?.title ?? (deal as unknown as { title?: string })?.title}
-              currentStage={(contextDeal as unknown as { currentStage?: number })?.currentStage ?? (deal as unknown as { currentStage?: number })?.currentStage ?? 0}
-              onUpdate={reloadCtx}
-            />
-          )}
+
 
           {((contextDeal?.side || (deal as unknown as { side?: string }).side) === "buyer") && (
             <OnboardingPanel dealId={deal.id} extra={extra}
@@ -1406,17 +1418,18 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
               fieldValue={infoFieldValue} saveField={saveInfoField} />
           )}
 
-          {((contextDeal?.side || (deal as unknown as { side?: string }).side) === "buyer") && (
-            <OfferKitWizard
-              dealId={deal.id}
-              extra={extra}
-              address={(contextDeal as unknown as { listingAddress?: string })?.listingAddress ?? (deal as unknown as { listingAddress?: string; address?: string })?.listingAddress ?? (deal as unknown as { address?: string })?.address}
-              buyerName={(extra as unknown as { buyerNames?: string }).buyerNames}
-              dealTitle={(contextDeal as unknown as { title?: string })?.title ?? (deal as unknown as { title?: string })?.title}
-              currentStage={(contextDeal as unknown as { currentStage?: number })?.currentStage ?? (deal as unknown as { currentStage?: number })?.currentStage ?? 0}
-              onUpdate={reloadCtx}
-            />
-          )}
+          <section className="kit-launcher" id={`abm-listing-kit-${deal.id}`}>
+            <div><h3>{(contextDeal?.side || deal.side) === "buyer" ? "Transaction Kit" : "Listing Kit"}</h3><p>Prepare terms, review documents and arrange signatures.</p></div>
+            <button type="button" className="kit-primary" onClick={() => {setKitInitialStep(!isBuyer && currentIdx === 2 ? 4 : 1); setKitOpen(true);}}>Open document kit →</button>
+          </section>
+          {kitOpen && <KitSurface
+            side={(contextDeal?.side || deal.side) === "buyer" ? "buyer" : "listing"}
+            dealId={deal.id} extra={extra}
+            address={contextDeal?.listingAddress || (deal as unknown as { listingAddress?: string }).listingAddress || undefined}
+            dealTitle={contextDeal?.title || (deal as unknown as { title?: string }).title}
+            currentStage={contextDeal?.currentStage ?? (deal as unknown as { currentStage?: number }).currentStage}
+            onUpdate={reloadCtx} onClose={() => setKitOpen(false)} initialStep={kitInitialStep}
+          />}
 
 
           {/* Deposit — tracked record (shows from accepted offer onward) */}
@@ -1710,6 +1723,10 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                           })}
                         </ul>
 
+                        {!isBuyer && p.stage === "S2" && <ListingIntakeDocuments
+                          dealId={deal.id} extra={extra} runs={ctx?.priorRuns ?? []}
+                          onOpen={() => {setKitInitialStep(4); setKitOpen(true);}} onResolved={reloadCtx}
+                        />}
                         {/* PROVINCE DOCUMENTS section removed per Skyleigh — the
                             auto-generated province doc list was inaccurate. */}
                       </div>

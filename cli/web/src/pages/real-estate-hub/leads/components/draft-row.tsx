@@ -67,7 +67,7 @@ export function DraftRow({
 
   return (
     <div className={"lb-draft" + (selected ? " selected" : "") + (expanded ? " expanded" : "")}>
-      <button type="button" className="lb-draft-check" onClick={onToggle} aria-label="Select draft">
+      <button type="button" className="lb-draft-check" onClick={onToggle} aria-label={`Select reply for ${draft.name}`} aria-pressed={selected} disabled={busy}>
         <span className={"lb-checkbox" + (selected ? " checked" : "")}>
           {selected && <span className="lb-check">✓</span>}
         </span>
@@ -110,6 +110,7 @@ export function DraftRow({
               </div>
             )}
             <textarea
+              aria-label={`Reply to ${draft.name}`}
               className="lb-draft-edit"
               value={editText}
               onChange={(e) => setEditText(e.target.value)}
@@ -121,7 +122,7 @@ export function DraftRow({
               }}
             />
             <div className="lb-draft-expand-foot">
-              <span className="lb-draft-template-link">
+              {onEditTemplate && <span className="lb-draft-template-link">
                 Generated from <strong>Warm intro</strong> template ·{" "}
                 <button
                   type="button"
@@ -133,7 +134,7 @@ export function DraftRow({
                 >
                   edit template
                 </button>
-              </span>
+              </span>}
               {dirty && (
                 <button
                   type="button"
@@ -222,7 +223,7 @@ export function DraftRow({
               onAction?.("approve", editedDraft);
             }}
           >
-            {busy ? "…" : "Approve"}
+            {busy ? "…" : "Approve and send"}
           </button>
         </div>
       )}

@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -16,6 +17,10 @@ GetSessionDb = Callable[[], Any]
 OpenInFileManager = Callable[[Path], None]
 SessionRevealTarget = Callable[[str], Path]
 LiveSubagentChildSessionIds = Callable[[], set[str]]
+
+
+class SessionArtifactRegistration(BaseModel):
+    artifacts: list[dict[str, str]]
 
 
 class SessionTitleUpdate(BaseModel):
@@ -239,6 +244,40 @@ def _artifact_kind(path: Path, mime_type: Optional[str]) -> str:
     return "file"
 
 
+# ── Per-open transcript coalescing cache ─────────────────────────────────
+# One session open fans out to 5 detail routes (messages/todos/plan/files/
+# artifacts), each needing the full decoded transcript. Without this they'd
+# each run a synchronous full-table read + JSON decode ON the event loop —
+# 5x the work per click, all blocking. A short TTL collapses them to one
+# read; synchronous route handlers run in FastAPI workers so the loop never blocks.
+# ponytail: 2s TTL — side panels poll at 2.5-4s and the REST transcript read
+# only fires on open/reconnect (live streaming arrives over WS, not here).
+# Cached lists are shared read-only across routes; the /messages route's
+# in-place client_message_id/message_id backfill is idempotent, so sharing
+# is safe. Upgrade path: key on (active_id, last_message_id) if 2s staleness
+# ever shows up in the side panels.
+_MSG_CACHE: dict[str, tuple[float, list]] = {}
+_MSG_CACHE_TTL = 2.0
+_MSG_CACHE_MAX = 64
+
+
+def _load_session_messages(db, active_id):
+    """Blocking full-transcript read, coalesced by a 2s TTL. Call via
+    a worker thread, never directly from an async handler."""
+    now = time.monotonic()
+    hit = _MSG_CACHE.get(active_id)
+    if hit and hit[0] > now:
+        return hit[1]
+    messages = db.get_messages(active_id)
+    if len(_MSG_CACHE) >= _MSG_CACHE_MAX:
+        for k in [k for k, (exp, _) in _MSG_CACHE.items() if exp <= now]:
+            _MSG_CACHE.pop(k, None)
+        if len(_MSG_CACHE) >= _MSG_CACHE_MAX:
+            _MSG_CACHE.pop(next(iter(_MSG_CACHE)), None)
+    _MSG_CACHE[active_id] = (now + _MSG_CACHE_TTL, messages)
+    return messages
+
+
 def create_session_detail_router(
     *,
     get_session_db: GetSessionDb,
@@ -247,10 +286,12 @@ def create_session_detail_router(
     live_subagent_child_session_ids: LiveSubagentChildSessionIds,
     log: Any,
 ) -> APIRouter:
+    # Synchronous DB reads/locks belong in FastAPI workers, never on the
+    # event loop that also delivers chat streaming and status requests.
     router = APIRouter()
 
     @router.get("/api/sessions/{session_id}")
-    async def get_session_detail(session_id: str):
+    def get_session_detail(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
@@ -264,11 +305,11 @@ def create_session_detail_router(
             db.close()
 
     @router.get("/api/sessions/{session_id}/messages")
-    async def get_session_messages(session_id: str):
+    def get_session_messages(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
-            messages = db.get_messages(active_id)
+            messages = _load_session_messages(db, active_id)
             _INTERNAL_ROW_PREFIXES = (
                 "[CONTEXT COMPACTION",
                 "[Your latest Plan panel plan was preserved",
@@ -307,14 +348,14 @@ def create_session_detail_router(
             db.close()
 
     @router.get("/api/sessions/{session_id}/todos")
-    async def get_session_todos(session_id: str):
+    def get_session_todos(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = _load_session_messages(db, active_id)
         finally:
             db.close()
 
@@ -360,14 +401,14 @@ def create_session_detail_router(
         }
 
     @router.get("/api/sessions/{session_id}/plan")
-    async def get_session_plan(session_id: str):
+    def get_session_plan(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = _load_session_messages(db, active_id)
         finally:
             db.close()
 
@@ -396,14 +437,14 @@ def create_session_detail_router(
         }
 
     @router.get("/api/sessions/{session_id}/files")
-    async def get_session_files(session_id: str):
+    def get_session_files(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = _load_session_messages(db, active_id)
         finally:
             db.close()
 
@@ -420,7 +461,7 @@ def create_session_detail_router(
         }
 
     @router.get("/api/sessions/{session_id}/turn_usage")
-    async def get_session_turn_usage(session_id: str):
+    def get_session_turn_usage(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
@@ -439,22 +480,40 @@ def create_session_detail_router(
             "turn_usage": [{k: r.get(k) for k in fields} for r in rows],
         }
 
+    @router.post("/api/sessions/{session_id}/artifacts")
+    def post_session_artifacts(session_id: str, body: SessionArtifactRegistration):
+        from elevate_cli.review_packages import register_artifacts
+        db = get_session_db()
+        try:
+            _sid, _active_id, identity = _resolve_active_session_or_404(db, session_id)
+            return {"artifacts": register_artifacts(db, identity, body.artifacts)}
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        finally:
+            db.close()
+
     @router.get("/api/sessions/{session_id}/artifacts")
-    async def get_session_artifacts(session_id: str):
+    def get_session_artifacts(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
-            checkpoint = _read_session_checkpoint(
+            from elevate_cli.review_packages import registered_artifacts
+            registered = registered_artifacts(db, identity)
+            # A skill's durable output inventory is authoritative. Avoid scanning
+            # the entire transcript (and stat-ing old Drive paths) on every open.
+            checkpoint = {} if registered else _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = [] if registered or checkpoint.get("files") else _load_session_messages(db, active_id)
         finally:
             db.close()
 
         checkpoint_files = checkpoint.get("files") if isinstance(checkpoint, dict) else None
         candidates = [str(p) for p in checkpoint_files if isinstance(p, str)] if isinstance(checkpoint_files, list) else []
-        if not candidates:
-            candidates = _extract_session_file_candidates(messages)
+        candidates += _extract_session_file_candidates(messages)
+        names = {item["path"]: item["name"] for item in registered}
+        registered_times = {item["path"]: item.get("registeredAt", 0) for item in registered}
+        candidates = list(names) + candidates
 
         artifacts: list[dict] = []
         for file_entry in _resolve_existing_session_files(candidates, limit=500):
@@ -470,11 +529,11 @@ def create_session_detail_router(
             artifacts.append({
                 "id": hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16],
                 "path": str(path),
-                "name": path.name,
+                "name": names.get(str(path), path.name),
                 "kind": _artifact_kind(path, mime_type),
                 "mime_type": mime_type,
                 "size": size,
-                "modified_at": modified_at,
+                "modified_at": max(modified_at or 0, registered_times.get(str(path), 0)),
             })
 
         return {
@@ -485,7 +544,7 @@ def create_session_detail_router(
         }
 
     @router.get("/api/sessions/{session_id}/children")
-    async def get_session_children(session_id: str):
+    def get_session_children(session_id: str):
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
@@ -512,7 +571,7 @@ def create_session_detail_router(
         }
 
     @router.put("/api/sessions/{session_id}/title")
-    async def update_session_title_endpoint(session_id: str, payload: SessionTitleUpdate):
+    def update_session_title_endpoint(session_id: str, payload: SessionTitleUpdate):
         db = get_session_db()
         try:
             sid = db.resolve_session_id(session_id)
@@ -530,7 +589,7 @@ def create_session_detail_router(
             db.close()
 
     @router.post("/api/sessions/{session_id}/reveal")
-    async def reveal_session_endpoint(session_id: str):
+    def reveal_session_endpoint(session_id: str):
         db = get_session_db()
         try:
             sid = db.resolve_session_id(session_id)
@@ -551,7 +610,7 @@ def create_session_detail_router(
             db.close()
 
     @router.delete("/api/sessions/{session_id}")
-    async def delete_session_endpoint(session_id: str):
+    def delete_session_endpoint(session_id: str):
         db = get_session_db()
         deleted = False
         try:

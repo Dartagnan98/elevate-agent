@@ -1,6 +1,5 @@
 """Dashboard status route."""
 
-import asyncio
 import json
 import logging
 import os
@@ -98,7 +97,7 @@ def create_status_router(
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/status")
-    async def get_status():
+    def get_status():
         cached = _cached_status_payload()
         if cached is not None:
             return cached
@@ -111,10 +110,7 @@ def create_status_router(
         gateway_health_url = gateway_health_url_func()
 
         if not gateway_running and gateway_health_url:
-            loop = asyncio.get_event_loop()
-            alive, remote_health_body = await loop.run_in_executor(
-                None, probe_gateway_health_func
-            )
+            alive, remote_health_body = probe_gateway_health_func()
             if alive:
                 gateway_running = True
                 if remote_health_body:

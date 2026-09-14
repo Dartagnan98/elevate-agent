@@ -12,15 +12,17 @@
 // that turned them off would only produce a report that cannot pass its own check.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../../lib/api";
+import type { CmaPricePageQuads } from "../../../../lib/api";
 import { useIsMobile } from "../../../../hooks/useIsMobile";
 import CmaInfo from "./cma-info";
+import CmaExpiredReview from "./cma-expired-review";
 
 const NAVY = "#182848", MUTED = "#6B7488", LINE = "#e3e7ef",
       GREEN = "#2f7a4d", BLUE = "#5E8AD0", TERRA = "#C46340";
 
 type Section = { key: string; label: string; blurb?: string; locked?: boolean; on: boolean };
 
-export default function CmaReportBuild({ dealId }: { dealId: string }) {
+export default function CmaReportBuild({ dealId, reportVersion = "", revision = 0 }: { dealId: string; reportVersion?: string; revision?: number }) {
   const isMobile = useIsMobile();
   const [sections, setSections] = useState<Section[]>([]);
   const [counts, setCounts] = useState({ on: 0, total: 0 });
@@ -37,7 +39,7 @@ export default function CmaReportBuild({ dealId }: { dealId: string }) {
     api.getCmaReportPages(dealId)
       .then((r) => setPages(r.available ? r.pages : 0))
       .catch(() => setPages(0));
-  }, [dealId]);
+  }, [dealId, reportVersion, revision]);
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
@@ -66,7 +68,11 @@ export default function CmaReportBuild({ dealId }: { dealId: string }) {
     } finally { setSaving(null); }
   };
 
-  if (!sections.length && !pages) return null;
+  // NO early return here. The expired picker, the price page and the overview
+  // are hers to fill in BEFORE a report exists, and getCmaSections swallows its
+  // own errors above, so a bad toggles fetch used to blank this whole step --
+  // the same silent-absence she hit on 2026-09-06 with the expired picker.
+  // Every block below carries its own guard.
 
   const FIRST = isMobile ? 6 : 12;
   const shown = Array.from({ length: showAll ? pages : Math.min(FIRST, pages) }, (_, i) => i + 1);
@@ -76,6 +82,17 @@ export default function CmaReportBuild({ dealId }: { dealId: string }) {
       {/* Her closing paragraph, written last because that is the order she
           thinks in: read the comps, then say where she lands. It replaces the
           standing copy in the report's closing block. */}
+      {/* ALSO HERE, not only on the Comparables step. Skyleigh 2026-09-06, after
+          the first build: "It's still not letting me select which expired listings
+          I want to include." It was mounted, on a step she was not on. Deciding
+          which expired homes a seller sees is a REPORT decision and she makes it
+          on the Report step, next to the section switches, so the control belongs
+          on both screens. They share server state, and only one step renders at a
+          time, so there is nothing to keep in sync. */}
+      <CmaExpiredReview dealId={dealId} />
+
+      <PricePage dealId={dealId} isMobile={isMobile} />
+
       <Overview dealId={dealId} isMobile={isMobile} />
 
       {!!sections.length && (
@@ -150,7 +167,7 @@ export default function CmaReportBuild({ dealId }: { dealId: string }) {
               <button key={n} type="button" onClick={() => setViewing(n)}
                 aria-label={`Report page ${n} of ${pages}`}
                 style={{ padding: 0, border: `1px solid ${LINE}`, borderRadius: 5, background: "#f4f6fa", cursor: "zoom-in", overflow: "hidden", position: "relative", lineHeight: 0, minHeight: 44 }}>
-                <img src={api.cmaReportPageUrl(dealId, n)} alt="" loading="lazy" style={{ width: "100%", display: "block" }} />
+                <img src={(api.cmaReportPageUrl(dealId, n) + "?v=" + encodeURIComponent(reportVersion))} alt="" loading="lazy" style={{ width: "100%", display: "block" }} />
                 <span style={{ position: "absolute", bottom: 2, right: 3, fontSize: 9, fontWeight: 700, color: "#fff", background: "rgba(24,40,72,.72)", borderRadius: 3, padding: "0 4px", lineHeight: "13px" }}>{n}</span>
               </button>
             ))}
@@ -173,7 +190,7 @@ export default function CmaReportBuild({ dealId }: { dealId: string }) {
             <span>page {viewing} of {pages}</span>
             <span>tap to close</span>
           </div>
-          <img src={api.cmaReportPageUrl(dealId, viewing)} alt={`Report page ${viewing}`}
+          <img src={(api.cmaReportPageUrl(dealId, viewing) + "?v=" + encodeURIComponent(reportVersion))} alt={`Report page ${viewing}`}
             onClick={(e) => e.stopPropagation()}
             style={{ maxWidth: "94vw", maxHeight: "76vh", objectFit: "contain", borderRadius: 6, background: "#fff" }} />
           <div style={{ display: "flex", gap: 10 }}>
@@ -187,6 +204,188 @@ export default function CmaReportBuild({ dealId }: { dealId: string }) {
         </div>
       )}
     </section>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   PricePage — "How We Got to the Price", the four-box page of the approved
+   design, written from her own material.
+
+   This page is IN the approved template and cma-visual-qa.py hard-fails A7
+   without it. The renderer has always been able to print it: it reads
+   pricingStrategy / valueDrivers / buyerQuestions / prepNextSteps off
+   _strategy.json. NOTHING EVER WROTE THOSE FOUR KEYS. Since the wizard rebuild
+   the only writer stamped the address and the price, so the page returned an
+   empty string on every CMA and the report failed its own design check in
+   silence, while this very step listed the section as "Always in".
+
+   Skyleigh 2026-09-06, asked where the words should come from: "From your notes,
+   you approve." So it is the same two-step everything else here uses: a draft off
+   her notes, her positioning, the buyer-demand number and her walkthrough read,
+   editable, and nothing in the report until she presses the button.
+   ───────────────────────────────────────────────────────────────── */
+
+const PRICE_BOXES: { key: keyof CmaPricePageQuads; label: string; blurb: string }[] = [
+  { key: "pricingStrategy", label: "Pricing strategy", blurb: "Why the launch price is where it is." },
+  { key: "valueDrivers", label: "Value drivers to lead with", blurb: "What this home has that its competition does not." },
+  { key: "buyerQuestions", label: "Likely buyer questions", blurb: "What a buyer or their agent will push back on." },
+  { key: "prepNextSteps", label: "Prep, timing and next steps", blurb: "What happens now, and what is worth doing first." },
+];
+
+const asLines = (q?: string[]) => (q || []).join("\n");
+const asBullets = (t: string) => t.split("\n").map((x) => x.trim()).filter(Boolean);
+
+function PricePage({ dealId, isMobile }: { dealId: string; isMobile: boolean }) {
+  const [saved, setSaved] = useState<CmaPricePageQuads>({});
+  const [inReport, setInReport] = useState(false);
+  const [sources, setSources] = useState<string[]>([]);
+  // Non-null while she has a draft or an edit open. Null means "show what is saved".
+  const [draft, setDraft] = useState<Record<string, string> | null>(null);
+  const [busy, setBusy] = useState<"" | "writing" | "saving">("");
+  const [err, setErr] = useState("");
+
+  const load = useCallback(() => {
+    api.getCmaPricePage(dealId)
+      .then((r) => {
+        if (!r?.ok) return;
+        setSaved(r.quads || {});
+        setInReport(!!r.inReport);
+        setSources(r.sources || []);
+      })
+      .catch(() => { /* the step still works without it */ });
+  }, [dealId]);
+  useEffect(() => { load(); }, [load]);
+
+  const write = async () => {
+    setBusy("writing"); setErr("");
+    try {
+      // The server side of this runs a headless writer for up to five minutes.
+      // On a phone, locking the screen or switching apps can suspend the fetch
+      // so it never settles, and then "writing" never clears and the button
+      // stays dead with nothing to tap. Race it against a clock so the UI can
+      // always come back, even when the request cannot.
+      const r = await Promise.race([
+        api.draftCmaPricePage(dealId),
+        new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Error("That took longer than five minutes, so I stopped waiting. Tap it again and leave this screen open.")), 305000)),
+      ]);
+      if (r?.ok && r.quads) {
+        const d: Record<string, string> = {};
+        PRICE_BOXES.forEach((b) => { d[b.key as string] = asLines(r.quads[b.key]); });
+        setDraft(d);
+      } else setErr(r?.error || "The page could not be written.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "The page could not be written.");
+    } finally { setBusy(""); }
+  };
+
+  const save = async (d: Record<string, string> | null) => {
+    setBusy("saving"); setErr("");
+    const quads: CmaPricePageQuads = {};
+    PRICE_BOXES.forEach((b) => { quads[b.key] = d ? asBullets(d[b.key as string] || "") : []; });
+    try {
+      const r = await api.setCmaPricePage(dealId, quads);
+      if (r?.ok) { setSaved(r.quads || quads); setInReport(!!r.inReport); setDraft(null); }
+      else setErr(r?.error || "Could not save that.");
+    } catch { setErr("Could not save that."); }
+    finally { setBusy(""); }
+  };
+
+  const btn = (kind: "primary" | "secondary" | "quiet"): React.CSSProperties => ({
+    minHeight: 44, borderRadius: 7,
+    padding: kind === "quiet" ? "10px 4px" : "10px 16px",
+    fontSize: 13, fontWeight: kind === "quiet" ? 600 : 800,
+    cursor: busy ? "default" : "pointer", font: "inherit",
+    border: kind === "secondary" ? "1px solid #C7D6EC" : "none",
+    background: kind === "primary" ? (busy ? "#D8B7A6" : TERRA) : "transparent",
+    color: kind === "primary" ? "#fff" : kind === "secondary" ? BLUE : MUTED,
+  });
+  const box: React.CSSProperties = {
+    // 16px on phones is not a taste call: iOS Safari auto-zooms any focused
+    // field under 16px, and this app ships no maximum-scale, so a smaller box
+    // leaves her zoomed and panned sideways after every tap.
+    width: "100%", boxSizing: "border-box", font: "inherit", fontSize: isMobile ? 16 : 13.5, lineHeight: 1.6,
+    color: NAVY, background: "transparent", border: "none", padding: 0,
+    minHeight: 96, resize: "vertical",
+  };
+
+  const showing = draft || (inReport
+    ? Object.fromEntries(PRICE_BOXES.map((b) => [b.key as string, asLines(saved[b.key])]))
+    : null);
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <h3 style={{ margin: "0 0 3px", fontSize: isMobile ? 17 : 16, fontWeight: 700, color: NAVY, display: "flex", alignItems: "center", gap: 7 }}>
+        How we got to the price
+        <CmaInfo label="About this page">
+          Four boxes in the approved design, written from your notes on the comparables,
+          your bracket, the buyer-demand number and your read on the home. Edit every word.
+          Nothing reaches the report until you save it.
+        </CmaInfo>
+      </h3>
+      <p style={{ margin: "0 0 10px", fontSize: 13.5, color: MUTED, lineHeight: 1.5, maxWidth: "66ch" }}>
+        Sits right after Key Strengths, the way the approved design has it.
+      </p>
+
+      {!showing ? (
+        <div style={{ border: "1px solid #E9CDBF", borderRadius: 12, background: "#FBF1EC", padding: "16px 18px" }}>
+          {/* Said out loud, because this is exactly what has been going wrong: the
+              page was listed as included and was not in the PDF. */}
+          <div style={{ fontSize: 13.5, fontWeight: 800, color: "#9B3B2E", marginBottom: 8, lineHeight: 1.5 }}>
+            This page is not in the report yet. Write and approve it if you want to include it.
+          </div>
+          <button type="button" style={btn("primary")} onClick={() => void write()} disabled={!!busy}>
+            {busy === "writing" ? "Writing…" : "Write it from my notes"}
+          </button>
+          <div style={{ fontSize: 12, color: MUTED, marginTop: 9, lineHeight: 1.5, maxWidth: "62ch" }}>
+            {sources.length
+              ? `Uses ${sources.join(", ")}. Takes a couple of minutes, and you can edit every word after.`
+              : "Finish the comparables and pricing steps first, then this can be written."}
+          </div>
+        </div>
+      ) : (
+        <div style={{ border: `1px solid ${LINE}`, borderRadius: 12, background: "#fff", overflow: "hidden" }}>
+          <div style={{ display: "grid", gap: 10, padding: 12,
+                        gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr" }}>
+            {PRICE_BOXES.map((b) => (
+              <div key={b.key as string} style={{ padding: "12px 14px", borderRadius: 8, background: "#FBF1EC", border: "1px solid #E9CDBF" }}>
+                <span style={{ display: "block", fontSize: 10, fontWeight: 900, letterSpacing: ".09em", textTransform: "uppercase", color: TERRA, marginBottom: 2 }}>
+                  {b.label}
+                </span>
+                <span style={{ display: "block", fontSize: 11.5, color: MUTED, marginBottom: 7, lineHeight: 1.4 }}>
+                  {b.blurb}
+                </span>
+                <textarea
+                  value={showing[b.key as string] || ""}
+                  onChange={(e) => setDraft({ ...(showing as Record<string, string>), [b.key as string]: e.target.value })}
+                  aria-label={b.label} style={box}
+                  placeholder="One line per bullet." />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "0 12px 13px", flexWrap: "wrap" }}>
+            {draft ? (
+              <>
+                <button type="button" style={btn("primary")} disabled={!!busy} onClick={() => void save(draft)}>
+                  {busy === "saving" ? "Saving…" : "Add to report"}
+                </button>
+                <button type="button" style={btn("quiet")} disabled={!!busy} onClick={() => { setDraft(null); setErr(""); }}>Discard</button>
+              </>
+            ) : (
+              <>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: GREEN }}>In the report</span>
+                <button type="button" style={btn("secondary")} disabled={!!busy} onClick={() => void write()}>
+                  {busy === "writing" ? "Writing…" : "Write it again from my notes"}
+                </button>
+                <button type="button" style={btn("quiet")} disabled={!!busy} onClick={() => void save(null)}>Remove</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {err && <div style={{ marginTop: 8, fontSize: 12.5, color: "#9B3B2E", lineHeight: 1.45 }}>{err}</div>}
+    </div>
   );
 }
 

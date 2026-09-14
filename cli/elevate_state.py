@@ -2166,6 +2166,16 @@ class SessionDB:
         msg_timestamp = time.time()
 
         def _do(conn):
+            # A resumed/compacted turn may replay an already-flushed prefix.
+            # The wire identity belongs to one message within this session;
+            # inserting it twice inflates history and triggers more compaction.
+            # Check inside the write transaction so concurrent writers agree.
+            existing = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND client_message_id = ? LIMIT 1",
+                (session_id, client_message_id),
+            ).fetchone()
+            if existing is not None:
+                return existing[0], False
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -2205,9 +2215,11 @@ class SessionDB:
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                     (session_id,),
                 )
-            return msg_id
+            return msg_id, True
 
-        result = self._execute_write(_do)
+        result, inserted = self._execute_write(_do)
+        if not inserted:
+            return result
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_append_message
             # content may be a list (multimodal) — encode for PG TEXT column.

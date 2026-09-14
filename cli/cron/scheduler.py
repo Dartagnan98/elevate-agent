@@ -1548,15 +1548,23 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     # script that does `from elevate_cli... import main` (admin-calendar-sync,
     # operational-maintenance, freshness-snapshot) dies with
     # ModuleNotFoundError on customer installs. Point the child at this
-    # process's own cli root so the import always resolves, dev or bundle,
-    # regardless of the gateway's cwd.
+    # package roots so imports resolve in dev, bundles, and partial overlays.
+    # An overlay can extend elevate_cli.__path__ into the base installation;
+    # its sibling modules (e.g. elevate_constants) still need the base root on
+    # sys.path. Keep overlay precedence and any caller-provided PYTHONPATH.
     try:
         import elevate_cli as _elevate_cli_pkg
 
-        _cli_root = str(Path(_elevate_cli_pkg.__file__).resolve().parent.parent)
+        _package_paths = list(getattr(_elevate_cli_pkg, "__path__", ()))
+        if not _package_paths:
+            _package_paths = [Path(_elevate_cli_pkg.__file__).resolve().parent]
+        _cli_roots = list(dict.fromkeys(
+            str(Path(package_path).resolve().parent)
+            for package_path in _package_paths
+        ))
         _prior_pp = run_env.get("PYTHONPATH") or ""
-        run_env["PYTHONPATH"] = (
-            _cli_root + os.pathsep + _prior_pp if _prior_pp else _cli_root
+        run_env["PYTHONPATH"] = os.pathsep.join(
+            _cli_roots + ([_prior_pp] if _prior_pp else [])
         )
     except Exception:
         pass
@@ -2893,6 +2901,14 @@ def tick(verbose: bool = True, adapters=None, loop=None, on_delivered=None) -> i
             )
 
         def _process_job(job: dict) -> bool:
+            gate = (load_config() or {}).get("background_jobs", {}).get("lock_path")
+            if gate and not job.get("script"):
+                from elevate_cli.background_budget import background_slot
+                with background_slot(gate):
+                    return _process_job_admitted(job)
+            return _process_job_admitted(job)
+
+        def _process_job_admitted(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
             # Pre-allocate the cron session id here so the mark_job_run /
             # tui_gateway cleanup paths below can reference it on BOTH the

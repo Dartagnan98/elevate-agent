@@ -117,7 +117,7 @@ const DEFAULT_ADMIN_AUTOMATIONS = [
     deliver: "local",
     workdir: "",
     prompt:
-      "Run the seller-update skill. Pull ShowingTime feedback/activity for active listings, match each listing to an Elevation deal, write the digest back to SQLite, and create Gmail seller-update drafts. Never send directly.",
+      "Run the seller-update skill. Pull ShowingTime feedback/activity for active listings, match each listing to an Elevation deal, write the digest back through the operational data layer, and create Gmail seller-update drafts. Never send directly.",
   },
   {
     name: "Market Stats Watcher",

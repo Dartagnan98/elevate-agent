@@ -28,6 +28,13 @@ type Group = { primary: QItem; siblings: string[] };
 
 const POLL_MS = 20_000;
 
+function promptVersion(item: QItem): string {
+  const hp = item.humanPrompt ?? {};
+  return JSON.stringify([item.title, hp.message ?? item.message, hp.requiredFields ?? item.requiredFields,
+    hp.optionalFields, hp.previewPdf ?? hp.preview_pdf, item.hasPreview,
+    hp.documentReview, hp.titleOrder, hp.approvalBlockedReason, (hp.reviewPackage as { versionHash?: string } | undefined)?.versionHash]);
+}
+
 /** Global "ACTION NEEDED" popup. Polls the same /api/admin/approvals-queue that
  *  aggregates every waiting_human run across all deals, and floats an
  *  interactive slide-in card top-right ON ANY SCREEN so Skyleigh can preview,
@@ -37,7 +44,7 @@ const POLL_MS = 20_000;
 export default function ActionNeededPopup() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [minimized, setMinimized] = useState(false);
-  const seen = useRef<Set<string>>(new Set());
+  const seen = useRef<Map<string, string>>(new Map());
 
   const load = useCallback(() => {
     fetchJSON<QResp>("/api/admin/approvals-queue")
@@ -48,15 +55,16 @@ export default function ActionNeededPopup() {
         // group. Rows arrive newest-first, so the first per key is the primary.
         const byKey = new Map<string, Group>();
         for (const x of raw) {
-          const key = `${x.dealId}::${x.title}`;
+          const key = x.humanPrompt?.reviewPackage || x.humanPrompt?.documentReview || x.humanPrompt?.titleOrder ? `review:${x.runId}` : `${x.dealId}::${x.title}`;
           const g = byKey.get(key);
           if (!g) byKey.set(key, { primary: x, siblings: [] });
           else g.siblings.push(x.runId);
         }
         const all = [...byKey.values()];
-        // Pop open whenever a primary runId we've never shown appears.
-        const fresh = all.some((g) => !seen.current.has(g.primary.runId));
-        for (const g of all) seen.current.add(g.primary.runId);
+        // A resumed run can move from missing inputs to document review under
+        // the same ID. Reopen for that new decision, not just a new run ID.
+        const fresh = all.some(({ primary }) => seen.current.get(primary.runId) !== promptVersion(primary));
+        seen.current = new Map(all.map(({ primary }) => [primary.runId, promptVersion(primary)]));
         setGroups(all);
         if (fresh && all.length) setMinimized(false);
       })
@@ -87,6 +95,8 @@ export default function ActionNeededPopup() {
     const t = setInterval(load, POLL_MS);
     // Refresh immediately after any card resolves (here or in a deal scorecard).
     const onResolved = () => load();
+    const onReview = () => setMinimized(true);
+    window.addEventListener("elevate:review-open", onReview);
     window.addEventListener("elevate:action-resolved", onResolved);
     // Refresh when the app regains focus so it never sits on stale data.
     const onFocus = () => load();
@@ -94,6 +104,7 @@ export default function ActionNeededPopup() {
     return () => {
       clearInterval(t);
       window.removeEventListener("elevate:action-resolved", onResolved);
+      window.removeEventListener("elevate:review-open", onReview);
       window.removeEventListener("focus", onFocus);
     };
   }, [load]);
@@ -128,7 +139,7 @@ export default function ActionNeededPopup() {
           aria-label="Minimize"
           title="Minimize"
         >
-          –
+          <span className="anp-min-line" aria-hidden="true" />
         </button>
       </div>
       <div className="anp-scroll">

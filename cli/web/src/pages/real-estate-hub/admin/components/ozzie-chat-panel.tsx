@@ -188,7 +188,7 @@ export default function OzzieChatPanel({
   const showEmpty = loadedHistory && messages.length === 0;
 
   return (
-    <div className="ozc-panel" role="dialog" aria-label="Ask Ozzie">
+    <div className="ozc-panel" role="dialog" aria-modal="false" aria-label="Ask Ozzie">
       <header className="ozc-head">
         <img className="ozc-head-avatar" src={OZZIE_AVATAR} alt="Ozzie" />
         <div className="ozc-head-text">

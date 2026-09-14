@@ -212,7 +212,7 @@
   padding: 6px 12px;
   border-radius: 7px;
   cursor: pointer;
-  background: var(--accent);
+  background: var(--ds-navy-surface);
   color: #fff;
   border: 1px solid transparent;
   transition: filter 0.15s ease, background 0.15s ease;
@@ -268,3 +268,19 @@
   text-decoration: none;
 }
 .dsk-footlink:hover { text-decoration: underline; }
+
+/* Keep recovery text and action names readable at phone widths. */
+.dsk-err { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dsk-bar-toggle, .dsk-empty, .dsk-row-sub, .dsk-row-dim { color: var(--ds-sub); }
+@media (max-width: 640px) {
+  .dsk-bar-head { align-items: flex-start; }
+  .dsk-bar-left { flex-wrap: wrap; gap: 6px; }
+  .dsk-bar-summary { flex-basis: 100%; white-space: normal; }
+  .dsk-bar-right { flex-direction: column; align-items: flex-end; gap: 6px; }
+  .dsk-row { flex-wrap: wrap; gap: 8px; }
+  .dsk-row-main { flex-basis: calc(100% - 52px); }
+  .dsk-row-addr, .dsk-row-sub { white-space: normal; overflow-wrap: anywhere; }
+  .dsk-bulkbar, .dsk-bulk-actions, .dsk-group-head { flex-wrap: wrap; }
+  .dsk-bulk-all { min-height: 44px; }
+  .dsk-row-approve > .dsk-check { width: 24px; height: 24px; margin: 10px; }
+}

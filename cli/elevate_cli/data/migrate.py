@@ -67,6 +67,7 @@ from elevate_cli.data import (
     upsert_contact,
 )
 from elevate_cli.data.connection import _reset_schema_cache
+from elevate_cli.data._util import decode_payload, sha256
 from elevate_cli.data.paths import backups_root, operational_db_path
 
 
@@ -1047,21 +1048,65 @@ def walk_jsonl_source(
             continue
         legacy_type = row.get("type") or ""
         record_kind = "note" if legacy_type in _NOTE_TYPES else "lifecycle_change"
-        already = conn.execute(
-            """
-            SELECT id FROM events
-            WHERE contact_id=? AND kind=? AND ts=? AND source_id=?
-              AND payload_json LIKE ?
-            LIMIT 1
-            """,
-            (
-                contact_id,
-                record_kind,
-                ts,
-                source_id,
-                f'%"legacyType":{json.dumps(legacy_type)}%',
-            ),
-        ).fetchone()
+        if legacy_type in {"crm_note", "crm_task", "crm_activity"} and row.get("source_record_id"):
+            from elevate_cli.data.crm_import import import_crm_record
+            try:
+                with _savepoint(conn, "sp_crm_record"):
+                    inserted = import_crm_record(
+                        conn, contact_id=contact_id, source_id=source_id, row=row, ts=ts,
+                    )
+                stats.lifecycle_events += int(inserted)
+            except Exception as exc:
+                stats.errors.append(f"{source_id}/lead-events:{contact_native}@{ts}: {exc}")
+            continue
+        payload = {
+            "legacyType": legacy_type,
+            "title": row.get("title"),
+            "summary": row.get("summary"),
+            "body": row.get("body") or row.get("note") or row.get("text"),
+        }
+        event_hash = None
+        if legacy_type == "crm_lead_synced":
+            # This is a snapshot, not an occurrence. Provider update times
+            # (and fallback poll times) change without the snapshot changing.
+            # Keep the original timestamp for display, but exclude it from
+            # identity. The UNIQUE index also protects concurrent importers.
+            event_hash = sha256(json.dumps(
+                ["crm-snapshot-v1", source_id, str(contact_native), payload],
+                sort_keys=True, separators=(",", ":"), default=str,
+            ))
+            if conn.execute(
+                "SELECT id FROM events WHERE event_hash=? LIMIT 1",
+                (event_hash,),
+            ).fetchone():
+                continue
+            # Existing installations have random hashes. Recognize their
+            # retained history too, without rewriting or deleting it.
+            candidates = conn.execute(
+                "SELECT payload_json, payload_ref FROM events "
+                "WHERE contact_id=? AND kind=? AND source_id=?",
+                (contact_id, record_kind, source_id),
+            ).fetchall()
+            if any(decode_payload(r["payload_json"], r["payload_ref"]) == payload
+                   for r in candidates):
+                continue
+            already = None
+        else:
+            already = conn.execute(
+                """
+                SELECT id FROM events
+                WHERE contact_id=? AND kind=? AND ts=? AND source_id=?
+                  AND payload_json LIKE ?
+                LIMIT 1
+                """,
+                (
+                    contact_id,
+                    record_kind,
+                    ts,
+                    source_id,
+                    f'%"legacyType":{json.dumps(legacy_type)}%',
+                ),
+            ).fetchone()
         if already:
             continue
         try:
@@ -1072,13 +1117,9 @@ def walk_jsonl_source(
                     kind=record_kind,
                     actor=row.get("actor") or "legacy_backfill",
                     ts=ts,
-                    payload={
-                        "legacyType": legacy_type,
-                        "title": row.get("title"),
-                        "summary": row.get("summary"),
-                        "body": row.get("body") or row.get("note") or row.get("text"),
-                    },
+                    payload=payload,
                     source_id=source_id,
+                    event_hash=event_hash,
                 )
             stats.lifecycle_events += 1
         except _DB_INTEGRITY_ERRORS:

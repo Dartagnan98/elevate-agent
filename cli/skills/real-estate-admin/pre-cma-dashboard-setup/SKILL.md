@@ -8,6 +8,11 @@ metadata:
       result_writer: admin-result-writer
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](../admin-result-writer/references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Pre-CMA Dashboard Setup
 
 Use when a new seller lead enters the listing board at **Pre-CMA (stage 0)**, before any CMA work begins. This skill turns a raw lead into a clean, CMA-ready deal: it confirms the intake form is complete, normalizes the seller and property facts, and writes the handoff notes the CMA skill picks up at stage 1.

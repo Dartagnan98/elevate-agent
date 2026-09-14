@@ -433,7 +433,7 @@ function GoalsModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="gm-card" role="dialog" aria-modal="true">
+      <div className="gm-card" role="dialog" aria-modal="true" aria-label="Edit goals">
         <h3>Set your goals</h3>
         <div className="gm-sub">
           Targets for this period. Leave a field blank to clear that goal.

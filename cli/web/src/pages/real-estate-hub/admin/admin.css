@@ -3404,31 +3404,31 @@ textarea.abm-waiting-textarea { resize: vertical; min-height: 64px; line-height:
   text-align: left;
   padding: 12px 14px;
   border-radius: var(--ds-r-sm);
-  border: 1px solid #2E4670;
-  background: color-mix(in srgb, #182848 22%, transparent);
+  border: 1px solid var(--ds-border-strong);
+  background: var(--ds-card);
   cursor: pointer;
   transition: border-color .12s ease, background .12s ease;
 }
 .ab-archived-card:hover {
-  border-color: #5E8AD0;
-  background: color-mix(in srgb, #182848 32%, transparent);
+  border-color: var(--ds-ink);
+  background: var(--ds-hover);
 }
 .ab-archived-tag {
   font-size: 9px;
   letter-spacing: .7px;
   text-transform: uppercase;
-  color: #C46340;
-  border: 1px solid color-mix(in srgb, #C46340 45%, transparent);
+  color: var(--ds-terracotta);
+  border: 1px solid color-mix(in srgb, var(--ds-terracotta) 45%, transparent);
   border-radius: 7px;
   padding: 1px 6px;
 }
-.ab-archived-addr { font-size: 13.5px; font-weight: 700; color: #E8ECF3; }
+.ab-archived-addr { font-size: 13.5px; font-weight: 700; color: var(--ds-ink); }
 .ab-archived-note {
   font-size: 11.5px;
-  color: color-mix(in srgb, #E8ECF3 65%, transparent);
+  color: var(--ds-sub);
   line-height: 1.35;
 }
-.ab-archived-date { font-size: 10px; color: #5E8AD0; }
+.ab-archived-date { font-size: 10px; color: var(--ds-ink); }
 
 /* The "Waiting on you" panel now lives inside .ab-modal-scroll and scrolls with
    the rest of the modal content, so it no longer needs its own cap/scroll. 2026-06-22 */
@@ -3466,3 +3466,68 @@ textarea.abm-waiting-textarea { resize: vertical; min-height: 64px; line-height:
   .abm-perf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .abm-perf-cell:nth-child(2n) { border-right: none; }
 }
+
+/* Scope legacy board aliases to the same semantic palette as the wizards.
+   Deal dialogs are portaled, so they need these aliases independently. */
+.app.admin-design-embedded, .ab-modal {
+  --bg: var(--ds-paper);
+  --bg-1: var(--ds-card);
+  --bg-2: var(--ds-card);
+  --bg-3: var(--ds-soft);
+  --fg: var(--ds-ink);
+  --fg-muted: var(--ds-sub);
+  --fg-faint: var(--ds-muted);
+  --fg-dim: var(--ds-muted);
+  --border: var(--ds-border);
+  --border-soft: var(--ds-divider);
+  --border-strong: var(--ds-border-strong);
+  --accent: var(--ds-blue);
+  --accent-fg: #fff;
+  --elev-navy: var(--ds-navy-surface);
+  --elev-orange: var(--ds-terracotta);
+  --status-error: var(--ds-error);
+  --status-warn: var(--ds-warn);
+  font-family: var(--ds-font);
+}
+.ab-live { color: var(--ds-sub); }
+.ab-archived-restore { color: var(--ds-ink); border-color: var(--ds-border-strong); background: var(--ds-card); }
+.ab-kpi-label, .ab-kpi-breakdown { white-space: normal; overflow: visible; }
+.admin-board .ab-kanban { scrollbar-width: thin !important; }
+.admin-board .ab-kanban::-webkit-scrollbar { display: block !important; height: 8px !important; }
+.admin-board .ab-kanban::-webkit-scrollbar-thumb { background: var(--ds-border-strong); border-radius: 4px; }
+
+/* Release readiness: board controls share the wizard's touch and focus rules. */
+.admin-board :is(button, input, select, textarea, a):focus-visible,
+.ab-modal :is(button, input, select, textarea, a):focus-visible {
+  outline: 2px solid var(--ds-ink);
+  outline-offset: 3px;
+}
+.ab-opening { padding: 12px 0; color: var(--ds-ink); }
+.ab-top { height: auto; min-height: 48px; flex-wrap: wrap; }
+.ab-top-actions { flex-wrap: wrap; }
+.ab-top-actions .ab-btn { min-height: 36px; }
+.ab-card-head { flex-wrap: wrap; }
+.ab-tabs { flex-wrap: wrap; min-width: 0; }
+.ab-search { max-width: 100%; }
+@media (max-width: 640px) {
+  .ab-top { padding: 12px; gap: 10px; }
+  .ab-top-actions { margin-left: 0; width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .ab-top-actions .ab-btn { justify-content: center; white-space: normal; }
+  #root .admin-board :is(.ab-btn, .ab-tab, .ab-top25-add, .ab-top25-form-submit, .ab-top25-form-cancel, .ab-archived-restore, .dsk-row-btn, .dsk-resolve-all),
+  .ab-modal :is(.abm-btn, .ab-modal-close) { min-height: 44px; min-width: 44px; }
+  .ab-archived-restore, .ab-top25-card-remove { opacity: 1; }
+  .ab-top25-card-remove { width: 44px; height: 44px; }
+  .ab-top25-card { padding-right: 48px; }
+  .ab-card-head { gap: 12px; align-items: stretch; }
+  .ab-card-actions, .ab-search { width: 100%; }
+  .ab-search input { min-width: 0; width: 100%; min-height: 44px; font-size: 16px; }
+  .ab-modal { max-height: 100dvh; }
+  .ab-modal-scroll { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .ab-modal-close { top: max(8px, env(safe-area-inset-top, 0px)); }
+  .abm-head { padding-right: 60px; }
+  .ab-modal :is(input, select, textarea) { font-size: 16px; min-height: 44px; }
+}
+
+.abm-intake-documents { margin-top: 18px; }
+.abm-intake-document-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; }
+.abm-intake-document-row small { display: block; color: var(--ds-muted); margin-top: 3px; }

@@ -96,6 +96,8 @@ export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
     heat: heatFromScore(d.score ?? null, d.leadLabel ?? undefined),
     sourceId: d.sourceId,
     taskId: d.taskId,
+    contactId: d.contactId,
+    threadId: d.threadId,
   }));
 }
 
@@ -178,6 +180,7 @@ export function mapLeadsProfiles(
       sourceId,
       threadId,
       contactIds: p.contactIds || [],
+      threadIds: p.threadIds || [],
       favorite: Boolean(p.favorite),
       favoritedAt: p.favoritedAt ?? null,
       pipelineStage: p.crmStage || statusLabel(p),

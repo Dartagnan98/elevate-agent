@@ -1130,6 +1130,8 @@ def move_deal_stage(
     actor: str,
     force: bool = False,
     gate_checked: bool = False,
+    dispatch_events: bool = True,
+    transition_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Move a deal to a 0-10 stage and append a stage_transition event."""
     to_stage = _validate_stage(to_stage)
@@ -1176,37 +1178,40 @@ def move_deal_stage(
         from_stage=from_stage,
         to_stage=to_stage,
         payload={
+            **(dict(transition_context) if transition_context else {}),
             "fromStage": from_stage,
             "toStage": to_stage,
             **({"force": True, "gate": gate_snapshot} if force else {}),
         },
         created_at=now,
     )
-    _dispatch_safely(
-        conn,
-        deal_id=deal_id,
-        deal_event_id=event["id"],
-        actor=actor,
-        triggers=(
-            ("stage_exit", {"from_stage": from_stage}),
-            ("stage_entry", {"to_stage": to_stage}),
-        ),
-    )
+    if dispatch_events:
+        _dispatch_safely(
+            conn,
+            deal_id=deal_id,
+            deal_event_id=event["id"],
+            actor=actor,
+            triggers=(
+                ("stage_exit", {"from_stage": from_stage}),
+                ("stage_entry", {"to_stage": to_stage}),
+            ),
+        )
     # Auto-touch the working-state journal so the next session knows where
     # this deal sits without re-reading deal_events. Best-effort: a failure
     # here must not block the stage transition itself.
-    try:
-        from elevate_cli.data.working_state import touch_deal_stage_move
-        touch_deal_stage_move(
-            conn,
-            deal_id=deal_id,
-            deal_title=str(existing.get("title") or existing.get("address") or ""),
-            from_stage=from_stage,
-            to_stage=to_stage,
-            agent_kind=actor,
-        )
-    except Exception:
-        pass
+    if dispatch_events:
+        try:
+            from elevate_cli.data.working_state import touch_deal_stage_move
+            touch_deal_stage_move(
+                conn,
+                deal_id=deal_id,
+                deal_title=str(existing.get("title") or existing.get("address") or ""),
+                from_stage=from_stage,
+                to_stage=to_stage,
+                agent_kind=actor,
+            )
+        except Exception:
+            pass
     return get_deal(conn, deal_id)  # type: ignore[return-value]
 
 
@@ -1217,6 +1222,7 @@ def set_deal_toggle(
     field: str,
     value: Any,
     actor: str,
+    dispatch_events: bool = True,
 ) -> dict[str, Any]:
     """Update one named toggle or enum field and append a toggle_change event."""
     if not field or not isinstance(field, str):
@@ -1274,18 +1280,19 @@ def set_deal_toggle(
         new_value=new_value,
         created_at=now,
     )
-    _dispatch_safely(
-        conn,
-        deal_id=deal_id,
-        deal_event_id=event["id"],
-        actor=actor,
-        triggers=(
-            (
-                "toggle_change",
-                {"field_key": field, "field_old": old_value, "field_new": new_value},
+    if dispatch_events:
+        _dispatch_safely(
+            conn,
+            deal_id=deal_id,
+            deal_event_id=event["id"],
+            actor=actor,
+            triggers=(
+                (
+                    "toggle_change",
+                    {"field_key": field, "field_old": old_value, "field_new": new_value},
+                ),
             ),
-        ),
-    )
+        )
     moved = _maybe_advance_from_workflow_signal(conn, deal_id, field=field, value=new_value, actor=actor)
     if moved is None:
         _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=int(row["current_stage"] or 0))
@@ -1350,6 +1357,10 @@ def _advance_on_accepted_offer(
     except Exception:
         return None
     deal = context.get("deal") or {}
+    # BC listings advance only through the evidence-bearing trigger path.
+    # Writing a date/checklist field alone does not prove a signed current CPS.
+    if deal.get("side") == "listing" and str(deal.get("province") or "").lower() == "bc":
+        return None
     if int(deal.get("currentStage") or 0) != 5:
         return None
     gate = ((context.get("dealFlow") or {}).get("gate") or {})
@@ -2488,6 +2499,33 @@ def record_run_result(
     if not isinstance(payload, dict):
         payload = {"prior": payload}
 
+    from elevate_cli.review_packages import preserve_review_consent
+    human_prompt, normalized_status = preserve_review_consent(
+        payload, _decode_json(row["human_prompt_json"]) or {}, human_prompt, normalized_status)
+    from elevate_cli.listing_title import title_result_prompt
+    human_prompt, normalized_status = title_result_prompt(
+        conn, deal_id, payload, _decode_json(row['human_prompt_json']) or {}, human_prompt, normalized_status)
+    if normalized_status == 'waiting_human':
+        completed_at = None
+        if payload.get('listingTitlePreparation') and human_prompt.get('title') == 'LTSA access needed for current title':
+            human_prompt.update({
+                'title': 'Retry current title lookup',
+                'message': 'The approved LTSA title task hit a session challenge. Retry using the saved local LTSA browser session `ellis-title`; do not ask the operator to log in again unless that saved session is unavailable. The MLC remains blocked until the actual title PDF and seller-name reconciliation are complete.',
+                'requiredFields': [],
+                'actionLabel': 'Retry using saved LTSA session',
+                'dismissLabel': 'Keep title task waiting',
+                'savedBrowserSession': 'ellis-title',
+                'approvalAlreadyRecorded': bool((human_prompt.get('decision') or {}).get('approved')),
+            })
+    status = normalized_status
+    if normalized_status in {"succeeded", "completed"} or (human_prompt or {}).get('documentReview'):
+        from elevate_cli.mlc_handoff import document_review_prompt
+        review_prompt = document_review_prompt(conn, deal_id, run_id, _decode_json(row["human_prompt_json"]) or {})
+        if review_prompt:
+            human_prompt = review_prompt
+            normalized_status = status = "waiting_human"
+            completed_at = None
+
     # Dedup intake cards: if this run is raising an "Info needed" card while the
     # deal already has one open, park this run instead of showing a second card.
     # When the surviving card is answered and its skill succeeds, the parked
@@ -2674,7 +2712,7 @@ def record_run_result(
         payload={"runId": run_id, "status": normalized_status, "humanPrompt": human_prompt, "error": error},
         created_at=now,
     )
-    if normalized_status == "waiting_human" and human_prompt:
+    if normalized_status == "waiting_human" and human_prompt and not payload.get('listingTitlePreparation'):
         # A skill reported it needs a human decision. This callback path (unlike
         # cron delivery) never alerted anyone, so the card sat silently. Fire a
         # best-effort Telegram ping. Reached only when NOT superseded (the dedup
@@ -2695,6 +2733,11 @@ def record_run_result(
         except Exception:
             pass
     if normalized_status in {"succeeded", "completed"}:
+        if payload.get('listingTitlePreparation'):
+            from elevate_cli.listing_title import resume_documents_after_title
+            resume_documents_after_title(conn, deal_id, run_id)
+        from elevate_cli.mlc_handoff import resume_documents_after_intake
+        resume_documents_after_intake(conn, deal_id, run_id)
         _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=_run_payload_stage(payload))
     updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (run_id,)).fetchone()
     return _row_to_action_run(updated)

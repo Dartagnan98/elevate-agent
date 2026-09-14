@@ -902,10 +902,14 @@ function ArtifactCard<T extends ArtifactListItem>({
 
 export function ArtifactsPanel<T extends ArtifactListItem>({
   artifacts,
+  loading = false,
+  error = null,
   onOpen,
   onClose,
 }: {
   artifacts: T[];
+  loading?: boolean;
+  error?: string | null;
   onOpen: (item: T) => void;
   onClose: () => void;
 }) {
@@ -947,8 +951,8 @@ export function ArtifactsPanel<T extends ArtifactListItem>({
       {total === 0 ? (
         <PanelEmpty
           icon={<FileStack className="h-5 w-5" />}
-          title="No artifacts yet"
-          body="PDFs, documents, images, and files the agent generates this session show up here. Tap one to preview it."
+          title={loading ? "Loading files…" : error ? "Could not load files" : "No artifacts yet"}
+          body={error ? "Close and reopen this panel to retry loading your drafts." : "PDFs, documents, images, and files the agent generates this session show up here. Tap one to preview it."}
         />
       ) : (
         <div className="flex flex-col gap-3 p-3">

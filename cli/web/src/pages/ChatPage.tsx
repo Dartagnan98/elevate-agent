@@ -1,4 +1,5 @@
 import { Markdown } from "@/components/Markdown";
+import { mergePreviewArtifacts, prepareHtmlPreview } from "@/lib/artifactPreview";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import {
   SlashPopover,
@@ -2517,9 +2518,10 @@ function fileExtension(path: string): string {
   return dot >= 0 ? name.slice(dot) : "";
 }
 
-function previewKind(path: string, contentType: string): "html" | "image" | "office" | "pdf" | "text" | "unknown" {
+function previewKind(path: string, contentType: string): "html" | "image" | "video" | "office" | "pdf" | "text" | "unknown" {
   const ext = fileExtension(path);
   const type = contentType.toLowerCase();
+  if (type.startsWith("video/") || [".mp4", ".m4v", ".mov", ".webm"].includes(ext)) return "video";
   if (type.includes("pdf") || ext === ".pdf") return "pdf";
   if (type.startsWith("image/") || [".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"].includes(ext)) {
     return "image";
@@ -2579,7 +2581,7 @@ function makeArtifact(
 // (.jsonl/.log/.sh) that are pipeline internals, not deliverables. Realtors
 // see PDFs, docs, images, reports — not /private/var/folders/... shims.
 const INTERNAL_ARTIFACT_PATH_RE =
-  /^(?:\/private)?\/(?:var\/folders|tmp)\/|\/\.elevate\/(?:logs|state|scripts|sessions|cache|pgdata)\/|\/(?:elevate-cwd-|elevate-snap-)[^/]*$/;
+  /^(?:\/private)?\/(?:var\/folders|tmp)\/|\/\.elevate\/(?:logs|state|scripts|sessions|cache|pgdata|skill-backups|skill-quarantine)\/|\/provider-proof\/|\/(?:elevate-cwd-|elevate-snap-)[^/]*$/;
 
 function isInternalArtifactPath(path: string): boolean {
   return INTERNAL_ARTIFACT_PATH_RE.test(path);
@@ -2587,7 +2589,7 @@ function isInternalArtifactPath(path: string): boolean {
 
 function extractPathsFromText(text: string): string[] {
   const matches = text.match(
-    /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
+    /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|mp4|m4v|mov|webm|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
   );
   return Array.from(new Set(matches ?? []))
     // Drop bare single-segment root paths like "/coming-soon.html".
@@ -2626,15 +2628,15 @@ function artifactsFromMessages(messages: ChatMessage[]): ArtifactEntry[] {
 
 function artifactsFromServer(items: SessionArtifactItem[]): ArtifactEntry[] {
   return items
-    .filter((item) => item.path)
+    .filter((item) => item.path && !isInternalArtifactPath(item.path) && previewKind(item.path, item.mime_type || "") !== "unknown")
     .map((item) =>
-      makeArtifact({
+      ({ ...makeArtifact({
         detail: item.path,
         kind: "file",
         path: item.path,
         source: "session artifacts",
         title: item.name || fileName(item.path),
-      }),
+      }), createdAt: item.modified_at ? (Number(item.modified_at) * 1000 || Date.parse(String(item.modified_at)) || 0) : 0 }),
     );
 }
 
@@ -3018,6 +3020,8 @@ export default function ChatPage() {
   const [startView, setStartView] = useState<"overview" | "models">("overview");
   const [userName, setUserName] = useState("there");
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactLoadError, setArtifactLoadError] = useState<string | null>(null);
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactEntry | null>(null);
   const dismissedArtifactsRef = useRef<Set<string>>(new Set());
   const previewAutoOpenDisabledRef = useRef(false);
@@ -3672,18 +3676,7 @@ export default function ChatPage() {
     if (!entries.length) return;
     const previewCandidate = bestSidePreviewArtifact(entries);
 
-    setArtifacts((prev) => {
-      const seen = new Set(prev.map((entry) => entry.key));
-      const next = [...prev];
-
-      for (const entry of entries) {
-        if (seen.has(entry.key)) continue;
-        seen.add(entry.key);
-        next.push(entry);
-      }
-
-      return next.slice(-ARTIFACT_LIMIT);
-    });
+    setArtifacts((prev) => mergePreviewArtifacts(prev, entries, ARTIFACT_LIMIT));
 
     if (
       previewCandidate &&
@@ -3694,7 +3687,8 @@ export default function ChatPage() {
       // auto-open the right panel — artifacts no longer take over the right
       // side. They live in the Artifacts tab (the button); tap one to open it
       // here in Preview.
-      setPreviewArtifact(previewCandidate);
+      // Refreshing the inventory must not replace a draft the user selected.
+      setPreviewArtifact((current) => current ?? previewCandidate);
     }
   }, []);
 
@@ -8473,6 +8467,35 @@ export default function ChatPage() {
   // freshly minted id with no history yet. This is the same id artifacts and
   // dismissals key on.
   const dataSessionId = artifactStateSessionId();
+  const requestedArtifactPath = searchParams.get("artifact");
+  // File discovery must not depend on the gateway's transcript hydration
+  // finishing: reconnects can cancel that continuation after messages appear.
+  // Opening either file surface explicitly refreshes its server inventory.
+  useEffect(() => {
+    if (!dataSessionId || (!requestedArtifactPath && !["artifacts", "preview"].includes(sidePanel))) return;
+    let cancelled = false;
+    setArtifactLoading(true);
+    setArtifactLoadError(null);
+    void api.getSessionArtifacts(dataSessionId).then(response => {
+      if (!cancelled) addArtifacts(artifactsFromServer(response.artifacts));
+    }).catch((error: Error) => {
+      if (!cancelled) setArtifactLoadError(error.message);
+    }).finally(() => {
+      if (!cancelled) setArtifactLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [dataSessionId, sidePanel, addArtifacts, requestedArtifactPath]);
+  const openedArtifactLink = useRef<string | null>(null);
+  useEffect(() => {
+    if (!requestedArtifactPath || !dataSessionId) { openedArtifactLink.current = null; return; }
+    const key = `${dataSessionId}:${requestedArtifactPath}`;
+    if (openedArtifactLink.current === key) return;
+    const target = artifacts.find(item => item.path === requestedArtifactPath);
+    if (!target) return;
+    openedArtifactLink.current = key;
+    openArtifactPreview(target);
+  }, [requestedArtifactPath, dataSessionId, artifacts, openArtifactPreview]);
+
   const renderSidePanel = () => {
     const renderPlanPanel = () => (
       <PlanPanel
@@ -8509,6 +8532,8 @@ export default function ChatPage() {
         return (
           <ArtifactsPanel
             artifacts={artifacts}
+            loading={artifactLoading}
+            error={artifactLoadError}
             onOpen={openArtifactPreview}
             onClose={closeSidePanel}
           />
@@ -11318,21 +11343,23 @@ function ArtifactPreviewPane({
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
   const pathForKind = artifact.path ?? artifact.title;
   const kind = artifact.path ? previewKind(pathForKind, contentType) : "text";
-  const previewHref = artifact.path ? api.previewFileUrl(artifact.path) : null;
-  const openPreviewHref =
-    kind === "pdf" && previewHref ? previewHref : blobUrl;
+  const [missingAssets, setMissingAssets] = useState(0);
+  const videoPreviewUrl = kind === "video" && artifact.path ? api.previewFileUrl(artifact.path) : null;
+  const openPreviewHref = videoPreviewUrl || blobUrl;
   const pdfFrameSrc =
-    kind === "pdf" && previewHref
-      ? `${previewHref}#navpanes=0&view=FitH`
+    kind === "pdf" && blobUrl
+      ? `${blobUrl}#navpanes=0&view=FitH`
       : null;
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
+    const controller = new AbortController();
 
     setBlobUrl(null);
     setContentType("");
     setError(null);
+    setMissingAssets(0);
     setTextPreview(artifact.content ?? null);
 
     if (!artifact.path) {
@@ -11340,18 +11367,35 @@ function ArtifactPreviewPane({
       return () => {};
     }
 
+    // Native media requests use the dashboard's HttpOnly session cookie and
+    // byte ranges. Keep a full video Blob out of React/browser heap memory.
+    if (previewKind(artifact.path, "") === "video") {
+      setContentType("video/mp4");
+      setLoading(false);
+      return () => { controller.abort(); };
+    }
     setLoading(true);
     void api
-      .previewFile(artifact.path)
+      .previewFile(artifact.path, controller.signal)
       .then(async (response) => {
         if (cancelled) return;
         const nextKind = previewKind(artifact.path ?? artifact.title, response.contentType);
-        const previewBlob =
+        let previewBlob =
           nextKind === "pdf" && response.blob.type !== "application/pdf"
             ? new Blob([response.blob], {
                 type: response.contentType || "application/pdf",
               })
             : response.blob;
+        if (nextKind === "html") {
+          const prepared = await prepareHtmlPreview(await previewBlob.text(), response.resolvedPath || artifact.path!, async (path) => {
+            const asset = await api.previewFile(path, controller.signal);
+            return asset.blob;
+          });
+          if (cancelled) return;
+          previewBlob = new Blob([prepared.html], { type: "text/html" });
+          setMissingAssets(prepared.missingAssets);
+        }
+        if (cancelled) return;
         objectUrl = URL.createObjectURL(previewBlob);
         setBlobUrl(objectUrl);
         setContentType(response.contentType);
@@ -11369,6 +11413,7 @@ function ArtifactPreviewPane({
 
     return () => {
       cancelled = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [artifact]);
@@ -11453,6 +11498,12 @@ function ArtifactPreviewPane({
         </div>
       </header>
 
+      {missingAssets > 0 && !loading && !error && (
+        <p className="shrink-0 px-4 pb-3 text-xs text-[var(--chat-muted)]" role="status">
+          The draft is open, but {missingAssets} supporting image or style file{missingAssets === 1 ? " is" : "s are"} unavailable.
+        </p>
+      )}
+
       {collapsed ? null : (
       <div className="min-h-0 flex-1 border-t border-[var(--chat-border)] bg-[var(--chat-surface-soft)]">
         {loading ? (
@@ -11506,6 +11557,8 @@ function ArtifactPreviewPane({
             src={blobUrl}
             title={artifact.title}
           />
+        ) : kind === "video" && videoPreviewUrl ? (
+          <video key={videoPreviewUrl} className="h-full w-full bg-black object-contain" src={videoPreviewUrl} controls playsInline preload="metadata" aria-label={artifact.title} onError={() => setError("The video could not load. Reopen this preview to retry.")} />
         ) : kind === "image" && blobUrl ? (
           <div className="flex h-full items-center justify-center overflow-auto p-4">
             <img

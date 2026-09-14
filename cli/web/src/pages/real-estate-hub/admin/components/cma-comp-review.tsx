@@ -17,6 +17,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import CmaInfo from "./cma-info";
 import { api } from "../../../../lib/api";
+import CmaFinishGrid from "./cma-finish-grid";
+import CmaExpiredReview from "./cma-expired-review";
 import type { CmaCandidate, CmaFacts } from "../../../../lib/api";
 import { useIsMobile } from "../../../../hooks/useIsMobile";
 
@@ -451,12 +453,15 @@ export default function CmaCompReview({
                   lot, size and finishings together..." line for this comp. */}
               {!current.excluded && current._group !== "expired" && (
                 <CompNote
+                  key={`${current._group}:${current.mls}`}
                   dealId={dealId}
                   mls={String(current.mls)}
                   kind={current._group === "active" ? "active" : "sold"}
                   address={String(current.address || "")}
                   saved={notes[`${current._group === "active" ? "active" : "sold"}:${current.mls}`]}
-                  onSaved={(k, v) => setNotes((m) => ({ ...m, [k]: v }))}
+                  // MERGE, do not replace: the autosave reports only `raw`, and a
+                  // replace here would wipe voiced/position off the parent's copy.
+                  onSaved={(k, v) => setNotes((m) => ({ ...m, [k]: { ...(m[k] || {}), ...v } }))}
                 />
               )}
 
@@ -502,7 +507,13 @@ export default function CmaCompReview({
         <div onClick={() => setLightbox(null)} role="dialog" aria-modal="true"
           aria-label={`Photos for ${current.address}`}
           // Above the CMA surface (1100), or the photo opens behind it.
-          style={{ position: "fixed", inset: 0, background: "rgba(13,20,33,.93)", zIndex: 1250, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, padding: 12, paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
+          // MOBILE: this was centred with no overflow, so the stack (header + two
+          // 32vh images + two captions + the match chip + Done) ran past the
+          // viewport and the ends were simply unreachable -- Skyleigh 2026-08-31:
+          // "on mobile when I bring up the photo comparisons it's not all visible."
+          // Centring is right when it fits and wrong when it does not, so on a
+          // phone it starts at the top and scrolls instead.
+          style={{ position: "fixed", inset: 0, background: "rgba(13,20,33,.93)", zIndex: 1250, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: isMobile ? "flex-start" : "center", overflowY: isMobile ? "auto" : "hidden", WebkitOverflowScrolling: "touch", gap: 12, padding: 12, paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
 
           {/* The room leads, because the room is what she is comparing. The
               addresses sit on each photo where they disambiguate "theirs" and
@@ -587,6 +598,12 @@ export default function CmaCompReview({
           </div>
         </div>
       )}
+      {/* Her finish calls, on the Comparables step, feeding straight into the report. */}
+      <CmaFinishGrid dealId={dealId} />
+
+      {/* The expired band is curated HERE, beside the sold and active comps,
+          because it is the same decision: which properties does this seller see. */}
+      <CmaExpiredReview dealId={dealId} />
     </div>
   );
 }
@@ -622,6 +639,7 @@ function CompNote({ dealId, mls, kind, address, saved, onSaved }: {
 
   const savePosition = async (next: string | null) => {
     const prev = pos;
+    posTouched.current = true;  // her tap outranks any late-arriving fetch
     setPos(next); setPosSource(next ? "yours" : null);   // optimistic: the control must not lag a tap
     try {
       const r = await api.setCmaPosition(dealId, mls, kind, next);
@@ -629,36 +647,225 @@ function CompNote({ dealId, mls, kind, address, saved, onSaved }: {
     } catch { setPos(prev); setErr("Could not save that."); }
   };
   const [busy, setBusy] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
+  // Non-empty when the autosave could NOT land her words. This must be loud:
+  // a silent failed autosave under a "Saving…" line is the fourth way to lose
+  // the same note.
+  const [saveErr, setSaveErr] = useState("");
+
+  // She has typed in THIS mounted box. While true, nothing arriving from the
+  // parent (the late first notes fetch, any refetch) may replace her words --
+  // the reset effect below used to setRaw(saved?.raw) whenever the parent's
+  // copy changed, so a fetch that resolved mid-typing clobbered the textarea
+  // with the older disk copy while her newer words were still in the debounce.
+  const dirty = useRef(false);
+  const posTouched = useRef(false);
+  // Mirrors `raw` for the pagehide flush, which runs outside React's lifecycle.
+  const rawRef = useRef(raw);
+  rawRef.current = raw;
+
+  // AUTOSAVE THE TYPED TEXT.
+  //
+  // Skyleigh 2026-08-31: "I just wrote notes on Gleneagles 696 and it doesn't
+  // look like it saved." It had not -- onChange only set React state, so her
+  // words were in the browser and nowhere else until she pressed the rewrite
+  // button, while the Better/Worse toggle beside it saved on tap. Two controls an
+  // inch apart behaving differently, with nothing on screen to say which was safe.
+  //
+  // Debounced so a fast typist is not one request per keystroke, flushed on blur
+  // so leaving the field commits immediately, flushed on unmount/comp-switch so
+  // navigating away cannot outrun the timer, and flushed with `keepalive` on
+  // pagehide so closing the tab cannot either.
+  //
+  // SINGLE-FLIGHT, CONFIRMED, RETRIED. The first version fired saves in
+  // parallel and marked "Saved" as soon as any response arrived -- so two
+  // saves could land out of order (older text winning on disk), and a response
+  // of {ok:false} or {} (the runner crashing) still showed "Saved. Your words
+  // are kept" over words that were nowhere. Now: one request at a time, newest
+  // text always wins, "Saved" only after the server said ok, failures retried
+  // and, if they keep failing, said out loud.
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDraft = useRef<string | null>(null);
+  const draftFor = useRef<string>("");
+  const inFlight = useRef(false);
+  const retries = useRef(0);
+  // The last text the SERVER confirmed. "Saved" is only honest while the box
+  // matches this.
+  const confirmedRaw = useRef<string | null>(null);
+  const sendDraft = useCallback((mlsKey: string, kindKey: "sold" | "active", text: string): Promise<void> => {
+    inFlight.current = true;
+    return api.cmaSaveNoteDraft(dealId, mlsKey, kindKey, text)
+      .then((r) => {
+        if (!r?.ok) throw new Error(r?.error || "The save did not go through.");
+        confirmedRaw.current = text;
+        retries.current = 0;
+        setSaveErr("");
+        setDraftSaved(rawRef.current.trim() === text.trim());
+        // Keep the parent's copy in step with the disk, so switching to another
+        // comp and back shows her words instead of an empty box over a safe file.
+        onSaved(`${kindKey}:${mlsKey}`, { mls: mlsKey, kind: kindKey, raw: text });
+      })
+      .catch(() => {
+        setDraftSaved(false);
+        retries.current += 1;
+        setSaveErr(retries.current >= 5
+          ? "Your words are NOT saved yet. Keep this page open — still retrying."
+          : "Not saved yet — retrying…");
+        // Re-queue this text unless she has already typed something newer.
+        if (pendingDraft.current === null) {
+          pendingDraft.current = text;
+          draftFor.current = `${kindKey}:${mlsKey}`;
+        }
+        if (retryTimer.current) clearTimeout(retryTimer.current);
+        retryTimer.current = setTimeout(() => { drainDraft(); }, 3000);
+      })
+      .finally(() => {
+        inFlight.current = false;
+        // Newer text queued while this one was in flight: send it now.
+        if (pendingDraft.current !== null && !draftTimer.current && !retryTimer.current) drainDraft();
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dealId]);
+  const drainDraft = () => {
+    if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null; }
+    if (inFlight.current) return;
+    const t = pendingDraft.current;
+    if (t === null) return;
+    pendingDraft.current = null;
+    const [k, m] = (draftFor.current || `${kind}:${mls}`).split(":");
+    void sendDraft(m, (k as "sold" | "active"), t);
+  };
+  const queueDraftSave = (text: string) => {
+    dirty.current = true;
+    setDraftSaved(false);
+    retries.current = 0;
+    pendingDraft.current = text;
+    draftFor.current = `${kind}:${mls}`;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => { draftTimer.current = null; drainDraft(); }, 800);
+  };
+  const flushDraftSave = () => {
+    if (draftTimer.current) { clearTimeout(draftTimer.current); draftTimer.current = null; }
+    drainDraft();
+  };
+  useEffect(() => () => {
+    flushDraftSave();
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // CLOSING THE TAB. React never unmounts on tab close, the debounce timer dies
+  // with the page, and an ordinary fetch already in flight is aborted -- so up
+  // to 800ms of typing (plus anything unconfirmed) evaporated. `keepalive`
+  // survives the page teardown. visibilitychange->hidden covers the phone case
+  // (Safari does not reliably fire pagehide when the app is swiped away).
+  useEffect(() => {
+    const flush = () => {
+      if (!dirty.current) return;
+      const t = rawRef.current;
+      if (t === confirmedRaw.current) return;
+      try { void api.cmaSaveNoteDraft(dealId, mls, kind, t, { keepalive: true }); } catch { /* page is going away */ }
+    };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [dealId, mls, kind]);
   const [err, setErr] = useState("");
   const [editing, setEditing] = useState(false);
+  // True while this instance is mounted. The rewrite poll below outlives a comp
+  // switch (the component remounts via the key prop); local state writes from a
+  // stale poll must become no-ops, while onSaved still delivers the finished
+  // wording into the parent's map under the ORIGINAL key.
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
-  // Switching comps must reset the box, or her note on one property follows her
-  // to the next one and she saves it against the wrong address.
+  // Sync the box from the parent's copy -- but ONLY while she has not typed.
+  // Remount (key prop) handles comp switches, so within one mounted instance the
+  // only thing this effect ever receives is a parent-side update: the first
+  // notes fetch resolving late, or our own onSaved echoing back. Before the
+  // dirty guard, a fetch that resolved after she started typing clobbered the
+  // textarea with the older disk copy (and wiped an in-progress draft edit via
+  // setDraft("")). Her typing outranks anything the parent has: the autosave
+  // owns the disk from her first keystroke.
+  // It must also NOT clear busy: our own save-first onSaved fires while the
+  // rewrite poll is still running, and resetting busy here re-enabled the
+  // button mid-rewrite.
   useEffect(() => {
-    setRaw(saved?.raw || ""); setDraft(""); setErr(""); setEditing(false); setBusy(false);
-    setPos(saved?.position ?? null);
-    setPosSource(saved?.position ? "yours" : null);
+    if (!dirty.current) {
+      setRaw(saved?.raw || ""); setDraft(""); setErr(""); setEditing(false);
+      // What arrived IS the saved copy -- reflect that honestly in the status line.
+      confirmedRaw.current = saved?.raw || "";
+      setDraftSaved(!!(saved?.raw || "").trim());
+    }
+    if (!posTouched.current) {
+      setPos(saved?.position ?? null);
+      setPosSource(saved?.position ? "yours" : null);
+    }
   }, [mls, saved?.raw, saved?.position]);
 
   const published = (saved?.voiced || "").trim();
   const key = `${kind}:${mls}`;
   const short = address.split(",")[0];
 
+  // SAVE FIRST, then rewrite in the background.
+  //
+  // Skyleigh 2026-08-30: "when I typed the notes in the comp section it deletes it
+  // if I leave the page before it's fully done re writing it." It was not deleting
+  // anything -- it had never saved. The old call rewrote synchronously (up to two
+  // minutes), saved NOTHING, and only persisted when she clicked save afterwards,
+  // so her words lived in this component's state and nowhere else. Now the raw text
+  // is on disk before the rewriter starts and she is free to leave immediately.
   const rewrite = async () => {
     if (!raw.trim() || busy) return;
     setBusy(true); setErr("");
+    const mine = raw.trim();
     try {
-      const r = await api.cmaVoiceRewrite(dealId, raw.trim(), "comp", mls);
-      // The rewrite also reads which way the note points, so the toggle above
-      // presets from her own words. Null means she did not say, and the toggle is
-      // left alone rather than guessed at.
-      if (r?.ok && r.position) { setPos(r.position); setPosSource("yours"); }
-      if (r?.ok && r.text) setDraft(r.text);
-      else { setDraft(r?.text || raw.trim()); setErr(r?.error || "The wording could not be prepared. This is your own text, unchanged."); }
+      const r = await api.cmaRewriteNote(dealId, mls, kind, mine, pos);
+      if (!r?.ok) { setErr(r?.error || "Could not save that note."); setBusy(false); return; }
+      // Keep the previously published sentence visible while the new one is
+      // prepared -- the backend now preserves it on disk for the same reason.
+      onSaved(key, { mls, kind, address, raw: mine, voiced: saved?.voiced || "", position: pos });
+      setErr("");
+      // Poll for the voiced version. Her note is already safe either way, so a
+      // failed or abandoned poll costs the wording, never the words.
+      let tries = 0;
+      const tick = async () => {
+        tries += 1;
+        try {
+          const st = await api.cmaRewriteStatus(dealId, mls, kind);
+          if (st?.rewrite === "done" && st.voiced) {
+            onSaved(key, { mls, kind, address, raw: mine, voiced: st.voiced, position: pos });
+            if (alive.current) { setDraft(st.voiced); setEditing(true); setBusy(false); }
+            return;
+          }
+          if (st?.rewrite === "failed") {
+            if (alive.current) {
+              setDraft(st.raw || mine); setEditing(true); setBusy(false);
+              setErr(st.voiced
+                ? "The rewrite did not finish. Your note is saved; the report keeps the earlier wording until you save a new one."
+                : "The wording could not be prepared. This is your own text, saved as you typed it.");
+            }
+            return;
+          }
+        } catch { /* keep polling; the note is already saved */ }
+        if (tries > 60) {                       // ~3 min, then stop nagging
+          if (alive.current) {
+            setBusy(false);
+            setErr("Still rewriting in the background. Your note is saved and you can carry on.");
+          }
+          return;
+        }
+        setTimeout(tick, 3000);
+      };
+      setTimeout(tick, 3000);
     } catch {
-      setDraft(raw.trim());
-      setErr("The wording could not be prepared. This is your own text, unchanged.");
-    } finally { setBusy(false); }
+      setErr("Could not save that note.");
+      setBusy(false);
+    }
   };
 
   const save = async (text: string) => {
@@ -751,9 +958,21 @@ function CompNote({ dealId, mls, kind, address, saved, onSaved }: {
       ) : (
         <>
           <div style={{ padding: "8px 12px 0" }}>
-            <textarea value={raw} onChange={(e) => setRaw(e.target.value)} style={box}
+            <textarea value={raw} onChange={(e) => { setRaw(e.target.value); queueDraftSave(e.target.value); }}
+              onBlur={() => flushDraftSave()} style={box}
               aria-label={`Your notes on ${short}`}
               placeholder="Rough notes are fine. Nothing is added to the report until you approve it." />
+            {/* She could not tell whether typing had saved, because it had not.
+                Now it autosaves and SAYS so -- an invisible save is the same
+                problem as no save. */}
+            <div style={{ fontSize: 11.5, color: saveErr ? "#B3261E" : draftSaved ? GREEN : MUTED, marginTop: 4, fontWeight: saveErr ? 700 : 400 }}>
+              {saveErr
+                ? saveErr
+                : raw.trim()
+                  ? (draftSaved ? "Saved. Your words are kept even if you leave this page."
+                                : "Saving as you type…")
+                  : "Saved as you type."}
+            </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px 12px", flexWrap: "wrap" }}>
             <button type="button" style={btn("primary")} onClick={rewrite} disabled={busy || !raw.trim()}>

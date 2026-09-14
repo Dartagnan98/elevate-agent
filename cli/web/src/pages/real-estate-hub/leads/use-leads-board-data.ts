@@ -189,6 +189,9 @@ export function useLeadsBoardData() {
           options,
         );
         setSourceInbox(res);
+        if (action === "approve" && res.drafts.some((d) => d.id === draft.id)) {
+          throw new Error("This reply is still awaiting approval. Refresh and check its status before trying again.");
+        }
       } catch (err) {
         console.error("draft action failed", err);
         throw err;

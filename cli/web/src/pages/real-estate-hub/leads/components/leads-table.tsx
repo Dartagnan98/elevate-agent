@@ -3,6 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile, LeadsTemperature } from "../leads-data";
 import { PIPELINE_STAGES, resolvePipelineStage } from "../pipeline-stages";
 import { DraftRow } from "./draft-row";
+import { SelectionCheckbox } from "./selection-checkbox";
+import { BulkReplyReview } from "./bulk-reply-review";
+import { indexProfileDrafts } from "../draft-selection";
 import "./leads-redesign.css";
 
 // ── constants ────────────────────────────────────────────────────────────
@@ -22,9 +25,6 @@ const TEMP_VAR: Record<LeadsTemperature, string> = {
 
 function initials(name: string): string {
   return name.split(/\s+/).map((w) => w[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "?";
-}
-function normName(s: string): string {
-  return (s || "").trim().toLowerCase();
 }
 
 export interface LeadsTableProps {
@@ -74,6 +74,8 @@ export function LeadsTable(props: LeadsTableProps) {
   const [page, setPage] = useState(0);
   const [toast, setToast] = useState<{ msg: string; err?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [repliesOnly, setRepliesOnly] = useState(false);
+  const [reviewDrafts, setReviewDrafts] = useState<LeadsDraft[] | null>(null);
   // Session-only custom filter options added via "Add New" (not yet persisted).
   const [customStages, setCustomStages] = useState<string[]>([]);
   const [customTags, setCustomTags] = useState<string[]>([]);
@@ -96,15 +98,7 @@ export function LeadsTable(props: LeadsTableProps) {
     window.setTimeout(() => setToast(null), 2800);
   }
 
-  // ── draft index: match a pending draft to a profile by name ──────────────
-  const draftByName = useMemo(() => {
-    const m = new Map<string, LeadsDraft>();
-    for (const d of drafts) {
-      const key = normName(d.name);
-      if (key && !m.has(key)) m.set(key, d);
-    }
-    return m;
-  }, [drafts]);
+  const draftsByProfile = useMemo(() => indexProfileDrafts(profiles, drafts), [profiles, drafts]);
 
   // ── distinct dimension values + counts (over the full loaded set) ────────
   const sourceOpts = useMemo(() => {
@@ -151,6 +145,7 @@ export function LeadsTable(props: LeadsTableProps) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return profiles.filter((p) => {
+      if (repliesOnly && !draftsByProfile.has(p.id)) return false;
       if (sourceF !== "all" && ((p.source || "—").trim() || "—") !== sourceF) return false;
       if (stageF !== "all" && resolvePipelineStage(p.status).label !== stageF) return false;
       if (tempF !== "all" && (p.temperature ?? "nurture") !== tempF) return false;
@@ -158,12 +153,12 @@ export function LeadsTable(props: LeadsTableProps) {
       if (q && !p.name.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [profiles, sourceF, stageF, tempF, tagsF, query]);
+  }, [profiles, sourceF, stageF, tempF, tagsF, query, repliesOnly, draftsByProfile]);
 
   // Sort the filtered set. "draft" floats leads with a ready-to-send draft to
   // the top (then most-recent), so the approve-and-send work is right there.
   const sorted = useMemo(() => {
-    const hasDraft = (p: LeadsProfile) => draftByName.has(normName(p.name));
+    const hasDraft = (p: LeadsProfile) => draftsByProfile.has(p.id);
     const arr = filtered.slice();
     if (sortBy === "draft") {
       arr.sort((a, b) => {
@@ -177,7 +172,7 @@ export function LeadsTable(props: LeadsTableProps) {
       arr.sort((a, b) => a.name.localeCompare(b.name));
     }
     return arr;
-  }, [filtered, sortBy, draftByName]);
+  }, [filtered, sortBy, draftsByProfile]);
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE));
   const safePage = Math.min(page, totalPages - 1);
@@ -204,6 +199,11 @@ export function LeadsTable(props: LeadsTableProps) {
     [profiles, selected],
   );
   const clearSel = () => setSelected(new Set());
+  const selectedDrafts = useMemo(() => Array.from(new Map(selectedProfiles.flatMap((p) =>
+    (draftsByProfile.get(p.id) || []).map((d) => [d.id, d] as const))).values()), [selectedProfiles, draftsByProfile]);
+  const selectedWithoutReply = selectedProfiles.filter((p) => !draftsByProfile.has(p.id)).length;
+  const selectedHidden = selectedProfiles.filter((p) => !visible.some((v) => v.id === p.id)).length;
+  const someVisibleChecked = visible.some((p) => selected.has(p.id));
 
   // ── bulk actions ─────────────────────────────────────────────────────────
   async function runBulk(action: "tags" | "segments" | "pipeline", value: string, mode: "add" | "replace" = "add") {
@@ -311,7 +311,7 @@ export function LeadsTable(props: LeadsTableProps) {
       <div className="leadsx-kpis">
         <div className="leadsx-kpi"><div className="n">{kpis.newLeads7d}</div><div className="l"><b>New</b> in the last 7 days</div></div>
         <div className="leadsx-kpi"><div className="n">{kpis.hot}</div><div className="l"><b>Hot</b> drafts (0.7+ score)</div></div>
-        <div className="leadsx-kpi accent"><div className="pin">approve</div><div className="n">{draftsWaiting}</div><div className="l"><b>Drafts</b> waiting on you</div></div>
+        <div className="leadsx-kpi accent"><div className="n">{draftsWaiting}</div><div className="l"><b>Replies</b> waiting for review</div></div>
         {hasAvgFirstTouch && <div className="leadsx-kpi"><div className="n">{kpis.avgFirstTouch}</div><div className="l">Avg <b>first touch</b></div></div>}
         {hasReplyRate && <div className="leadsx-kpi"><div className="n">{kpis.replyRate}</div><div className="l"><b>Reply rate</b></div></div>}
       </div>
@@ -319,11 +319,15 @@ export function LeadsTable(props: LeadsTableProps) {
       {/* search */}
       <div className="leadsx-search">
         <span className="s-ic">🔍</span>
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search a lead by name…" autoComplete="off" />
+        <input aria-label="Search leads by name" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search a lead by name…" autoComplete="off" />
       </div>
 
       {/* quick filters */}
       <div className="leadsx-quick">
+        <button type="button" className={"leadsx-replies-filter" + (repliesOnly ? " active" : "")}
+          aria-pressed={repliesOnly} onClick={() => { setRepliesOnly((v) => !v); setPage(0); }}>
+          {repliesOnly ? "✓ " : ""}Replies to review <span>{drafts.length}</span>
+        </button>
         <div className={"leadsx-qf" + (sourceF !== "all" ? " active" : "")} ref={sourceRef}>
           <button className="leadsx-qf-btn" onClick={() => setOpenMenu((m) => (m === "source" ? null : "source"))}>
             <span className="leadsx-qf-lab">Source</span><b className="leadsx-qf-val">{sourceLabel}</b><span className="leadsx-qf-car">▾</span>
@@ -388,10 +392,9 @@ export function LeadsTable(props: LeadsTableProps) {
       {/* selection bar */}
       {selected.size > 0 && (
         <div className="leadsx-selbar">
-          <span className="cnt"><b>{selected.size}</b> selected</span>
-          <button className="leadsx-sb-btn leadsx-sb-primary" disabled={busy} onClick={() => bulkStub("Mass Email")}>✉ Mass Email</button>
-          <button className="leadsx-sb-btn" disabled={busy} onClick={() => bulkStub("Mass Text")}>💬 Mass Text</button>
-          <button className="leadsx-sb-btn" disabled={busy} onClick={() => bulkStub("Assign to agent")}>Assign to agent</button>
+          <span className="cnt" role="status"><b>{selectedProfiles.length}</b> selected · <b>{selectedDrafts.length}</b> {selectedDrafts.length === 1 ? "reply" : "replies"}</span>
+          <button className="leadsx-sb-btn leadsx-sb-primary" disabled={busy || !props.onDraftAction || selectedDrafts.length === 0}
+            onClick={() => setReviewDrafts(selectedDrafts.map((d) => ({ ...d })))}>Review selected replies ({selectedDrafts.length})</button>
           <div className="leadsx-sb-more" ref={moreRef}>
             <button className="leadsx-sb-btn" disabled={busy} onClick={() => setOpenMenu((m) => (m === "more" ? null : "more"))}>More ▾</button>
             {openMenu === "more" && (
@@ -402,12 +405,16 @@ export function LeadsTable(props: LeadsTableProps) {
                 <button onClick={() => promptBulk("segments", "Add a segment", "e.g. SOI")}><span className="ic">🌡</span>Change Segments</button>
                 <button onClick={() => promptBulk("tags", "Add a tag", "e.g. Pre-approved")}><span className="ic">🏷</span>Change Tags</button>
                 <div className="sep" />
-                <button className="soon"><span className="ic">✉</span>Send Postcards<span className="tagsoon">soon</span></button>
-                <button className="soon"><span className="ic">📄</span>Send Letters<span className="tagsoon">soon</span></button>
+                <button type="button" className="soon" disabled><span className="ic">✉</span>Send Postcards<span className="tagsoon">soon</span></button>
+                <button type="button" className="soon" disabled><span className="ic">📄</span>Send Letters<span className="tagsoon">soon</span></button>
               </div>
             )}
           </div>
-          <button className="leadsx-sb-btn leadsx-sb-clear" onClick={clearSel}>Clear</button>
+          <button className="leadsx-sb-btn leadsx-sb-clear" disabled={busy} onClick={clearSel}>Clear selection</button>
+          {(selectedHidden > 0 || selectedWithoutReply > 0) && <span className="leadsx-selection-detail">
+            {selectedHidden > 0 && `${selectedHidden} selected outside this page. `}
+            {selectedWithoutReply > 0 && `${selectedWithoutReply} without a pending reply will not receive a message.`}
+          </span>}
         </div>
       )}
 
@@ -415,7 +422,8 @@ export function LeadsTable(props: LeadsTableProps) {
       <div className="leadsx-tablewrap">
         <div className="leadsx-tscroll">
           <div className="leadsx-thead">
-            <div className="leadsx-th"><span className={"leadsx-cbox" + (allVisibleChecked ? " checked" : "")} onClick={toggleAll} /></div>
+            <div className="leadsx-th"><SelectionCheckbox checked={allVisibleChecked} mixed={someVisibleChecked && !allVisibleChecked}
+              label="Select all leads on this page" disabled={busy || !visible.length} onChange={toggleAll} /></div>
             <div className="leadsx-th">Name</div>
             <div className="leadsx-th">Pipeline stage</div>
             <div className="leadsx-th">Contact</div>
@@ -429,20 +437,21 @@ export function LeadsTable(props: LeadsTableProps) {
 
           {visible.map((p) => {
             const heat = (p.temperature ?? "nurture") as LeadsTemperature;
-            const draft = draftByName.get(normName(p.name));
+            const profileDrafts = draftsByProfile.get(p.id) || [];
+            const draft = profileDrafts[0];
             const stage = resolvePipelineStage(p.status).label;
             const isOpen = expandedId === p.id;
             return (
               <div key={p.id} className={"leadsx-group" + (isOpen ? " open" : "")}>
                 <div
-                  className="leadsx-trow"
+                  className={"leadsx-trow" + (selected.has(p.id) ? " is-selected" : "")}
                   role="button"
                   tabIndex={0}
                   onClick={() => props.onOpen(p)}
-                  onKeyDown={(e) => { if (e.key === "Enter") props.onOpen(p); }}
+                  onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); props.onOpen(p); } }}
                 >
                   <div onClick={(e) => e.stopPropagation()}>
-                    <span className={"leadsx-cbox" + (selected.has(p.id) ? " checked" : "")} onClick={() => toggleSel(p.id)} />
+                    <SelectionCheckbox checked={selected.has(p.id)} label={`Select ${p.name}`} disabled={busy} onChange={() => toggleSel(p.id)} />
                   </div>
                   <div className="leadsx-namecell">
                     <button
@@ -455,7 +464,7 @@ export function LeadsTable(props: LeadsTableProps) {
                     </button>
                     <div className="leadsx-avatar" data-heat={heat}>{initials(p.name)}</div>
                     <div className="leadsx-nm">
-                      <div className="n">{p.name}{p.verified && <span className="verified" title="Verified">✓</span>}</div>
+                      <div className="n">{p.name}{selected.has(p.id) && <span className="leadsx-selected-label">Selected</span>}</div>
                       <div className="t"><span className={"leadsx-tpill " + heat}>{TEMPS.find((t) => t.id === heat)?.label ?? heat}</span>{p.sub || ""}</div>
                     </div>
                   </div>
@@ -467,8 +476,8 @@ export function LeadsTable(props: LeadsTableProps) {
                   <div className="leadsx-src">{p.source || "—"}</div>
                   <div onClick={(e) => e.stopPropagation()}>
                     {draft ? (
-                      <button className="leadsx-ai-draft" onClick={() => setExpandedId((id) => (id === p.id ? null : p.id))}>
-                        ✦ Reply drafted
+                      <button className="leadsx-ai-draft" aria-expanded={isOpen} onClick={() => setExpandedId((id) => (id === p.id ? null : p.id))}>
+                        {profileDrafts.length > 1 ? `Review ${profileDrafts.length} replies` : "Review reply"}
                       </button>
                     ) : (
                       <span className="leadsx-ai-muted">—</span>
@@ -479,11 +488,11 @@ export function LeadsTable(props: LeadsTableProps) {
                 </div>
                 {isOpen && draft && (
                   <div className="leadsx-draftpanel" onClick={(e) => e.stopPropagation()}>
-                    <DraftRow
+                    {profileDrafts.map((draft) => <DraftRow key={draft.id}
                       draft={draft}
-                      selected={false}
+                      selected={selected.has(p.id)}
                       expanded
-                      onToggle={() => {}}
+                      onToggle={() => toggleSel(p.id)}
                       onExpand={() => {}}
                       busy={busy}
                       onAction={async (action, d, scheduledAt) => {
@@ -498,7 +507,7 @@ export function LeadsTable(props: LeadsTableProps) {
                           setBusy(false);
                         }
                       }}
-                    />
+                    />)}
                   </div>
                 )}
               </div>
@@ -512,17 +521,23 @@ export function LeadsTable(props: LeadsTableProps) {
         <div className="leadsx-pager">
           <span className="rng">{safePage * PAGE + 1}–{Math.min(filtered.length, safePage * PAGE + PAGE)} of {filtered.length}</span>
           <div className="nums">
-            <button disabled={safePage === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>‹</button>
-            <button className="on">{safePage + 1}</button>
+            <button type="button" aria-label="Previous page" disabled={safePage === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>‹</button>
+            <button type="button" className="on" aria-current="page" disabled>{safePage + 1}</button>
             <span style={{ color: "var(--faint)", fontFamily: "var(--lx-mono)", fontSize: 12 }}>of {totalPages}</span>
-            <button disabled={safePage >= totalPages - 1} onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}>›</button>
+            <button type="button" aria-label="Next page" disabled={safePage >= totalPages - 1} onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}>›</button>
           </div>
         </div>
       )}
 
       <div className="leadsx-callout">
-        <b>Three ways to slice it, all stacking:</b> Source (where they came from), Pipeline (their stage), and Temp (your follow-up cadence). Check any rows for the bulk bar: Mass Email / Mass Text, Send to Dialer, Assign to agent, and More for Change Pipeline / Segments / Tags. Click a row to open the contact card, or the drafted chip to review and approve inline.
+        Open <b>Review reply</b> to read a message, then check the leads you want to include. Choose <b>Review selected replies</b> to approve and send them together. The top checkbox selects this page only.
       </div>
+
+      {reviewDrafts && <BulkReplyReview drafts={reviewDrafts} currentDrafts={drafts}
+        onClose={() => setReviewDrafts(null)}
+        onApprove={async (d) => { if (!props.onDraftAction) throw new Error("Approval is unavailable."); await props.onDraftAction("approve", d); }}
+        onAccepted={(d) => setSelected((s) => { const next = new Set(s); for (const p of profiles) if ((draftsByProfile.get(p.id) || []).some((v) => v.id === d.id)) next.delete(p.id); return next; })}
+        onComplete={async () => { await props.onDraftActionComplete?.("approve"); }} />}
 
       {/* name-it modal */}
       {modal && (
@@ -544,7 +559,7 @@ export function LeadsTable(props: LeadsTableProps) {
         </div>
       )}
 
-      {toast && <div className={"leadsx-toast" + (toast.err ? " leadsx-err" : "")}>{toast.msg}</div>}
+      {toast && <div role={toast.err ? "alert" : "status"} className={"leadsx-toast" + (toast.err ? " leadsx-err" : "")}>{toast.msg}</div>}
     </div>
   );
 }

@@ -31,16 +31,30 @@ export default function CmaInfo({ children, label }: { children: React.ReactNode
         aria-label={label || "What this means"}
         aria-expanded={open}
         style={{
-          // 44pt hit area via padding, while the dot itself stays small enough
-          // not to compete with the label it belongs to.
-          width: 18, height: 18, borderRadius: "50%", padding: 0,
-          border: `1px solid ${open ? NAVY : "#B9C2D2"}`,
-          background: open ? NAVY : "transparent",
-          color: open ? "#fff" : "#6B7488",
-          fontSize: 11, fontWeight: 700, lineHeight: 1, cursor: "pointer",
+          // A real 44pt hit area. The dot is an inner span so the ring draws at
+          // 18px while the button that catches her thumb is 44px, and an equal
+          // negative margin keeps the layout footprint at 18px so no heading
+          // grows. This block used to say "44pt hit area via padding" while
+          // setting padding: 0 -- the comment was the only defence and it was
+          // not true, so on a phone this was an 18px target.
+          width: 44, height: 44, margin: -13, padding: 0,
+          border: "none", background: "transparent", cursor: "pointer",
           display: "inline-flex", alignItems: "center", justifyContent: "center",
+          WebkitTapHighlightColor: "transparent",
         }}
-      >i</button>
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            width: 18, height: 18, borderRadius: "50%",
+            border: `1px solid ${open ? NAVY : "#B9C2D2"}`,
+            background: open ? NAVY : "transparent",
+            color: open ? "#fff" : "#6B7488",
+            fontSize: 11, fontWeight: 700, lineHeight: 1,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+          }}
+        >i</span>
+      </button>
       {open && (
         <span
           role="note"

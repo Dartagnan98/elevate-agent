@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { AdminUpcomingEvent } from "@/lib/api-types";
 import type { AdminEvent } from "./compute-admin-events";
@@ -22,29 +22,27 @@ export function useAdminEvents(days = 21): UseAdminEventsResult {
   const [events, setEvents] = useState<AdminEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const request = useRef(0);
 
-  const load = useCallback(async (signal?: { cancelled: boolean }, options?: { keepData?: boolean }) => {
+  const load = useCallback(async (signal?: { cancelled: boolean }) => {
+    const id = ++request.current;
     try {
       const response = await api.getAdminUpcomingEvents(days);
-      if (signal?.cancelled) return;
+      if (signal?.cancelled || id !== request.current) return;
       setRawEvents(response.items);
       setEvents(mapAdminUpcomingEvents(response.items));
       setError(null);
     } catch (e) {
-      if (signal?.cancelled) return;
-      if (!options?.keepData) {
-        setRawEvents([]);
-        setEvents([]);
-      }
+      if (signal?.cancelled || id !== request.current) return;
       setError(errMsg(e, "Admin events failed"));
     } finally {
-      if (!signal?.cancelled) setLoading(false);
+      if (!signal?.cancelled && id === request.current) setLoading(false);
     }
   }, [days]);
 
   const refresh = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) setLoading(true);
-    await load(undefined, { keepData: options?.silent });
+    await load();
   }, [load]);
 
   useEffect(() => {
@@ -53,6 +51,7 @@ export function useAdminEvents(days = 21): UseAdminEventsResult {
     void load(signal);
     return () => {
       signal.cancelled = true;
+      request.current += 1;
     };
   }, [load]);
 

@@ -1,9 +1,11 @@
+import KitStepper from "./kit-stepper";
+import { TermField, KitPreferences, useKitPreferences } from "./kit-term-fields";
 // Offer Kit wizard (buyer side) — replaces the old OfferPrepPanel + kit list with
 // a 4-step flow: Property -> Terms -> Subjects -> Build & Preview. Step 1 here;
 // later steps land incrementally. Selections persist to deals.extra_toggles_json
 // via setAdminDealToggle (bare keys), so the existing backend reads them as-is.
 import React, { useState, useCallback, useEffect } from "react";
-import { api } from "../../../../lib/api";
+import { useKitSaves, kitRequest } from "./kit-save-queue";
 import { clauseLibrary } from "../cps/cps-libraries";
 import ClausePickerModal from "./clause-picker-modal";
 import { useIsMobile } from "../../../../hooks/useIsMobile";
@@ -134,7 +136,7 @@ export default function OfferKitWizard({
   buyerName,
   dealTitle,
   currentStage,
-  onUpdate,
+  onUpdate, bare = false, onSaveReady,
 }: {
   dealId: string;
   extra: AnyObj;
@@ -142,9 +144,13 @@ export default function OfferKitWizard({
   buyerName?: string;
   dealTitle?: string;
   currentStage?: number;
-  onUpdate?: () => void;
+  onUpdate?: () => void; bare?: boolean; onSaveReady?: (save: () => Promise<void>) => void;
 }) {
   const isMobile = useIsMobile();
+  const { saveToggle, saveDocument, flushSaves: flushQueuedSaves, saveError } = useKitSaves(dealId, onUpdate);
+  const { preferences, setPreferences, preferenceError, waitForPreferences } = useKitPreferences(dealId, "buyer", extra, saveToggle);
+  const flushSaves = useCallback(async () => { await waitForPreferences(); await flushQueuedSaves(); }, [waitForPreferences, flushQueuedSaves]);
+  useEffect(() => { onSaveReady?.(flushSaves); }, [onSaveReady, flushSaves]);
   // Every place the kit refers to the client resolves through this one call.
   const buyerNames = resolveBuyerNames(extra, buyerName, dealTitle);
   const buyerLabel = buyerNames || "the buyer(s)";
@@ -188,8 +194,8 @@ export default function OfferKitWizard({
   const [showMoreClauses, setShowMoreClauses] = useState(false);
   const [newClause, setNewClause] = useState("");
   const persistClauses = useCallback((sel: Set<string>, custom: AnyObj[]) => {
-    api.setAdminDealToggle(dealId, "cpsClauses", Array.from(sel) as any).catch(() => {});
-    api.setAdminDealToggle(dealId, "cpsCustomClauses", custom as any).catch(() => {});
+    saveToggle("cpsClauses", Array.from(sel) as any).catch(() => {});
+    saveToggle("cpsCustomClauses", custom as any).catch(() => {});
   }, [dealId]);
   const toggleClause = (id: string) => {
     setSelectedClauses((prev) => {
@@ -200,7 +206,7 @@ export default function OfferKitWizard({
     });
   };
   const saveVar = (key: string, value: string) => {
-    setCpsVars((prev) => { const next = { ...prev, [key]: value }; api.setAdminDealToggle(dealId, "cpsVars", next as any).catch(() => {}); return next; });
+    setCpsVars((prev) => { const next = { ...prev, [key]: value }; saveToggle("cpsVars", next as any).catch(() => {}); return next; });
   };
   const addCustomClause = () => {
     const t = newClause.trim(); if (!t) return;
@@ -282,7 +288,7 @@ export default function OfferKitWizard({
     () => (extra.cpsKitForms as Record<string, boolean>) || { ...KIT_FORM_DEFAULTS },
   );
   const toggleKitForm = (id: string) => {
-    setKitForms((p) => { const next = { ...p, [id]: !(p[id] ?? KIT_FORM_DEFAULTS[id] ?? true) }; api.setAdminDealToggle(dealId, "cpsKitForms", next as any).catch(() => {}); return next; });
+    setKitForms((p) => { const next = { ...p, [id]: !(p[id] ?? KIT_FORM_DEFAULTS[id] ?? true) }; saveToggle("cpsKitForms", next as any).catch(() => {}); return next; });
   };
   const [building, setBuilding] = useState(false);
   const [builtMsg, setBuiltMsg] = useState("");
@@ -290,16 +296,19 @@ export default function OfferKitWizard({
     const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
     setBuilding(true); setBuiltMsg("");
     try {
+      await flushSaves();
       // Make sure the current subject selection is saved before we assemble it.
       // Persist the umbrella here too — the property-type click also saves it, but
       // if that write flaked the deal would build on the wrong (residential) base.
       // Saving it at Build guarantees the umbrella matches what's on screen.
-      await api.setAdminDealToggle(dealId, "cpsUmbrella", umbrella).catch(() => {});
-      await api.setAdminDealToggle(dealId, "cpsClauses", Array.from(selectedClauses) as any).catch(() => {});
-      await api.setAdminDealToggle(dealId, "cpsCustomClauses", customClauses as any).catch(() => {});
+      await saveToggle("cpsUmbrella", umbrella);
+      await saveToggle("cpsClauses", Array.from(selectedClauses) as any);
+      await saveToggle("cpsCustomClauses", customClauses as any);
       // Always seed the document slots (this creates the DORTS / Privacy / etc.
       // records, not just the CPS). We only skip GENERATING the CPS PDF below when
       // the CPS is turned off — the seed itself must always run.
+      await saveToggle("cpsVars", cpsVars);
+      await saveToggle("cpsKitForms", kitForms);
       const buildRes = await fetch(`/api/admin/deals/${dealId}/offer-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }).catch(() => null);
       if (!buildRes || !buildRes.ok) {
         const detail = buildRes ? await buildRes.text().catch(() => "") : "no response";
@@ -341,8 +350,9 @@ export default function OfferKitWizard({
         setBuiltMsg(`✓ Drafted ${ok} documents into the kit`);
       }
       onUpdate?.();
-    } finally { setBuilding(false); }
-  }, [dealId, kitForms, onUpdate, selectedClauses, customClauses, umbrella]);
+    } catch (error) { setBuiltMsg(`Draft stopped: ${String(error)}`); }
+    finally { setBuilding(false); }
+  }, [dealId, kitForms, onUpdate, selectedClauses, customClauses, umbrella, cpsVars, saveToggle, flushSaves]);
 
   // ── built kit documents (Step 4, post-build) ─────────────────────────────
   // Folded in from the old standalone "Transaction Kit" card so build + open +
@@ -360,6 +370,8 @@ export default function OfferKitWizard({
   // Standard forms follow their toggle; anything added or uploaded is in the kit
   // by virtue of existing.
   const kitIncluded = (id: string) => {
+    if (id === "cps-addendum" && umbrella === "mobile") return false;
+    if (id === "cps-mobile-addendum" && umbrella !== "mobile") return false;
     const std = KIT_FORMS.find((f) => f.id === id);
     if (!std && id !== "cps-mobile-addendum") return true;
     if (std?.required) return true;
@@ -373,7 +385,7 @@ export default function OfferKitWizard({
   const [draftSignMsg, setDraftSignMsg] = useState("");
   useEffect(() => {
     if (!sendOpen) return;
-    setSignSel(new Set(builtDocs.filter((d) => d.filePath && !docIsStale(d)).map((d) => d.id)));
+    setSignSel(new Set(builtDocs.filter((d) => kitIncluded(d.id) && d.filePath && d.ready !== false && !docIsStale(d)).map((d) => d.id)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sendOpen]);
   const toggleSign = (id: string) => setSignSel((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -384,19 +396,11 @@ export default function OfferKitWizard({
   const tok = () => (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
 
   const draftForSignatures = useCallback(async () => {
-    const ids = Array.from(signSel);
+    const ids = Array.from(signSel).filter(kitIncluded);
     if (!ids.length) return;
     setDrafting(true); setDraftSignMsg("");
     try {
-      // Regenerate anything edited since it was drafted BEFORE it goes in the
-      // envelope. Leaving that to a Redraft button the operator had to remember
-      // is how stale values reach a client.
-      const stale = ids.filter((id) => docIsStale(builtDocs.find((d) => d.id === id)));
-      for (const id of stale) {
-        await fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(id)}/generate`,
-          { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } })
-          .catch(() => null);
-      }
+      await flushSaves();
       const res = await fetch(`/api/admin/deals/${dealId}/offer-kit/draft-signatures`, {
         method: "POST",
         headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
@@ -409,26 +413,29 @@ export default function OfferKitWizard({
         const e = await res.json().catch(() => null);
         setDraftSignMsg(`Couldn't draft for signatures: ${(e && e.detail) || res.status}`);
       }
-    } finally { setDrafting(false); }
+    } catch (error) { setDraftSignMsg(`Review stopped: ${String(error)}`); }
+    finally { setDrafting(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dealId, signSel, onUpdate, builtDocs]);
   const openKitDoc = useCallback((docId: string, download = false) => {
     const origin = window.location.origin;
     const externalOrigin = origin.includes("127.0.0.1") ? origin.replace("127.0.0.1", "localhost") : origin.replace("localhost", "127.0.0.1");
-    window.open(`${externalOrigin}/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank");
+    window.open(`${externalOrigin}/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank", "noopener,noreferrer");
   }, [dealId]);
   const saveKitField = useCallback((docId: string, key: string, value: string) => {
-    fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/field`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ key, value }) }).catch(() => {});
-  }, [dealId]);
+    void saveDocument(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/field`, key, value).catch(() => {});
+  }, [dealId, saveDocument]);
   const generateKitDoc = useCallback(async (docId: string, label?: string) => {
     setGeneratingKit(docId); setBuiltMsg("");
     const name = label || docId;
     try {
+      await flushSaves();
+      if (!builtDocs.some(d=>d.id===docId)) await kitRequest(`/api/admin/deals/${dealId}/offer-kit/build`, {method:"POST"});
       const r = await fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }).catch(() => null);
       if (!r || !r.ok) {
         const e = r ? await r.json().catch(() => null) : null;
         setBuiltMsg(`✗ ${name} did not draft — ${(e && e.detail) || (r ? `error ${r.status}` : "no response")}`);
-        return;
+        return false;
       }
       const body = await r.json().catch(() => ({} as any));
       const warns: string[] = Array.isArray(body?.warnings) ? body.warnings : [];
@@ -436,8 +443,10 @@ export default function OfferKitWizard({
         ? `✓ ${name} drafted — still blank: ${warns.join("; ")}`
         : `✓ ${name} drafted.`);
       onUpdate?.();
-    } finally { setGeneratingKit(null); }
-  }, [dealId, onUpdate]);
+      return true;
+    } catch (error) { setBuiltMsg(`Draft stopped: ${String(error)}`); return false; }
+    finally { setGeneratingKit(null); }
+  }, [dealId, onUpdate, flushSaves, builtDocs]);
 
   // ── Add a form (#6): upload a PDF, or pick from the wired-template catalog ──
   const [addFormOpen, setAddFormOpen] = useState(false);
@@ -490,7 +499,7 @@ export default function OfferKitWizard({
       const defs = new Set(defaultsFor(u));
       setSelectedClauses(defs);
       persistClauses(defs, customClauses);
-      api.setAdminDealToggle(dealId, "cpsUmbrella", u).then(() => onUpdate?.()).catch(() => {});
+      saveToggle("cpsUmbrella", u).then(() => onUpdate?.()).catch(() => {});
     },
     [dealId, onUpdate, customClauses, persistClauses],
   );
@@ -504,7 +513,7 @@ export default function OfferKitWizard({
     if (!num) return;
     const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
     setPulling(true);
-    await api.setAdminDealToggle(dealId, "mlsNumber", num).catch(() => {});
+    await saveToggle("mlsNumber", num);
     await fetch(`/api/admin/deals/${dealId}/pull-listing`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -524,7 +533,7 @@ export default function OfferKitWizard({
   // Save any term to the deal (bare key — same keys the CPS/assembler read).
   const saveField = useCallback(
     (key: string, value: string) => {
-      api.setAdminDealToggle(dealId, key, value.trim() || null).catch(() => {});
+      saveToggle(key, value.trim() || null).catch(() => {});
     },
     [dealId],
   );
@@ -551,7 +560,7 @@ export default function OfferKitWizard({
   // renders and React tears the component down (error #310) the moment the
   // card is opened.
   const [showExcluded, setShowExcluded] = useState(false);
-  if (collapsed) {
+  if (collapsed && !bare) {
     return (
       <section style={{ border: `1px solid ${BORDER}`, borderRadius: 12, marginBottom: 16, overflow: "hidden" }}>
         <button type="button" onClick={() => setCollapsed(false)} style={{ width: "100%", background: NAVY, color: "#fff", border: "none", padding: "13px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", textAlign: "left" }}>
@@ -566,9 +575,6 @@ export default function OfferKitWizard({
   }
 
   // ── step indicator ──────────────────────────────────────────────────────
-  // A breadcrumb, not four equal circles. Finished steps recede; the current
-  // one is the only thing emphasised. The old rail took a full band across the
-  // card and the deal card's sticky header sliced it in half on scroll.
   // Every step is directly reachable — each answer persists as you go, so
   // there is nothing to gate.
   const stepComplete = (n: number) =>
@@ -576,37 +582,7 @@ export default function OfferKitWizard({
     : n === 2 ? termsComplete(extra)
     : n === 3 ? selectedClauses.size > 0
     : false;
-  const Stepper = (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", margin: "0 0 16px" }}>
-      {STEPS.map((label, i) => {
-        const n = i + 1;
-        const done = stepComplete(n) && n !== step;
-        const active = n === step;
-        return (
-          <div key={label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button
-              type="button"
-              onClick={() => setStep(n)}
-              aria-current={active ? "step" : undefined}
-              title={`Go to step ${n}: ${label}`}
-              style={{
-                display: "flex", alignItems: "center", gap: 6, border: "none", cursor: "pointer",
-                font: "inherit", padding: "6px 10px", borderRadius: 7, minHeight: tap ? 40 : undefined,
-                background: active ? "#fff" : "transparent",
-                boxShadow: active ? "0 1px 2px rgba(24,40,72,.09)" : "none",
-                color: active ? INK : MUTED, fontWeight: active ? 800 : 600, fontSize: 13,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {done && <span style={{ color: GREEN, fontWeight: 800 }}>✓</span>}
-              {label}
-            </button>
-            {i < STEPS.length - 1 && <span style={{ color: "#c9ced6", fontSize: 11 }}>›</span>}
-          </div>
-        );
-      })}
-    </div>
-  );
+  const Stepper = <KitStepper steps={STEPS} current={step} complete={stepComplete} onSelect={setStep} mobile={isMobile} />;
 
   const panel: React.CSSProperties = { border: `1px solid ${BORDER}`, borderRadius: 12, padding: "18px 20px", marginTop: 14 };
   const FromTag = ({ t }: { t: string }) => (
@@ -677,35 +653,48 @@ export default function OfferKitWizard({
   );
 
   // ── Step 2: Terms ─────────────────────────────────────────────────────────
-  const fieldLabel: React.CSSProperties = { display: "block", fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 5 };
-  const termsInput: React.CSSProperties = { width: "100%", boxSizing: "border-box", fontSize: 15, padding: "10px 12px", borderRadius: 8, border: `1px solid ${BORDER}`, color: INK, fontFamily: "inherit" };
   const cell = (label: string, key: string, ph: string) => (
-    <div key={key}>
-      <label style={fieldLabel}>{label}</label>
-      <input defaultValue={(extra[key] as string) || ""} placeholder={ph} onBlur={(e) => saveField(key, e.target.value)} style={termsInput} />
-    </div>
+    <TermField key={key} label={label.charAt(0) + label.slice(1).toLowerCase()} field={key} value={String(extra[key] ?? "")} placeholder={ph} save={saveField} preference={preferences[key]} />
   );
+
   const Step2 = (
     <div style={panel}>
       <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Deal terms</div>
       <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 16px" }}>
-        Buyer &amp; seller names pull from the card; PID and legal from the title. Just the offer numbers here — everything saves as you type.
+        Review the offer terms below. Changes save when you leave a field; dates save when selected.
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
+      <KitPreferences side="buyer" values={preferences} onSaved={setPreferences} onApply={async values=>{for(const [key,value] of Object.entries(values)){if(!["listingCommission","buyerAgencyComp"].includes(key))await saveToggle(key,value.trim() || null);}}} />
+      {preferenceError && <p role="alert">{preferenceError}</p>}
+      <h3 className="kit-terms-section">Price &amp; deposit</h3>
+      <div className="kit-terms-grid">
         {cell("PURCHASE PRICE", "cpsPurchasePrice", "$630,000")}
         {cell("DEPOSIT", "cpsDeposit", "$10,000")}
-        {cell("DEPOSIT DUE", "cpsDepositTerms", "on subject removal")}
+        {cell("DEPOSIT DUE", "cpsDepositTerms", "Enter when the deposit is due")}
+        {cell("DEPOSIT HELD BY", "cpsDepositHolder", "Brokerage or other trust holder")}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: cols(4), gap: 14, marginBottom: 14 }}>
+      <h3 className="kit-terms-section">Dates</h3>
+      <div className="kit-terms-grid">
         {cell("SUBJECT REMOVAL", "subjectRemovalDate", "Jul 14")}
         {cell("COMPLETION", "completionDate", "Aug 12")}
         {cell("POSSESSION", "possessionDate", "Aug 14")}
         {cell("ADJUSTMENT", "adjustmentDate", "Aug 12")}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
+      <div className="kit-terms-grid" style={{ marginTop: 18 }}>
+        {cell("CONTRACT DATE", "offerDate", "")}
+        {cell("VIEWED ON", "viewedDate", "")}
+        {cell("OFFER OPEN UNTIL DATE", "offerOpenDate", "")}
+        {cell("OFFER OPEN UNTIL TIME", "offerOpenTime", "")}
+        {cell("POSSESSION TIME", "possessionTime", "")}
+      </div>
+      <h3 className="kit-terms-section">Items &amp; representation</h3>
+      <div className="kit-terms-grid">
         {cell("INCLUDED ITEMS", "cpsInclusions", "all appliances, window coverings…")}
         {cell("EXCLUDED ITEMS", "cpsExclusions", "staging furniture…")}
-        {cell("DESIGNATED AGENCY", "designatedAgency", "Skyleigh McCallum")}
+        {cell("DESIGNATED AGENT", "designatedAgency", "Skyleigh McCallum")}
+        {cell("SECOND DESIGNATED AGENT (OPTIONAL)", "designatedAgency2", "")}
+        {cell("SELLER’S DESIGNATED AGENT", "listingAgentName", "From MLS")}
+        {cell("SELLER’S SECOND AGENT (OPTIONAL)", "listingAgent2", "")}
+        {cell("SELLER’S BROKERAGE", "listingBrokerage", "From MLS")}
       </div>
       {umbrella === "mobile" && (
         <div style={{ marginTop: 4, borderTop: `1px solid ${BORDER}`, paddingTop: 14 }}>
@@ -833,7 +822,7 @@ export default function OfferKitWizard({
     const d = builtDocs.find((x) => x.id === id);
     if (generatingKit === id || (building && !d?.filePath)) return "building";
     if (!kitIncluded(id)) return "excluded";
-    if (!d || !d.filePath) return "unbuilt";
+    if (!d || !d.filePath || d.ready === false) return "unbuilt";
     if (docIsStale(d)) return "stale";
     return "ready";
   };
@@ -883,7 +872,10 @@ export default function OfferKitWizard({
         previewUrl={(id, page, dpi) =>
           `/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(id)}/preview?page=${page}&dpi=${dpi}&v=${Date.now()}`}
         fieldsUrl={(id) => `/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(id)}/fields?v=${Date.now()}`}
-        onDraft={(id, name) => void generateKitDoc(id, name)}
+        onDraft={(id, name) => generateKitDoc(id, name)}
+        pdfEditorUrl={(id) => `/api/admin/deals/${dealId}/kit-pdf/buyer/${encodeURIComponent(id)}`}
+        onBeforeEdit={flushSaves}
+        onPdfSaved={onUpdate}
         onOpen={(id, download) => openKitDoc(id, download)}
         onSaveField={saveKitField}
         onExclude={(id) => { if (KIT_FORMS.some((f) => f.id === id)) toggleKitForm(id); }}
@@ -970,7 +962,7 @@ export default function OfferKitWizard({
             {sendable.length ? `Send ${sendable.length} for signature` : "Send for signature"}
           </button>
           <div style={{ flexBasis: "100%", fontSize: 12.5, color: MUTED }}>
-            Sending redrafts anything you edited first, then creates one DigiSign envelope. Nothing leaves without the next screen.
+            Redraft changed documents first. Continue to review the selected package before creating a DigiSign draft.
           </div>
         </div>
       )}
@@ -1024,8 +1016,9 @@ export default function OfferKitWizard({
   const navBtn: React.CSSProperties = { padding: "11px 20px", borderRadius: 9, fontWeight: 700, fontSize: 15, cursor: "pointer", border: "none" };
 
   return (
-    <section style={{ border: `1px solid ${BORDER}`, borderRadius: 12, marginBottom: 16, background: "#fff" }}>
-      {Header}
+    <section style={{ border: bare ? "none" : `1px solid ${BORDER}`, borderRadius: 12, marginBottom: bare ? 0 : 16, background: "var(--ds-card, #fff)" }}>
+      {!bare && Header}
+      {saveError && <div role="alert" style={{ padding: 14, color: "#b42318" }}>{saveError} <button type="button" onClick={() => void flushSaves().catch(() => {})}>Retry saving</button></div>}
       <div style={{ padding: "18px 22px 20px" }}>
         <div>{Stepper}</div>
         {step === 1 ? Step1 : step === 2 ? Step2 : step === 3 ? Step3 : step === 4 ? Step4 : Placeholder}

@@ -1,3 +1,6 @@
+import KitStepper from "./kit-stepper";
+import { openListingKitPdf } from "./waiting-card";
+import { TermField, KitPreferences, useKitPreferences } from "./kit-term-fields";
 // Listing Kit wizard (listing/seller side) — the listing-side twin of the buyer
 // Offer Kit wizard. 4 steps: Property & Records -> Listing Terms & Schedule A ->
 // Forms -> Build & Sign. Selections persist to deals.extra_toggles_json via
@@ -5,8 +8,8 @@
 // backend endpoints (mirrors the offer-kit endpoints). Self-contained: uses raw
 // fetch for the kit endpoints so it doesn't depend on api.ts additions (which
 // keeps it deployable independently). Render from deal-modal for listing deals.
-import { useState, useCallback } from "react";
-import { api } from "../../../../lib/api";
+import { useState, useCallback, useEffect } from "react";
+import { useKitSaves, kitRequest } from "./kit-save-queue";
 import { useIsMobile } from "../../../../hooks/useIsMobile";
 import KitDocumentList, { type KitDocState, type KitFieldDef, useSendCheck, SendGapWarning } from "./kit-document-list";
 
@@ -30,7 +33,7 @@ const LISTING_DOC_FIELDS: KitFieldDef[] = [
   { key: "seller1", label: "Seller 1" }, { key: "seller2", label: "Seller 2" },
   { key: "property", label: "Property address" }, { key: "listPrice", label: "List price ($)" },
   { key: "listPriceWords", label: "Price in words" }, { key: "listingCommission", label: "Listing commission" },
-  { key: "buyerAgencyComp", label: "Buyer agency compensation" }, { key: "listingDate", label: "Listing date" },
+  { key: "buyerAgencyComp", label: "Buyer agency compensation" }, { key: "listingDate", label: "Contract effective date" },
   { key: "expiryDate", label: "Expiry date" }, { key: "designatedAgency", label: "Designated agency" },
   { key: "pid", label: "PID" }, { key: "zoning", label: "Zoning" },
   { key: "legal", label: "Legal description", multiline: true },
@@ -110,16 +113,20 @@ const formsFor = (umbrella: string): { id: string; title: string; sub: string; o
 ];
 
 export default function ListingKitWizard({
-  dealId, extra, address, sellerName, dealTitle, currentStage, onUpdate,
+  dealId, extra, address, sellerName, dealTitle, currentStage, onUpdate, bare = false, onSaveReady, initialStep = 1,
 }: {
   dealId: string; extra: AnyObj; address?: string; sellerName?: string; dealTitle?: string;
-  currentStage?: number; onUpdate?: () => void;
+  currentStage?: number; onUpdate?: () => void; bare?: boolean; onSaveReady?: (save: () => Promise<void>) => void; initialStep?: number;
 }) {
   const isMobile = useIsMobile();
+  const { saveToggle, saveDocument, flushSaves: flushQueuedSaves, saveError } = useKitSaves(dealId, onUpdate);
+  const { preferences, setPreferences, preferenceError, waitForPreferences } = useKitPreferences(dealId, "listing", extra, saveToggle);
+  const flushSaves = useCallback(async () => { await waitForPreferences(); await flushQueuedSaves(); }, [waitForPreferences, flushQueuedSaves]);
+  useEffect(() => { onSaveReady?.(flushSaves); }, [onSaveReady, flushSaves]);
   // Fixed multi-column field grids collapse to one column on a phone (CSS media
   // queries can't reach these inline styles).
   const cols = (n: number) => (isMobile ? "1fr" : Array(n).fill("1fr").join(" "));
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(initialStep);
   const [umbrella, setUmbrella] = useState<string>((extra.listingUmbrella as string) || "residential");
   const accepted = (currentStage ?? 0) >= 5; // listing live / accepted offer -> minimize
   const [manualCollapse, setManualCollapse] = useState<boolean | null>(null);
@@ -136,8 +143,8 @@ export default function ListingKitWizard({
   const [custom, setCustom] = useState<AnyObj[]>(savedCustom);
   const [newClause, setNewClause] = useState("");
   const persistClauses = useCallback((sel: Set<string>, cust: AnyObj[]) => {
-    api.setAdminDealToggle(dealId, "scheduleAClauses", Array.from(sel) as any).catch(() => {});
-    api.setAdminDealToggle(dealId, "scheduleACustomClauses", cust as any).catch(() => {});
+    saveToggle("scheduleAClauses", Array.from(sel) as any).catch(() => {});
+    saveToggle("scheduleACustomClauses", cust as any).catch(() => {});
   }, [dealId]);
   const toggleClause = (id: string) => setSelected((prev) => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); persistClauses(next, custom); return next;
@@ -151,26 +158,18 @@ export default function ListingKitWizard({
   // ── property type ──
   const saveUmbrella = useCallback((u: string) => {
     setUmbrella(u);
-    api.setAdminDealToggle(dealId, "listingUmbrella", u).then(() => onUpdate?.()).catch(() => {});
+    saveToggle("listingUmbrella", u).then(() => onUpdate?.()).catch(() => {});
   }, [dealId, onUpdate]);
 
   // ── record pull (Step 1) ──
-  const [pulling, setPulling] = useState(false);
-  const recordsPulled = !!(extra.pid || extra.legalDescription || extra.legal);
-  const pullStatus = (extra.recordsPullStatus as string) || "";
-  const pullRecords = useCallback(async () => {
-    setPulling(true);
-    await fetch(`/api/admin/deals/${dealId}/listing-pull-records`, {
-      method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
-    }).catch(() => {});
-    let n = 0;
-    const poll = setInterval(() => { n += 1; onUpdate?.(); if (n > 30) { clearInterval(poll); setPulling(false); } }, 6000);
-  }, [dealId, onUpdate]);
-  const busy = pulling || pullStatus === "pulling";
+  const recordsPulled = !!((extra.pid) && (extra.legalDescription || extra.legal) && extra.zoning);
+  const titlePending = String(extra.propertyProvince || extra.province || "BC").toUpperCase() === "BC" &&
+    !(extra.listingTitleVerification?.status === "verified" && extra.listingTitleVerification?.ownerMatch && extra.listingTitleVerification?.filePath);
+  const busy = false;
 
   // ── terms (Step 2) — save any term to a bare key the MLC/Schedule-A fill read ──
   const saveField = useCallback((key: string, value: string) => {
-    api.setAdminDealToggle(dealId, key, value.trim() || null).catch(() => {});
+    saveToggle(key, value.trim() || null).catch(() => {});
   }, [dealId]);
 
   // ── build (Step 4) ──
@@ -179,7 +178,7 @@ export default function ListingKitWizard({
   );
   const toggleKitForm = (id: string) => {
     if (id === "mlc") return;
-    setKitForms((p) => { const next = { ...p, [id]: !(p[id] ?? LISTING_FORM_DEFAULTS[id] ?? true) }; api.setAdminDealToggle(dealId, "listingKitForms", next as any).catch(() => {}); return next; });
+    setKitForms((p) => { const next = { ...p, [id]: !(p[id] ?? LISTING_FORM_DEFAULTS[id] ?? true) }; saveToggle("listingKitForms", next as any).catch(() => {}); return next; });
   };
   const [building, setBuilding] = useState(false);
   const [builtMsg, setBuiltMsg] = useState("");
@@ -203,7 +202,7 @@ export default function ListingKitWizard({
     const d = builtDocs.find((x) => x.id === id);
     if (genBusy === id || (building && !d?.filePath)) return "building";
     if (!kitIncluded(id)) return "excluded";
-    if (!d || !d.filePath) return "unbuilt";
+    if (!d || !d.filePath || d.ready === false) return "unbuilt";
     return docIsStale(d) ? "stale" : "ready";
   };
   const allRows: { id: string; name: string; required?: boolean }[] = [
@@ -221,18 +220,18 @@ export default function ListingKitWizard({
   // early-return, or the hook count changes between renders.
   const sendGaps = useSendCheck(dealId, "listing", sendable.map((r) => r.id), sendOpen);
   const saveKitField = useCallback((docId: string, key: string, value: string) => {
-    fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/field`, {
-      method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ key, value }),
-    }).catch(() => {});
-  }, [dealId]);
+    void saveDocument(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/field`, key, value).catch(() => {});
+  }, [dealId, saveDocument]);
   const linkBtn: React.CSSProperties = { background: "none", border: "none", padding: 0, color: BLUE, fontWeight: 700, fontSize: 12.5, cursor: "pointer", font: "inherit", minHeight: tap };
 
   const buildKit = useCallback(async () => {
     setBuilding(true); setBuiltMsg("");
     try {
-      await api.setAdminDealToggle(dealId, "scheduleAClauses", Array.from(selected) as any).catch(() => {});
-      await api.setAdminDealToggle(dealId, "scheduleACustomClauses", custom as any).catch(() => {});
+      await flushSaves();
+      await saveToggle("scheduleAClauses", Array.from(selected) as any);
+      await saveToggle("scheduleACustomClauses", custom as any);
+      await saveToggle("listingUmbrella", umbrella);
+      await saveToggle("listingKitForms", kitForms);
       const buildRes = await fetch(`/api/admin/deals/${dealId}/listing-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }).catch(() => null);
       if (!buildRes || !buildRes.ok) {
         const detail = buildRes ? await buildRes.text().catch(() => "") : "no response";
@@ -270,19 +269,27 @@ export default function ListingKitWizard({
         setBuiltMsg(`✓ Built ${ok} documents into the listing package`);
       }
       onUpdate?.();
-    } finally { setBuilding(false); }
-  }, [dealId, kitForms, onUpdate, selected, custom]);
+    } catch (error) { setBuiltMsg(`Draft stopped: ${String(error)}`); }
+    finally { setBuilding(false); }
+  }, [dealId, kitForms, onUpdate, selected, custom, umbrella, saveToggle, flushSaves]);
 
   const openKitDoc = useCallback((docId: string, download = false) => {
     const o = window.location.origin;
     const ext = o.includes("127.0.0.1") ? o.replace("127.0.0.1", "localhost") : o.replace("localhost", "127.0.0.1");
-    window.open(`${ext}/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank");
+    window.open(`${ext}/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank", "noopener,noreferrer");
   }, [dealId]);
   const generateKitDoc = useCallback(async (docId: string) => {
-    setGenBusy(docId);
-    try { await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }); onUpdate?.(); }
+    setGenBusy(docId); setBuiltMsg("");
+    try {
+      await flushSaves();
+      if (!builtDocs.some(d=>d.id===docId)) await kitRequest(`/api/admin/deals/${dealId}/listing-kit/build`, {method:"POST"});
+      await kitRequest(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST" });
+      onUpdate?.();
+      return true;
+    } catch (error) { setBuiltMsg(`Draft stopped: ${String(error)}`); return false; }
     finally { setGenBusy(null); }
-  }, [dealId, onUpdate]);
+  }, [dealId, onUpdate, flushSaves, builtDocs]);
+
   // ── Add a form (Step 4) — catalog + upload, mirrors the offer kit ──
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [addingForm, setAddingForm] = useState(false);
@@ -336,24 +343,24 @@ export default function ListingKitWizard({
   const sendForSign = useCallback(async () => {
     setSending(true); setSendMsg("");
     try {
-      const r = await fetch(`/api/admin/deals/${dealId}/listing-sign`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
+      await flushSaves();
+      const r = await kitRequest(`/api/admin/deals/${dealId}/listing-sign`, { method: "POST", body: JSON.stringify({ docIds: sendable.map((d) => d.id) }) });
       setSendMsg(r.ok ? "Listing package dispatched — you'll get a Review & approve card with the Preview before anything sends to the sellers." : "Could not dispatch. Try again.");
       onUpdate?.();
-    } catch { setSendMsg("Could not dispatch. Try again."); } finally { setSending(false); }
-  }, [dealId, onUpdate]);
+    } catch (error) { setSendMsg(`Review stopped: ${String(error)}`); } finally { setSending(false); }
+  }, [dealId, onUpdate, flushSaves, sendable]);
 
   const mls = (extra.mlsNumber as string) || "";
   const fv = (k: string) => (extra[k] as string) || "";
 
   // ── styles ──
   const panel: React.CSSProperties = { border: `1px solid ${BORDER}`, borderRadius: 12, padding: "18px 20px", marginTop: 14 };
-  const fieldLabel: React.CSSProperties = { display: "block", fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 5 };
-  const ci: React.CSSProperties = { width: "100%", boxSizing: "border-box", fontSize: 15, padding: "10px 12px", borderRadius: 8, border: `1px solid ${BORDER}`, color: INK, fontFamily: "inherit" };
+
+
   const factBox: React.CSSProperties = { background: "#f7f8fa", border: `1px solid ${BORDER}`, borderRadius: 8, padding: "10px 12px" };
   const FromTag = ({ t }: { t: string }) => <span style={{ color: BLUE, fontWeight: 700, fontSize: 11, letterSpacing: 0.4 }}>{t}</span>;
   const cell = (label: string, key: string, ph: string) => (
-    <div key={key}><label style={fieldLabel}>{label}</label>
-      <input defaultValue={fv(key)} placeholder={ph} onBlur={(e) => saveField(key, e.target.value)} style={ci} /></div>
+    <TermField key={key} label={label.charAt(0) + label.slice(1).toLowerCase()} field={key} value={String(extra[key] ?? "")} placeholder={ph} save={saveField} preference={preferences[key]} />
   );
 
   const Header = (
@@ -369,7 +376,7 @@ export default function ListingKitWizard({
     </div>
   );
 
-  if (collapsed) {
+  if (collapsed && !bare) {
     return (
       <section style={{ border: `1px solid ${BORDER}`, borderRadius: 12, marginBottom: 16, overflow: "hidden" }}>
         <button type="button" onClick={() => setCollapsed(false)} style={{ width: "100%", background: NAVY, color: "#fff", border: "none", padding: "13px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", textAlign: "left" }}>
@@ -383,35 +390,12 @@ export default function ListingKitWizard({
     );
   }
 
-  // Breadcrumb, not four equal circles — completed steps recede and the deal
-  // card's sticky header can no longer slice the rail in half on scroll.
   const stepComplete = (n: number) =>
     n === 1 ? recordsPulled
     : n === 2 ? !!(fv("listPrice") && fv("listingDate"))
     : n === 3 ? true
     : false;
-  const Stepper = (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", margin: "0 0 16px" }}>
-      {STEPS.map((label, i) => {
-        const n = i + 1, active = n === step, done = stepComplete(n) && !active;
-        return (
-          <div key={label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button type="button" onClick={() => setStep(n)} aria-current={active ? "step" : undefined}
-              title={`Go to step ${n}: ${label}`}
-              style={{ display: "flex", alignItems: "center", gap: 6, border: "none", cursor: "pointer", font: "inherit",
-                padding: "6px 10px", borderRadius: 7, minHeight: tap ? 40 : undefined,
-                background: active ? "#fff" : "transparent",
-                boxShadow: active ? "0 1px 2px rgba(24,40,72,.09)" : "none",
-                color: active ? INK : MUTED, fontWeight: active ? 800 : 600, fontSize: 13, whiteSpace: "nowrap" }}>
-              {done && <span style={{ color: GREEN, fontWeight: 800 }}>✓</span>}
-              {label}
-            </button>
-            {i < STEPS.length - 1 && <span style={{ color: "#c9ced6", fontSize: 11 }}>›</span>}
-          </div>
-        );
-      })}
-    </div>
-  );
+  const Stepper = <KitStepper steps={STEPS} current={step} complete={stepComplete} onSelect={setStep} mobile={isMobile} />;
 
   // ── Step 1: Property & Records ──
   const Step1 = (
@@ -427,26 +411,27 @@ export default function ListingKitWizard({
         </div>
       </div>
       <div style={panel}>
-        <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Pull property records</div>
-        <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 12px" }}>One pull grabs the LTSA title (PID + legal), BC Assessment value &amp; lot size, and zoning — so the MLC and MLS sheet fill themselves.</div>
+        <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Property records</div>
+        <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 12px" }}>Enter the details from verified title, assessment and zoning records. Saved values will be used when drafting the listing forms.</div>
         <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ flex: isMobile ? "1 1 100%" : "0 1 auto", minWidth: 0 }}><label style={{ display: "block", fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: 0.4, marginBottom: 4 }}>PROPERTY ADDRESS</label>
-            <input defaultValue={address || ""} style={{ fontSize: 15, padding: "9px 12px", borderRadius: 8, border: `1px solid ${BORDER}`, color: INK, width: isMobile ? "100%" : 340, maxWidth: "100%", boxSizing: "border-box" }} /></div>
-          <button type="button" onClick={pullRecords} disabled={busy} style={{ padding: "10px 18px", borderRadius: 8, fontWeight: 700, fontSize: 14, cursor: busy ? "default" : "pointer", border: "none", background: busy ? "#9aa6bd" : NAVY, color: "#fff" }}>{busy ? "Pulling…" : "Pull title, assessment & zoning"}</button>
+            <input readOnly value={address || ""} style={{ fontSize: 15, padding: "9px 12px", borderRadius: 8, border: `1px solid ${BORDER}`, color: INK, width: isMobile ? "100%" : 340, maxWidth: "100%", boxSizing: "border-box" }} /></div>
+          <span>Automatic title, assessment and zoning retrieval is not available here. Obtain the records through the title workflow, then enter and verify the details below.</span>
         </div>
         <div style={{ display: "inline-block", background: busy ? "#eef2f9" : recordsPulled ? "#e7f4ec" : "#fdf0e9", color: busy ? NAVY : recordsPulled ? GREEN : ORANGE, fontWeight: 700, fontSize: 13, padding: "8px 14px", borderRadius: 8, marginBottom: 12 }}>
-          {busy ? "Pulling from LTSA + BC Assessment + CityMap…" : recordsPulled ? "✓ Pulled · LTSA title + BC Assessment + CityMap zoning" : "Not pulled yet — pull above"}
+          {extra.listingTitleVerification?.status === "verified" ? "Title saved and sellers reconciled against the registered owners" : "Current title and seller verification are still required"}
         </div>
+        {extra.listingTitleVerification?.filePath && <button type="button" className="kit-primary" onClick={() => openListingKitPdf(dealId, "title")}>Open current title ↗</button>}
         <div style={{ display: "grid", gap: 10 }}>
           <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 10 }}>
-            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>PID</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("pid") || "—"}</div></div>
-            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>LOT SIZE</span><FromTag t="BC ASSESSMENT" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("lotSize") || "—"}</div></div>
-            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>ASSESSMENT</span><FromTag t="BC ASSESSMENT" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("assessmentValue") || "—"}</div></div>
+            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>PID</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}><input aria-label="PID" defaultValue={fv("pid") || ""} onBlur={(e) => saveField("pid", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} /></div></div>
+            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>LOT SIZE</span><FromTag t="BC ASSESSMENT" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}><input aria-label="Lot size" defaultValue={fv("lotSize") || ""} onBlur={(e) => saveField("lotSize", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} /></div></div>
+            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>ASSESSMENT</span><FromTag t="BC ASSESSMENT" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}><input aria-label="Assessment value" defaultValue={fv("assessmentValue") || ""} onBlur={(e) => saveField("assessmentValue", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} /></div></div>
           </div>
-          <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>LEGAL DESCRIPTION</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("legalDescription") || fv("legal") || "—"}</div></div>
+          <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>LEGAL DESCRIPTION</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}><textarea aria-label="Legal description" defaultValue={fv("legalDescription") || fv("legal") || ""} onBlur={(e) => saveField("legalDescription", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} /></div></div>
           <div style={{ display: "grid", gridTemplateColumns: cols(2), gap: 10 }}>
-            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>ZONING</span><FromTag t="CITYMAP" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("zoning") || "—"}</div></div>
-            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>REGISTERED OWNER</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}>{fv("registeredOwner") || sellerName || "—"}</div></div>
+            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>ZONING</span><FromTag t="CITYMAP" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}><input aria-label="Zoning" defaultValue={fv("zoning") || ""} onBlur={(e) => saveField("zoning", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} /></div></div>
+            <div style={factBox}><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED, fontWeight: 700 }}>REGISTERED OWNER</span><FromTag t="TITLE / LTSA" /></div><div style={{ fontWeight: 700, color: INK, marginTop: 3 }}><input aria-label="Registered owner" defaultValue={fv("registeredOwner") || ""} onBlur={(e) => saveField("registeredOwner", e.target.value)} style={{ width: "100%", boxSizing: "border-box" }} /></div></div>
           </div>
         </div>
       </div>
@@ -458,16 +443,22 @@ export default function ListingKitWizard({
     <>
       <div style={panel}>
         <div style={{ fontWeight: 700, fontSize: 16, color: INK }}>Listing terms</div>
-        <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 16px" }}>Seller names pull from the card; PID &amp; legal from the title. Just the listing numbers here — everything saves as you type.</div>
+        <div style={{ fontSize: 13, color: MUTED, margin: "5px 0 16px" }}>Review the listing terms. Changes save when you leave a field; dates save when selected.</div>
+        <KitPreferences side="listing" values={preferences} onSaved={setPreferences} onApply={async values=>{for(const [key,value] of Object.entries(values)){if(!key.startsWith("cps"))await saveToggle(key,value.trim() || null);}}} />
+        {preferenceError && <p role="alert">{preferenceError}</p>}
         <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14, marginBottom: 14 }}>
           {cell("LIST PRICE", "listPrice", "$539,900")}
           {cell("LISTING COMMISSION", "listingCommission", "3.5% / 1.5%")}
           {cell("BUYER AGENCY COMP", "buyerAgencyComp", "3.255% / 1.1625%")}
         </div>
+        <div style={{ display: "grid", gridTemplateColumns: cols(2), gap: 14, marginBottom: 14 }}>
+          {cell("SELLER MAILING ADDRESS", "sellerMailingAddress", "Unit, street, city, province, postal code")}
+          {cell("RETAINED BY LISTING BROKERAGE (OVERRIDE)", "listingBrokerageRetained", "Calculated from matching total and cooperating tiers")}
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: cols(3), gap: 14 }}>
-          {cell("LISTING DATE", "listingDate", "Jul 2")}
+          {cell("CONTRACT EFFECTIVE DATE", "contractEffectiveDate", "Jul 2")}
           {cell("EXPIRY DATE", "expiryDate", "Oct 2")}
-          {cell("DESIGNATED AGENCY", "designatedAgency", "Skyleigh McCallum")}
+          {cell("DESIGNATED AGENT", "designatedAgency", "Skyleigh McCallum")}
         </div>
       </div>
       <div style={panel}>
@@ -530,9 +521,11 @@ export default function ListingKitWizard({
         {building || genBusy
           ? "Drafting…"
           : needsDraft.length === 0 && sendable.length > 0
-            ? `All ${sendable.length} drafted and ready to send.`
+            ? `All ${sendable.length} drafted and ready for review.`
             : `${sendable.length} drafted. ${needsDraft.length} still to draft.`}
       </div>
+      {titlePending && <p role="status" style={{ color: ORANGE }}>Current title and seller verification are required before approving these drafts or preparing signatures. You can open and edit the drafts below.</p>}
+      {extra.listingTitleVerification?.filePath && <button type="button" style={kitBtn} onClick={() => openListingKitPdf(dealId, "title")}>Open current title ↗</button>}
 
       <KitDocumentList
         rows={includedRows.map((r) => ({
@@ -547,7 +540,10 @@ export default function ListingKitWizard({
         previewUrl={(id, page, dpi) =>
           `/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(id)}/preview?page=${page}&dpi=${dpi}&v=${Date.now()}`}
         fieldsUrl={(id) => `/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(id)}/fields?v=${Date.now()}`}
-        onDraft={(id) => void generateKitDoc(id)}
+        onDraft={(id) => generateKitDoc(id)}
+        pdfEditorUrl={(id) => `/api/admin/deals/${dealId}/kit-pdf/listing/${encodeURIComponent(id)}`}
+        onBeforeEdit={flushSaves}
+        onPdfSaved={onUpdate}
         onOpen={(id, download) => openKitDoc(id, download)}
         onSaveField={saveKitField}
         onExclude={(id) => toggleKitForm(id)}
@@ -622,9 +618,9 @@ export default function ListingKitWizard({
               {building ? "Drafting…" : `Draft the ${needsDraft.length} remaining`}
             </button>
           )}
-          <button type="button" disabled={building || sendable.length === 0} onClick={() => setSendOpen(true)}
+          <button type="button" disabled={building || sendable.length === 0 || titlePending} onClick={() => setSendOpen(true)}
             style={{ padding: "11px 20px", borderRadius: 9, fontWeight: 700, fontSize: 14.5, border: "none", color: "#fff", cursor: sendable.length === 0 ? "default" : "pointer", minHeight: tap,
-              background: sendable.length === 0 || building ? "#9aa6bd" : ORANGE }}>
+              background: sendable.length === 0 || building || titlePending ? "#9aa6bd" : ORANGE }}>
             {sendable.length ? `Send ${sendable.length} for signature` : "Send for signature"}
           </button>
           <div style={{ flexBasis: "100%", fontSize: 12.5, color: MUTED }}>
@@ -648,7 +644,7 @@ export default function ListingKitWizard({
           <SendGapWarning gaps={sendGaps} nameOf={(id) => sendable.find((r) => r.id === id)?.name} />
           <div style={{ display: "flex", gap: 9, marginTop: 14, alignItems: "center", flexWrap: "wrap" }}>
             <button type="button" onClick={() => setSendOpen(false)} style={kitBtn}>Cancel</button>
-            <button type="button" disabled={sending} onClick={() => { setSendOpen(false); void sendForSign(); }}
+            <button type="button" disabled={sending || titlePending} onClick={() => { setSendOpen(false); void sendForSign(); }}
               style={{ ...kitBtn, background: ORANGE, borderColor: "transparent", color: "#fff", padding: "9px 16px", fontSize: 13.5 }}>
               {sending ? "Dispatching…" : `Send ${sendable.length} to ${sellerLabel}`}
             </button>
@@ -664,9 +660,10 @@ export default function ListingKitWizard({
 
   const navBtn: React.CSSProperties = { padding: "11px 20px", borderRadius: 9, fontWeight: 700, fontSize: 15, cursor: "pointer", border: "none" };
   return (
-    <section style={{ border: `1px solid ${BORDER}`, borderRadius: 12, marginBottom: 16, background: "#fff" }}>
-      {Header}
+    <section style={{ border: bare ? "none" : `1px solid ${BORDER}`, borderRadius: 12, marginBottom: bare ? 0 : 16, background: "var(--ds-card, #fff)" }}>
+      {!bare && Header}
       <div style={{ padding: "18px 22px 20px" }}>
+      {saveError && <div role="alert" style={{ padding: 14, color: "#b42318" }}>{saveError} <button type="button" onClick={() => void flushSaves().catch(() => {})}>Retry saving</button></div>}
         <div>{Stepper}</div>
         {step === 1 ? Step1 : step === 2 ? Step2 : step === 3 ? Step3 : Step4}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>

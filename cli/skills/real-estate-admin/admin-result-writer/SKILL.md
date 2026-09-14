@@ -9,9 +9,16 @@ metadata:
       requires_idempotency_key: true
 ---
 
+## Listing stage trigger contract — September 9, 2026
+
+For BC listing stage decisions, read the [shared stage trigger contract](references/listing-stage-triggers.md). It supersedes older manual-only and workflow-completion advancement rules for the named triggers. Entry into a stage starts its workflow; completing work alone does not advance the card. Preserve buyer-stage behavior. Use the runtime invocation section for the supported trigger tool/CLI; distinguish queued workflows from completed work.
+
+
 # Admin Result Writer
 
 Use this contract at the end of every Admin workflow, however it was invoked.
+
+Stage policy: completing or approving a run records its result; it does not by itself authorize a stage change. A clear gate means the card is ready to move. Use the shared listing trigger contract to determine authorization; moving a card launches the destination workflow.
 
 Write one result for one verified `deal_id`. Include a stable `idempotencyKey` so retries do not duplicate artifacts, checklist updates, or next tasks. `run_id` is optional: present for background/stage runs, absent for live sessions (see "Where this writes").
 
@@ -19,10 +26,10 @@ Write one result for one verified `deal_id`. Include a stable `idempotencyKey` s
 
 The result always lands on the deal's kanban card. How it gets there depends on how the skill was invoked:
 
-- **Background / stage run (has a `run_id`):** close the run through its result callback. The callback applies checklist updates, fields, and artifacts to the deal and advances the stage when the gate clears. Free-form questions reach the realtor on the Admin agent's async lane.
-- **Live session (no `run_id`):** you are talking to the realtor directly. Hold the back-and-forth in that session — ask, confirm, iterate — then finalize through the **`admin_deal`** tool so the SAME result lands on the card: `set_fields` for named fields, `set_checklist` for cells, `attach` for artifacts, and `advance` when the gate is clear. If the deal entered the stage on its own it has a pending run that blocks the gate — close it with `admin_deal` `complete_run` (which applies checklist_updates + artifacts and auto-advances), not `force`. The card must reflect the outcome before you consider the work done.
+- **Background / stage run (has a `run_id`):** close the run through its result callback. The callback applies checklist updates, fields, and artifacts to the deal. Read back the actual stage; completing a run does not authorize moving the card. Free-form questions reach the realtor on the Admin agent's async lane.
+- **Live session (no `run_id`):** you are talking to the realtor directly. Hold the back-and-forth in that session — ask, confirm, iterate — then finalize through the **`admin_deal`** tool so the SAME result lands on the card: `set_fields` for named fields, `set_checklist` for cells, `attach` for artifacts, and `trigger` with the named event and evidence for an authorized BC listing move. If the deal entered the stage on its own it has a pending run that blocks the gate — close it with `admin_deal` `complete_run` (which applies checklist_updates + artifacts and clears the blocking run; it does not authorize advancement), not `force`. The card must reflect the outcome before you consider the work done.
 
-Either way the end state is identical: the kanban shows the completed checklist cells, the attached artifacts, and the new stage. A session conversation that ends without syncing the deal is unfinished — never leave the result only in the chat.
+Either way the end state is identical: the kanban shows the completed checklist cells, the attached artifacts, and the verified current stage. A session conversation that ends without syncing the deal is unfinished — never leave the result only in the chat.
 
 Result shape:
 

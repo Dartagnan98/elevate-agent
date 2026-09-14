@@ -55,6 +55,9 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
 }) {
   const isMobile = useIsMobile();
   const [phases, setPhases] = useState<Phase[]>([]);
+  const [reportReady, setReportReady] = useState(false);
+  const [reportVersion, setReportVersion] = useState("");
+  const [revision, setRevision] = useState(0);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [comps, setComps] = useState<{ sold: Comp[]; active: Comp[]; subject?: import('../../../../lib/api').CmaFacts | null }>({ sold: [], active: [] });
   const [loading, setLoading] = useState(true);
@@ -69,6 +72,7 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   const [photosUrl, setPhotosUrl] = useState("");
   const [photosSaved, setPhotosSaved] = useState(false);
   const [photosUrlSet, setPhotosUrlSet] = useState(false); // a link is saved on the deal
+  const [editingPhotos, setEditingPhotos] = useState(false);
   const [noPhotos, setNoPhotos] = useState(false);         // agent chose "no photos"
   const [scoring, setScoring] = useState(false);           // photo run dispatched, awaiting result
   const [runErr, setRunErr] = useState("");                // last phase-dispatch error, surfaced inline
@@ -102,7 +106,10 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   const load = () => api.getCmaPhases(dealId)
     .then(async (r) => {
       setPhases(r.phases || []); setPdfUrl(r.pdfUrl || "");
-      if (r.photosUrlSet) setPhotosUrlSet(true);
+      api.getCmaProspectingStatus(dealId).then((p) => setProspect({ state: p.state || "idle", message: p.message })).catch(() => {});
+      setReportReady(!!r.reportReady); setReportVersion(r.reportVersion || ""); setRevision(r.revision || 0);
+      setPhotosUrlSet(!!r.photosUrlSet);
+      api.getCmaStagedPhotos(dealId).then((p) => { setDropped(p.count); if (p.count > 0) setPhotosSaved(true); }).catch(() => {});
       if (r.photosUrl && !photosUrl) setPhotosUrl(r.photosUrl);
       // Photo run finished (done or failed) -> stop treating it as in-flight.
       const ph = (r.phases || []).find((p: Phase) => p.id === "photos");
@@ -134,10 +141,11 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   }, [dealId]);
 
   useEffect(() => {
-    if (!scoring && !phases.some((p) => p.status === "running")) return;
+    // Refresh completed runs too: notes, captures and section choices invalidate them.
+    if (!open) return;
     const t = setTimeout(() => { void load(); }, 4000);
     return () => clearTimeout(t);
-  }, [phases, scoring]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [phases, scoring, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Pull the pricing breakdown once the pricing engine (normalize) has run.
   useEffect(() => {
@@ -155,6 +163,15 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
     return "todo";
   };
   const stepDone = (s: typeof STEPS[number]) => stepStatus(s) === "done";
+  // The Comparables section used to require the WHOLE Property step, which
+  // includes photo scoring. So the moment a re-score started, her comps, her
+  // exclusions and the side-by-side finish table all vanished off the screen
+  // mid-session -- and after a week of genuinely losing notes, work disappearing
+  // is indistinguishable from work being deleted. Skyleigh 2026-08-31: "The
+  // comparison section side by side isn't there."
+  //
+  // The comp set only depends on the PULL. Scoring changes the finish numbers
+  // inside the table, not whether there are comps to show. Gate on collect.
   const curIdx = Math.min(STEPS.findIndex((s) => !stepDone(s)) === -1 ? STEPS.length - 1 : STEPS.findIndex((s) => !stepDone(s)), STEPS.length - 1);
   const shown = viewIdx ?? curIdx;
   const step = STEPS[shown];
@@ -170,8 +187,9 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   // captured — the runner then silently no-ops (detached, output discarded) and
   // the click looks dead. Gate it here so the button never dispatches a doomed run.
   const isDone = (id: string) => byId(id)?.status === "done";
+  const compsReady = isDone("collect") && comps.sold.length > 0;
   const renderBlocked = nextRunnable?.id === "render"
-    && !(isDone("finish") && isDone("actives") && isDone("prospecting"));
+    && !(isDone("photos") && isDone("actives") && isDone("prospecting"));
 
   const run = async (id: string) => {
     setBusy(id); setRunErr("");
@@ -230,12 +248,21 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   // decided once the data is there, and Continue does the mechanical part.
   const activesPresent = comps.active.length > 0;
   const advance = async () => {
-    if (step.key === "property" && !isDone("photos")) {
-      setBusy("continue");
+    if (step.key === "property" && (!isDone("photos") || editingPhotos)) {
+      setBusy("continue"); setRunErr("");
       try {
-        if (photosAttached && !noPhotos) { setScoring(true); await api.scoreCmaPhotos(dealId); }
+        // Order matters: `scoring` is what renders "runs in the background", so
+        // it must only flip AFTER the dispatch POST resolves 2xx. The old order
+        // (setScoring first, no catch) showed "running in the background" while
+        // a 400 from the server was silently swallowed as an unhandled
+        // rejection -- nothing had run and nothing said so (2026-08-29,
+        // 426 Gleneagles). Same runErr surface as the comparables branch.
+        if (photosAttached && !noPhotos) { await api.scoreCmaPhotos(dealId); setScoring(true); }
         else { await api.skipCmaPhotos(dealId); }
-        await load();
+        await load(); setEditingPhotos(false);
+      } catch (e) {
+        setRunErr(e instanceof Error ? e.message : "Could not start the photo scoring.");
+        return;
       } finally { setBusy(""); }
     }
     if (step.key === "comparables" && !isDone("actives") && activesPresent) {
@@ -260,7 +287,7 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   };
   const regenerate = async () => {
     setBusy("regen");
-    try { await api.regenerateCmaComps(dealId, regen); setViewIdx(1); await load(); } finally { setBusy(""); }
+    try { await api.regenerateCmaComps(dealId, regen); setViewIdx(1); await load(); } catch (e) { setRunErr(e instanceof Error ? e.message : "Could not start the pull."); } finally { setBusy(""); }
   };
   // doReprice lived here. CmaBracket owns setting the price now.
   // The capture runs DETACHED with its output discarded, so this POST returns in
@@ -268,6 +295,12 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
   // polling a status file the screen dropped straight back to the picker and the
   // button looked dead -- which is exactly what Skyleigh reported.
   const [prospect, setProspect] = useState<{ state: string; message?: string }>({ state: "idle" });
+  // Buyer demand had NO WAY BACK once it had run. Skyleigh 2026-09-06: "Buyer
+  // demand section. I want to re run this but there is no option." The done state
+  // rendered a single green tick and nothing else, so a capture anchored on the
+  // wrong listing, or one taken before she moved her price, was permanent for the
+  // life of the run. This flag reopens the picker on demand.
+  const [redoProspect, setRedoProspect] = useState(false);
   const pollProspect = useCallback(async () => {
     try {
       const r = await api.getCmaProspectingStatus(dealId);
@@ -286,14 +319,16 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
 
   const captureProspecting = async () => {
     if (!prospectMls) return;
+    setRedoProspect(false);
     setBusy("prospect");
     setProspect({ state: "running", message: "Signing in to Xposure" });
     try { await api.captureCmaProspecting(dealId, prospectMls); await load(); }
+    catch (e) { setRunErr(e instanceof Error ? e.message : "Could not start the capture."); setProspect({ state: "failed", message: "Capture did not start. Try again." }); }
     finally { setBusy(""); void pollProspect(); }
   };
   const reloadComps = () => api.getCmaComps(dealId).then(setComps).catch(() => { /* ignore */ });
   const toggleComp = (mls: string, kind: "sold" | "active") =>
-    api.toggleCmaComp(dealId, mls, kind).then(reloadComps).catch(() => { /* ignore */ });
+    api.toggleCmaComp(dealId, mls, kind).then(() => { void reloadComps(); void load(); }).catch((e) => setRunErr(e instanceof Error ? e.message : "Could not save that choice."));
 
 
 
@@ -399,13 +434,13 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                 <CmaMyRead dealId={dealId} />
               )}
 
-              {step.key === "comparables" && stepDone(STEPS[0]) && comps.sold.length > 0 && (
+              {step.key === "comparables" && compsReady && (
                 <CmaCompReview dealId={dealId} soldComps={comps.sold} activeComps={comps.active} yours={comps.subject} onToggle={toggleComp} />
               )}
 
               {/* WHERE THE COMPS COME FROM. She builds curated lists in Xposure
                   and asked to point the CMA at one instead of the tool's search. */}
-              {step.key === "comparables" && stepDone(STEPS[0]) && (
+              {step.key === "comparables" && compsReady && (
                 <div style={{ marginTop: 14, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 13px", background: "#fff" }}>
                   <div style={{ fontSize: 11, fontWeight: 800, color: MUTED, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8, display: "flex", alignItems: "center", gap: 7 }}>
                     Comps from an Xposure saved list
@@ -437,7 +472,7 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                 </div>
               )}
 
-              {step.key === "comparables" && stepDone(STEPS[0]) && (
+              {step.key === "comparables" && compsReady && (
                 <div style={{ marginTop: 14, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 13px", background: "#fbfcfe" }}>
                   <div style={{ fontSize: 11, fontWeight: 800, color: MUTED, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8, display: "flex", alignItems: "center", gap: 7 }}>
                     Re-run the search
@@ -465,7 +500,7 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                       was derived from price per square foot, comp averaging and
                       score interpolation -- none of which she does. */}
                   <CmaBracket dealId={dealId} onRepriced={() => { void api.getCmaPricing(dealId).then(setPricing).catch(() => { /* ignore */ }); }} />
-                  <CmaPositioned
+                  {!!pricing.recommendedPrice && <CmaPositioned
                     recommended={pricing.recommendedPrice}
                     range={pricing.range}
                     better={pricing.better}
@@ -473,8 +508,8 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                     worse={pricing.worse}
                     expired={pricing.expired}
                     freshness={pricing.freshness}
-                  />
-                  {pricing.strategy && (
+                  />}
+                  {!!pricing.recommendedPrice && pricing.strategy && (
                     <div style={{ border: `1px solid ${LINE}`, borderRadius: 10, padding: "11px 13px", marginBottom: 12, fontSize: 12.5, color: "#384256", lineHeight: 1.55 }}>{String(pricing.strategy)}</div>
                   )}
                   {/* Buyer demand sits beside the sandwich because it answers the
@@ -490,8 +525,18 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
 
                   <div style={{ marginTop: 12, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", background: "#fbfcfe" }}>
                     <div style={{ fontSize: 11, fontWeight: 800, color: MUTED, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 7 }}>Buyer-demand prospecting</div>
-                    {byId("prospecting")?.status === "done" ? (
-                      <div style={{ fontSize: 12.5, fontWeight: 700, color: GREEN }}>✓ Buyer demand captured. Ready to Generate.</div>
+                    {byId("prospecting")?.status === "done" && !redoProspect ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: GREEN }}>✓ Buyer demand captured. Ready to Generate.</span>
+                        {/* Anchored on the wrong listing, or taken before the price
+                            moved? This is the way back. It re-opens the picker; it
+                            does not run anything on its own. */}
+                        <button onClick={() => setRedoProspect(true)} disabled={!!busy}
+                          style={{ minHeight: 44, font: "inherit", fontSize: 12.5, fontWeight: 700, color: BLUE,
+                                   background: "none", border: "none", cursor: busy ? "default" : "pointer", padding: "10px 2px" }}>
+                          Capture it again
+                        </button>
+                      </div>
                     ) : (byId("prospecting")?.status === "running" || busy === "prospect" || prospect.state === "running") ? (
                       <div style={{ fontSize: 12.5, color: TERRA, fontWeight: 700 }}>
                         Capturing from Xposure… one last login, about 1 to 2 minutes. You can keep working.
@@ -509,18 +554,33 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                       </div>
                     ) : (
                       <>
-                        <div style={{ fontSize: 12, color: "#384256", marginBottom: 7 }}>Pick the active listing to anchor the buyer-demand pull (one priced near your number reads cleanest):</div>
+                        <div style={{ fontSize: 12, color: "#384256", marginBottom: 7 }}>
+                          {redoProspect
+                            ? "Pick the listing to anchor the new pull. This replaces the buyer-demand numbers already in the report."
+                            : "Pick the active listing to anchor the buyer-demand pull (one priced near your number reads cleanest):"}
+                        </div>
                         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                           <select value={prospectMls} onChange={(e) => setProspectMls(e.target.value)}
-                            style={{ flex: 1, minWidth: 220, border: "1px solid #dde3ee", borderRadius: 7, padding: "8px 10px", fontSize: 12.5, color: "#1c2433", background: "#fff" }}>
+                            style={{ flex: 1, minWidth: isMobile ? "100%" : 220, boxSizing: "border-box", border: "1px solid #dde3ee", borderRadius: 7, padding: isMobile ? "11px 10px" : "8px 10px", fontSize: isMobile ? 16 : 12.5, color: "#1c2433", background: "#fff" }}>
                             <option value="">Select an active comp…</option>
                             {comps.active.filter((c) => !c.excluded).map((c) => (
                               <option key={c.mls} value={c.mls}>{c.address} · {String(c.price)}</option>
                             ))}
                           </select>
-                          <button onClick={captureProspecting} disabled={!!busy || !prospectMls}
+                          <button onClick={captureProspecting} disabled={!!busy || !prospectMls || phases.some((p) => p.status === "running") || prospect.state === "running"}
                             style={{ fontSize: 12.5, fontWeight: 700, padding: "9px 16px", borderRadius: 9, border: "none", background: (busy || !prospectMls) ? "#d7dce6" : NAVY, color: (busy || !prospectMls) ? "#8a93a6" : "#fff", cursor: busy ? "wait" : "pointer" }}>
                             Capture buyer demand</button>
+                          {/* The way back out. "Capture it again" throws away the
+                              green tick on tap, and on a phone that row wraps, so
+                              a stray thumb used to leave her with no way to say
+                              never mind. */}
+                          {redoProspect && byId("prospecting")?.status === "done" && (
+                            <button onClick={() => { setRedoProspect(false); setProspectMls(""); }} disabled={!!busy}
+                              style={{ minHeight: 44, font: "inherit", fontSize: 12.5, fontWeight: 700, color: MUTED,
+                                       background: "none", border: "none", cursor: busy ? "default" : "pointer", padding: "10px 4px" }}>
+                              Keep what I have
+                            </button>
+                          )}
                         </div>
                       </>
                     )}
@@ -541,16 +601,16 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                   so on the Report step there was no Generate button to find. */}
               {step.key === "report" && (() => {
                 const rendered = isDone("render");
-                const blocked = !(isDone("finish") && isDone("actives") && isDone("prospecting"));
+                const blocked = !(isDone("photos") && isDone("actives") && isDone("prospecting"));
                 const missing = [
                   !isDone("prospecting") && "buyer demand",
-                  !isDone("finish") && "pricing",
+                  !isDone("photos") && "the property assessment",
                   !isDone("actives") && "the comparables",
                 ].filter(Boolean) as string[];
                 return (
                   <div style={{ border: `1px solid ${LINE}`, borderRadius: 12, padding: "14px 16px", background: "#fff", marginBottom: 14 }}>
                     <div style={{ fontSize: 15, fontWeight: 700, color: NAVY, marginBottom: 4 }}>
-                      {rendered ? "The report is built" : "Build the report"}
+                      {reportReady ? "The report passed its checks" : rendered ? "Report built; checks pending" : "Build the report"}
                     </div>
                     <p style={{ margin: "0 0 11px", fontSize: 13, color: MUTED, lineHeight: 1.5, maxWidth: "62ch" }}>
                       {rendered
@@ -560,7 +620,7 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                         : "Builds the PDF from your comps, your positioning and your notes, then runs the visual check."}
                     </p>
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                      <button onClick={() => run("render")} disabled={!!busy || blocked}
+                      <button onClick={() => run("render")} disabled={!!busy || blocked || phases.some((p) => p.status === "running") || prospect.state === "running"}
                         title={blocked ? `Finish ${missing.join(" and ")} first` : ""}
                         style={{ minHeight: 44, fontSize: 13.5, fontWeight: 800, padding: "11px 20px", borderRadius: 9,
                                  border: "none", font: "inherit",
@@ -575,12 +635,12 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                           Open the PDF ↗
                         </a>
                       )}
-                      {rendered && <CmaSendToSeller dealId={dealId} />}
+                      {reportReady && <CmaSendToSeller key={reportVersion} dealId={dealId} />}
                     </div>
                   </div>
                 );
               })()}
-              {step.key === "report" && <CmaReportBuild dealId={dealId} />}
+              {step.key === "report" && <CmaReportBuild dealId={dealId} reportVersion={reportVersion} revision={revision} />}
               {step.key === "report" && <CmaApprovedDesign />}
 
               {/* failed phase error */}
@@ -588,6 +648,13 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                 <div key={p!.id} style={{ fontSize: 11.5, color: "#d44", marginTop: 8 }}>{p!.label}: {(p!.error || "").slice(0, 110)}</div>
               ))}
               {runErr && <div style={{ fontSize: 11.5, color: "#d44", marginTop: 8 }}>{runErr.slice(0, 160)}</div>}
+
+              {step.key === "property" && isDone("photos") && !editingPhotos && (
+                <button type="button" onClick={() => setEditingPhotos(true)} disabled={!!busy || phases.some((p) => p.status === "running")}
+                  style={{ minHeight: 44, padding: "10px 14px", border: `1px solid ${LINE}`, borderRadius: 8, background: "#fff", color: NAVY }}>
+                  Update photos or assessment
+                </button>
+              )}
 
               {/* action row */}
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
@@ -621,7 +688,7 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                 {step.key === "report" && pdfUrl && (
                   <a href={pdfUrl} target="_blank" rel="noreferrer" style={{ fontSize: 13, fontWeight: 700, color: BLUE, textDecoration: "none" }}>Open CMA PDF ↗</a>
                 )}
-                {step.key === "property" && isDone("collect") && !isDone("photos") && stepStatus(step) !== "running" && !scoring && (
+                {step.key === "property" && isDone("collect") && (!isDone("photos") || editingPhotos) && stepStatus(step) !== "running" && !scoring && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10, width: "100%" }}>
                     <label style={{ fontSize: 12, fontWeight: 700, color: NAVY }}>Subject photos</label>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -658,11 +725,11 @@ export default function CmaWizard({ dealId, bare = false, address = "", onAddres
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                       <button onClick={() => setNoPhotos((v) => !v)} disabled={!!busy}
-                        title="No usable photos. Continue scores finish neutral (price-based CMA)"
+                        title="No usable photos. Use confirmed facts and notes without unsupported finish comparisons"
                         style={{ fontSize: 12, fontWeight: 700, padding: "6px 12px", borderRadius: 8, border: `1px solid ${noPhotos ? NAVY : LINE}`, background: noPhotos ? NAVY : "#fff", color: noPhotos ? "#fff" : MUTED, cursor: busy ? "wait" : "pointer" }}>
                         {noPhotos ? "✓ No photos" : "No photos"}</button>
                       <span style={{ fontSize: 11, color: MUTED }}>
-                        {noPhotos ? "Continue will skip scoring. Price-based CMA."
+                        {noPhotos ? "Uses confirmed facts and notes. Unobserved finishes will not be compared."
                           : photosAttached ? "Continue will pull and score these photos."
                           : "Attach a photo folder, or choose No photos. Either lets you Continue."}</span>
                     </div>

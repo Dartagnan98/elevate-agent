@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,17 +42,30 @@ _LOFTY_ENRICHMENT_CHECKPOINT_EVERY = 5
 
 def _lofty_load_enrichment_progress(
     artifacts_dir: Path,
+    *, refresh_seconds: int = 3600,
+    checkpoint: dict | None = None,
 ) -> tuple[set[str], list[JsonRecord], dict[str, int]]:
     """Load the prior enrichment checkpoint so a resumed sync skips already-
     enriched lead_ids. Missing/corrupt file = clean start, never raises."""
     path = artifacts_dir / "enrichment_progress.json"
-    if not path.exists():
+    if checkpoint is None and not path.exists():
         return set(), [], {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+        payload = checkpoint if checkpoint is not None else json.loads(path.read_text(encoding="utf-8") or "{}")
     except (json.JSONDecodeError, OSError):
         return set(), [], {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
-    completed = {str(x) for x in (payload.get("completed_lead_ids") or []) if x}
+    # Only successful, recent fetches count. Legacy checkpoints marked failed
+    # endpoints complete forever, so they intentionally receive no freshness.
+    refreshed = (payload.get("refreshed_at") or {}) if payload.get("refresh_version") == 2 else {}
+    now = datetime.now(timezone.utc)
+    completed = set()
+    for lead_id, stamp in refreshed.items():
+        try:
+            age = (now - datetime.fromisoformat(stamp)).total_seconds()
+            if 0 <= age < refresh_seconds:
+                completed.add(str(lead_id))
+        except (TypeError, ValueError):
+            pass
     events = [e for e in (payload.get("events") or []) if isinstance(e, dict)]
     summary = payload.get("summary") or {}
     base_summary = {"activities": 0, "notes": 0, "tasks": 0, "errors": 0}
@@ -67,6 +82,9 @@ def _lofty_save_enrichment_progress(
     summary: dict[str, int],
     total_leads: int,
     status: str,
+    refreshed_at: dict[str, str] | None = None,
+    fingerprints: dict[str, str] | None = None,
+    attempted_at: dict[str, str] | None = None,
 ) -> None:
     """Atomic checkpoint write — same readers/writers can see partial
     enrichment without a torn file."""
@@ -78,12 +96,38 @@ def _lofty_save_enrichment_progress(
         "total_leads": total_leads,
         "summary": summary,
         "events": events,
+        "refreshed_at": refreshed_at or {},
+        "refresh_version": 2,
+        "fingerprints": fingerprints or {},
+        "attempted_at": attempted_at or {},
     }
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     tmp = artifacts_dir / "enrichment_progress.json.tmp"
     final = artifacts_dir / "enrichment_progress.json"
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, final)
+
+
+def _lofty_refresh_plan(jobs, fresh_ids, saved, budget):
+    """Changed profiles first, then oldest details; failures rotate behind peers.
+
+    The provider's profile timestamp is not assumed to cover every note/task,
+    so unchanged profiles also receive a rolling detail refresh.
+    """
+    fingerprints = saved.get("fingerprints") or {}
+    attempts = saved.get("attempted_at") or {}
+    refreshed = saved.get("refreshed_at") or {}
+    reusable, due = set(), []
+    for job in jobs:
+        lid = job["lead_id"]
+        changed = fingerprints.get(lid) != job["fingerprint"]
+        if not changed and lid in fresh_ids:
+            reusable.add(lid)
+        else:
+            due.append((0 if changed else 1, attempts.get(lid, refreshed.get(lid, "")), lid, job))
+    due.sort(key=lambda item: item[:3])
+    selected = [item[3] for item in due[:budget]]
+    return reusable, selected, max(0, len(due) - len(selected))
 
 
 def _lofty_enrich_one_lead(
@@ -122,6 +166,8 @@ def _lofty_enrich_one_lead(
                 "subtype": norm["subtype"],
                 "title": norm["title"],
                 "summary": norm["summary"],
+                "body": norm["summary"],
+                "provider_record": raw_act,
                 "address": norm["address"],
                 "timestamp": norm["timestamp"] or fallback_timestamp,
             }
@@ -146,6 +192,10 @@ def _lofty_enrich_one_lead(
                 "provider": "lofty",
                 "title": norm["title"] or "Note",
                 "summary": norm["summary"],
+                "body": norm["summary"],
+                "provider_record": raw_note,
+                "remote_id": str(raw_note.get("id") or raw_note.get("noteId") or note_id),
+                "deleted": bool(raw_note.get("deleteFlag")),
                 "author": norm["author"],
                 "timestamp": norm["timestamp"] or fallback_timestamp,
             }
@@ -171,6 +221,8 @@ def _lofty_enrich_one_lead(
                 "provider": "lofty",
                 "title": norm["title"],
                 "summary": norm["summary"],
+                "body": norm["summary"],
+                "provider_record": raw_task,
                 "status": norm["status"],
                 "task_subtype": norm["type"],
                 "assignedUser": norm["assignedUser"],
@@ -191,6 +243,12 @@ def sync_lofty_crm_source(
 ) -> JsonRecord:
     source_connectors = _source_connectors()
     config = config or source_connectors.load_config()
+    tuning = config.get("integrations", {}).get("crm", {}).get("sync", {}) or {}
+    incremental = bool(tuning.get("incremental_enrichment", False))
+    workers = max(1, min(8, int(tuning.get("enrichment_workers", _LOFTY_ENRICHMENT_WORKERS))))
+    refresh_seconds = max(60, int(tuning.get("detail_refresh_seconds", 3600)))
+    budget = max(1, int(tuning.get("max_detail_leads_per_run", enrichment_limit)))
+    checkpoint_every = max(1, int(tuning.get("checkpoint_every", _LOFTY_ENRICHMENT_CHECKPOINT_EVERY)))
     info = source_connectors.get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
     source_dir = _source_dir(source_root, "crm")
@@ -393,6 +451,7 @@ def sync_lofty_crm_source(
                     "record_id": record_id,
                     "base_record": base_record,
                     "fallback_timestamp": timestamp,
+                    "fingerprint": hashlib.sha256(json.dumps(lead, sort_keys=True, default=str).encode()).hexdigest(),
                 }
             )
 
@@ -419,6 +478,17 @@ def sync_lofty_crm_source(
     # drawer) already see the 21 leads with stage/score/source. Enrichment
     # in Phase 2 only adds the activity/note/task lead_events.
     base_lead_events = list(lead_events)
+    try:
+        saved = json.loads((artifacts_dir / "enrichment_progress.json").read_text())
+        if not isinstance(saved, dict):
+            saved = {}
+    except (OSError, ValueError):
+        saved = {}
+    # Keep last-known details visible if a bounded or interrupted run only
+    # finishes phase 1. The checkpoint is loaded once to avoid duplicate trees.
+    prior_completed, prior_events, prior_summary = _lofty_load_enrichment_progress(
+        artifacts_dir, refresh_seconds=refresh_seconds, checkpoint=saved,
+    )
     with _snapshot_writer_lock(source_dir):
         preserved_tasks_phase1 = [
             r for r in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000)
@@ -428,7 +498,7 @@ def sync_lofty_crm_source(
         _replace_jsonl(source_dir / "conversations.jsonl", conversation_records)
         _replace_jsonl(source_dir / "messages.jsonl", [])
         _replace_jsonl(source_dir / "message-days.jsonl", [])
-        _replace_jsonl(source_dir / "lead-events.jsonl", base_lead_events)
+        _replace_jsonl(source_dir / "lead-events.jsonl", base_lead_events + prior_events)
         _replace_jsonl(source_dir / "tasks.jsonl", preserved_tasks_phase1 + task_records)
     _write_json(
         source_dir / "source.json",
@@ -501,32 +571,43 @@ def sync_lofty_crm_source(
     # 21 leads. Checkpoints every N completed leads so a killed run
     # resumes from where it left off.
     enrichment_status = "skipped"
+    refreshed_at: dict[str, str] = {}
+    fingerprints: dict[str, str] = {}
+    attempted_at: dict[str, str] = {}
+    deferred = 0
     if pending_enrichments:
-        prior_completed, prior_events, prior_summary = _lofty_load_enrichment_progress(artifacts_dir)
-        # Keep prior summary so resumed runs surface cumulative counts.
-        for key in enrichment_summary:
-            enrichment_summary[key] = prior_summary.get(key, 0)
-        completed_lead_ids: set[str] = set(prior_completed)
-        enrichment_events: list[JsonRecord] = [
-            e for e in prior_events
-            if str((e.get("lead_id") or "")).strip() in completed_lead_ids
-        ]
+        refreshed_at = (saved.get("refreshed_at") or {}) if saved.get("refresh_version") == 2 else {}
+        fingerprints = saved.get("fingerprints") or {}
+        attempted_at = saved.get("attempted_at") or {}
+        current_ids = {job["lead_id"] for job in pending_enrichments}
+        completed_lead_ids: set[str] = set(prior_completed) & current_ids
+        # Keep the last known records through failures/partial sweeps. Merge by
+        # provider record identity rather than appending another history copy.
+        event_by_id = {e.get("source_record_id") or json.dumps(e, sort_keys=True): e
+                       for e in prior_events if e.get("type") != "crm_lead_synced"}
+        enrichment_events: list[JsonRecord] = list(event_by_id.values())
         to_enrich = [
             job for job in pending_enrichments
             if job["lead_id"] not in completed_lead_ids
         ]
+        if incremental:
+            completed_lead_ids, to_enrich, deferred = _lofty_refresh_plan(
+                pending_enrichments, prior_completed, saved, budget,
+            )
+        current_fingerprints = {j["lead_id"]: j["fingerprint"] for j in to_enrich}
         total = len(pending_enrichments)
         done = len(completed_lead_ids)
+        processed = 0
         if to_enrich:
             print(
                 f"[crm] enrichment phase: {done}/{total} already done, "
-                f"enriching {len(to_enrich)} leads with {_LOFTY_ENRICHMENT_WORKERS} workers"
+                f"enriching {len(to_enrich)} leads with {workers} workers; {deferred} deferred"
                 f" (timeout={_LOFTY_ENRICHMENT_TIMEOUT_S}s/call)",
                 file=sys.stderr,
                 flush=True,
             )
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=_LOFTY_ENRICHMENT_WORKERS,
+                max_workers=workers,
                 thread_name_prefix="lofty-enrich",
             ) as executor:
                 futures = {
@@ -542,18 +623,27 @@ def sync_lofty_crm_source(
                     for job in to_enrich
                 }
                 for fut in concurrent.futures.as_completed(futures):
+                    processed += 1
+                    attempted_at[futures[fut]] = source_connectors._now()
                     try:
                         lead_id, events, delta = fut.result()
                     except Exception as exc:  # noqa: BLE001
                         enrichment_summary["errors"] += 1
                         errors.append(f"enrichment worker crashed: {exc}")
                         continue
-                    completed_lead_ids.add(lead_id)
-                    enrichment_events.extend(events)
+                    if not delta.get("errors"):
+                        completed_lead_ids.add(lead_id)
+                        refreshed_at[lead_id] = source_connectors._now()
+                        fingerprints[lead_id] = current_fingerprints[lead_id]
+                    else:
+                        refreshed_at.pop(lead_id, None)
+                    for event in events:
+                        event_by_id[event["source_record_id"]] = event
+                    enrichment_events = list(event_by_id.values())
                     for key, val in delta.items():
                         enrichment_summary[key] = enrichment_summary.get(key, 0) + int(val or 0)
                     done = len(completed_lead_ids)
-                    if done % _LOFTY_ENRICHMENT_CHECKPOINT_EVERY == 0 or done == total:
+                    if processed % checkpoint_every == 0 or processed == len(to_enrich):
                         # Atomic checkpoint: lead-events.jsonl + progress file
                         # both reflect the same partial state. Resume picks
                         # up from the union of base + checkpoint events.
@@ -569,6 +659,9 @@ def sync_lofty_crm_source(
                             summary=enrichment_summary,
                             total_leads=total,
                             status="in_progress" if done < total else "complete",
+                            refreshed_at=refreshed_at,
+                            fingerprints=fingerprints,
+                            attempted_at=attempted_at,
                         )
                         print(
                             f"[crm] enriched {done}/{total} leads "
@@ -581,7 +674,9 @@ def sync_lofty_crm_source(
                         )
         # Always include prior + new events in the final lead_events list
         lead_events = base_lead_events + enrichment_events
-        enrichment_status = "complete" if done >= total else "partial"
+        enrichment_status = "partial" if enrichment_summary["errors"] else ("deferred" if deferred else "complete")
+        enrichment_summary["deferred_leads"] = deferred
+        enrichment_summary["refreshed_leads"] = processed
 
     # === PHASE 3 — Final atomic rewrite + writethrough ===
     # Atomic multi-file rewrite — readers holding _snapshot_reader_lock
@@ -669,11 +764,14 @@ def sync_lofty_crm_source(
         )
     # Mark enrichment checkpoint complete so a subsequent run doesn't
     # re-enrich leads already finalized.
-    if enrichment_status in {"complete", "partial"}:
+    if enrichment_status in {"complete", "partial", "deferred"}:
         try:
             _lofty_save_enrichment_progress(
                 artifacts_dir,
                 completed_lead_ids=set(completed_lead_ids) if pending_enrichments else set(),
+                refreshed_at=refreshed_at,
+                fingerprints=fingerprints,
+                attempted_at=attempted_at,
                 events=[e for e in lead_events if e.get("type") != "crm_lead_synced"],
                 summary=enrichment_summary,
                 total_leads=len(pending_enrichments),

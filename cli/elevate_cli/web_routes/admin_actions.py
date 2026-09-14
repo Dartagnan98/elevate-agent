@@ -10,6 +10,24 @@ from pydantic import BaseModel
 RequireReady = Callable[[], None]
 
 
+class _ReviewBody(BaseModel):
+    dealId: str
+    manifestPath: str
+    sessionId: str
+    runId: Optional[str] = None
+
+
+class _RecordedReviewAuthorizationBody(BaseModel):
+    manifestPath: str
+    approvedActions: list[str]
+    sourceText: str
+
+
+class _ReviewClaimBody(BaseModel):
+    action: str
+    runDir: str
+
+
 class _AdminTaskRunBody(BaseModel):
     dealId: str
     skill: str
@@ -21,6 +39,15 @@ class _AdminTaskRunBody(BaseModel):
 class _ActionRunApproveBody(BaseModel):
     approved: bool = True
     runNow: bool = True
+    expectedTitleOrderHash: Optional[str] = None
+
+
+class _TitleOrderBody(BaseModel):
+    pid: str
+    titleNumber: str
+    totalCad: str
+    quotedAt: str
+    runId: Optional[str] = None
 
 
 class _ActionRunAnswerBody(BaseModel):
@@ -31,6 +58,7 @@ class _ActionRunAnswerBody(BaseModel):
     # ~/skyleigh-tools/scripts/elevate-reapply-after-update.sh.
     answers: Dict[str, str] = {}
     runNow: bool = True
+    expectedTitleOrderHash: Optional[str] = None
 
 
 class _AdminActionCreateBody(BaseModel):
@@ -74,6 +102,26 @@ def create_admin_actions_router(
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
 
+    @router.post('/api/admin/deals/{deal_id}/title-order-review')
+    def prepare_listing_title_review(deal_id: str, body: _TitleOrderBody):
+        from elevate_cli.data import connect
+        from elevate_cli.listing_title import prepare_title_order
+        try:
+            with connect() as conn:
+                return prepare_title_order(conn, deal_id, body.model_dump(), body.runId)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @router.post('/api/admin/action-runs/{run_id}/claim-title-order')
+    def claim_listing_title_order(run_id: str, body: _TitleOrderBody):
+        from elevate_cli.data import connect
+        from elevate_cli.listing_title import claim_title_order
+        try:
+            with connect() as conn:
+                return claim_title_order(conn, run_id, body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
     @router.get("/api/admin/actions")
     def get_admin_actions(
         trigger: Optional[str] = None,
@@ -104,6 +152,97 @@ def create_admin_actions_router(
         except Exception as exc:
             _log.exception("GET /api/admin/actions failed")
             raise HTTPException(status_code=500, detail=f"Admin actions failed: {exc}")
+
+    @router.post("/api/admin/reviews")
+    def prepare_review(body: _ReviewBody):
+        import json
+        from elevate_cli.data import connect
+        from elevate_cli.data.dispatch import queue_action_run, _run_lookup, _row_to_run
+        from elevate_cli.review_packages import freeze_review, register_artifacts
+        from elevate_cli.web_routes.session_details import _resolve_active_session_or_404
+        from elevate_state import SessionDB
+        try:
+            review = freeze_review(body.manifestPath)
+            manifest = json.loads(open(review["manifestPath"]).read())
+            db = SessionDB()
+            try:
+                _sid, _active, identity = _resolve_active_session_or_404(db, body.sessionId)
+                register_artifacts(db, identity, review["artifacts"])
+            finally:
+                db.close()
+            prompt = {"title": manifest.get("title", "Review marketing launch"),
+                      "message": manifest.get("message", "Review these assets and the exact launch plan before approving."),
+                      "requiredFields": manifest.get("requiredFields", []),
+                      "reviewPackage": review, "sessionId": body.sessionId}
+            with connect() as conn:
+                # Serialize prepare retries for a deal and reuse the same pending package.
+                conn.execute("SELECT id FROM deals WHERE id=? FOR UPDATE", (body.dealId,)).fetchone()
+                existing_id = body.runId
+                if not existing_id:
+                    candidates = conn.execute("SELECT id, human_prompt_json FROM admin_action_runs WHERE deal_id=? AND status IN ('waiting_human','running','queued')", (body.dealId,)).fetchall()
+                    for candidate in candidates:
+                        raw = candidate["human_prompt_json"]
+                        prior = json.loads(raw) if isinstance(raw, str) and raw else raw or {}
+                        if (prior.get("reviewPackage") or {}).get("manifestPath") == review["manifestPath"]:
+                            existing_id = candidate["id"]
+                            break
+                if existing_id:
+                    conn.execute("SELECT id FROM admin_action_runs WHERE id=? FOR UPDATE", (existing_id,)).fetchone()
+                    row = _run_lookup(conn, existing_id)
+                    if row["deal_id"] != body.dealId or row["status"] not in ("running", "queued", "waiting_human"):
+                        raise ValueError("Review must belong to an active run on this deal")
+                    previous = json.loads(row["human_prompt_json"] or "{}")
+                    if previous.get("actionClaims"):
+                        raise ValueError("A launch action already started. Reconcile provider results before preparing a new review.")
+                    conn.execute("UPDATE admin_action_runs SET status='waiting_human', human_prompt_json=? WHERE id=?", (json.dumps(prompt), existing_id))
+                    run_id = existing_id
+                else:
+                    run = queue_action_run(conn, deal_id=body.dealId, skill="marketing",
+                        name=prompt["title"], payload={"reviewSessionId": body.sessionId}, human_prompt=prompt)
+                    run_id = run["id"]
+            return {"runId": run_id, "reviewPackage": review, "status": "waiting_human"}
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/api/admin/action-runs/{run_id}/review-authorization")
+    def record_existing_review_authorization(run_id: str, body: _RecordedReviewAuthorizationBody):
+        from elevate_cli.data import connect
+        from elevate_cli.review_packages import apply_recorded_review_authorization
+        try:
+            with connect() as conn:
+                return apply_recorded_review_authorization(conn, run_id, body.manifestPath,
+                    body.approvedActions, body.sourceText)
+        except (ValueError, KeyError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @router.post("/api/admin/action-runs/{run_id}/claim-review-action")
+    def claim_review_action(run_id: str, body: _ReviewClaimBody):
+        import json
+        from pathlib import Path
+        from elevate_cli.data import connect
+        from elevate_cli.data.dispatch import _run_lookup, _decode_json, now_iso
+        from elevate_cli.review_packages import validate_review
+        try:
+            with connect() as conn:
+                conn.execute("SELECT id FROM admin_action_runs WHERE id=? FOR UPDATE", (run_id,)).fetchone()
+                row = _run_lookup(conn, run_id)
+                prompt = _decode_json(row["human_prompt_json"]) or {}
+                review, decision = prompt.get("reviewPackage"), prompt.get("decision", {})
+                if (row["status"] not in ("queued", "running") or not review or
+                    decision.get("approved") is not True or decision.get("versionHash") != review["versionHash"] or
+                    body.action not in decision.get("actions", [])):
+                    raise ValueError("This action has no current publishing approval")
+                if str(Path(body.runDir).resolve()) != review["runDir"]:
+                    raise ValueError("Approval belongs to a different marketing package")
+                validate_review(review, publishing=True)
+                claims = prompt.setdefault("actionClaims", {})
+                if body.action in claims:
+                    raise ValueError("Action was already started. Reconcile provider results before retrying; do not create duplicates.")
+                claims[body.action] = {"claimedAt": now_iso(), "versionHash": review["versionHash"]}
+                conn.execute("UPDATE admin_action_runs SET human_prompt_json=? WHERE id=?", (json.dumps(prompt), run_id))
+                return {"claimed": True, "action": body.action, "versionHash": review["versionHash"]}
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @router.post("/api/admin/actions")
     def post_admin_action(body: _AdminActionCreateBody):
@@ -257,6 +396,7 @@ def create_admin_actions_router(
                     approved=body.approved,
                     actor=web_actor,
                     create_cron_job=body.runNow,
+                    expected_title_order_hash=body.expectedTitleOrderHash,
                 )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
@@ -313,6 +453,13 @@ def create_admin_actions_router(
                     approved=True,
                     actor=web_actor,
                     create_cron_job=body.runNow,
+                    # Fillable title-reconciliation cards retain the approved
+                    # title order in their prompt. Reuse that hash so submitting
+                    # answers does not require a second approval click.
+                    expected_title_order_hash=(
+                        body.expectedTitleOrderHash
+                        or ((prompt.get("titleOrder") or {}).get("versionHash"))
+                    ),
                 )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc))

@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,6 +15,8 @@ from typing import Any
 
 
 JsonRecord = dict[str, Any]
+_LOFTY_REQUEST_LOCK = threading.Lock()
+_LOFTY_LAST_REQUEST = 0.0
 
 
 def _source_connectors():
@@ -171,6 +175,12 @@ def _lofty_get(
     *,
     timeout: int = 18,
 ) -> Any:
+    global _LOFTY_LAST_REQUEST
+    # Share pacing across enrichment workers (at most 600 requests/minute).
+    # HTTP rate-limit failures still propagate and leave the lead retryable.
+    with _LOFTY_REQUEST_LOCK:
+        time.sleep(max(0.0, 0.1 - (time.monotonic() - _LOFTY_LAST_REQUEST)))
+        _LOFTY_LAST_REQUEST = time.monotonic()
     headers, _auth_type = _lofty_headers(env_values)
     if headers.get("Authorization") is None:
         raise RuntimeError("LOFTY_API_KEY or LOFTY_ACCESS_TOKEN is not set")
@@ -178,7 +188,7 @@ def _lofty_get(
     url = f"{base}/{path.lstrip('/')}"
     if params:
         query = urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
-        url = f"{url}?{query}"
+        url = f"{url}{'&' if '?' in url else '?'}{query}"
     request = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read(1024 * 1024 * 4)
@@ -245,12 +255,10 @@ def _lofty_get_first_ok(
         try:
             payload = _source_connectors()._lofty_get(path, env_values, params, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            # 404 is a clean "this endpoint shape isn't supported on this
-            # tenant" — fall through silently. Other HTTP errors track as
-            # real failures so callers can count them.
-            if exc.code == 404:
-                saw_ok = True
-                continue
+            # Try compatible endpoint shapes, but unsupported endpoints must
+            # not turn a completely failed fetch into a successful empty one.
+            if exc.code in (401, 429):
+                raise
             last_error = exc
             continue
         except Exception as exc:  # noqa: BLE001 — defensive cross-endpoint probe
@@ -259,7 +267,29 @@ def _lofty_get_first_ok(
         saw_ok = True
         records = _lofty_extract_list(payload)
         if records:
+            # Activity endpoints return a bounded page. Fetch the rest instead
+            # of silently treating the first 50 activities as the full history.
+            if params and params.get("limit"):
+                page_size = int(params["limit"])
+                offset = int(params.get("offset", 0))
+                page = records
+                seen = {json.dumps(r, sort_keys=True, default=str) for r in records}
+                while len(page) >= page_size:
+                    offset += page_size
+                    next_payload = _source_connectors()._lofty_get(
+                        path, env_values, {**params, "offset": offset}, timeout=timeout,
+                    )
+                    page = _lofty_extract_list(next_payload)
+                    fresh = [r for r in page if json.dumps(r, sort_keys=True, default=str) not in seen]
+                    if page and not fresh:
+                        raise RuntimeError("Lofty repeated an activity page; full history is not verified")
+                    records.extend(fresh)
+                    seen.update(json.dumps(r, sort_keys=True, default=str) for r in fresh)
             return records
+        if isinstance(payload, list) or (isinstance(payload, dict) and any(
+            isinstance(payload.get(k), list) for k in _LOFTY_LIST_KEYS
+        )):
+            return []  # A supported endpoint's empty list is a successful fetch.
     if not saw_ok and last_error is not None:
         # Every probe errored — surface so caller can count it as a real
         # enrichment failure (Lofty 500/auth/timeout), not a clean empty lead.
@@ -270,22 +300,22 @@ def _lofty_get_first_ok(
 def _lofty_get_activities(
     lead_id: str, env_values: dict[str, str], *, limit: int = 50, timeout: int = 18,
 ) -> list[JsonRecord]:
-    """Pull the lead's activity feed (page views, saved-search hits,
-    tour requests, email opens). Tries v2.0 then v1.0 — endpoint shape
-    varies across Lofty/Chime tenant migrations."""
+    """Combine paginated communications with the complete legacy site feed."""
     if not lead_id:
         return []
     params = {"limit": min(int(limit or 50), 100), "offset": 0}
-    return _source_connectors()._lofty_get_first_ok(
-        (
-            f"v2.0/leads/{lead_id}/activities",
-            f"v1.0/leads/{lead_id}/activities",
-            f"v1.0/leads/{lead_id}/activity",
-        ),
-        env_values,
-        params,
-        timeout=timeout,
+    # These are complementary feeds: v2 communications and v1 website/
+    # property activity. An empty communication feed must not hide browsing.
+    communication = _source_connectors()._lofty_get_first_ok(
+        (f"v2.0/leads/{lead_id}/activities",), env_values, params, timeout=timeout,
     )
+    browsing = _source_connectors()._lofty_get_first_ok(
+        (f"v1.0/leads/{lead_id}/activities", f"v1.0/leads/{lead_id}/activity"),
+        # Legacy v1 returns a complete bare array and ignores limit/offset.
+        env_values, None, timeout=timeout,
+    )
+    return list({json.dumps(r, sort_keys=True, default=str): r
+                 for r in communication + browsing}.values())
 
 
 def _lofty_get_notes(

@@ -11,6 +11,8 @@ metadata:
 
 # Admin Agent
 
+For BC listing stage events, read the [shared trigger contract](../admin-result-writer/references/listing-stage-triggers.md), including runtime invocation. Its named user/document triggers supersede older manual-only or checklist-completion stage rules. Queued listing-event-review runs verify evidence; they do not re-scan Gmail. Stage entry already queues the destination workers, so do not launch duplicate copies. Explicit activation-email requests carry authorization for that exact send; retain all other approval boundaries.
+
 You are the Admin agent for an Elevate deal-file run.
 
 Start from the injected deal context. Treat the operational store (the per-account embedded Postgres database, reached through tools like `admin_deal` / `elevate_db`, never raw `sqlite3`/`psql`) as the source of truth. Do not guess missing identity, property, MLS, document, date, or approval values.
@@ -51,7 +53,7 @@ The Admin agent decides whether the task can run now. If required inputs are mis
 | Listing intake or MLC docs start | `mlc` |
 | Form/provider document needed | `webforms` |
 | Signature envelope needed | `signing-package` |
-| Signed MLC confirmed | `photo-cleanup`, then `property-lookup` |
+| Signed MLC confirmed | Trigger SkySlope & Matrix Prep; its entry queues the preparation workers |
 | Docs/photos/context ready | `listing-build` |
 | Listing live | `marketing`, then recurring `seller-update` |
 | Accepted offer arrives | `offer-review` |

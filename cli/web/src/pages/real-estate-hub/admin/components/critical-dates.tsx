@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { Clock, AlertTriangle } from "../icons";
 import { DeskBar } from "./desk-bar";
+import { useDeskResource } from "../use-desk-resource";
 
 type CDItem = {
   dealId: string;
@@ -35,18 +36,13 @@ function fmtDate(iso: string): string {
 }
 
 /** Critical dates — collapsible deadline bar between the KPI block and board. */
-export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: string) => void }) {
-  const [data, setData] = useState<CDResp | null>(null);
+export default function CriticalDates({ onOpenDeal, refreshKey, onChanged }: { onOpenDeal: (dealId: string) => void; refreshKey?: unknown; onChanged?: () => void | Promise<void> }) {
+  const { data, loading, error, load } = useDeskResource<CDResp>("/api/admin/critical-dates", refreshKey);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(() => {
-    fetchJSON<CDResp>("/api/admin/critical-dates")
-      .then((r) => setData(r))
-      .catch(() => setData(null));
-  }, []);
-  useEffect(() => { load(); }, [load]);
 
   const c = data?.counts ?? { overdue: 0, today: 0, thisWeek: 0, upcoming: 0 };
   const total = c.overdue + c.today + c.thisWeek + c.upcoming;
@@ -57,7 +53,7 @@ export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: str
     if (data && !touched && c.overdue > 0) setOpen(true);
   }, [data, touched, c.overdue]);
 
-  const summary =
+  const summary = error ? "Could not refresh deadlines — retry below" : !data ? "Loading deadlines…" :
     total === 0
       ? "All clear — no upcoming deadlines"
       : `${c.overdue} overdue · ${c.today} due today · ${c.thisWeek} this week`;
@@ -71,7 +67,7 @@ export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: str
   const resolveAllOverdue = useCallback(async () => {
     const overdue = items.filter((i) => i.bucket === "overdue");
     const addrs = Array.from(new Set(overdue.map((i) => i.address)));
-    if (!addrs.length || busy) return;
+    if (!addrs.length || busy || loading || error) return;
     const msg =
       `Resolve all ${overdue.length} overdue item${overdue.length > 1 ? "s" : ""}?\n\n` +
       `This marks ${addrs.length} deal${addrs.length > 1 ? "s" : ""} CLOSED and clears all their dates:\n` +
@@ -79,29 +75,34 @@ export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: str
       `\n\nThey come off the active board. Continue?`;
     if (!window.confirm(msg)) return;
     setBusy(true);
+    setActionError(null);
     try {
       await fetchJSON("/api/admin/critical-dates/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bucket: "overdue" }),
       });
-    } catch {
-      /* reload reflects the real state either way */
+      void onChanged?.();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Could not close the overdue deals. Please retry.");
+    } finally {
+      setBusy(false);
+      void load();
     }
-    setBusy(false);
-    load();
-  }, [items, busy, load]);
+  }, [items, busy, loading, error, load, onChanged]);
 
   return (
     <DeskBar
-      tone={alert ? "alert" : "neutral"}
+      tone={alert || error ? "alert" : "neutral"}
       leftIcon={alert ? <AlertTriangle /> : <Clock />}
       label="Critical dates"
       summary={summary}
       expanded={open}
       onToggle={() => { setTouched(true); setOpen((o) => !o); }}
     >
-      {total === 0 ? (
+      {error && <div className="dsk-err" role="alert">Deadlines could not refresh. {data ? "Showing the last available dates." : "Your deadlines have not been checked."} <button type="button" className="dsk-row-btn" disabled={loading} onClick={() => void load()}>{loading ? "Retrying…" : "Retry"}</button></div>}
+      {actionError && <div className="dsk-err" role="alert">{actionError}</div>}
+      {!data ? <div className="dsk-empty" role="status">{loading ? "Loading deadlines…" : "Deadline information is unavailable."}</div> : total === 0 ? (
         <div className="dsk-empty">No deadlines in the next 14 days.</div>
       ) : (
         BUCKETS.map(([key, title]) => {
@@ -115,10 +116,10 @@ export default function CriticalDates({ onOpenDeal }: { onOpenDeal: (dealId: str
                   <button
                     type="button"
                     className="dsk-resolve-all"
-                    disabled={busy}
+                    disabled={busy || loading || !!error}
                     onClick={resolveAllOverdue}
                   >
-                    {busy ? "Resolving…" : "Resolve all overdue"}
+                    {busy ? "Closing deals…" : "Close all overdue deals"}
                   </button>
                 )}
               </div>

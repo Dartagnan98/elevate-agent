@@ -1,0 +1,4 @@
+interface:
+  display_name: "Listing Video"
+  short_description: "Optional Forever listing videos and social launch"
+  default_prompt: "Use $listing-video to prepare a Forever listing video from my recording and property photos."

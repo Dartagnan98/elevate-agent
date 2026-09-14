@@ -5,17 +5,19 @@ import mimetypes
 import os
 import re
 import tempfile
+from urllib.parse import quote, unquote, urlsplit
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from elevate_cli.config import get_elevate_home
+from elevate_cli.config import get_elevate_home, load_config
 
 
 _PREVIEWABLE_SUFFIXES = {
     ".csv",
+    ".css",
     ".docx",
     ".gif",
     ".htm",
@@ -25,12 +27,18 @@ _PREVIEWABLE_SUFFIXES = {
     ".json",
     ".log",
     ".md",
+    ".mp4",
+    ".m4v",
+    ".mov",
+    ".webm",
     ".pdf",
     ".png",
     ".pptx",
     ".svg",
     ".txt",
     ".webp",
+    ".woff",
+    ".woff2",
     ".xlsx",
     ".yaml",
     ".yml",
@@ -52,6 +60,7 @@ def create_files_router(
     project_root: Path,
     get_elevate_home_func=get_elevate_home,
     upload_max_per_file_func=lambda: _UPLOAD_MAX_PER_FILE,
+    load_config_func=load_config,
     log: logging.Logger | None = None,
 ) -> APIRouter:
     """Build routes for file preview and chat uploads."""
@@ -74,6 +83,9 @@ def create_files_router(
             Path(tempfile.gettempdir()),
             Path("/tmp"),
         ]
+        configured = (load_config_func() or {}).get("file_preview", {}).get("additional_roots", [])
+        if isinstance(configured, list):
+            roots.extend(Path(root) for root in configured if isinstance(root, str) and root.strip())
         resolved: list[Path] = []
         for root in roots:
             try:
@@ -86,9 +98,15 @@ def create_files_router(
         if not raw_path or not raw_path.strip():
             raise HTTPException(status_code=400, detail="Missing file path")
 
-        candidate = Path(os.path.expandvars(raw_path.strip())).expanduser()
+        value = raw_path.strip()
+        if value.lower().startswith("file:"):
+            uri = urlsplit(value)
+            if uri.netloc not in {"", "localhost"}:
+                raise HTTPException(status_code=400, detail="Remote file URLs are not supported")
+            value = unquote(uri.path)
+        candidate = Path(os.path.expandvars(value)).expanduser()
         if not candidate.is_absolute():
-            candidate = Path.cwd() / candidate
+            candidate = project_root / candidate
 
         try:
             path = candidate.resolve()
@@ -108,7 +126,8 @@ def create_files_router(
             size = path.stat().st_size
         except OSError as exc:
             raise HTTPException(status_code=400, detail=f"Could not inspect file: {exc}")
-        if size > _MAX_PREVIEW_BYTES:
+        limit = 512 * 1024 * 1024 if path.suffix.lower() in {".mp4", ".m4v", ".mov", ".webm"} else _MAX_PREVIEW_BYTES
+        if size > limit:
             raise HTTPException(status_code=413, detail="File is too large to preview")
 
         if not any(_is_relative_to(path, root) for root in _preview_roots()):
@@ -124,7 +143,7 @@ def create_files_router(
         return clean[:120] or "file"
 
     @router.get("/api/files/preview")
-    async def preview_file(path: str):
+    def preview_file(path: str):
         target = _resolve_preview_file(path)
         media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         return FileResponse(
@@ -133,8 +152,12 @@ def create_files_router(
             media_type=media_type,
             content_disposition_type="inline",
             headers={
-                "X-Elevate-File-Name": target.name,
+                # MP4/WebM are already compressed. Avoid gzip buffering and keep
+                # byte-range offsets meaningful for native video seeking.
+                **({"Content-Encoding": "identity"} if media_type.startswith("video/") else {}),
+                "X-Elevate-File-Name": quote(target.name),
                 "X-Elevate-File-Size": str(target.stat().st_size),
+                "X-Elevate-File-Path": quote(str(target)),
             },
         )
 

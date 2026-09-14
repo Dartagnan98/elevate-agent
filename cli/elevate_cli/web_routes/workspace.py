@@ -20,6 +20,25 @@ from elevate_cli.config import get_elevate_home
 
 OpenInFileManager = Callable[[Path], None]
 _GIT_UNAVAILABLE_WARNED = False
+_SESSION_SNAPSHOT_MAX_FILES = 2000
+_SESSION_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _session_snapshot_skip_reason(repo_dir: Path, changed_paths: list[str]) -> str | None:
+    """Avoid hashing an entire artifact/media workspace just to draw a badge."""
+    if len(changed_paths) > _SESSION_SNAPSHOT_MAX_FILES:
+        return "workspace_file_limit"
+    total_bytes = 0
+    for rel in changed_paths:
+        try:
+            total_bytes += (repo_dir / rel).lstat().st_size
+        except FileNotFoundError:
+            continue  # Deleted tracked files still belong in the snapshot.
+        except OSError:
+            return "workspace_stat_unavailable"
+        if total_bytes > _SESSION_SNAPSHOT_MAX_BYTES:
+            return "workspace_size_limit"
+    return None
 
 
 def git_value(
@@ -448,9 +467,15 @@ def _workspace_git_status_payload(
     display_stats = repo_stats
     display_changed_files = len(status_lines)
     display_untracked = untracked
+    snapshot_skip_reason = None
 
     if session_id:
         changed_paths = _git_worktree_changed_paths(repo_dir)
+        snapshot_skip_reason = _session_snapshot_skip_reason(repo_dir, changed_paths)
+
+    # Fall back to ordinary repo status for large workspaces. Keep existing
+    # baselines intact and don't label repo-wide counts as session changes.
+    if session_id and not snapshot_skip_reason:
         fingerprint = _git_worktree_fingerprint(repo_dir, changed_paths)
         baseline = _read_session_git_baseline(session_id, repo_dir)
         cache = (
@@ -522,6 +547,7 @@ def _workspace_git_status_payload(
         "diff_scope": diff_scope,
         "baseline_created": baseline_created,
         "baseline_at": baseline_at,
+        "session_snapshot_skipped": snapshot_skip_reason,
         "short_sha": short_sha,
         "origin_url": origin_url,
         "repo_url": repo_url,

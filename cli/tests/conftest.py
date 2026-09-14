@@ -61,7 +61,7 @@ _raise_nofile_limit_for_tests()
 
 
 @pytest.fixture(autouse=True)
-def _freeze_cron_account_scoping():
+def _freeze_cron_account_scoping(_hermetic_environment, monkeypatch):
     """Disable per-account cron path scoping during tests.
 
     In production ``cron.jobs._sync_account_cron_paths()`` re-points
@@ -70,12 +70,18 @@ def _freeze_cron_account_scoping():
     so the seam is turned off here and restored afterward.
     """
     import cron.jobs as _cron_jobs
-    prev = _cron_jobs._account_scoping_enabled
-    _cron_jobs._account_scoping_enabled = False
-    try:
-        yield
-    finally:
-        _cron_jobs._account_scoping_enabled = prev
+    # The module can be imported during collection, before ELEVATE_HOME is
+    # isolated. Disabling account scoping alone leaves those cached paths
+    # pointing at the developer's real legacy cron file. Pin every path after
+    # the hermetic fixture has run; tests can still override them explicitly.
+    from elevate_constants import get_elevate_home
+
+    home = get_elevate_home().resolve()
+    monkeypatch.setattr(_cron_jobs, "_account_scoping_enabled", False)
+    monkeypatch.setattr(_cron_jobs, "ELEVATE_DIR", home)
+    monkeypatch.setattr(_cron_jobs, "CRON_DIR", home / "cron")
+    monkeypatch.setattr(_cron_jobs, "JOBS_FILE", home / "cron" / "jobs.json")
+    monkeypatch.setattr(_cron_jobs, "OUTPUT_DIR", home / "cron" / "output")
 
 
 def _optional_dependency_available(module_name: str) -> bool:

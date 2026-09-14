@@ -8,7 +8,18 @@ access:
 
 # Relisting — Matrix Template Flow
 
+## Listing-agent defaults
+
+Use the configured primary listing agent. Leave co-listing/co-agent fields blank unless the realtor explicitly specifies a co-listing agent for this listing. Buyer-paperwork roles do not establish listing representation. Do not carry a buyer co-agent into Matrix/Xposure, a relist copied from a prior MLS, or the listing-side compliance file.
+
+When preparing or resuming a draft, check the actual selected agent record/picker key as well as the displayed name. Remove an unrequested co-listing agent inherited from a template or prior draft, save as incomplete, and reopen to verify the primary agent and blank co-listing selection persisted. If current signed listing paperwork names a co-listing agent and conflicts with the instructions, surface that conflict before changing the representation fields; do not alter signed paperwork to fit a default.
+
+
 the realtor's standard process for putting a cancelled or expired listing back on the market without rebuilding everything from scratch.
+
+## Documents and links
+
+Read the [shared Matrix document/link checklist](../matrix-incomplete-listing/references/documents-and-links.md). Copying the old MLS does not prove the current title, BC Assessment PDF, Property Information Report, available floor plans or current property links are present. Verify and complete them on the saved new draft, reusing correct uploads already added by the realtor.
 
 ## CRITICAL — read first
 

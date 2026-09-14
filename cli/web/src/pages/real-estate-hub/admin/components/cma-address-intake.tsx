@@ -12,26 +12,27 @@
 // Seller name is optional and is only a label on the new deal. Nothing here
 // starts a search or sends anything; picking a row opens the wizard, and the
 // wizard's own Subject step runs the pull.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api } from "../../../../lib/api";
 import { useIsMobile } from "../../../../hooks/useIsMobile";
 
-const NAVY = "#182848", INK = "#1D2433", INK3 = "#6B7488", LINE = "#DDE2EA",
-      LINE2 = "#EAEEF4", BLUE = "#5E8AD0", TERRA = "#C46340",
-      WARN = "#B26B12", WARNBG = "#FDF3E4";
+const NAVY = "var(--ds-ink)", INK = "var(--ds-ink)", INK3 = "var(--ds-sub)", LINE = "var(--ds-border-strong)",
+      LINE2 = "var(--ds-divider)", BLUE = "var(--ds-blue)", TERRA = "var(--ds-ink)",
+      WARN = "var(--ds-ink)", WARNBG = "var(--ds-warn-bg)";
 
 type DealHit = { dealId: string; address: string; side?: string | null; stage?: number | null; status?: string | null; title?: string | null };
 type GeoHit = { address: string; locality?: string | null; score?: number | null; matchPrecision?: string | null };
 type Row = { kind: "deal"; deal: DealHit } | { kind: "geo"; geo: GeoHit };
 
 const STAGE_LABEL: Record<number, string> = {
-  0: "CMA / Prospect", 1: "Listing initiated", 2: "Documents signed", 3: "Photos ready",
-  4: "MLS entry", 5: "Listing live", 6: "Accepted offer", 7: "Subject removal",
-  8: "Closing", 9: "Closed",
+  0: "Pre-CMA", 1: "CMA / Evaluation", 2: "Listing Intake", 3: "SkySlope & Matrix Prep",
+  4: "Marketing Go", 5: "Listing Live / Marketing", 6: "Accepted Offer", 7: "Condition Removal",
+  8: "Closed", 9: "Closed", 10: "Closed",
 };
 
 export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: string) => void }) {
   const isMobile = useIsMobile();
+  const listId = useId();
   const [q, setQ] = useState("");
   const [seller, setSeller] = useState("");
   const [deals, setDeals] = useState<DealHit[]>([]);
@@ -52,10 +53,10 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
   ];
 
   useEffect(() => {
+    const mine = ++seqRef.current;
     const term = q.trim();
     if (term.length < 3) { setDeals([]); setGeocoded([]); setGeocoderOk(true); setLooking(false); return; }
     setLooking(true);
-    const mine = ++seqRef.current;
     const t = setTimeout(() => {
       api.getCmaAddressSuggest(term)
         .then((r) => {
@@ -63,10 +64,10 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
           setDeals(r.deals || []); setGeocoded(r.geocoded || []);
           setGeocoderOk(r.geocoderOk !== false); setCursor(0);
         })
-        .catch(() => { if (mine === seqRef.current) { setDeals([]); setGeocoded([]); } })
+        .catch(() => { if (mine === seqRef.current) { setDeals([]); setGeocoded([]); setGeocoderOk(false); } })
         .finally(() => { if (mine === seqRef.current) setLooking(false); });
     }, 300);
-    return () => clearTimeout(t);
+    return () => { clearTimeout(t); seqRef.current += 1; };
   }, [q]);
 
   const choose = useCallback(async (row: Row | undefined) => {
@@ -80,6 +81,7 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
         title,
         side: "listing",
         listingAddress: row.geo.address,
+        fields: seller.trim() ? { clientName: seller.trim(), workflow_client_1_name: seller.trim(), prospectClientNames: seller.trim() } : undefined,
         // Stage 0 = CMA / Prospect. Card auto-advance is never wanted, so this
         // opens where an evaluation belongs and stays there until she moves it.
         currentStage: 0,
@@ -99,11 +101,11 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
     if (e.key === "ArrowDown") { e.preventDefault(); setCursor((c) => Math.min(rows.length - 1, c + 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setCursor((c) => Math.max(0, c - 1)); }
     else if (e.key === "Enter") { e.preventDefault(); void choose(rows[cursor]); }
-    else if (e.key === "Escape") { setQ(""); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setQ(""); }
   };
 
   const group = (label: string) => (
-    <div key={`h-${label}`} style={{ padding: "6px 14px", background: "#F7F9FC", fontSize: 10.5, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: INK3, borderBottom: `1px solid ${LINE2}` }}>
+    <div key={`h-${label}`} style={{ padding: "6px 14px", background: "var(--ds-soft)", fontSize: 10.5, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: INK3, borderBottom: `1px solid ${LINE2}` }}>
       {label}
     </div>
   );
@@ -121,14 +123,15 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
       <div
         key={`${row.kind}-${idx}-${primary}`}
         role="option"
+        id={`${listId}-${idx}`}
         aria-selected={on}
         onMouseEnter={() => setCursor(idx)}
         onClick={() => void choose(row)}
         style={{
           display: "flex", alignItems: isMobile ? "flex-start" : "center", gap: 11,
           flexDirection: isMobile ? "column" : "row",
-          padding: "10px 14px", borderBottom: `1px solid ${LINE2}`, fontSize: 13.5,
-          background: on ? "#F3F7FF" : "transparent", cursor: creating ? "wait" : "pointer",
+          minHeight: 44, boxSizing: "border-box", padding: "10px 14px", borderBottom: `1px solid ${LINE2}`, fontSize: 13.5,
+          background: on ? "var(--ds-hover)" : "transparent", cursor: creating ? "wait" : "pointer",
         }}
       >
         <span style={{ fontWeight: 700, color: NAVY, flex: 1 }}>{primary}</span>
@@ -147,14 +150,18 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
       <h3 style={{ margin: "0 0 14px", fontSize: 19, fontWeight: 700, color: NAVY }}>What's the address?</h3>
 
       <input
-        autoFocus
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={onKey}
         placeholder="Start typing a street address"
         aria-label="Property address"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={showList}
+        aria-controls={showList ? listId : undefined}
+        aria-activedescendant={showList && rows[cursor] ? `${listId}-${cursor}` : undefined}
         style={{
-          width: "100%", boxSizing: "border-box", background: "#fff",
+          width: "100%", boxSizing: "border-box", background: "var(--ds-card)",
           border: `1.5px solid ${BLUE}`, borderRadius: 11, padding: "13px 15px",
           fontSize: 17, fontWeight: 600, color: INK, outline: "none",
           boxShadow: "0 0 0 3px rgba(94,138,208,.16)",
@@ -162,7 +169,7 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
       />
 
       {showList && (
-        <div role="listbox" style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 11, marginTop: 7, overflow: "hidden", boxShadow: "0 6px 20px rgba(24,40,72,.12)" }}>
+        <div role="listbox" id={listId} aria-label="Matching properties" style={{ background: "var(--ds-card)", border: `1px solid ${LINE}`, borderRadius: 11, marginTop: 7, overflow: "hidden", boxShadow: "0 6px 20px rgba(24,40,72,.12)" }}>
           {deals.length > 0 && group("Your deals")}
           {deals.map((_, i) => rowEl(rows[i], i))}
           {geocoded.length > 0 && group("BC address lookup")}
@@ -173,7 +180,7 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
                   saying "no match" when the lookup never ran would be a lie. */}
               {geocoderOk
                 ? "No match yet. Keep typing, or add the number and street."
-                : "The BC address lookup is not reachable right now. You can still type the full address and carry on."}
+                : "The BC address lookup is not reachable right now. Please try again in a moment."}
             </div>
           )}
         </div>
@@ -192,17 +199,17 @@ export default function CmaAddressIntake({ onOpenDeal }: { onOpenDeal: (dealId: 
           onChange={(e) => setSeller(e.target.value)}
           placeholder="Optional"
           aria-label="Seller name (optional)"
-          style={{ border: "1px solid #C9D1DE", background: "#fff", borderRadius: 7, padding: "5px 9px", fontSize: 13, fontWeight: 600, color: INK, minWidth: 160, outline: "none" }}
+          style={{ border: "1px solid var(--ds-border-strong)", background: "var(--ds-card)", borderRadius: 7, minHeight: 44, padding: "5px 9px", fontSize: isMobile ? 16 : 13, fontWeight: 600, color: INK, minWidth: 160, outline: "none" }}
         />
       </div>
 
-      {err && <div style={{ marginTop: 14, color: "#8B1A1A", fontSize: 13 }}>{err}</div>}
+      {err && <div role="alert" style={{ marginTop: 14, color: "var(--ds-error)", fontSize: 13 }}>{err}</div>}
 
-      <div style={{ marginTop: 22, fontSize: 12, color: INK3 }}>
+      <div role="status" style={{ marginTop: 22, fontSize: 12, color: INK3 }}>
         {creating ? "Starting the evaluation..."
           : looking ? "Looking..."
           : rows.length ? "Press Enter to start, or arrow keys to pick a different one."
-          : "Press Enter to start."}
+          : "Choose a matching address to start."}
       </div>
     </div>
   );

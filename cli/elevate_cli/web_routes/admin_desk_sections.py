@@ -286,7 +286,7 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
                 prompt = {}
             title = (prompt.get("title") or r["reg_name"] or "Approval needed").strip()
             message = (prompt.get("message") or "").strip()
-            has_preview = bool(prompt.get("previewPdf"))
+            has_preview = bool(prompt.get("previewPdf") or (prompt.get("reviewPackage") or {}).get("artifacts") or (prompt.get("documentReview") or {}).get("documents"))
             blob = f"{r['reg_name'] or ''} {title} {message}".lower()
             # "Document to send" = a true outbound action waiting on sign-off, not
             # an incoming review. Match send-intent phrases (and DigiSign signing),
@@ -301,6 +301,10 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
             )
             if "digisign" in blob and ("send" in blob or "for sign" in blob):
                 is_doc = True
+            document_review = bool(prompt.get("documentReview"))
+            title_order = bool(prompt.get('titleOrder') or prompt.get('titleVerification'))
+            if document_review or title_order:
+                is_doc = False  # Draft approval never authorizes an external send.
             # requiredFields + the full prompt let the global ACTION NEEDED popup
             # render the SAME interactive card (fill-in fields, Preview, Approve)
             # as the deal scorecard, without opening the deal first.
@@ -321,7 +325,7 @@ def create_admin_desk_sections_router(*, log: logging.Logger | None = None) -> A
                 "skill": (r["reg_name"] or ""),
                 "humanPrompt": prompt,
             }
-            (documents if is_doc else gates).append(item)
+            (documents if is_doc or document_review or title_order else gates).append(item)
 
         return {
             "ok": True,

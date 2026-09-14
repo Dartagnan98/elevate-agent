@@ -331,13 +331,19 @@ function cachedFetchJSON<T>(url: string, ttlMs: number, init?: RequestInit): Pro
     return cached.promise as Promise<T>;
   }
 
-  const promise = fetchJSONNetwork<T>(url, init).catch((error) => {
+  const promise = fetchJSONNetwork<T>(url, init).then((result) => {
+    const current = GET_CACHE.get(key);
+    if (current?.promise === promise) current.expiresAt = Date.now() + ttlMs;
+    return result;
+  }).catch((error) => {
     if (GET_CACHE.get(key)?.promise === promise) {
       GET_CACHE.delete(key);
     }
     throw error;
   });
-  GET_CACHE.set(key, { expiresAt: now + ttlMs, promise });
+  // Pending requests never expire into duplicate requests. Start the short
+  // freshness window only after completion, including on slow machines.
+  GET_CACHE.set(key, { expiresAt: Infinity, promise });
   return promise;
 }
 
@@ -359,7 +365,8 @@ async function fetchBlob(url: string, init?: RequestInit): Promise<BlobResponse>
   return {
     blob: await res.blob(),
     contentType: res.headers.get("content-type") ?? "",
-    fileName: res.headers.get("x-elevate-file-name") ?? "",
+    fileName: decodeURIComponent(res.headers.get("x-elevate-file-name") ?? ""),
+    resolvedPath: res.headers.has("x-elevate-file-path") ? decodeURIComponent(res.headers.get("x-elevate-file-path")!) : undefined,
     size: Number(res.headers.get("x-elevate-file-size") ?? "0") || undefined,
   };
 }
@@ -485,6 +492,28 @@ export type AdminDeadlineDeal = {
   subjectRemovalDate: string | null;
   completionDate: string | null;
   primaryContactId: string | null;
+};
+
+export type CmaExpiredRow = {
+  key: string; address: string; attempts: number;
+  topAsk: number | null; lowAsk: number | null;
+  minorArea?: string | null; bedrooms?: string | null; bathrooms?: string | null;
+  yearBuilt?: string | null; hasPhotos?: boolean;
+  excluded: boolean; inReport: boolean;
+  // Advisory only. Nothing acts on it: she decides.
+  outsideBracket?: string | null;
+};
+export type CmaExpiredList = {
+  ok: boolean; available: boolean; reason?: string;
+  expired: CmaExpiredRow[]; shownCap?: number;
+  floor?: number | null; ceiling?: number | null;
+};
+
+export type CmaPricePageQuads = {
+  pricingStrategy?: string[];
+  valueDrivers?: string[];
+  buyerQuestions?: string[];
+  prepNextSteps?: string[];
 };
 
 export const api = {
@@ -623,8 +652,8 @@ export const api = {
     }),
   previewFileUrl: (path: string) =>
     `${BASE}/api/files/preview?path=${encodeURIComponent(path)}`,
-  previewFile: (path: string) =>
-    fetchBlob(`/api/files/preview?path=${encodeURIComponent(path)}`),
+  previewFile: (path: string, signal?: AbortSignal) =>
+    fetchBlob(`/api/files/preview?path=${encodeURIComponent(path)}`, { signal }),
   uploadChatAttachment: async (
     sessionId: string,
     file: File,
@@ -2023,7 +2052,7 @@ export const api = {
     }),
   // CMA wizard — checkpointed phase pipeline + comp review.
   getCmaPhases: (dealId: string) =>
-    fetchJSON<{ ok: boolean; done: number; total: number; pdfUrl?: string | null; photosUrl?: string; photosUrlSet?: boolean; phases: { id: string; label: string; browser: boolean; manual: boolean; status: string; attempts: number; error?: string | null }[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/phases`),
+    fetchJSON<{ ok: boolean; done: number; total: number; pdfUrl?: string | null; reportReady?: boolean; reportVersion?: string; revision?: number; photosUrl?: string; photosUrlSet?: boolean; phases: { id: string; label: string; browser: boolean; manual: boolean; status: string; attempts: number; error?: string | null }[] }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/phases`),
   runCmaPhase: (dealId: string, phase: string) =>
     fetchJSON<{ ok: boolean; phase?: string; status?: string; error?: string | null }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/run`, {
       method: "POST",
@@ -2322,6 +2351,41 @@ export const api = {
   summarizeCmaNotes: (dealId: string) =>
     fetchJSON<{ ok: boolean; error?: string; text: string; fromNotes?: number }>(
       `/api/admin/deals/${encodeURIComponent(dealId)}/cma/summarize`, { method: "POST" }),
+  // The expired band's set-aside. Sold and active comps have had one since the
+  // review screen was built; "what was tried and didn't sell" never did, so every
+  // address the search found went into the seller's report whether it sat in her
+  // price bracket or not.
+  // Deliberately NOT named getCmaExpired: that already exists above and feeds the
+  // comp review's candidate list off a different shape. Two client methods on one
+  // path is how the backend nearly ended up with two handlers on one route.
+  getCmaExpiredSelect: (dealId: string) =>
+    fetchJSON<CmaExpiredList>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/expired-select`),
+  toggleCmaExpired: (dealId: string, key: string) =>
+    fetchJSON<CmaExpiredList & { key?: string; excluded?: boolean }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/expired-select/toggle`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      }),
+  // "How We Got to the Price" -- the four boxes of the approved design. The
+  // renderer has always been able to print this page; nothing ever wrote it, so
+  // it silently dropped out of every wizard-built CMA and the visual check
+  // hard-failed A7 without saying so. `inReport` is the honest answer.
+  getCmaPricePage: (dealId: string) =>
+    fetchJSON<{
+      ok: boolean; quads: CmaPricePageQuads; inReport?: boolean;
+      sources?: string[]; savedAt?: string | null;
+    }>(`/api/admin/deals/${encodeURIComponent(dealId)}/cma/price-page`),
+  // Drafts the four boxes from her notes/picks. Saves nothing, and it runs the
+  // headless writer, so callers must show a pending state (up to ~3 min).
+  draftCmaPricePage: (dealId: string) =>
+    fetchJSON<{ ok: boolean; error?: string; quads: CmaPricePageQuads; sources?: string[] }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/price-page/draft`, { method: "POST" }),
+  setCmaPricePage: (dealId: string, quads: CmaPricePageQuads) =>
+    fetchJSON<{ ok: boolean; error?: string; quads?: CmaPricePageQuads; inReport?: boolean }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/price-page`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(quads),
+      }),
   setCmaOverview: (dealId: string, raw: string, voiced: string) =>
     fetchJSON<{ ok: boolean; error?: string; voiced?: string }>(
       `/api/admin/deals/${encodeURIComponent(dealId)}/cma/overview`, {
@@ -2337,6 +2401,40 @@ export const api = {
       `/api/admin/deals/${encodeURIComponent(dealId)}/cma/voice`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, kind, mls }),
+      }),
+  // Save-first rewrite. Returns as soon as HER RAW TEXT is on disk, then the
+  // rewrite runs detached. The old cmaVoiceRewrite above saves nothing and blocks
+  // for up to 2 minutes, so leaving the page mid-rewrite lost the note outright.
+  cmaRewriteNote: (dealId: string, mls: string, kind: "sold" | "active", text: string, position?: string | null) =>
+    fetchJSON<{ ok: boolean; saved?: boolean; rewrite?: string; error?: string; note?: string }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/rewrite-note`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mls, kind, text, position: position ?? null }),
+      }),
+  // Persists ONLY what she typed. Fired on a debounce while she writes, so the
+  // words can never live in the browser alone. `keepalive` lets the pagehide
+  // flush outlive a closing tab -- a normal fetch is aborted with the page and
+  // the last debounce window of typing dies with it.
+  cmaSaveNoteDraft: (dealId: string, mls: string, kind: "sold" | "active", text: string,
+                     opts?: { keepalive?: boolean }) =>
+    fetchJSON<{ ok: boolean; saved?: boolean; error?: string; rowMissing?: boolean; warning?: string }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/save-draft`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mls, kind, text }),
+        ...(opts?.keepalive ? { keepalive: true } : {}),
+      }),
+  cmaRewriteStatus: (dealId: string, mls: string, kind: "sold" | "active" = "sold") =>
+    fetchJSON<{ ok: boolean; rewrite?: string; raw?: string; voiced?: string; rewriteError?: string | null }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/rewrite-status?mls=${encodeURIComponent(mls)}&kind=${kind}`),
+  cmaFinishGrid: (dealId: string) =>
+    fetchJSON<{ ok: boolean; verdicts: string[]; rows: { compNum: number; mls: string; address: string; suite?: string | null;
+                cells: { key: string; label: string; auto: string | null; override: string | null; value: string | null; edited: boolean }[] }[] }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/finish-grid`),
+  cmaSetFinishFlip: (dealId: string, comp: string, category: string, verdict: string) =>
+    fetchJSON<{ ok: boolean; error?: string; rows?: unknown[] }>(
+      `/api/admin/deals/${encodeURIComponent(dealId)}/cma/finish-flip`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comp, category, verdict }),
       }),
   cmaCompPhotoUrl: (dealId: string, num: number, idx: number, kind: "comp" | "active" | "subject" = "comp") =>
     `/api/admin/deals/${encodeURIComponent(dealId)}/cma/comp-photo/${num}/${idx}?kind=${kind}`,
@@ -2421,7 +2519,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  approveAdminActionRun: (runId: string, body: { approved?: boolean; runNow?: boolean } = {}) =>
+  approveAdminActionRun: (runId: string, body: { approved?: boolean; runNow?: boolean; expectedTitleOrderHash?: string } = {}) =>
     fetchJSON<AdminActionRun>(`/api/admin/action-runs/${encodeURIComponent(runId)}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2429,7 +2527,7 @@ export const api = {
     }),
   answerAdminActionRun: (
     runId: string,
-    body: { answers: Record<string, string>; runNow?: boolean },
+    body: { answers: Record<string, string>; runNow?: boolean; expectedTitleOrderHash?: string },
   ) =>
     fetchJSON<AdminActionRun>(`/api/admin/action-runs/${encodeURIComponent(runId)}/answer`, {
       method: "POST",

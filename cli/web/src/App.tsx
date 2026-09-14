@@ -1526,7 +1526,12 @@ function DesktopSidebar({
     }
   }, [desktopUpdate?.status, desktopUpdater, runAction, showToast, updateStatus?.available]);
 
+  const sessionScanRunning = useRef(false);
   const loadSessions = useCallback(async (options?: { refresh?: boolean }) => {
+    // A full sidebar scan can outlast the polling interval. Never start a
+    // second scan while the first still occupies a browser connection.
+    if (sessionScanRunning.current) return;
+    sessionScanRunning.current = true;
     try {
       const nowSec = Date.now() / 1000;
       const byId = new Map<string, SessionInfo>();
@@ -1598,6 +1603,7 @@ function DesktopSidebar({
     } catch {
       setSessionError(true);
     } finally {
+      sessionScanRunning.current = false;
       setSessionsLoading(false);
     }
   }, []);

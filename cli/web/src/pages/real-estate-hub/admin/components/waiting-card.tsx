@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 
 /** Normalized shape a WAITING ON YOU / ACTION NEEDED card needs. Both the deal
@@ -12,9 +13,7 @@ export type WaitingRunLike = {
   registryName?: string;
 };
 
-type ParsedField = { label: string; help: string; type: "text" | "select" | "textarea"; options: string[] };
-
-const PHOTOS_FIELD_LABEL = "Property photos (Google Drive link)";
+type ParsedField = { label: string; help: string; type: "text" | "select" | "textarea" | "date"; options: string[]; optional: boolean; defaultValue: string };
 
 /** A bare requiredField that is really "approve / confirm / authorize …" with
  *  nothing to type. Rendered as a text box it becomes a dead-end (a Submit
@@ -30,8 +29,9 @@ function isApprovalAck(label: string): boolean {
   );
 }
 
-function parseFields(hp: Record<string, unknown>): ParsedField[] {
-  const raw = Array.isArray(hp.requiredFields) ? (hp.requiredFields as unknown[]) : [];
+function parseFields(hp: Record<string, unknown>, optional = false): ParsedField[] {
+  const fields = optional ? hp.optionalFields : hp.requiredFields;
+  const raw = Array.isArray(fields) ? fields : [];
   return raw
     .map((f): ParsedField => {
       if (f && typeof f === "object") {
@@ -39,11 +39,13 @@ function parseFields(hp: Record<string, unknown>): ParsedField[] {
         return {
           label: String(o.label ?? o.name ?? o.key ?? ""),
           help: o.help ? String(o.help) : "",
-          type: o.type === "select" ? "select" : o.type === "textarea" ? "textarea" : "text",
+          type: o.type === "select" ? "select" : o.type === "textarea" ? "textarea" : o.type === "date" ? "date" : "text",
           options: Array.isArray(o.options) ? (o.options as unknown[]).map(String) : [],
+          optional: optional || o.required === false,
+          defaultValue: typeof o.defaultValue === "string" ? o.defaultValue : "",
         };
       }
-      return { label: String(f), help: "", type: "text", options: [] };
+      return { label: String(f), help: "", type: "text", options: [], optional, defaultValue: "" };
     })
     .filter((f) => f.label);
 }
@@ -58,7 +60,13 @@ function openRunPdf(dealId: string, runId: string) {
     ? origin.replace("127.0.0.1", "localhost")
     : origin.replace("localhost", "127.0.0.1");
   const url = `${externalOrigin}/api/deals/${dealId}/run-draft-pdf/${runId}?token=${encodeURIComponent(token)}`;
-  window.open(url, "_blank");
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export function openListingKitPdf(dealId: string, docId: string) {
+  const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
+  const origin = window.location.origin.replace("127.0.0.1", "localhost");
+  window.open(`${origin}/api/admin/deals/${encodeURIComponent(dealId)}/listing-kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(token)}`, "_blank", "noopener,noreferrer");
 }
 
 /** One WAITING ON YOU / ACTION NEEDED item. Self-contained: renders fill-in
@@ -77,57 +85,40 @@ export default function WaitingCard({
   const hp = run.humanPrompt || {};
   const title = String(hp.title ?? run.registryName ?? "Needs your input");
   const message = hp.message ? String(hp.message) : "";
+  const review = hp.reviewPackage as { mode?: string; artifacts?: { path: string; name: string }[]; actions?: { id: string; label: string; details: string; schedule?: string[]; destinations?: string[] }[]; notes?: string[] } | undefined;
+  const publishReview = review?.mode === "publish";
+  const titleOrder = hp.titleOrder as { versionHash?: string } | undefined;
+  const documentReview = hp.documentReview as { kit?: string; documents?: { id: string; name: string }[] } | undefined;
+  const listingDocuments = documentReview?.kit === "listing" && Array.isArray(documentReview.documents)
+    ? documentReview.documents.filter(d => typeof d.id === "string" && typeof d.name === "string") : [];
 
-  const parsed = parseFields(hp);
+
+  const parsed = [...parseFields(hp), ...parseFields(hp, true)];
   // Strip plain-text approval acknowledgements so they never render as a
   // dead-end form. What's left are fields that actually need data typed in.
-  const realFields = parsed.filter(
+  const formFields = parsed.filter(
     (f) => !(f.type === "text" && f.options.length === 0 && isApprovalAck(f.label)),
   );
 
-  // Photos-link guarantee for CMA / listing / marketing cards only (never on
-  // pre-cma / seller-package / offers / closing). Based on the real fields so an
-  // approval-only card never grows a photo box.
-  const photoCtxId = (String(run.skill ?? "") + " " + String(run.registryName ?? "")).toLowerCase();
-  const photoRelevant =
-    !/pre-cma|seller-package/.test(photoCtxId) && /cma|listing|marketing|photo/.test(photoCtxId);
-  const formFields =
-    realFields.length > 0 &&
-    photoRelevant &&
-    !realFields.some((f) => /photo/i.test(f.label) || /drive/i.test(f.label))
-      ? [
-          ...realFields,
-          {
-            label: PHOTOS_FIELD_LABEL,
-            help: "Paste a Google Drive or Dropbox link to the property photos so the CMA can pull from them. Optional.",
-            type: "text" as const,
-            options: [] as string[],
-          },
-        ]
-      : realFields;
+  // The workflow owns its inputs. Never infer extra questions from its name.
 
   const hasDraftPdf =
     (typeof hp.previewPdf === "string" && (hp.previewPdf as string).trim() !== "") ||
     (typeof hp.preview_pdf === "string" && String(hp.preview_pdf).trim() !== "");
 
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [edits, setAnswers] = useState<Record<string, string>>({});
+  const provided = hp.providedAnswers && typeof hp.providedAnswers === "object"
+    ? hp.providedAnswers as Record<string, unknown> : {};
+  const answers = Object.fromEntries(formFields.map((f) => [
+    f.label, edits[f.label] ?? (typeof provided[f.label] === "string" ? provided[f.label] as string : f.defaultValue),
+  ]));
   const [busy, setBusy] = useState<"" | "submit" | "approve" | "dismiss">("");
   const [err, setErr] = useState<string | null>(null);
 
   const finish = useCallback(() => {
-    // Best-effort: clear any matching surface-approval so it stops nagging.
-    (async () => {
-      try {
-        const { approvals } = await api.getSurfaceApprovals("pending");
-        const matches = (approvals || []).filter((a) => (a.description || "").includes(run.dealId));
-        for (const a of matches) await api.resolveSurfaceApproval(a.id, "approve", "Cleared via action popup");
-      } catch {
-        /* surface-approvals absent — ignore */
-      }
-    })();
     window.dispatchEvent(new CustomEvent("elevate:action-resolved"));
     onResolved?.();
-  }, [run.dealId, onResolved]);
+  }, [onResolved]);
 
   const submit = useCallback(async () => {
     const entered: Record<string, string> = {};
@@ -139,21 +130,26 @@ export default function WaitingCard({
     setBusy("submit");
     setErr(null);
     try {
-      await api.answerAdminActionRun(run.runId, { answers: entered, runNow: true });
+      await api.answerAdminActionRun(run.runId, {
+        answers: entered,
+        runNow: true,
+        ...(titleOrder?.versionHash ? { expectedTitleOrderHash: titleOrder.versionHash } : {}),
+      });
       finish();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy("");
     }
-  }, [answers, formFields, run.runId, finish]);
+  }, [answers, formFields, run.runId, finish, titleOrder]);
 
   const decide = useCallback(
     async (approved: boolean) => {
       setBusy(approved ? "approve" : "dismiss");
       setErr(null);
       try {
-        await api.approveAdminActionRun(run.runId, { approved, runNow: approved });
+        await api.approveAdminActionRun(run.runId, { approved, runNow: approved,
+          ...(titleOrder ? {expectedTitleOrderHash: titleOrder.versionHash} : {}) });
         finish();
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
@@ -161,21 +157,51 @@ export default function WaitingCard({
         setBusy("");
       }
     },
-    [run.runId, finish],
+    [run.runId, finish, titleOrder?.versionHash],
   );
 
   return (
     <div className={"abm-waiting-item" + (compact ? " abm-waiting-item-compact" : "")}>
       <div className="abm-waiting-title">{title}</div>
       {message && <div className="abm-waiting-msg">{message}</div>}
+      {typeof hp.approvalBlockedReason === "string" && <p role="status" className="abm-waiting-msg">{hp.approvalBlockedReason}</p>}
+      {listingDocuments.length > 0 && (
+        <div className="abm-waiting-actions" aria-label="Listing documents to review">
+          {listingDocuments.map(doc => (
+            <button type="button" className="abm-waiting-btn preview" key={doc.id}
+              onClick={() => openListingKitPdf(run.dealId, doc.id)}>Open {doc.name} ↗</button>
+          ))}
+        </div>
+      )}
+      {review && (
+        <div className="my-3 space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {(review.artifacts || []).map(asset => (
+              <Link className="abm-waiting-btn preview" key={asset.path}
+                onClick={() => window.dispatchEvent(new CustomEvent("elevate:review-open"))}
+                to={`/chat?resume=${encodeURIComponent(String(hp.sessionId || ""))}&artifact=${encodeURIComponent(asset.path)}`}>
+                Preview {asset.name}
+              </Link>
+            ))}
+          </div>
+          {(review.actions || []).map(action => (
+            <div key={action.id}><strong>{action.label}</strong><div>{action.details}</div>
+              {action.schedule?.map(time => <div key={time}>{time}</div>)}
+              {action.destinations?.map(destination => <div key={destination}>{destination}</div>)}
+            </div>
+          ))}
+          {(review.notes || []).map(note => <p key={note}>{note}</p>)}
+          {publishReview && <p>Approval applies to this version and only the actions listed above.</p>}
+        </div>
+      )}
       {formFields.length > 0 && (
         <div className="abm-waiting-form">
-          <div className="abm-waiting-needs mono">FILL IN TO CONTINUE</div>
+          <div className="abm-waiting-needs mono">ADD MISSING DETAILS</div>
           {formFields.map((f, i) => {
             const setVal = (v: string) => setAnswers((prev) => ({ ...prev, [f.label]: v }));
             return (
               <label className="abm-waiting-field" key={i}>
-                <span className="abm-waiting-field-label">{f.label}</span>
+                <span className="abm-waiting-field-label">{f.label}{f.optional ? " (optional)" : ""}</span>
                 {f.help && <span className="abm-waiting-field-help">{f.help}</span>}
                 {f.type === "select" && f.options.length > 0 ? (
                   <select
@@ -196,7 +222,7 @@ export default function WaitingCard({
                 ) : f.type === "textarea" ? (
                   <textarea
                     className="abm-waiting-input abm-waiting-textarea"
-                    rows={3}
+                    rows={f.defaultValue.length > 100 ? 6 : 3}
                     value={answers[f.label] ?? ""}
                     placeholder={`Type ${f.label}…`}
                     disabled={busy === "submit"}
@@ -204,7 +230,7 @@ export default function WaitingCard({
                   />
                 ) : (
                   <input
-                    type="text"
+                    type={f.type === "date" ? "date" : "text"}
                     className="abm-waiting-input"
                     value={answers[f.label] ?? ""}
                     placeholder={`Type ${f.label}…`}
@@ -233,29 +259,29 @@ export default function WaitingCard({
           <button
             type="button"
             className="abm-waiting-btn submit"
-            disabled={busy === "submit" || !Object.values(answers).some((v) => v.trim())}
+            disabled={!!busy || !Object.values(answers).some((v) => v.trim())}
             onClick={submit}
             title="Send your answers and continue the skill"
           >
-            {busy === "submit" ? "Sending…" : "Submit & run"}
+            {busy === "submit" ? "Sending…" : review ? "Prepare final approval" : "Submit & run"}
           </button>
         ) : (
           <button
             type="button"
             className="abm-waiting-btn approve"
-            disabled={busy === "approve"}
+            disabled={!!busy || !!hp.approvalBlockedReason || (publishReview && !review?.actions?.length)}
             onClick={() => decide(true)}
           >
-            {busy === "approve" ? "Working…" : "Approve & re-run"}
+            {busy === "approve" ? "Working…" : publishReview ? "Approve listed actions" : review ? "Continue review" : typeof hp.actionLabel === "string" ? hp.actionLabel : "Approve & re-run"}
           </button>
         )}
         <button
           type="button"
           className="abm-waiting-btn dismiss"
-          disabled={busy === "dismiss"}
+          disabled={!!busy}
           onClick={() => decide(false)}
         >
-          {busy === "dismiss" ? "…" : "Dismiss"}
+          {busy === "dismiss" ? "…" : String(hp.dismissLabel || "Dismiss")}
         </button>
       </div>
     </div>

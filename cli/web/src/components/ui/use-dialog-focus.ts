@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -27,6 +27,8 @@ export function useDialogFocus({
   initialFocusSelector?: string;
   onEscape: () => void;
 }) {
+  const escapeRef = useRef(onEscape);
+  escapeRef.current = onEscape;
   useEffect(() => {
     if (!active) return;
     const dialog = dialogRef.current;
@@ -43,9 +45,13 @@ export function useDialogFocus({
     initialFocus.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const top = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].at(-1);
+      if (top && top !== dialog) return;
       if (event.key === "Escape") {
         event.preventDefault();
-        onEscape();
+        event.stopImmediatePropagation();
+        escapeRef.current();
         return;
       }
       if (event.key !== "Tab") return;
@@ -76,5 +82,5 @@ export function useDialogFocus({
       document.body.style.overflow = prevOverflow;
       prevActive?.focus?.();
     };
-  }, [active, dialogRef, initialFocusSelector, onEscape]);
+  }, [active, dialogRef, initialFocusSelector]);
 }

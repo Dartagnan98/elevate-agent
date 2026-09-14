@@ -161,7 +161,6 @@ _BC: dict[str, Any] = {
                     ("listPrice", "List price"),
                     ("commissionPct", "Commission rate"),
                     ("listingDate", "Planned go-live date"),
-                    ("listingType", "Listing type"),
                 ],
                 docs=[("title_search", "Title search"), ("signed_envelope", "Signed listing envelope")],
                 forms=[("MLC", "Multiple Listing Contract"), ("FINTRAC", "FINTRAC identity form"), ("PDS", "Property Disclosure Statement")],
@@ -666,6 +665,8 @@ def resolve_deal_phase(
 _ANY_OF_FIELDS: dict[str, tuple[str, ...]] = {
     "workflow_client_1_email": ("workflow_client_1_phone", "prospectPhones", "buyerPhones"),
     "workflow_client_1_phone": ("workflow_client_1_email", "prospectEmails", "buyerEmails"),
+    # Tiered listing remuneration is stored verbatim in the Listing Kit.
+    "commissionPct": ("listingCommission",),
 }
 
 

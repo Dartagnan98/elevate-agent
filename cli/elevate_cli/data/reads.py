@@ -1116,7 +1116,7 @@ def db_thread_context_response(
             if True:
                 activity_rows = conn.execute(
                     """
-                    SELECT id, kind, payload_json, ts
+                    SELECT id, kind, payload_json, payload_ref, ts
                     FROM events
                     WHERE contact_id = ?
                       AND kind IN (
@@ -1129,12 +1129,9 @@ def db_thread_context_response(
                     (contact["id"],),
                 ).fetchall()
                 for ev in activity_rows:
-                    payload: dict[str, Any] = {}
-                    if ev["payload_json"]:
-                        try:
-                            payload = json.loads(ev["payload_json"])
-                        except (TypeError, json.JSONDecodeError):
-                            payload = {}
+                    from elevate_cli.data._util import decode_payload
+                    decoded = decode_payload(ev["payload_json"], ev["payload_ref"])
+                    payload = decoded if isinstance(decoded, dict) else {}
                     legacy_type = payload.get("legacyType") or payload.get("legacy_type")
                     summary = (
                         payload.get("note")

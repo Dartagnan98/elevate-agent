@@ -285,7 +285,7 @@ export default function OnboardingPanel({
       : origin.replace("localhost", "127.0.0.1");
     window.open(
       `${externalOrigin}/api/admin/deals/${encodeURIComponent(dealId)}/onboarding-doc/${encodeURIComponent(key)}?token=${encodeURIComponent(tok)}&v=${Date.now()}${download ? "&download=1" : ""}`,
-      "_blank");
+      "_blank", "noopener,noreferrer");
   };
   const sendPackage = async () => {
     const chosen = unsigned.filter((k) => sel.has(k));

@@ -1,0 +1,24 @@
+.kit-pdf-workspace { z-index: 9200; }
+.kit-pdf-toolbar { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:12px 0; background:var(--ds-paper); border-bottom:1px solid var(--ds-border); }
+.kit-pdf-toolbar label,.kit-pdf-pages { display:flex; align-items:center; gap:8px; }
+.kit-pdf-toolbar select { min-height:44px; font:inherit; color:var(--ds-ink); background:var(--ds-card); border:1px solid var(--ds-border); border-radius:6px; padding:6px; }
+.kit-pdf-toolbar [role=status] { font-size:13px; flex-basis:100%; }
+.kit-pdf-help { color:var(--ds-muted); font-size:13px; line-height:1.5; }
+.kit-pdf-error { color:var(--ds-error); padding:12px 0; line-height:1.5; }
+.kit-pdf-error button { margin-left:12px; }
+.kit-pdf-active { display:grid; gap:6px; margin:12px 0; }
+.kit-pdf-active label { font-size:13px; font-weight:600; }
+.kit-pdf-active input:not([type=checkbox]),.kit-pdf-active textarea,.kit-pdf-active select { padding:10px; min-height:44px; font:inherit; font-size:16px; border:1px solid var(--ds-border-strong); border-radius:6px; color:var(--ds-ink); background:var(--ds-card); width:100%; box-sizing:border-box; }
+.kit-pdf-active small { color:var(--ds-muted); }
+.kit-pdf-canvas-scroll { overflow:auto; padding:2px; }
+.kit-pdf-page { position:relative; background:white; margin:0 auto; }
+.kit-pdf-page>img { display:block; width:100%; height:auto; }
+.kit-pdf-field { position:absolute; box-sizing:border-box; min-width:8px; min-height:8px; }
+.kit-pdf-field input:not([type=checkbox]),.kit-pdf-field textarea,.kit-pdf-field select { box-sizing:border-box; border:1px solid #2f5da8; border-radius:1px; background:#f2f6ff; color:#111; font-family:Arial,sans-serif; font-size:clamp(8px,1.05vw,14px); line-height:1.05; padding:0 1px; width:100%; height:100%; min-width:0; resize:none; }
+.kit-pdf-field input[type=checkbox] { width:100%; height:100%; padding:0; margin:0; accent-color:#234c80; cursor:pointer; }
+.kit-pdf-field.active { outline:2px solid #234c80; outline-offset:2px; z-index:1; }
+.kit-pdf-field :focus-visible { outline:2px solid #234c80; outline-offset:2px; }
+@media(max-width:640px) { .kit-pdf-toolbar { gap:8px; } .kit-pdf-pages { gap:4px; } .kit-pdf-toolbar [role=status] { line-height:1.4; } }
+
+.kit-pdf-field-picker { display:none; }
+@media(max-width:640px) { .kit-pdf-field-picker { display:grid; gap:6px; margin:12px 0; font-size:13px; font-weight:600; } .kit-pdf-field-picker select { min-height:44px; width:100%; padding:8px; font:inherit; font-size:16px; background:var(--ds-card); color:var(--ds-ink); border:1px solid var(--ds-border); border-radius:6px; } }

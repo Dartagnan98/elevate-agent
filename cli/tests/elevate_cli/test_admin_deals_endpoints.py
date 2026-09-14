@@ -585,6 +585,24 @@ def test_move_deal_endpoint_blocks_incomplete_forward_stage_move(client):
     assert any(item["field"] == "listPrice" for item in detail["gate"]["missingFields"])
 
 
+def test_listing_intake_accepts_tiered_commission_and_blank_listing_type(client):
+    deal = _create(title="Listing defaults", current_stage=2, dispatch_initial_stage=False)
+    deal_id = deal["id"]
+    before = client.get(f"/api/deals/{deal_id}/context").json()
+    assert "commissionPct" in {f["field"] for f in before["dealFlow"]["gate"]["missingFields"]}
+    for field, value in [("signing_authority", "seller"), ("listingCommission", "6% first $100,000 and 3% balance, plus GST")]:
+        response = client.post(f"/api/admin/deals/{deal_id}/toggle", json={"field": field, "value": value})
+        assert response.status_code == 200, response.text
+    after = client.get(f"/api/deals/{deal_id}/context").json()
+    missing = {f["field"] for f in after["dealFlow"]["gate"]["missingFields"]}
+    assert not missing.intersection({"signingAuthority", "commissionPct", "listingType"})
+    assert after["deal"]["signingAuthority"] == "seller"
+    assert after["deal"]["listingType"] is None
+    assert after["deal"]["commissionPct"] is None
+    assert after["deal"]["currentStage"] == 2
+    assert any(d["kind"] == "signed_envelope" for d in after["dealFlow"]["gate"]["missingDocs"])
+
+
 def test_move_deal_endpoint_reports_clear_gate_skip_as_wrong_target(client):
     with connect() as conn:
         deal = create_deal(

@@ -2807,6 +2807,7 @@ export interface SkillFileResponse {
 }
 
 export interface BlobResponse {
+  resolvedPath?: string;
   blob: Blob;
   contentType: string;
   fileName: string;

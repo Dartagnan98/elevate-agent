@@ -63,7 +63,7 @@ export function AdminDesignShell() {
   const kpis = useMemo(() => computeAdminKpis(deals), [deals]);
   const fallbackEvents = useMemo(() => computeAdminEvents(deals), [deals]);
   const events = syncedEvents.length > 0 ? syncedEvents : fallbackEvents;
-  const visibleError = error || (eventsError && fallbackEvents.length === 0 ? eventsError : null);
+  const visibleError = error || (eventsError ? "Calendar could not refresh. Deal dates are still shown; retry to update calendar events." : null) || adminSetup.error;
   const handleRefresh = useCallback(async (options?: { silent?: boolean }) => {
     await Promise.all([refresh(options), refreshEvents(options)]);
   }, [refresh, refreshEvents]);

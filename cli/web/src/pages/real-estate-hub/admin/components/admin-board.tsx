@@ -28,6 +28,8 @@ import CriticalDates from "./critical-dates";
 import ApprovalsQueue from "./approvals-queue";
 import CmaAddressIntake from "./cma-address-intake";
 import { api } from "@/lib/api";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
+import { adminDealToDeal, adminDealToBuyerDeal } from "../admin-mappers";
 import type { AdminDealCreateRequest, AdminDealSide } from "@/lib/api-types";
 
 export interface AdminBoardProps {
@@ -37,7 +39,7 @@ export interface AdminBoardProps {
   events?: AdminEvent[];
   loading?: boolean;
   error?: string | null;
-  onRefresh?: () => void;
+  onRefresh?: () => void | Promise<void>;
   onOpenDeal?: (dealId: string) => void;
   onMoveDeal?: (dealId: string, toStage: number) => void;
   onReRunOnboarding?: () => void;
@@ -274,6 +276,7 @@ function DealCard({
 }) {
   const lastDragAtRef = useRef(0);
   const [pinning, setPinning] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
   const pinned = deal.primary === true;
 
   const handleTogglePin = async (e: React.MouseEvent) => {
@@ -281,16 +284,19 @@ function DealCard({
     e.preventDefault();
     if (pinning) return;
     setPinning(true);
+    setPinError(null);
     try {
       await api.setAdminDealToggle(deal.id, "pinnedTop25", !pinned);
       onTogglePin?.(deal.id);
+    } catch {
+      setPinError("Could not update Top 25. Please try again.");
     } finally {
       setPinning(false);
     }
   };
   const waitingCount = deal.waitingHumanCount ?? 0;
   const runningCount = deal.runningRunCount ?? 0;
-  const activityLabel = deal.activeRunLabel || `${deal.daysInStage || "3d"} in stage`;
+  const activityLabel = deal.activeRunLabel || (deal.daysInStage ? `${deal.daysInStage} in stage` : "Stage date unavailable");
   const statusLabel =
     waitingCount > 0
       ? "Waiting on you"
@@ -352,6 +358,7 @@ function DealCard({
       >
         {pinned ? <PinFilled /> : <Pin />}
       </button>
+      {pinError && <div className="dsk-err" role="alert">{pinError}</div>}
       <div className="ab-deal-addr" title={deal.addr}>{deal.addr}</div>
       <div className="ab-deal-line2">{deal.line2}</div>
       <div className="ab-deal-mid">
@@ -368,7 +375,7 @@ function DealCard({
         <span className="ab-deal-next-text">{deal.next}</span>
       </div>
       <div className="ab-deal-foot">
-        <span className="ab-deal-owner" title={deal.owner || "Demo Agent"}>
+        <span className="ab-deal-owner" title={deal.owner || "Unassigned"}>
           {deal.ownerInitial || "A"}
         </span>
         <span className="ab-deal-time" title={activityLabel}>{activityLabel}</span>
@@ -476,7 +483,7 @@ function Top25Deals({
   deals: Deal[];
   mode: string;
   onOpenDeal: (deal: Deal) => void;
-  onRefresh?: () => void;
+  onRefresh?: () => void | Promise<void>;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [formName, setFormName] = useState("");
@@ -1113,16 +1120,15 @@ function NewEvaluationModal({
   onClose: () => void;
   onOpenDeal: (dealId: string) => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus({ dialogRef, initialFocusSelector: "input", onEscape: onClose });
 
   return (
     <div className="ab-modal-backdrop" onClick={onClose}>
       <div
         className="ab-modal"
+        ref={dialogRef}
+        tabIndex={-1}
         onClick={(e: React.MouseEvent) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -1176,13 +1182,8 @@ function NewDealModal({
     (isListing ? listingAddress.trim().length > 0 : title.trim().length > 0) &&
     !submitting;
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus({ dialogRef, initialFocusSelector: "input", onEscape: () => { if (!submitting) onClose(); } });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1237,8 +1238,12 @@ function NewDealModal({
     <div className="ab-modal-backdrop" onClick={onClose}>
       <div
         className="ab-modal"
+        ref={dialogRef}
+        tabIndex={-1}
         onClick={(e: React.MouseEvent) => e.stopPropagation()}
         role="dialog"
+        aria-modal="true"
+        aria-label="New deal"
         style={{ maxWidth: "30rem" }}
       >
         <button className="ab-modal-close" onClick={onClose} aria-label="Close">
@@ -1445,16 +1450,21 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const [showNewEval, setShowNewEval] = useState(false);
   const [draggingDeal, setDraggingDeal] = useState<Deal | null>(null);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const openRequest = useRef(0);
+  useEffect(() => () => { openRequest.current += 1; }, []);
 
   // Restore an archived deal back to the live board (status -> active).
   const handleRestore = async (deal: Deal | BuyerDeal) => {
     if (restoringId) return;
     setRestoringId(deal.id);
+    setActionError(null);
     try {
       await api.setAdminDealStatus(deal.id, "active");
       onRefresh?.();
     } catch {
-      window.alert("Could not restore that lead. Try again.");
+      setActionError("Could not restore that deal. Please try again.");
     } finally {
       setRestoringId(null);
     }
@@ -1505,7 +1515,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const isBuyer = tab === "buyer";
   const isArchivedTab = tab === "archived";
   const activePipeline = isBuyer ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
-  const allDeals       = isBuyer ? buyerDealsResolved   : listingDeals;
+  const allDeals = isArchivedTab ? archivedDeals : isBuyer ? buyerDealsResolved : listingDeals;
 
   // FIX 1: filter rendered deals by the search query (addr / line2 / mls)
   // before they get grouped into the kanban columns.
@@ -1513,7 +1523,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
     const q = query.trim().toLowerCase();
     if (!q) return allDeals;
     return allDeals.filter((d) => {
-      const haystack = [d.addr, d.line2, (d as Deal).mls]
+      const haystack = [d.addr, d.line2, (d as Deal).mls, d.archivedNote]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -1528,12 +1538,23 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
 
   // Open a deal modal from a deal id (used by the Critical dates + Approvals
   // desk sections, which only carry ids).
-  const openDealById = (dealId: string) => {
-    const d =
-      listingDeals.find((x) => x.id === dealId) ||
-      buyerDealsResolved.find((x) => x.id === dealId);
-    if (d) handleOpenDeal(d);
-    else onOpenDeal?.(dealId);
+  const openDealById = async (dealId: string) => {
+    const request = ++openRequest.current;
+    setActionError(null);
+    const known = [...rawListingDeals, ...rawBuyerDeals].find(d => d.id === dealId);
+    if (known) { setOpening(false); handleOpenDeal(known); return; }
+    // Intake may have just created this deal. Read it directly instead of
+    // depending on a cached list and the previous render's closure.
+    setOpening(true);
+    try {
+      const { deal } = await api.getDealContext(dealId);
+      if (request !== openRequest.current) return;
+      handleOpenDeal(deal.side === "buyer" ? adminDealToBuyerDeal(deal) : adminDealToDeal(deal));
+    } catch (e) {
+      if (request === openRequest.current) setActionError(e instanceof Error ? e.message : "Could not open the deal. Refresh and try again.");
+    } finally {
+      if (request === openRequest.current) setOpening(false);
+    }
   };
 
   const dealsByPhase = useMemo(() => {
@@ -1553,7 +1574,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           {/* octopus moved to the global sidebar brand mark (on every page) */}
           <span className="crumb">Admin desk</span>
           <span className="sep">&middot;</span>
-          <span className="ab-live"><span className="ab-live-dot"></span>Local gateway online</span>
+          <span className="ab-live" role="status">{loading ? "Refreshing deals…" : error ? "Refresh needs attention" : "Deal workspace"}</span>
         </div>
         <div className="ab-top-actions">
           <button className="ab-btn ghost" type="button" onClick={onRefresh} disabled={loading}>
@@ -1568,21 +1589,22 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
       </header>
 
       <div className="ab-scroll">
-        {error ? (
+        {error || actionError ? (
           <div className="ab-error mono" role="alert" aria-live="polite">
-            <span>{error}</span>
+            <span>{error || actionError}</span>
             <button className="ab-btn ghost ab-error-retry" type="button" onClick={onRefresh} disabled={loading}>
               <Refresh /><span>{loading ? "Retrying..." : "Retry"}</span>
             </button>
           </div>
         ) : null}
 
-        {loading || showIntro ? (
+        {opening && <div className="ab-opening" role="status">Opening deal…</div>}
+        {(loading && !rawListingDeals.length && !rawBuyerDeals.length) || showIntro ? (
           <BoardLoader />
         ) : (
         <>
         {/* Top 25 deals strip */}
-        <Top25Deals deals={activeDeals} mode={tab} onOpenDeal={handleOpenDeal} onRefresh={onRefresh} />
+        {!isArchivedTab && <Top25Deals deals={activeDeals} mode={tab} onOpenDeal={handleOpenDeal} onRefresh={onRefresh} />}
 
         {/* KPI tiles */}
         <section className="ab-kpis">
@@ -1612,20 +1634,20 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
         </section>
 
         {/* Critical dates + Approvals — cross-deal desk sections (between KPIs and board) */}
-        <CriticalDates onOpenDeal={openDealById} />
-        <ApprovalsQueue onOpenDeal={openDealById} />
+        <CriticalDates onOpenDeal={openDealById} refreshKey={deals} onChanged={onRefresh} />
+        <ApprovalsQueue onOpenDeal={openDealById} refreshKey={deals} onChanged={onRefresh} />
 
         {/* Kanban with tabs + search */}
         <section className="ab-card">
           <header className="ab-card-head">
             <div className="ab-tabs">
-              <button className={"ab-tab" + (tab === "listing" ? " active" : "")} onClick={() => setTab("listing")}>
+              <button type="button" aria-pressed={tab === "listing"} className={"ab-tab" + (tab === "listing" ? " active" : "")} onClick={() => setTab("listing")}>
                 <span>Listing admin</span><span className="count mono">{listingDeals.length}</span>
               </button>
-              <button className={"ab-tab" + (tab === "buyer" ? " active" : "")} onClick={() => setTab("buyer")}>
+              <button type="button" aria-pressed={tab === "buyer"} className={"ab-tab" + (tab === "buyer" ? " active" : "")} onClick={() => setTab("buyer")}>
                 <span>Buyer admin</span><span className="count mono">{buyerDealsResolved.length}</span>
               </button>
-              <button className={"ab-tab" + (tab === "archived" ? " active" : "")} onClick={() => setTab("archived")}>
+              <button type="button" aria-pressed={tab === "archived"} className={"ab-tab" + (tab === "archived" ? " active" : "")} onClick={() => setTab("archived")}>
                 <span>Archived</span><span className="count mono">{archivedDeals.length}</span>
               </button>
               {/* Real events only (Google Calendar + deal milestones via
@@ -1652,17 +1674,17 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
             /* Archived deals: cancelled-without-relist sellers. Compact cards,
                open the same deal modal on click. */
             <div className="ab-archived">
-              {archivedDeals.length === 0 ? (
-                <div className="ab-archived-empty">Nothing archived yet.</div>
+              {activeDeals.length === 0 ? (
+                <div className="ab-archived-empty">{query.trim() ? "No archived deals match your search." : "Nothing archived yet."}</div>
               ) : (
                 <div className="ab-archived-grid">
-                  {archivedDeals.map((d) => (
+                  {activeDeals.map((d) => (
                     <div className="ab-archived-card-wrap" key={d.id}>
                       <button
                         type="button"
                         className="ab-archived-restore"
                         title="Restore to board"
-                        disabled={restoringId === d.id}
+                        disabled={restoringId !== null}
                         onClick={(e) => { e.stopPropagation(); void handleRestore(d); }}
                       >
                         {restoringId === d.id ? "Restoring…" : "Restore"}
@@ -1712,7 +1734,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
       {activeDeal && (
         <DealDetailModal
           deal={activeDeal}
-          onClose={() => setActiveDeal(null)}
+          onClose={() => { setActiveDeal(null); void onRefresh?.(); }}
         />
       )}
       {showNewDeal && (
@@ -1726,9 +1748,8 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           onClose={() => setShowNewEval(false)}
           onOpenDeal={(dealId) => {
             setShowNewEval(false);
-            // Refresh first: a deal the intake just created is not on the board
-            // yet, and openDealById falls back to a no-op for an unknown id.
-            void Promise.resolve(onRefresh?.()).finally(() => openDealById(dealId));
+            void openDealById(dealId);
+            void onRefresh?.();
           }}
         />
       )}

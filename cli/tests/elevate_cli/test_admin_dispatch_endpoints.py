@@ -885,3 +885,31 @@ def test_date_trigger_firing_ledger_is_unique():
     assert first["created"] is True
     assert second["created"] is False
     assert second["id"] == first["id"]
+
+
+def test_mlc_worker_context_carries_saved_intake_and_resumed_answers(client, monkeypatch):
+    import json
+    from elevate_cli.data import dispatch, set_deal_money
+    from cron import jobs
+
+    deal = _new_listing_deal()
+    with connect() as conn:
+        set_deal_money(conn, deal["id"], list_price=725000, actor="human:test")
+        set_deal_toggle(conn, deal["id"], field="sellerLegalNames", value=["Test Seller"], actor="human:test")
+        create_action(conn, name="MLC context check", trigger="stage_entry", skill="mlc",
+                      side="listing", to_stage=2, approval_required=True, skill_args={"mode":"intake"})
+        move_deal_stage(conn, deal["id"], to_stage=2, actor="human:test", force=True)
+        run = list_action_runs(conn, deal_id=deal["id"])[0]
+    captured = []
+    monkeypatch.setattr(jobs, "create_job", lambda **kw: (captured.append(kw) or {"id":"test-job"}))
+    response = client.post(f"/api/admin/action-runs/{run['id']}/answer",
+                           json={"answers":{"Commission terms":"Negotiated terms"},"runNow":True})
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "running"
+    prompt = captured[0]["prompt"]
+    # Inspect the actual serialized worker context, not a mocked context builder.
+    context = json.loads(prompt[prompt.index('{\n  "source": "operational:deal_context"'):])
+    assert context["deal"]["listPrice"] == 725000
+    assert context["checklist"]["sellerLegalNames"] == ["Test Seller"]
+    assert context["currentRun"]["humanPrompt"]["providedAnswers"] == {"Commission terms":"Negotiated terms"}
+    assert context["currentRun"]["id"] == run["id"]

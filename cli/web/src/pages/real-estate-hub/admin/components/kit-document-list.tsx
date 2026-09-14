@@ -1,3 +1,4 @@
+import KitPdfEditor from "./kit-pdf-editor";
 // One document list, shared by every paperwork surface on the deal card:
 // the buyer Transaction Kit, the listing-side Listing Kit, and Client
 // Onboarding. Built 2026-07-28 from the Transaction Kit redesign so the three
@@ -80,7 +81,7 @@ export default function KitDocumentList({
   excludeLabel = "Leave out of this kit",
   isMobile = false,
   isNarrow = false,
-  footNote,
+  footNote, pdfEditorUrl, onBeforeEdit, onPdfSaved,
 }: {
   rows: KitRow[];
   fieldDefs: KitFieldDef[];
@@ -90,7 +91,7 @@ export default function KitDocumentList({
   fieldsUrl?: (docId: string) => string;
   /** For surfaces that resolve defaults client-side instead of over HTTP. */
   resolveLocal?: (docId: string) => { fields: Record<string, string>; derived: string[]; defs?: KitFieldDef[] };
-  onDraft: (docId: string, name: string) => void | Promise<void>;
+  onDraft: (docId: string, name: string) => void | boolean | Promise<void | boolean>;
   onOpen: (docId: string, download?: boolean) => void;
   onSaveField: (docId: string, key: string, value: string) => void;
   /** Omit to hide the "leave out" action (e.g. a required form). */
@@ -99,10 +100,20 @@ export default function KitDocumentList({
   isMobile?: boolean;
   isNarrow?: boolean;
   footNote?: string;
+  pdfEditorUrl?: (docId:string)=>string;
+  onBeforeEdit?: ()=>Promise<void>;
+  onPdfSaved?: ()=>void;
 }) {
   const tap = isMobile ? 44 : undefined;
   const tok = () => (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
 
+  const [editor,setEditor]=useState<{id:string;name:string}|null>(null);
+  const [editorError,setEditorError]=useState("");
+  const openEditor=async(id:string,name:string)=>{
+    setEditorError("");
+    try { await onBeforeEdit?.();setEditor({id,name}); }
+    catch(e){setEditorError(`Could not open the PDF: ${String(e)}`);}
+  };
   const [expanded, setExpanded] = useState<string | null>(null);
   // Your own name / brokerage / office is on nearly every form and identical
   // every time. Present, but folded away so it cannot bury what varies.
@@ -176,17 +187,17 @@ export default function KitDocumentList({
   // worked. Draft/Redraft now waits for the build, then opens the row and pulls
   // a fresh preview of the PDF that was actually produced -- the document gets
   // read before it can be sent for signature. (2026-07-29)
-  const draftThenReview = useCallback(async (docId: string, name: string) => {
+  const draftThenReview = async (docId:string,name:string)=>{
+    setEditorError("");
     try {
-      await onDraft(docId, name);
-    } finally {
-      setExpanded(docId);
-      dropPreview(docId);
-      await loadPreview(docId);
+      const result=await onDraft(docId,name);
+      if(result===false)return;
+      setExpanded(docId);dropPreview(docId);
+      if(pdfEditorUrl)await openEditor(docId,name);
+      else await loadPreview(docId);
       void loadFields(docId);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onDraft, dropPreview, loadPreview, loadFields]);
+    } catch(e){setEditorError(`Could not draft the PDF: ${String(e)}`);}
+  };
 
   const openRow = useCallback((docId: string | null) => {
     setExpanded(docId);
@@ -273,6 +284,8 @@ export default function KitDocumentList({
 
   return (
     <>
+      {editorError&&<p role="alert" style={{color:ORANGE}}>{editorError}</p>}
+      {editor&&pdfEditorUrl&&<KitPdfEditor url={pdfEditorUrl(editor.id)} name={editor.name} onClose={()=>{setEditor(null);void loadPreview(editor.id);}} onSaved={()=>{dropPreview(editor.id);void loadFields(editor.id);onPdfSaved?.();}}/>}
       {rows.map((r) => {
         const isOpen = expanded === r.id;
         const built = r.state === "ready" || r.state === "stale";
@@ -297,7 +310,7 @@ export default function KitDocumentList({
           : r.state === "stale"
             ? <button type="button" onClick={() => void draftThenReview(r.id, r.name)} style={{ ...btn, background: NAVY, borderColor: "transparent", color: "#fff" }}>Redraft</button>
             : r.state === "ready"
-              ? <button type="button" onClick={() => openRow(isOpen ? null : r.id)} style={{ ...btn, background: "#eef2f9", borderColor: "transparent", color: "#2f5da8" }}>Review</button>
+              ? <button type="button" onClick={() => pdfEditorUrl ? void openEditor(r.id,r.name) : openRow(isOpen ? null : r.id)} style={{ ...btn, background: "#eef2f9", borderColor: "transparent", color: "#2f5da8" }}>{pdfEditorUrl ? "Edit & review" : "Review"}</button>
               : <button type="button" onClick={() => void draftThenReview(r.id, r.name)} style={{ ...btn, background: NAVY, borderColor: "transparent", color: "#fff" }}>Draft</button>;
 
         return (
@@ -338,7 +351,7 @@ export default function KitDocumentList({
                     </div>
                   ) : pv?.state === "ok" && pv.url ? (
                     <>
-                      <button type="button" onClick={() => void showPage(r.id, r.name, 1, pv.pages || 1)} title="Open it full size"
+                      <button type="button" onClick={() => pdfEditorUrl ? void openEditor(r.id,r.name) : void showPage(r.id, r.name, 1, pv.pages || 1)} title="Open it full size"
                         style={{ display: "block", width: "100%", padding: 0, border: "none", background: "none", cursor: "zoom-in" }}>
                         <img src={pv.url} alt={`First page of ${r.name}`} style={{ ...previewBox, objectFit: "contain", background: "#fff", display: "block" }} />
                       </button>
@@ -359,7 +372,7 @@ export default function KitDocumentList({
                 </div>
 
                 <div>
-                  {(() => {
+                  {built && pdfEditorUrl ? <div><p>Edit the fillable fields directly on the PDF, then save your changes.</p><button type="button" className="kit-primary" onClick={()=>void openEditor(r.id,r.name)}>Edit & review PDF</button></div> : (() => {
                     const all = res?.defs || r.fieldDefs || fieldDefs;
                     const val = (k: string) => (res ? (res.fields[k] ?? "") : ((r.fields || {})[k] || ""));
                     // Tier on the axis she cares about — "what still needs me" —
@@ -458,7 +471,11 @@ export default function KitDocumentList({
                     return (
                       <>
                         {needs.length > 0 && <>{head(`Needs your input · ${needs.length}`)}{grid(needs)}</>}
-                        {filled.length > 0 && <>{head("Filled from the deal")}{grid(filled)}</>}
+                        {filled.length > 0 && <details style={{marginTop:14}}>
+                          <summary style={{cursor:"pointer",fontSize:13,fontWeight:600,minHeight:44,display:"list-item"}}>Already filled · {filled.length} fields</summary>
+                          <p style={{fontSize:12.5,color:MUTED}}>Property and terms carry into this document automatically. Open these details only to make a document-specific override.</p>
+                          {grid(filled)}
+                        </details>}
                         {standard.length > 0 && (
                           <>
                             <button type="button" onClick={() => setShowStd((p) => ({ ...p, [r.id]: !p[r.id] }))}
@@ -477,13 +494,13 @@ export default function KitDocumentList({
                     </div>
                   )}
                   <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center", marginTop: 12, paddingTop: 11, borderTop: `1px solid ${BORDER}` }}>
-                    {built && <button type="button" onClick={() => onOpen(r.id)} style={link}>Open the full PDF</button>}
+                    {built && !pdfEditorUrl && <button type="button" onClick={() => onOpen(r.id)} style={link}>Open the full PDF</button>}
                     {built && <button type="button" onClick={() => onOpen(r.id, true)} style={link}>Download</button>}
                     {onExclude && !r.required && (
                       <button type="button" onClick={() => onExclude(r.id)} style={{ ...link, color: "#c0392b" }}>{excludeLabel}</button>
                     )}
                     <span style={{ fontSize: 12, color: "#9aa0a6" }}>
-                      {footNote || "Edits save as you type. Anything you change is redrafted when you send."}
+                      {built && pdfEditorUrl ? "PDF edits save directly to this document." : footNote || "Changes save when you leave a field. Redraft to update the PDF before review."}
                     </span>
                   </div>
                 </div>
