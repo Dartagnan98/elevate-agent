@@ -47,6 +47,17 @@ def _no_auto_discovery(monkeypatch):
     monkeypatch.setattr("gateway.platforms.telegram.HTTPXRequest", lambda **kwargs: MagicMock())
 
 
+@pytest.fixture
+def fast_conflict_retry(monkeypatch):
+    """Skip retry backoff while preserving cooperative background waits."""
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        return await real_sleep(0 if delay == 10 else delay, *args, **kwargs)
+
+    monkeypatch.setattr("gateway.platforms.telegram.asyncio.sleep", sleep)
+
+
 @pytest.mark.asyncio
 async def test_connect_rejects_same_host_token_lock(monkeypatch):
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="secret-token"))
@@ -65,7 +76,7 @@ async def test_connect_rejects_same_host_token_lock(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_polling_conflict_retries_before_fatal(monkeypatch):
+async def test_polling_conflict_retries_before_fatal(monkeypatch, fast_conflict_retry):
     """A single 409 should trigger a retry, not an immediate fatal error."""
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
     fatal_handler = AsyncMock()
@@ -97,6 +108,9 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
         add_handler=MagicMock(),
         initialize=AsyncMock(),
         start=AsyncMock(),
+        running=True,
+        stop=AsyncMock(),
+        shutdown=AsyncMock(),
     )
     builder = MagicMock()
     builder.token.return_value = builder
@@ -104,9 +118,6 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
     builder.get_updates_request.return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
-
-    # Speed up retries for testing
-    monkeypatch.setattr("asyncio.sleep", AsyncMock())
 
     ok = await adapter.connect()
 
@@ -118,18 +129,18 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
 
     # First conflict: should retry, NOT be fatal
     captured["error_callback"](conflict("Conflict: terminated by other getUpdates request"))
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    # Give the scheduled task a chance to run
-    for _ in range(10):
-        await asyncio.sleep(0)
-
-    assert adapter.has_fatal_error is False, "First conflict should not be fatal"
-    assert adapter._polling_conflict_count == 0, "Count should reset after successful retry"
+    try:
+        await asyncio.wait_for(adapter._polling_error_task, timeout=1)
+        assert adapter.has_fatal_error is False, "First conflict should not be fatal"
+        assert adapter._polling_conflict_count == 0, "Count should reset after successful retry"
+        updater.stop.assert_awaited_once()
+        assert updater.start_polling.await_count == 2
+    finally:
+        await adapter.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
+async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch, fast_conflict_retry):
     """After exhausting retries, the conflict should become fatal."""
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
     fatal_handler = AsyncMock()
@@ -173,6 +184,9 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
         add_handler=MagicMock(),
         initialize=AsyncMock(),
         start=AsyncMock(),
+        running=True,
+        stop=AsyncMock(),
+        shutdown=AsyncMock(),
     )
     builder = MagicMock()
     builder.token.return_value = builder
@@ -180,9 +194,6 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     builder.get_updates_request.return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
-
-    # Speed up retries for testing
-    monkeypatch.setattr("asyncio.sleep", AsyncMock())
 
     ok = await adapter.connect()
     assert ok is True
@@ -205,6 +216,7 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     )
     assert adapter.has_fatal_error is True
     fatal_handler.assert_awaited_once()
+    await adapter.disconnect()
 
 
 @pytest.mark.asyncio

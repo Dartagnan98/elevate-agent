@@ -129,6 +129,9 @@ def test_source_revision_catches_agent_writes_and_field_changes():
 def test_review_dispatch_requires_preview_and_always_waits(routes, tmp_path, monkeypatch, kit, route, preview_ok):
     import subprocess
     state, ns = routes
+    # This test starts after listing preparation; the separate MLC handoff
+    # endpoint test covers title/preparation failures before signature review.
+    monkeypatch.setattr('elevate_cli.mlc_handoff.listing_preparation_issues', lambda *_: [])
     pdf = tmp_path / 'source.pdf'; pdf.write_bytes(b'fixture')
     state[kit] = {'documents':[{'id':'privacy-notice','name':'Privacy','filePath':str(pdf),'status':'draft'}]}
     queued = []
