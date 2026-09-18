@@ -1833,7 +1833,24 @@ def list_deal_action_runs(
     return [_row_to_action_run(row) for row in rows]
 
 
-def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
+def get_deal_context(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    include_guides: bool = True,
+    include_events: bool = True,
+) -> dict[str, Any]:
+    """Return the full working context for one deal.
+
+    ``include_guides`` controls the province guide summary, the province
+    agent memory, and the per-stage document checklist. Those three pull the
+    whole province reference corpus (markdown bodies included) and are only
+    read by skill prompts, the ``admin_deal`` tool, and the deal modal.
+    ``include_events`` controls the co-contact list and the recent event
+    feed. Both default to True so every existing caller is unchanged; the
+    dashboard task board passes False for both because it only needs the
+    phase gate, which never reads them.
+    """
     deal = get_deal(conn, deal_id)
     if deal is None:
         raise LookupError(f"deal {deal_id!r} not found")
@@ -1868,8 +1885,11 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
         side=str(deal.get("side") or ""),
         stage=int(deal.get("currentStage") or 0),
     )
-    province_guide = province_guide_summary(conn, deal_province)
-    agent_guide_memory = province_agent_memory(conn, deal_province)
+    province_guide: dict[str, Any] = {}
+    agent_guide_memory: dict[str, Any] = {}
+    if include_guides:
+        province_guide = province_guide_summary(conn, deal_province)
+        agent_guide_memory = province_agent_memory(conn, deal_province)
     # Conditions for stage-document mapping combine the named-field conditions
     # (signing_authority, fintrac_form_type, etc.) with any boolean toggles
     # carried on the checklist (tenanted, multiple_offers, strata, lockbox...).
@@ -1885,12 +1905,14 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
                 stage_doc_conditions[str(key)] = value
     if deal.get("propertySubtype"):
         stage_doc_conditions["property_subtype"] = deal.get("propertySubtype")
-    stage_documents = province_stage_documents(
-        conn,
-        province=deal_province,
-        side=str(deal.get("side") or "listing"),
-        conditions=stage_doc_conditions,
-    )
+    stage_documents: dict[str, Any] = {}
+    if include_guides:
+        stage_documents = province_stage_documents(
+            conn,
+            province=deal_province,
+            side=str(deal.get("side") or "listing"),
+            conditions=stage_doc_conditions,
+        )
     from elevate_cli.admin_deal_flow import resolve_deal_phase
 
     deal_flow = resolve_deal_phase(
@@ -1904,7 +1926,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
     return {
         "deal": deal,
         "primaryContact": primary,
-        "coContacts": list_deal_contacts(conn, deal_id),
+        "coContacts": list_deal_contacts(conn, deal_id) if include_events else [],
         "conditions": conditions,
         "conditionalDocs": condition_docs,
         "checklist": checklist,
@@ -1914,7 +1936,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
         "provinceGuide": province_guide,
         "agentGuideMemory": agent_guide_memory,
         "stageDocuments": stage_documents,
-        "events": list_deal_events(conn, deal_id, limit=50),
+        "events": list_deal_events(conn, deal_id, limit=50) if include_events else [],
     }
 
 
@@ -2133,7 +2155,13 @@ def list_deal_tasks(
 
     tasks: list[dict[str, Any]] = []
     for deal in list_deals(conn, status="active", limit=max(200, limit + offset), offset=0):
-        context = get_deal_context(conn, str(deal["id"]))
+        # The task board only reads the phase gate, prior runs, and automation
+        # triggers. Skip the province corpus and the event feed: the dashboard
+        # polls this for every active deal every ~20s, and those fields are
+        # only consumed by skill prompts and the single-deal views.
+        context = get_deal_context(
+            conn, str(deal["id"]), include_guides=False, include_events=False
+        )
         flow = context.get("dealFlow") or {}
         gate = flow.get("gate") or {}
         active_run_skills: set[str] = set()
