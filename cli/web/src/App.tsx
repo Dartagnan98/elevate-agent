@@ -1362,6 +1362,12 @@ function DesktopSidebar({
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>(readCachedSessions);
+  // Mirror of `sessions` for the shallow poll merge below (see loadSessions).
+  const sessionsRef = useRef<SessionInfo[]>([]);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+  const sessionPollTickRef = useRef(0);
   // Sessions whose agent is currently waiting on the user (clarify/approval/
   // sudo/secret prompt) — drives the amber sidebar dot. Fed by the
   // elevate:agent-needs-approval window event ChatPage emits.
@@ -1509,17 +1515,26 @@ function DesktopSidebar({
     }
   }, [desktopUpdate?.status, desktopUpdater, runAction, showToast, updateStatus?.available]);
 
-  const loadSessions = useCallback(async (options?: { refresh?: boolean }) => {
+  // `deep` walks up to SIDEBAR_SESSION_SCAN_LIMIT rows (serial 200-row pages)
+  // until the sidebar has enough visible chats + cron runs. That is the right
+  // thing on first load and on an explicit refresh, but the 12s background poll
+  // was doing it too — up to 7 sequential requests per tick on a workspace with
+  // many automation sessions. A shallow poll fetches only the first page and
+  // keeps the rows an earlier deep scan already found; the interval still runs
+  // a deep scan every few ticks so stale rows are bounded.
+  const loadSessions = useCallback(async (options?: { refresh?: boolean; deep?: boolean }) => {
+    const deep = options?.deep ?? true;
     try {
       const nowSec = Date.now() / 1000;
       const byId = new Map<string, SessionInfo>();
       let chatCount = 0;
       let cronRunCount = 0;
       let hiddenAutomationCount = 0;
+      const scanLimit = deep ? SIDEBAR_SESSION_SCAN_LIMIT : SIDEBAR_SESSION_PAGE_LIMIT;
 
       for (
         let offset = 0;
-        offset < SIDEBAR_SESSION_SCAN_LIMIT;
+        offset < scanLimit;
         offset += SIDEBAR_SESSION_PAGE_LIMIT
       ) {
         const resp = await api.getSessions(SIDEBAR_SESSION_PAGE_LIMIT, offset, {
@@ -1548,6 +1563,17 @@ function DesktopSidebar({
         const noMorePages = page.length < SIDEBAR_SESSION_PAGE_LIMIT;
         if (hasEnoughVisibleRows || noMorePages) {
           break;
+        }
+      }
+
+      if (!deep) {
+        // Carry forward rows from beyond the first page that the last deep
+        // scan found. Optimistic rows are handled separately below.
+        const optimisticIds = optimisticSessionsRef.current;
+        for (const prior of sessionsRef.current) {
+          if (!byId.has(prior.id) && !optimisticIds.has(prior.id)) {
+            byId.set(prior.id, prior);
+          }
         }
       }
 
@@ -1600,7 +1626,14 @@ function DesktopSidebar({
     if (typeof document === "undefined") return;
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      if (!id) id = window.setInterval(loadSessions, 12000);
+      if (!id) {
+        id = window.setInterval(() => {
+          sessionPollTickRef.current += 1;
+          // Every 5th tick (60s) re-walks the full scan so removed/hidden
+          // sessions fall out; the other ticks only refetch the first page.
+          void loadSessions({ deep: sessionPollTickRef.current % 5 === 0 });
+        }, 12000);
+      }
     };
     const stop = () => {
       if (id) { window.clearInterval(id); id = null; }

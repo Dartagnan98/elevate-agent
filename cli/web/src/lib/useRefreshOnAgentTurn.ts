@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 
+const AGENT_TURN_REFRESH_COALESCE_MS = 300;
+
 /**
  * Re-run a fetch/refresh the instant the agent finishes a turn.
  *
@@ -23,11 +25,21 @@ export function useRefreshOnAgentTurn(
 
   useEffect(() => {
     if (!enabled || typeof window === "undefined") return;
+    // Coalesce bursts: a turn with subagents or tool follow-ups can emit
+    // several `message.complete` events within a few hundred ms, and every
+    // subscriber (the hub alone fans out to 7 endpoints) would refetch for
+    // each one. One trailing refresh per burst is still "instant" to a human.
+    let timer: number | null = null;
     const handler = () => {
-      void refreshRef.current();
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void refreshRef.current();
+      }, AGENT_TURN_REFRESH_COALESCE_MS);
     };
     window.addEventListener("elevate:agent-turn-complete", handler);
     return () => {
+      if (timer !== null) window.clearTimeout(timer);
       window.removeEventListener("elevate:agent-turn-complete", handler);
     };
   }, [enabled]);

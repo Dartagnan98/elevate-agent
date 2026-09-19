@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import type { ActionStatusResponse, UpdateStatusResponse } from "@/lib/api";
 import { Toast } from "@/components/Toast";
@@ -124,20 +124,36 @@ export function SystemActionsProvider({
   const isRunning = activeAction !== null && actionStatus?.running !== false;
   const isBusy = pendingAction !== null || isRunning;
 
+  // This provider wraps the whole app. A fresh object literal here re-rendered
+  // every consumer on every provider state change (toasts, the 1.5s action
+  // status poll, the update check), so keep the identity stable.
+  const value = useMemo(
+    () => ({
+      actionStatus,
+      activeAction,
+      dismissLog,
+      isBusy,
+      isRunning,
+      pendingAction,
+      refreshUpdateStatus,
+      runAction,
+      updateStatus,
+    }),
+    [
+      actionStatus,
+      activeAction,
+      dismissLog,
+      isBusy,
+      isRunning,
+      pendingAction,
+      refreshUpdateStatus,
+      runAction,
+      updateStatus,
+    ],
+  );
+
   return (
-    <SystemActionsContext.Provider
-      value={{
-        actionStatus,
-        activeAction,
-        dismissLog,
-        isBusy,
-        isRunning,
-        pendingAction,
-        refreshUpdateStatus,
-        runAction,
-        updateStatus,
-      }}
-    >
+    <SystemActionsContext.Provider value={value}>
       {children}
       <Toast toast={toast} />
     </SystemActionsContext.Provider>
