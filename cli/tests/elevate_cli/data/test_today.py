@@ -127,3 +127,31 @@ def test_today_endpoint_returns_page_snapshot():
         assert key in body
     assert len(body["hourBuckets"]) == 24
     assert len(body["dayBuckets"]) == 7
+
+
+def test_today_window_bound_keeps_offset_timestamps_and_drops_old_rows():
+    """The SQL lower bound is padded, so a mixed-offset event just inside the
+    7-day window still counts while a much older one is excluded."""
+    now = datetime(2026, 5, 27, 18, 0, tzinfo=timezone.utc)
+    pacific = timezone(timedelta(hours=-7))
+    with connect() as conn:
+        contact = upsert_contact(
+            conn, display_name="Edge Case", primary_phone="+15550000003", source_key="sms:edge",
+        )
+        conv = get_or_create_conversation(
+            conn, contact_id=contact["id"], source_id="sms-provider", channel="sms", thread_key="edge",
+        )
+        # Six days ago, written with a non-UTC offset: inside the week window.
+        _record_inbound(
+            conn, contact, conv, body="old but counted",
+            ts=(now - timedelta(days=6)).astimezone(pacific),
+        )
+        # Thirty days ago: outside the window, must not appear anywhere.
+        _record_inbound(conn, contact, conv, body="ancient", ts=now - timedelta(days=30))
+        _record_inbound(conn, contact, conv, body="fresh", ts=now - timedelta(minutes=1))
+
+        activity = build_today_activity(conn, now=now)
+
+    total_week_leads = sum(int(bucket["leadsIn"]) for bucket in activity["dayBuckets"])
+    assert total_week_leads == 2
+    assert activity["dayBuckets"][-1]["leadsIn"] == 1

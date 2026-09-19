@@ -137,32 +137,49 @@ def _waiting_threads_count(conn: sqlite3.Connection) -> int:
     return int(row["c"] if row and row["c"] is not None else 0)
 
 
-def _event_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
+# Timestamps are ISO-8601 text (``now_iso()`` writes UTC with an explicit
+# offset). A lexicographic lower bound on the column is exact for same-offset
+# strings and off by at most one day for mixed offsets, so the SQL bound is
+# padded by two days and the Python loop below still applies the precise
+# window. Without the bound these queries pulled the newest 20k/5k rows on
+# every Today poll to compute a 7-day rollup.
+_SQL_WINDOW_PAD = timedelta(days=2)
+
+
+def _sql_lower_bound(window_start: datetime) -> str:
+    return (window_start - _SQL_WINDOW_PAD).astimezone(timezone.utc).isoformat()
+
+
+def _event_rows(conn: sqlite3.Connection, *, since: datetime | None = None) -> list[dict[str, Any]]:
+    sql = """
         SELECT
           e.kind,
           e.ts,
           e.conversation_id
         FROM events e
         WHERE e.kind IN ('inbound', 'outbound')
-        ORDER BY e.ts DESC
-        LIMIT 20000
-        """
-    ).fetchall()
+    """
+    params: list[Any] = []
+    if since is not None:
+        sql += " AND e.ts >= ?"
+        params.append(_sql_lower_bound(since))
+    sql += " ORDER BY e.ts DESC LIMIT 20000"
+    rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(row) for row in rows]
 
 
-def _completed_run_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
+def _completed_run_rows(conn: sqlite3.Connection, *, since: datetime | None = None) -> list[dict[str, Any]]:
+    sql = """
         SELECT status, completed_at
         FROM admin_action_runs
         WHERE completed_at IS NOT NULL
-        ORDER BY completed_at DESC
-        LIMIT 5000
-        """
-    ).fetchall()
+    """
+    params: list[Any] = []
+    if since is not None:
+        sql += " AND completed_at >= ?"
+        params.append(_sql_lower_bound(since))
+    sql += " ORDER BY completed_at DESC LIMIT 5000"
+    rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -190,7 +207,7 @@ def build_today_activity(
     latest_activity: datetime | None = None
     parsed_events: list[tuple[datetime, str, str | None]] = []
 
-    for row in _event_rows(conn):
+    for row in _event_rows(conn, since=week_start):
         ts = _parse_ts(row.get("ts"))
         kind = str(row.get("kind") or "")
         if ts is None or kind not in {"inbound", "outbound"}:
@@ -239,7 +256,7 @@ def build_today_activity(
         elif yesterday_start <= ts < today_start:
             response_samples_yesterday.append(minutes)
 
-    for row in _completed_run_rows(conn):
+    for row in _completed_run_rows(conn, since=week_start):
         if str(row.get("status") or "") not in {"succeeded", "completed", "success", "approved"}:
             continue
         completed = _parse_ts(row.get("completed_at"))

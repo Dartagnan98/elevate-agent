@@ -294,3 +294,40 @@ def test_agent_surface_task_update_and_delete_policy_block_without_mutation():
     assert still_there is not None
     assert still_there["status"] == "blocked"
     assert len(approvals) == 2
+
+
+def test_list_and_get_enrich_dependencies_outside_the_listed_set():
+    """Read paths fetch only the blockers they need, not the whole table.
+
+    The blocker is filtered out of the list (different assignee), so it must
+    be looked up separately for the dependency state to be right.
+    """
+    with connect() as conn:
+        done_blocker = surface_tasks.create_task(conn, title="Done blocker", assignee="alice")
+        surface_tasks.update_task(conn, done_blocker["id"], {"status": "completed"})
+        open_blocker = surface_tasks.create_task(conn, title="Open blocker", assignee="alice")
+        waiting = surface_tasks.create_task(
+            conn,
+            title="Waits on both",
+            assignee="bob",
+            blocked_by=[done_blocker["id"], open_blocker["id"]],
+        )
+        # Unrelated rows must not be needed for enrichment.
+        for i in range(5):
+            surface_tasks.create_task(conn, title=f"noise {i}", assignee="carol")
+
+        listed = surface_tasks.list_tasks(conn, assignee="bob")
+        assert [t["id"] for t in listed] == [waiting["id"]]
+        assert listed[0]["unresolvedDependencyIds"] == [open_blocker["id"]]
+        assert listed[0]["unresolvedDependencies"] == [
+            {"id": open_blocker["id"], "title": "Open blocker", "status": "pending"}
+        ]
+
+        fetched = surface_tasks.get_task(conn, waiting["id"])
+        assert fetched is not None
+        assert fetched["unresolvedDependencyIds"] == [open_blocker["id"]]
+
+        # A blocker id that no longer exists reads as missing, as before.
+        ghost = surface_tasks.create_task(conn, title="Ghost dep", assignee="bob", blocked_by=["nope"])
+        fetched = surface_tasks.get_task(conn, ghost["id"])
+        assert fetched["unresolvedDependencies"] == [{"id": "nope", "title": None, "status": "missing"}]

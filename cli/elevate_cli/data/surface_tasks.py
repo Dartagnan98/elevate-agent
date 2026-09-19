@@ -423,6 +423,33 @@ def _all_task_rows(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
     return {str(_row_get(row, "id")): row for row in rows}
 
 
+def _dependency_rows_for(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row]
+) -> dict[str, sqlite3.Row]:
+    """Rows needed to enrich ``rows`` with dependency state.
+
+    Enrichment is not transitive: each task only needs the status/title of
+    the tasks in its own ``blocked_by`` list. Fetch just those instead of the
+    whole table (the read path used to full-scan ``surface_tasks`` on every
+    list and every single-task get; the write path still uses
+    ``_all_task_rows`` because it rewrites the reverse ``blocks`` links).
+    """
+    by_id: dict[str, sqlite3.Row] = {str(_row_get(row, "id")): row for row in rows}
+    wanted: set[str] = set()
+    for row in rows:
+        for dep_id in _json_list(_row_get(row, "blocked_by")):
+            if dep_id and dep_id not in by_id:
+                wanted.add(str(dep_id))
+    if wanted:
+        ids = sorted(wanted)
+        placeholders = ",".join("?" for _ in ids)
+        for row in conn.execute(
+            f"SELECT * FROM surface_tasks WHERE id IN ({placeholders})", tuple(ids)
+        ).fetchall():
+            by_id[str(_row_get(row, "id"))] = row
+    return by_id
+
+
 def _dependency_graph(rows: dict[str, sqlite3.Row]) -> dict[str, list[str]]:
     return {
         task_id: _json_list(_row_get(row, "blocked_by"))
@@ -696,15 +723,15 @@ def list_tasks(
     else:
         sql += " ORDER BY created_at DESC"
     rows = conn.execute(sql, tuple(params)).fetchall()
-    all_rows = _all_task_rows(conn)
-    return _enrich_task_dependencies([_row_to_task(r) for r in rows], all_rows)
+    dep_rows = _dependency_rows_for(conn, list(rows))
+    return _enrich_task_dependencies([_row_to_task(r) for r in rows], dep_rows)
 
 
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
     row = conn.execute("SELECT * FROM surface_tasks WHERE id = ?", (task_id,)).fetchone()
     if not row:
         return None
-    return _enrich_task_dependencies([_row_to_task(row)], _all_task_rows(conn))[0]
+    return _enrich_task_dependencies([_row_to_task(row)], _dependency_rows_for(conn, [row]))[0]
 
 
 def reap_stale_in_progress(

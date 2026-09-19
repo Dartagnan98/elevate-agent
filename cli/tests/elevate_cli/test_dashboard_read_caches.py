@@ -76,3 +76,28 @@ def test_load_jobs_cache_invalidated_by_save_and_external_write(tmp_path, monkey
         json.dumps({"jobs": [{"id": "b", "name": "external"}]}), encoding="utf-8"
     )
     assert [j["id"] for j in cron_jobs.load_jobs()] == ["b"]
+
+
+def test_load_config_throttles_the_home_ensure_step(monkeypatch):
+    from elevate_cli import config as config_mod
+
+    calls = {"n": 0}
+    real = config_mod.ensure_elevate_home
+
+    def counting():
+        calls["n"] += 1
+        real()
+
+    monkeypatch.setattr(config_mod, "ensure_elevate_home", counting)
+    config_mod._ENSURE_HOME_LAST.clear()
+
+    config_mod.load_config()
+    config_mod.load_config()
+    config_mod.load_config()
+    assert calls["n"] == 1, "repeated load_config calls must not re-run the ensure step"
+
+    # Once the interval lapses it runs again.
+    for key in list(config_mod._ENSURE_HOME_LAST):
+        config_mod._ENSURE_HOME_LAST[key] -= config_mod._ENSURE_HOME_INTERVAL_S + 1
+    config_mod.load_config()
+    assert calls["n"] == 2

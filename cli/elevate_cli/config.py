@@ -20,6 +20,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -3850,9 +3851,28 @@ def read_raw_config() -> Dict[str, Any]:
         return {}
 
 
+# ``ensure_elevate_home()`` does ~10 mkdir/chmod syscalls plus a full read of
+# SOUL.md (to decide whether to re-seed it) every time it runs. ``load_config``
+# is called from most dashboard handlers on every poll, so throttle the ensure
+# step to once per home path per interval; ``elevate setup`` and the other
+# explicit callers still run it unconditionally.
+_ENSURE_HOME_INTERVAL_S = 30.0
+_ENSURE_HOME_LAST: Dict[str, float] = {}
+
+
+def _ensure_elevate_home_throttled() -> None:
+    key = str(get_elevate_home())
+    now = time.monotonic()
+    last = _ENSURE_HOME_LAST.get(key)
+    if last is not None and (now - last) < _ENSURE_HOME_INTERVAL_S:
+        return
+    ensure_elevate_home()
+    _ENSURE_HOME_LAST[key] = now
+
+
 def load_config() -> Dict[str, Any]:
     """Load configuration from ~/.elevate/config.yaml."""
-    ensure_elevate_home()
+    _ensure_elevate_home_throttled()
     config_path = get_config_path()
 
     cache_key = str(config_path)
