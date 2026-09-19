@@ -29,7 +29,7 @@ def create_threads_router(*, log: logging.Logger | None = None) -> APIRouter:
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/threads/meta")
-    async def list_thread_meta_endpoint(
+    def list_thread_meta_endpoint(
         label: Optional[str] = None,
         minScore: Optional[int] = None,
         limit: int = 200,
@@ -48,7 +48,7 @@ def create_threads_router(*, log: logging.Logger | None = None) -> APIRouter:
             raise HTTPException(status_code=500, detail=f"List thread meta failed: {exc}")
 
     @router.get("/api/threads/meta/{source_id}/{thread_id}")
-    async def get_thread_meta_endpoint(source_id: str, thread_id: str):
+    def get_thread_meta_endpoint(source_id: str, thread_id: str):
         try:
             from elevate_cli import outreach_db
 
@@ -63,7 +63,7 @@ def create_threads_router(*, log: logging.Logger | None = None) -> APIRouter:
             raise HTTPException(status_code=500, detail=f"Get thread meta failed: {exc}")
 
     @router.post("/api/threads/score")
-    async def score_thread_endpoint(body: ThreadScoreBody):
+    def score_thread_endpoint(body: ThreadScoreBody):
         try:
             from elevate_cli import outreach_db
 
@@ -83,7 +83,7 @@ def create_threads_router(*, log: logging.Logger | None = None) -> APIRouter:
             raise HTTPException(status_code=500, detail=f"Score thread failed: {exc}")
 
     @router.post("/api/threads/dead")
-    async def mark_thread_dead_endpoint(body: ThreadDeadBody):
+    def mark_thread_dead_endpoint(body: ThreadDeadBody):
         try:
             from elevate_cli import outreach_db
 

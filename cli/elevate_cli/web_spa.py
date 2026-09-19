@@ -34,10 +34,27 @@ def mount_spa(
         return
 
     _index_path = web_dist / "index.html"
+    # The built index.html only changes on a redeploy, but it was re-read from
+    # disk on every SPA navigation and every deep link. Cache the raw file on
+    # (mtime_ns, size); the token injection below is cheap string work.
+    _index_cache: dict[str, object] = {"key": None, "html": ""}
+
+    def _read_index_html() -> str:
+        try:
+            st = _index_path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return _index_path.read_text()
+        if _index_cache["key"] == key:
+            return str(_index_cache["html"])
+        html = _index_path.read_text()
+        _index_cache["key"] = key
+        _index_cache["html"] = html
+        return html
 
     def _serve_index():
         """Return index.html with the session token injected."""
-        html = _index_path.read_text()
+        html = _read_index_html()
         chat_js = "true" if embedded_chat_enabled() else "false"
         # transcriptStore (Phase 4) per-box burn-in switch. OFF unless this box
         # sets ELEVATE_TRANSCRIPT_STORE=1 — so it's scoped to a tester's machine

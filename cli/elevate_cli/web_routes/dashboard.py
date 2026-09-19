@@ -308,7 +308,7 @@ def create_dashboard_router(*, project_root: Path, log: logging.Logger | None = 
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/dashboard/themes")
-    async def get_dashboard_themes():
+    def get_dashboard_themes():
         config = load_config()
         active = _normalise_dashboard_theme_name(config.get("dashboard", {}).get("theme", "dark"))
         themes = []
@@ -317,7 +317,7 @@ def create_dashboard_router(*, project_root: Path, log: logging.Logger | None = 
         return {"themes": themes, "active": active}
 
     @router.put("/api/dashboard/theme")
-    async def set_dashboard_theme(body: ThemeSetBody):
+    def set_dashboard_theme(body: ThemeSetBody):
         config = load_config()
         if "dashboard" not in config:
             config["dashboard"] = {}
@@ -326,7 +326,7 @@ def create_dashboard_router(*, project_root: Path, log: logging.Logger | None = 
         return {"ok": True, "theme": config["dashboard"]["theme"]}
 
     @router.get("/api/dashboard/plugins")
-    async def get_dashboard_plugins():
+    def get_dashboard_plugins():
         plugins = _get_dashboard_plugins(project_root, _log)
         # UI-facing list only: skip plugins whose JS bundle was never built
         # (manifest present, dist/ missing) — advertising them makes the SPA
@@ -345,12 +345,12 @@ def create_dashboard_router(*, project_root: Path, log: logging.Logger | None = 
         return out
 
     @router.get("/api/dashboard/plugins/rescan")
-    async def rescan_dashboard_plugins():
+    def rescan_dashboard_plugins():
         plugins = _get_dashboard_plugins(project_root, _log, force_rescan=True)
         return {"ok": True, "count": len(plugins)}
 
     @router.get("/dashboard-plugins/{plugin_name}/{file_path:path}")
-    async def serve_plugin_asset(plugin_name: str, file_path: str):
+    def serve_plugin_asset(plugin_name: str, file_path: str):
         plugins = _get_dashboard_plugins(project_root, _log)
         plugin = next((p for p in plugins if p["name"] == plugin_name), None)
         if not plugin:

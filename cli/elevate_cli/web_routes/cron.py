@@ -94,7 +94,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
         return isinstance(origin, dict) and str(origin.get("source") or "") == "agent_handoff"
 
     @router.get("/api/cron/jobs")
-    async def list_cron_jobs(compact: bool = False, include_system: bool = False):
+    def list_cron_jobs(compact: bool = False, include_system: bool = False):
         from cron.jobs import list_jobs
         jobs = list_jobs(include_disabled=True)
         if not include_system:
@@ -103,7 +103,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.get("/api/cron/jobs/{job_id}")
-    async def get_cron_job(job_id: str):
+    def get_cron_job(job_id: str):
         from cron.jobs import get_job
         job = get_job(job_id)
         if not job:
@@ -112,7 +112,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.post("/api/cron/jobs")
-    async def create_cron_job(body: CronJobCreate):
+    def create_cron_job(body: CronJobCreate):
         from cron.jobs import create_job
         from elevate_cli.onboarding import compute_onboarding_status
 
@@ -187,7 +187,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.post("/api/cron/jobs/ensure-lanes")
-    async def ensure_lanes(body: _EnsureLanesBody):
+    def ensure_lanes(body: _EnsureLanesBody):
         """Idempotently install/converge the default outreach/admin lanes.
 
         Returns ``{created: [...], updated: [...], skipped: [...]}`` so the UI can decide
@@ -261,7 +261,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.put("/api/cron/jobs/{job_id}")
-    async def update_cron_job(job_id: str, body: CronJobUpdate):
+    def update_cron_job(job_id: str, body: CronJobUpdate):
         from cron.jobs import update_job
         job = update_job(job_id, body.updates)
         if not job:
@@ -281,7 +281,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.get("/api/cron/jobs/{job_id}/backfill")
-    async def get_cron_job_backfill(job_id: str):
+    def get_cron_job_backfill(job_id: str):
         """Return the lane's backfill progress: pending flag + day/eligible counters."""
         from cron.jobs import get_job
         job = get_job(job_id)
@@ -295,7 +295,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.post("/api/cron/jobs/{job_id}/backfill/progress")
-    async def post_cron_job_backfill_progress(job_id: str, body: _BackfillProgressBody):
+    def post_cron_job_backfill_progress(job_id: str, body: _BackfillProgressBody):
         """Lane skill calls this at end of each backfill run to record progress.
 
         Increments day, records queued_today + eligible_remaining + total_estimate.
@@ -321,7 +321,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.post("/api/cron/jobs/{job_id}/pause")
-    async def pause_cron_job(job_id: str):
+    def pause_cron_job(job_id: str):
         from cron.jobs import pause_job
         job = pause_job(job_id)
         if not job:
@@ -330,7 +330,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.post("/api/cron/jobs/{job_id}/resume")
-    async def resume_cron_job(job_id: str):
+    def resume_cron_job(job_id: str):
         from cron.jobs import resume_job
         job = resume_job(job_id)
         if not job:
@@ -339,7 +339,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.post("/api/cron/jobs/{job_id}/trigger")
-    async def trigger_cron_job(job_id: str):
+    def trigger_cron_job(job_id: str):
         from cron.jobs import trigger_job
         job = trigger_job(job_id)
         if not job:
@@ -374,7 +374,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
 
 
     @router.delete("/api/cron/jobs/{job_id}")
-    async def delete_cron_job(job_id: str):
+    def delete_cron_job(job_id: str):
         from cron.jobs import remove_job
         if not remove_job(job_id):
             raise HTTPException(status_code=404, detail="Job not found")

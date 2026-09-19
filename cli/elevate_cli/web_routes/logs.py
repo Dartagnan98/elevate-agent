@@ -12,7 +12,7 @@ def create_logs_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/logs")
-    async def get_logs(
+    def get_logs(
         file: str = "agent",
         lines: int = 100,
         level: Optional[str] = None,

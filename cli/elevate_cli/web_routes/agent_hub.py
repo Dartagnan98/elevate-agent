@@ -32,7 +32,7 @@ def create_agent_hub_router(
 
 
     @router.get("/api/agent-hub")
-    async def get_agent_hub(
+    def get_agent_hub(
         lite: bool = False,
         include_memory_graph: Optional[bool] = None,
         include_session_total: Optional[bool] = None,
@@ -62,7 +62,7 @@ def create_agent_hub_router(
 
     @router.get("/api/agent-hub/agent-packs")
     @router.get("/api/agent-hub/cortext-packs")  # legacy alias
-    async def get_cortext_agent_packs():
+    def get_cortext_agent_packs():
         """Return installable agent-pack presets converted to native Agent Hub payloads."""
         try:
             return _build_cortext_agent_packs()

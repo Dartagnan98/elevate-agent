@@ -95,12 +95,12 @@ def create_config_router(
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/config")
-    async def get_config():
+    def get_config():
         config = _normalize_config_for_web(load_config_func())
         return {k: v for k, v in config.items() if not k.startswith("_")}
 
     @router.put("/api/config")
-    async def update_config(body: ConfigUpdate):
+    def update_config(body: ConfigUpdate):
         try:
             save_config_func(
                 _denormalize_config_from_web(
@@ -114,11 +114,11 @@ def create_config_router(
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.get("/api/config/defaults")
-    async def get_defaults():
+    def get_defaults():
         return default_config
 
     @router.get("/api/config/schema")
-    async def get_schema():
+    def get_schema():
         return {"fields": config_schema, "category_order": category_order}
 
     @router.get("/api/model/info")
@@ -250,14 +250,14 @@ def create_config_router(
             raise HTTPException(status_code=500, detail=str(exc))
 
     @router.get("/api/config/raw")
-    async def get_config_raw():
+    def get_config_raw():
         path = get_config_path()
         if not path.exists():
             return {"yaml": ""}
         return {"yaml": path.read_text(encoding="utf-8")}
 
     @router.put("/api/config/raw")
-    async def update_config_raw(body: RawConfigUpdate):
+    def update_config_raw(body: RawConfigUpdate):
         try:
             parsed = yaml.safe_load(body.yaml_text)
             if not isinstance(parsed, dict):

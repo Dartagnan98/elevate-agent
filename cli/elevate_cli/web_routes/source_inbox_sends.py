@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger) -> None:
     @router.get("/api/source-inbox/draft/{source_id}/{thread_id}/{task_id}/send-status")
-    async def get_source_inbox_draft_send_status(source_id: str, thread_id: str, task_id: str):
+    def get_source_inbox_draft_send_status(source_id: str, thread_id: str, task_id: str):
         try:
             from elevate_cli import sender
 
@@ -20,7 +20,7 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
             raise HTTPException(status_code=500, detail=f"Send status lookup failed: {exc}")
 
     @router.get("/api/source-inbox/sent")
-    async def get_source_inbox_sent(limit: int = 100, include_pending: bool = False):
+    def get_source_inbox_sent(limit: int = 100, include_pending: bool = False):
         """Recent send_queue rows, newest first. Powers the /leads Sent tab.
 
         - `include_pending=false` (default): only delivered messages (status=sent).
@@ -48,7 +48,7 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
             raise HTTPException(status_code=500, detail=f"Sent list failed: {exc}")
 
     @router.get("/api/source-inbox/not-sent")
-    async def get_source_inbox_not_sent(limit: int = 100):
+    def get_source_inbox_not_sent(limit: int = 100):
         """send_queue rows that did NOT get delivered — failed, skipped (e.g. no
         phone / safety hold), or stuck retrying. Powers the /leads 'Didn't Send'
         tab so silently-dropped approvals don't vanish off the board."""

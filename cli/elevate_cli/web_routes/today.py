@@ -95,13 +95,9 @@ def _live_sessions() -> list[dict[str, Any]]:
 
         sessions = list_session_summaries(limit=36, offset=0)
     except Exception:
-        from elevate_state import SessionDB
+        from elevate_cli.web_session_store import _get_session_db
 
-        db = SessionDB()
-        try:
-            sessions = db.list_sessions_rich(limit=36, offset=0)
-        finally:
-            db.close()
+        sessions = _get_session_db().list_sessions_rich(limit=36, offset=0)
 
     live: list[dict[str, Any]] = []
     for session in sessions:

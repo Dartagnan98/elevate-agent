@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import threading
 import re
 import sqlite3
 import time
@@ -2537,6 +2538,43 @@ def _memory_fact_items(content: Any, *, limit: int = 200) -> list[str]:
     return facts[:limit]
 
 
+# Append-only JSONL files (memory events, context pressure) are re-read by the
+# Agent Hub snapshot once per agent per request. Cache the parsed tail on the
+# file's (mtime_ns, size) so a poll only pays for the parse when the file
+# actually changed. Callers treat the returned records as read-only.
+_JSONL_TAIL_CACHE: dict[str, tuple[tuple[int, int, int], list[dict[str, Any]]]] = {}
+_JSONL_TAIL_CACHE_LOCK = threading.Lock()
+
+
+def _read_jsonl_tail_records(path: Path, tail: int) -> list[dict[str, Any]]:
+    """Return the parsed dict records from the last ``tail`` lines of ``path``."""
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = (st.st_mtime_ns, st.st_size, int(tail))
+    cache_key = str(path)
+    with _JSONL_TAIL_CACHE_LOCK:
+        hit = _JSONL_TAIL_CACHE.get(cache_key)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-tail:]
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    with _JSONL_TAIL_CACHE_LOCK:
+        _JSONL_TAIL_CACHE[cache_key] = (key, records)
+    return records
+
+
 def agent_memory_facts(agent_id: str, *, limit: int = 40) -> list[dict[str, Any]]:
     """Return recent native memory facts for an agent."""
     if not str(agent_id or "").strip():
@@ -2547,19 +2585,9 @@ def agent_memory_facts(agent_id: str, *, limit: int = 40) -> list[dict[str, Any]
     path = _agent_memory_events_path()
     if not path.exists():
         return []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-5000:]
-    except Exception:
-        return []
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for line in lines:
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(rec, dict):
-            continue
+    for rec in _read_jsonl_tail_records(path, 5000):
         if _slug(str(rec.get("agent") or "")) != clean_agent:
             continue
         fact = _redact_memory_fact(str(rec.get("fact") or ""))
@@ -2918,14 +2946,13 @@ def _session_summary(limit: int = 100, *, include_total: bool = True) -> dict[st
         "error": "",
     }
     try:
-        from elevate_state import SessionDB
+        from elevate_cli.web_session_store import _get_session_db
 
-        db = SessionDB()
-        try:
-            sessions = db.list_sessions_rich(limit=limit, include_children=False)
-            summary["total"] = db.session_count() if include_total else len(sessions)
-        finally:
-            db.close()
+        # Process-wide shared handle: constructing SessionDB() replays the
+        # whole schema (twice) on every call, and this runs on every hub poll.
+        db = _get_session_db()
+        sessions = db.list_sessions_rich(limit=limit, include_children=False)
+        summary["total"] = db.session_count() if include_total else len(sessions)
     except Exception as exc:
         summary["error"] = str(exc)
         return summary
@@ -3825,17 +3852,11 @@ def _context_pressure_summaries() -> dict[str, dict[str, Any]]:
         path = data_root() / "agent_context_pressure.jsonl"
         if not path.exists():
             return {}
-        lines = path.read_text(encoding="utf-8").splitlines()[-200:]
+        records = _read_jsonl_tail_records(path, 200)
     except Exception:
         return {}
     summaries: dict[str, dict[str, Any]] = {}
-    for line in lines:
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(rec, dict):
-            continue
+    for rec in records:
         agent_id = _slug(str(rec.get("agent") or ""))
         if not agent_id:
             continue

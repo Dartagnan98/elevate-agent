@@ -52,12 +52,12 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             pass
 
     @router.get("/api/access")
-    async def get_access_status():
+    def get_access_status():
         """Return local entitlement state used to unlock paid dashboard packs."""
         return dashboard_access_status()
 
     @router.get("/api/license/status")
-    async def get_license_status():
+    def get_license_status():
         from elevate_cli import license as lic_mod
 
         lic = lic_mod.load()
@@ -86,7 +86,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         }
 
     @router.post("/api/license/activate")
-    async def activate_license(body: LicenseActivateBody, request: Request):
+    def activate_license(body: LicenseActivateBody, request: Request):
         require_token(request)
 
         from elevate_cli import license as lic_mod
@@ -113,7 +113,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         }
 
     @router.post("/api/license/signup")
-    async def signup_license(body: LicenseActivateBody, request: Request):
+    def signup_license(body: LicenseActivateBody, request: Request):
         require_token(request)
 
         from elevate_cli import license as lic_mod
@@ -145,7 +145,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         }
 
     @router.post("/api/license/request-code")
-    async def request_license_code(body: LoginCodeRequestBody, request: Request):
+    def request_license_code(body: LoginCodeRequestBody, request: Request):
         require_token(request)
 
         from elevate_cli import license as lic_mod
@@ -159,7 +159,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         return {"ok": True}
 
     @router.post("/api/license/activate-code")
-    async def activate_license_code(body: LoginCodeVerifyBody, request: Request):
+    def activate_license_code(body: LoginCodeVerifyBody, request: Request):
         require_token(request)
 
         from elevate_cli import license as lic_mod
@@ -186,7 +186,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         }
 
     @router.post("/api/license/sync-skills")
-    async def sync_license_skills(request: Request):
+    def sync_license_skills(request: Request):
         require_token(request)
 
         from elevate_cli import cloud_skills
@@ -217,7 +217,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         }
 
     @router.post("/api/license/logout")
-    async def logout_license(request: Request):
+    def logout_license(request: Request):
         require_token(request)
 
         from elevate_cli import license as lic_mod

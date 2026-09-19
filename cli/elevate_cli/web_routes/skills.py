@@ -92,7 +92,7 @@ def create_skills_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/skills")
-    async def get_skills():
+    def get_skills():
         from tools.skills_tool import _find_all_skills
         from elevate_cli.skills_config import get_disabled_skills
 
@@ -104,7 +104,7 @@ def create_skills_router() -> APIRouter:
         return skills
 
     @router.put("/api/skills/toggle")
-    async def toggle_skill(body: SkillToggle):
+    def toggle_skill(body: SkillToggle):
         from elevate_cli.skills_config import get_disabled_skills, save_disabled_skills
 
         config = load_config()
@@ -117,7 +117,7 @@ def create_skills_router() -> APIRouter:
         return {"ok": True, "name": body.name, "enabled": body.enabled}
 
     @router.get("/api/skills/{name}/steps")
-    async def get_skill_steps(name: str):
+    def get_skill_steps(name: str):
         from tools.skills_tool import skill_view
         from elevate_cli.skill_steps import parse_steps_from_text
 
@@ -130,7 +130,7 @@ def create_skills_router() -> APIRouter:
         return {"name": name, "steps": steps}
 
     @router.get("/api/skills/{name}/tree")
-    async def get_skill_tree(name: str):
+    def get_skill_tree(name: str):
         skill_dir = _resolve_skill_dir(name)
         if skill_dir is None:
             return {"name": name, "tree": [], "error": "skill not found"}
@@ -141,7 +141,7 @@ def create_skills_router() -> APIRouter:
         }
 
     @router.get("/api/skills/{name}/file")
-    async def get_skill_file(name: str, path: str = ""):
+    def get_skill_file(name: str, path: str = ""):
         from tools.path_security import has_traversal_component, validate_within_dir
 
         skill_dir = _resolve_skill_dir(name)
@@ -182,7 +182,7 @@ def create_skills_router() -> APIRouter:
         }
 
     @router.get("/api/tools/toolsets")
-    async def get_toolsets():
+    def get_toolsets():
         from elevate_cli.tools_config import (
             _get_effective_configurable_toolsets,
             _get_platform_tools,

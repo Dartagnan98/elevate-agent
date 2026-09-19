@@ -2225,12 +2225,45 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Job CRUD Operations
 # =============================================================================
 
+# Parsed jobs.json cache keyed on the file's identity + (mtime_ns, size).
+# The dashboard reads the job list from half a dozen polled endpoints every
+# ~20s; without this each one re-parsed the file. Any external writer bumps
+# the mtime/size, and save_jobs() clears the entry explicitly. Callers get a
+# deep copy so they can keep mutating the rows they are handed.
+_JOBS_CACHE: Dict[str, Any] = {"key": None, "jobs": []}
+_JOBS_CACHE_LOCK = threading.Lock()
+
+
+def _invalidate_jobs_cache() -> None:
+    with _JOBS_CACHE_LOCK:
+        _JOBS_CACHE["key"] = None
+        _JOBS_CACHE["jobs"] = []
+
+
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     ensure_dirs()
     if not JOBS_FILE.exists():
         return []
-    
+
+    try:
+        st = JOBS_FILE.stat()
+        cache_key = (str(JOBS_FILE), st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _JOBS_CACHE_LOCK:
+            if _JOBS_CACHE["key"] == cache_key:
+                return copy.deepcopy(_JOBS_CACHE["jobs"])
+    jobs = _load_jobs_uncached()
+    if cache_key is not None:
+        with _JOBS_CACHE_LOCK:
+            _JOBS_CACHE["key"] = cache_key
+            _JOBS_CACHE["jobs"] = copy.deepcopy(jobs)
+    return jobs
+
+
+def _load_jobs_uncached() -> List[Dict[str, Any]]:
     try:
         with open(JOBS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -2265,6 +2298,7 @@ def save_jobs(jobs: List[Dict[str, Any]]):
             os.fsync(f.fileno())
         atomic_replace(tmp_path, JOBS_FILE)
         _secure_file(JOBS_FILE)
+        _invalidate_jobs_cache()
     except BaseException:
         try:
             os.unlink(tmp_path)

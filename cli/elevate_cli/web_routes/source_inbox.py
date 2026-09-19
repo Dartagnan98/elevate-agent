@@ -59,7 +59,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
             )
 
     @router.get("/api/source-inbox")
-    async def get_source_inbox(limit: int = 16, debug: bool = False):
+    def get_source_inbox(limit: int = 16, debug: bool = False):
         try:
             return _source_inbox_response(limit=limit, debug=debug)
         except Exception:
@@ -67,7 +67,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
             raise HTTPException(status_code=500, detail="source_inbox_unavailable")
 
     @router.get("/api/source-inbox/thread/{source_id}/{thread_id}")
-    async def get_source_inbox_thread(source_id: str, thread_id: str, limit: int = 200):
+    def get_source_inbox_thread(source_id: str, thread_id: str, limit: int = 200):
         try:
             from elevate_cli.source_connectors import build_thread_context_response
             from elevate_cli.data import db_thread_context_response
@@ -103,7 +103,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
             raise HTTPException(status_code=500, detail=f"Thread context failed: {exc}")
 
     @router.post("/api/source-inbox/thread")
-    async def update_source_inbox_thread(body: SourceInboxThreadAction):
+    def update_source_inbox_thread(body: SourceInboxThreadAction):
         try:
             from elevate_cli.source_connectors import update_source_thread_state
 
@@ -123,7 +123,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
             raise HTTPException(status_code=500, detail=f"Source inbox update failed: {exc}")
 
     @router.post("/api/source-inbox/profile")
-    async def update_source_inbox_profile(body: SourceInboxProfileAction):
+    def update_source_inbox_profile(body: SourceInboxProfileAction):
         try:
             from elevate_cli.source_connectors import update_profile_state
 
@@ -142,7 +142,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
             raise HTTPException(status_code=500, detail=f"Profile update failed: {exc}")
 
     @router.post("/api/source-inbox/profile/favorite")
-    async def update_source_inbox_profile_favorite(body: SourceInboxFavoriteAction):
+    def update_source_inbox_profile_favorite(body: SourceInboxFavoriteAction):
         try:
             from elevate_cli.source_connectors import update_profile_favorite
 
@@ -162,7 +162,7 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
             raise HTTPException(status_code=500, detail=f"Favorite update failed: {exc}")
 
     @router.post("/api/source-inbox/draft")
-    async def update_source_inbox_draft(body: SourceInboxDraftAction):
+    def update_source_inbox_draft(body: SourceInboxDraftAction):
         try:
             from elevate_cli.source_connectors import update_source_task_state
 
