@@ -89,3 +89,15 @@ the ones the system knows and reports the rest.
 * `tests/elevate_cli/test_drips_routes.py` — the HTTP surface.
 * `web/src/pages/real-estate-hub/drips/__tests__/drips-helpers.test.ts` —
   schedule wording, clash detection, due-date wording.
+
+## Previewing the page
+
+`scripts/drips_preview_server.py` runs the real drips API on a scratch
+database seeded with demo contacts, and `web/mock-drips.html` mounts just the
+Drips page against it (`web/vite.mock.config.ts` proxies `/api`):
+
+```bash
+ELEVATE_HOME=/tmp/elevate-drips-preview .venv/bin/python scripts/drips_preview_server.py
+cd web && npx vite --config vite.mock.config.ts
+# http://127.0.0.1:5179/mock-drips.html?theme=dark  (or light)
+```
