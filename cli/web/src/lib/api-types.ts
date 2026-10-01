@@ -3188,3 +3188,265 @@ export interface SurfaceApproval {
   resolvedBy?: string | null;
   resolutionNote?: string | null;
 }
+
+// ─── Drip campaigns (/api/drips) ──────────────────────────────────────
+
+export type DripChannel = "text" | "email" | "call" | "task" | "tag";
+export type DripCampaignKind = "nurture" | "course" | "playbook" | "custom";
+export type DripCampaignRole = "primary" | "layer";
+export type DripLayerFlag = "buying" | "selling";
+export type DripEnrollmentStatus = "active" | "paused" | "completed" | "stopped";
+export type DripTouchStatus = "scheduled" | "done" | "skipped" | "cancelled";
+
+export interface DripSegment {
+  key: string;
+  label: string;
+  description: string | null;
+  windowLabel: string | null;
+  color: string | null;
+  sortOrder: number;
+  builtin: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  contactCount?: number;
+  campaigns?: string[];
+}
+
+export interface DripStep {
+  id: string;
+  campaignId: string;
+  day: number;
+  sortOrder: number;
+  channel: DripChannel;
+  title: string;
+  subject: string | null;
+  body: string | null;
+  video: string | null;
+  notes: string | null;
+  routeTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DripCampaign {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  kind: DripCampaignKind;
+  role: DripCampaignRole;
+  triggerSegment: string | null;
+  layerFlag: DripLayerFlag | null;
+  deferLayers: boolean;
+  runOnce: boolean;
+  enabled: boolean;
+  templateSlug: string | null;
+  sourceUrl: string | null;
+  exitDay: number | null;
+  exitRule: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  stepCount: number;
+  days: number[];
+  activeEnrollments: number;
+  pausedEnrollments: number;
+  completedEnrollments: number;
+}
+
+export interface DripEnrollmentTouch {
+  id: string;
+  stepId: string;
+  day: number;
+  channel: DripChannel;
+  title: string;
+  dueDate: string;
+  status: DripTouchStatus;
+  doneAt: string | null;
+  note: string | null;
+  taskId: string | null;
+}
+
+export interface DripEnrollment {
+  id: string;
+  campaignId: string;
+  contactId: string;
+  startDate: string;
+  status: DripEnrollmentStatus;
+  stopReason: string | null;
+  enrolledBy: string;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  campaignName?: string;
+  contactName?: string | null;
+  scheduledCount?: number;
+  doneCount?: number;
+  nextDue?: string | null;
+  touches?: DripEnrollmentTouch[];
+  created?: boolean;
+}
+
+export interface DripCampaignDetail extends DripCampaign {
+  steps: DripStep[];
+  enrollments: DripEnrollment[];
+}
+
+export interface DripContact {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  type: string | null;
+  createdAt: string | null;
+  leadSource: string | null;
+  hidden: boolean;
+  unsubscribed: boolean;
+  segment: string | null;
+  buying: boolean;
+  selling: boolean;
+}
+
+export interface DripContactState extends DripContact {
+  segmentSetAt: string | null;
+  segmentSetBy: string | null;
+  segmentNote: string | null;
+  enrollments: DripEnrollment[];
+  started?: Array<{ campaignId: string; campaignName: string; enrollmentId: string }>;
+  stopped?: string[];
+  skipped?: Array<{ campaignName: string; reason: string }>;
+}
+
+export interface DripBoardItem {
+  id: string;
+  dueDate: string;
+  daysLate: number;
+  day: number;
+  channel: DripChannel;
+  title: string;
+  subject: string | null;
+  body: string;
+  placeholders: string[];
+  video: { slug: string; name: string; link: string | null } | null;
+  videoMissing: boolean;
+  notes: string | null;
+  routeTo: string | null;
+  taskId: string | null;
+  stepId: string;
+  enrollmentId: string;
+  campaignId: string;
+  campaignName: string;
+  campaignKind: DripCampaignKind;
+  contact: {
+    id: string;
+    name: string;
+    firstName: string | null;
+    email: string | null;
+    phone: string | null;
+    segment: string | null;
+  };
+}
+
+export interface DripBoard {
+  date: string;
+  overdue: DripBoardItem[];
+  today: DripBoardItem[];
+  upcoming: DripBoardItem[];
+  counts: { overdue: number; today: number; upcoming: number };
+}
+
+export interface DripVideo {
+  slug: string;
+  name: string;
+  lengthLabel: string | null;
+  script: string | null;
+  usedIn: string | null;
+  link: string | null;
+  recordedAt: string | null;
+  sortOrder: number;
+  builtin: boolean;
+}
+
+export interface DripSettings {
+  autoEnrollNewLeads: boolean;
+  autoEnrollSince: string | null;
+  autoTagMoves: boolean;
+  sendWindowStart: string;
+  sendWindowEnd: string;
+  callsAsTasks: boolean;
+  pauseAiDraftsInCampaigns: boolean;
+  newsletterTool: string | null;
+}
+
+export interface DripTemplate {
+  slug: string;
+  name: string;
+  description: string | null;
+  kind: DripCampaignKind;
+  role: DripCampaignRole;
+  triggerSegment: string | null;
+  layerFlag: DripLayerFlag | null;
+  runOnce: boolean;
+  exitDay: number | null;
+  exitRule: string | null;
+  sourceUrl: string | null;
+  stepCount: number;
+  days: number[];
+  channels: DripChannel[];
+  installed: Array<{ id: string; name: string; enabled: boolean }>;
+}
+
+export interface DripOverview {
+  date: string;
+  segments: DripSegment[];
+  campaigns: DripCampaign[];
+  settings: DripSettings;
+  counts: {
+    dueToday: number;
+    overdue: number;
+    upcoming: number;
+    liveEnrollments: number;
+    contactsInSegments: number;
+    videosRecorded: number;
+    videosTotal: number;
+  };
+}
+
+export interface DripRunSummary {
+  date: string;
+  autoEnrolled: number;
+  routed: Array<{ contactId: string; to: string; toLabel: string; campaignName: string }>;
+  restarted: number;
+  completed: number;
+  tasksCreated: number;
+  errors: Array<{ touchId: string; error: string }>;
+}
+
+export interface DripStepInput {
+  day: number;
+  channel: DripChannel;
+  title: string;
+  subject?: string | null;
+  body?: string | null;
+  video?: string | null;
+  notes?: string | null;
+  routeTo?: string | null;
+}
+
+export interface DripCampaignInput {
+  name: string;
+  description?: string | null;
+  kind?: DripCampaignKind;
+  role?: DripCampaignRole;
+  triggerSegment?: string | null;
+  layerFlag?: DripLayerFlag | null;
+  deferLayers?: boolean;
+  runOnce?: boolean;
+  enabled?: boolean;
+  exitDay?: number | null;
+  exitRule?: string | null;
+  notes?: string | null;
+  sourceUrl?: string | null;
+  steps?: DripStepInput[];
+}

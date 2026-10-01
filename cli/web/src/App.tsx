@@ -71,6 +71,7 @@ import {
   Star,
   Terminal,
   Megaphone,
+  Droplets,
   Users,
   Wrench,
   X,
@@ -125,6 +126,8 @@ const loadRealEstateLeadsPage = () =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage }));
 const loadRealEstateMemoryPage = () =>
   import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage }));
+const loadRealEstateDripsPage = () =>
+  import("@/pages/real-estate-hub/drips").then((m) => ({ default: m.RealEstateDripsPage }));
 const loadRealEstateSocialMediaPage = () =>
   import("@/pages/real-estate-hub/social").then((m) => ({ default: m.RealEstateSocialMediaPage }));
 const loadRealEstateTodayPage = () =>
@@ -154,6 +157,7 @@ const RealEstateAdminPage = lazy(loadRealEstateAdminPage);
 const RealEstateTemplatesPage = lazy(loadRealEstateTemplatesPage);
 const RealEstateLeadsPage = lazy(loadRealEstateLeadsPage);
 const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
+const RealEstateDripsPage = lazy(loadRealEstateDripsPage);
 const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
 const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
 const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
@@ -161,6 +165,7 @@ const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
 const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/today": loadRealEstateTodayPage,
   "/leads": loadRealEstateLeadsPage,
+  "/drips": loadRealEstateDripsPage,
   "/admin": loadRealEstateAdminPage,
   "/admin/templates": loadRealEstateTemplatesPage,
   "/social-media": loadRealEstateSocialMediaPage,
@@ -622,6 +627,7 @@ function buildAccessControlledBuiltinRoutes(
     "/": accessPending ? AccessLoadingPage : realEstateDashboard ? RootRedirect : CoreRootRedirect,
     "/today": realEstateDashboard ? RealEstateTodayPage : PendingOrLocked,
     "/leads": packs.realEstateSales ? RealEstateLeadsPage : PendingOrLocked,
+    "/drips": packs.realEstateSales ? RealEstateDripsPage : PendingOrLocked,
     "/admin": packs.realEstateAdmin ? RealEstateAdminPage : PendingOrLocked,
     "/admin/templates": packs.realEstateAdmin
       ? RealEstateTemplatesPage
@@ -1875,6 +1881,7 @@ function DesktopSidebar({
   }
   if (realEstatePacks.realEstateSales) {
     agentPrimaryNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
+    agentPrimaryNavItems.push({ icon: Droplets, label: "Drips", path: "/drips" });
   }
   if (realEstatePacks.realEstateAdmin) {
     agentPrimaryNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });

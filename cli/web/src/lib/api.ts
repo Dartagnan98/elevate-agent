@@ -10,6 +10,22 @@ import type {
   SourceRecordsResponse,
   OutreachTemplate,
   OutreachOverview,
+  DripBoard,
+  DripCampaign,
+  DripCampaignDetail,
+  DripCampaignInput,
+  DripContact,
+  DripContactState,
+  DripEnrollment,
+  DripEnrollmentTouch,
+  DripOverview,
+  DripRunSummary,
+  DripSegment,
+  DripSettings,
+  DripStep,
+  DripStepInput,
+  DripTemplate,
+  DripVideo,
   AdminDealSide,
   AdminDealToggleValue,
   AdminDealCreateRequest,
@@ -365,6 +381,14 @@ export type AdminDeadlineDeal = {
   completionDate: string | null;
   primaryContactId: string | null;
 };
+
+function jsonInit(method: string, body?: unknown): RequestInit {
+  return {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  };
+}
 
 export const api = {
   getStatus: (options?: { refresh?: boolean }) =>
@@ -2243,6 +2267,108 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...crm, action: "test" }),
     }),
+
+  // ── Drip campaigns ───────────────────────────────────────────────────
+  getDripsOverview: (date?: string) =>
+    fetchJSON<DripOverview>(`/api/drips/overview${date ? `?date=${encodeURIComponent(date)}` : ""}`),
+  getDripsBoard: (options?: { date?: string; horizon?: number }) => {
+    const params = new URLSearchParams();
+    if (options?.date) params.set("date", options.date);
+    if (options?.horizon != null) params.set("horizon", String(options.horizon));
+    const qs = params.toString();
+    return fetchJSON<DripBoard>(`/api/drips/board${qs ? `?${qs}` : ""}`);
+  },
+  runDrips: (date?: string) => fetchJSON<{ run: DripRunSummary }>("/api/drips/run", jsonInit("POST", { date })),
+  getDripCampaigns: () => fetchJSON<{ campaigns: DripCampaign[] }>("/api/drips/campaigns"),
+  getDripCampaign: (id: string) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>(`/api/drips/campaigns/${encodeURIComponent(id)}`),
+  createDripCampaign: (body: DripCampaignInput) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>("/api/drips/campaigns", jsonInit("POST", body)),
+  updateDripCampaign: (id: string, patch: Partial<Omit<DripCampaignInput, "steps">>) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>(`/api/drips/campaigns/${encodeURIComponent(id)}`, jsonInit("PUT", patch)),
+  setDripCampaignEnabled: (id: string, enabled: boolean) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>(
+      `/api/drips/campaigns/${encodeURIComponent(id)}/enabled`,
+      jsonInit("POST", { enabled }),
+    ),
+  duplicateDripCampaign: (id: string, name?: string) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>(
+      `/api/drips/campaigns/${encodeURIComponent(id)}/duplicate`,
+      jsonInit("POST", { name }),
+    ),
+  resetDripCampaign: (id: string) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>(`/api/drips/campaigns/${encodeURIComponent(id)}/reset`, jsonInit("POST")),
+  deleteDripCampaign: (id: string, force = false) =>
+    fetchJSON<{ ok: boolean }>(`/api/drips/campaigns/${encodeURIComponent(id)}${force ? "?force=true" : ""}`, {
+      method: "DELETE",
+    }),
+  addDripStep: (campaignId: string, body: DripStepInput) =>
+    fetchJSON<{ step: DripStep }>(`/api/drips/campaigns/${encodeURIComponent(campaignId)}/steps`, jsonInit("POST", body)),
+  updateDripStep: (id: string, patch: Partial<DripStepInput> & { sortOrder?: number }) =>
+    fetchJSON<{ step: DripStep }>(`/api/drips/steps/${encodeURIComponent(id)}`, jsonInit("PUT", patch)),
+  deleteDripStep: (id: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/drips/steps/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  getDripTemplates: () => fetchJSON<{ templates: DripTemplate[] }>("/api/drips/templates"),
+  installDripTemplate: (slug: string, asCopy = false) =>
+    fetchJSON<{ campaign: DripCampaignDetail }>(
+      `/api/drips/templates/${encodeURIComponent(slug)}/install`,
+      jsonInit("POST", { asCopy }),
+    ),
+  getDripSegments: () => fetchJSON<{ segments: DripSegment[] }>("/api/drips/segments"),
+  createDripSegment: (body: { label: string; key?: string; description?: string; windowLabel?: string; color?: string }) =>
+    fetchJSON<{ segment: DripSegment }>("/api/drips/segments", jsonInit("POST", body)),
+  updateDripSegment: (
+    key: string,
+    patch: { label?: string; description?: string; windowLabel?: string; color?: string; enabled?: boolean },
+  ) => fetchJSON<{ segment: DripSegment }>(`/api/drips/segments/${encodeURIComponent(key)}`, jsonInit("PUT", patch)),
+  deleteDripSegment: (key: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/drips/segments/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  reorderDripSegments: (keys: string[]) =>
+    fetchJSON<{ segments: DripSegment[] }>("/api/drips/segments/reorder", jsonInit("POST", { keys })),
+  searchDripContacts: (q: string, options?: { segment?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (options?.segment) params.set("segment", options.segment);
+    if (options?.limit != null) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return fetchJSON<{ contacts: DripContact[] }>(`/api/drips/contacts${qs ? `?${qs}` : ""}`);
+  },
+  getDripContact: (id: string) =>
+    fetchJSON<{ contact: DripContactState }>(`/api/drips/contacts/${encodeURIComponent(id)}`),
+  setDripContactSegment: (
+    id: string,
+    body: { segment: string | null; note?: string; buying?: boolean; selling?: boolean; startDate?: string },
+  ) => fetchJSON<{ contact: DripContactState }>(`/api/drips/contacts/${encodeURIComponent(id)}/segment`, jsonInit("POST", body)),
+  enrollDripContact: (body: { campaignId: string; contactId: string; startDate?: string }) =>
+    fetchJSON<{ enrollment: DripEnrollment }>("/api/drips/enroll", jsonInit("POST", body)),
+  getDripEnrollment: (id: string) =>
+    fetchJSON<{ enrollment: DripEnrollment }>(`/api/drips/enrollments/${encodeURIComponent(id)}`),
+  pauseDripEnrollment: (id: string) =>
+    fetchJSON<{ enrollment: DripEnrollment }>(`/api/drips/enrollments/${encodeURIComponent(id)}/pause`, jsonInit("POST")),
+  resumeDripEnrollment: (id: string) =>
+    fetchJSON<{ enrollment: DripEnrollment }>(`/api/drips/enrollments/${encodeURIComponent(id)}/resume`, jsonInit("POST")),
+  stopDripEnrollment: (id: string, reason?: string) =>
+    fetchJSON<{ enrollment: DripEnrollment }>(
+      `/api/drips/enrollments/${encodeURIComponent(id)}/stop`,
+      jsonInit("POST", { reason }),
+    ),
+  completeDripTouch: (id: string, status: "done" | "skipped", note?: string) =>
+    fetchJSON<{ touch: DripEnrollmentTouch }>(
+      `/api/drips/touches/${encodeURIComponent(id)}/${status === "done" ? "done" : "skip"}`,
+      jsonInit("POST", { note }),
+    ),
+  getDripVideos: () => fetchJSON<{ videos: DripVideo[] }>("/api/drips/videos"),
+  createDripVideo: (body: { name: string; script?: string; lengthLabel?: string; usedIn?: string }) =>
+    fetchJSON<{ video: DripVideo }>("/api/drips/videos", jsonInit("POST", body)),
+  updateDripVideo: (
+    slug: string,
+    patch: { name?: string; script?: string; lengthLabel?: string; usedIn?: string; link?: string; recordedAt?: string },
+  ) => fetchJSON<{ video: DripVideo }>(`/api/drips/videos/${encodeURIComponent(slug)}`, jsonInit("PUT", patch)),
+  deleteDripVideo: (slug: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/drips/videos/${encodeURIComponent(slug)}`, { method: "DELETE" }),
+  getDripSettings: () => fetchJSON<{ settings: DripSettings }>("/api/drips/settings"),
+  updateDripSettings: (patch: Partial<Omit<DripSettings, "autoEnrollSince">>) =>
+    fetchJSON<{ settings: DripSettings }>("/api/drips/settings", jsonInit("PUT", patch)),
 };
 
 export const __apiTestables = {

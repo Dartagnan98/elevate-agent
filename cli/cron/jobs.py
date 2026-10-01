@@ -43,6 +43,8 @@ OPERATIONAL_MAINTENANCE_JOB_NAME = "Operational DB Maintenance"
 OPERATIONAL_MAINTENANCE_SCRIPT = "operational-maintenance.py"
 OPERATIONAL_FRESHNESS_JOB_NAME = "Account + DB Freshness Snapshot"
 OPERATIONAL_FRESHNESS_SCRIPT = "operational-freshness-snapshot.py"
+DRIP_ENGINE_JOB_NAME = "Drip Campaign Engine"
+DRIP_ENGINE_SCRIPT = "drip-engine.py"
 
 # In-process lock protecting load_jobs→modify→save_jobs cycles.
 # Required when tick() runs jobs in parallel threads — without this,
@@ -204,6 +206,11 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     raise SystemExit(main())
 """,
+    DRIP_ENGINE_SCRIPT: """from elevate_cli.drip_engine_job import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
 }
 
 
@@ -301,6 +308,23 @@ def ensure_operational_freshness_job() -> Dict[str, Any]:
             "sync services, cron failures, contacts, conversations, deals, admin queues, "
             "CRM note queues, and calendar freshness. Save the snapshot and surface only "
             "new or changed warnings. This is a no-agent system job."
+        ),
+    )
+
+
+def ensure_drip_engine_job() -> Dict[str, Any]:
+    """Idempotently register the drip campaign engine job."""
+    return _ensure_system_job(
+        name=DRIP_ENGINE_JOB_NAME,
+        script=DRIP_ENGINE_SCRIPT,
+        schedule="every 1h",
+        source="drip-engine",
+        prompt=(
+            "Advance the drip campaigns. Apply the automatic segment moves that fall due "
+            "(day 15, day 92, day 187, day 101, day 367), close finished runs, restart "
+            "yearly rhythms, put today's call touches on the task list, and enrol new "
+            "buyer/seller leads when that setting is on. This is a no-agent system job; "
+            "stay silent when nothing changed."
         ),
     )
 
@@ -1947,6 +1971,7 @@ def ensure_system_jobs() -> List[Dict[str, Any]]:
         ensure_admin_calendar_sync_job(),
         ensure_operational_maintenance_job(),
         ensure_operational_freshness_job(),
+        ensure_drip_engine_job(),
         *ensure_surface_heartbeats(),
         *ensure_surface_automations(),
         *ensure_agent_heartbeats(),

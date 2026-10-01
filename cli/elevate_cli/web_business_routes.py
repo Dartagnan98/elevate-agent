@@ -16,6 +16,7 @@ from elevate_cli.web_routes.channels import create_channels_router
 from elevate_cli.web_routes.composio import create_composio_router
 from elevate_cli.web_routes.config import create_config_router
 from elevate_cli.web_routes.dashboard import create_dashboard_router
+from elevate_cli.web_routes.drips import create_drips_router
 from elevate_cli.web_routes.env import create_env_router
 from elevate_cli.web_routes.integrations import create_integrations_router
 from elevate_cli.web_routes.lanes import create_lanes_router
@@ -114,6 +115,7 @@ def register_business_routes(
     app.include_router(create_dashboard_router(project_root=project_root, log=log))
     app.include_router(create_lanes_router(log=log))
     app.include_router(create_outreach_templates_router(log=log))
+    app.include_router(create_drips_router(web_actor=web_actor, log=log))
     app.include_router(create_skills_router())
     app.include_router(
         create_social_router(

@@ -112,6 +112,14 @@ phone-matched iMessage history means not first-touch; weak attribution gets
 referral relationship type before drafting; `own_listing` ownership stays on
 the disclosure-safe path; `unknown` ownership blocks specific listing claims.
 
+Drip campaigns gate: the dashboard's Drips section runs its own day-by-day
+campaigns. When `GET /api/drips/settings` returns `pauseAiDraftsInCampaigns:
+true`, every contact with a live enrollment (`GET /api/drips/contacts/{id}` →
+any enrollment with status `active` or `paused`, or SQL
+`drip_enrollments.status IN ('active','paused')`) goes to `send_suppressed`:
+the campaign is the only voice they hear, and a reply never stops it. Replies
+from those contacts still land in `reply_needed`.
+
 → Cooldown windows, segment routing, the DNC-vs-Cold decision rule, the candidate
 shape, New Leads hygiene, and the closed-client protocol are all in
 `references/cadence-and-routing.md`.
