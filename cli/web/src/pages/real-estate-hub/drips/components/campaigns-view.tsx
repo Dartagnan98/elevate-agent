@@ -34,9 +34,15 @@ export function CampaignsView({
   onCreate: () => void;
   onBrowseTemplates: () => void;
 }) {
+  // Order nurture campaigns by the pipeline flow (the segment order), then
+  // anything without a trigger, so the list reads New → Hot → Warm → … rather
+  // than alphabetically.
+  const segmentRank = new Map(segments.map((s, index) => [s.key, index]));
+  const rank = (c: DripCampaign) => (c.triggerSegment ? segmentRank.get(c.triggerSegment) ?? 900 : 950);
+  const sorted = [...campaigns].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
   const groups = GROUP_ORDER.map((group) => ({
     group,
-    items: campaigns.filter((c) => campaignGroup(c) === group),
+    items: sorted.filter((c) => campaignGroup(c) === group),
   }));
 
   return (
@@ -129,6 +135,7 @@ function CampaignCard({
           checked={campaign.enabled}
           onCheckedChange={onToggle}
           disabled={busy}
+          className={campaign.enabled ? "border-success bg-success" : undefined}
           aria-label={`${campaign.enabled ? "Switch off" : "Switch on"} ${campaign.name}`}
           title={campaign.enabled ? "Switch off" : "Switch on"}
         />

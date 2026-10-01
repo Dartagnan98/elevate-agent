@@ -202,6 +202,7 @@ export function CampaignDetail({
             checked={campaign.enabled}
             onCheckedChange={(next) => void run("Toggle", () => api.setDripCampaignEnabled(campaign.id, next))}
             disabled={busy}
+            className={campaign.enabled ? "border-success bg-success" : undefined}
             aria-label={campaign.enabled ? "Switch campaign off" : "Switch campaign on"}
           />
           <Button size="sm" onClick={() => setEnrolling(true)} disabled={!campaign.enabled || busy}>

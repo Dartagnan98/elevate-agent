@@ -114,7 +114,7 @@ export function DripsShell() {
             )}
             {actionError && <Note tone="error">{actionError}</Note>}
 
-            <TabsList className="flex-wrap">
+            <TabsList className="h-auto flex-wrap gap-1 py-1">
               {(
                 [
                   ["campaigns", "Campaigns"],
